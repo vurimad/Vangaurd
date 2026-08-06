@@ -1,0 +1,216 @@
+$struct PositionContext
+{
+	$field start : int32;
+	$field end : int32;
+}
+
+$struct StandardContext
+{
+	$field file : string;
+	$field line : int32;
+}
+
+$struct DetailedContext
+{
+	$field standard : StandardContext;
+	$field position : PositionContext;
+
+	$field lineStart : int32;
+}
+
+$struct Scope
+{
+	$field start : DetailedContext;
+	$field end : DetailedContext;
+}
+
+$struct NameContext
+{
+	$field detailed : DetailedContext;
+	$field name : string;
+}
+
+$struct EnumOptionStub
+{
+	$field context : NameContext;
+	$field value : int64;
+}
+
+$struct EnumStub
+{
+	$field context : NameContext;
+	$field scope : Scope;
+	$array options : EnumOptionStub;
+	$field flags : uint8 = 0;
+}
+
+// Deprecated (Needed by Script Studio)
+$struct FuncParamStub
+{
+	$field flags : uint8 = 0;
+	$field name : string;
+	$field typeName : string;
+}
+
+// Deprecated (Needed by Script Studio)
+$struct FuncLocalStub
+{
+	$field typeName : string;
+	$field context : NameContext;
+	$field name : string;
+}
+
+$struct PropertyStub
+{
+	$field flags : uint8 = 0;
+	
+	// var myProp : MyClass
+	// ----^^^^^^----------
+	$field context : NameContext;
+
+	// var myProp : MyClass
+	// -------------^^^^^^^
+	$field typeDeclarationContext : NameContext;
+
+	// class MyClass extends OtherClass
+	// ------^^^^^^^-------------------
+	$field typeDefinitionContext : NameContext;
+}
+
+$struct FunctionStub
+{
+	$field flags : uint8 = 0;
+	$array localsNew : PropertyStub;
+	$array parametersNew : PropertyStub;
+	$field scope : Scope;
+	
+	// private function MyFunc() : MyClass
+	// -----------------^^^^^^------------
+	$field context : NameContext;
+	
+	// private function MyFunc() : MyClass
+	// ----------------------------^^^^^^^
+	$field typeDeclarationContext : NameContext;
+
+	// class MyClass extends OtherClass
+	// ------^^^^^^^-------------------
+	$field typeDefinitionContext : NameContext;
+}
+
+$struct ClassStub
+{
+	$field flags : uint8 = 0;
+	$field scope : Scope;
+	
+	// class MyClass extends OtherClass
+	// ------^^^^^^^-------------------
+	$field context : NameContext;
+	
+	// class MyClass extends OtherClass
+	// ----------------------^^^^^^^^^^
+	$field extendsDeclarationContext : NameContext;
+	
+	// class OtherClass
+	// ------^^^^^^^^^^
+	$field extendsDefinitionContext : NameContext;
+
+	$array properties : PropertyStub;
+	$array functions : FunctionStub;
+}
+
+$struct CommentStub
+{
+	$field context : DetailedContext;
+}
+
+$struct LiteralStub
+{
+	$field context : DetailedContext;
+	$field type : int32;
+}
+
+$struct ScriptFile
+{
+	$field path : string;
+	$field fnv64 : uint64;
+}
+
+$struct ScriptDatabase
+{
+	$array enums : EnumStub;
+	$array types : ClassStub;
+	$array functions : FunctionStub;
+	$array comments : CommentStub;
+	$array literals : LiteralStub;
+}
+
+// TODO: possibly combine with StandardContext?
+$struct TokenContext
+{
+	$field file : string;
+	$field position : PositionContext;
+}
+
+$struct ScriptToken
+{
+	$field use : TokenContext;
+	$field declaration : TokenContext;
+	$field scope : PositionContext;
+}
+
+$message SccCommandMsg
+{
+	$field command : uint8;
+}
+
+$message SccVersion
+{
+	$field major : uint32;
+	$field minor : uint32;
+	$field build : uint32;
+}
+
+$message SccInitialize
+{
+	$field inputDirectory : string;
+	$field threads : uint32 = 1;
+}
+
+$message SccInitializeResponse
+{
+	$field count : int32;
+	$field total : int32;
+
+	$field database : ScriptDatabase;
+}
+
+$message SccCompileRequest
+{
+	$field scriptsRoot : string;
+	$field fileName : string;
+	$array code : uint8;
+}
+
+$message SccCompileFileResponse
+{
+	$field file : ScriptFile;
+	$field database : ScriptDatabase;
+
+	$field success : bool;
+}
+
+$message SccCompileFunctionsResponse
+{
+	$field file : ScriptFile;
+	$array tokens : ScriptToken;
+	$array breakpoints : DetailedContext;
+
+	$field success : bool;
+}
+
+$message SccBuildScriptCache
+{
+	$field inputDirectory : string;
+	$field outputFile : string;
+	$field threads : uint8 = 1;
+}

@@ -1,0 +1,10 @@
+# Format:
+# rule|repository-relative/path|why Vanguard has no suitable equivalent and
+# why this exact standard/CRT facility is appropriate here.
+#
+# Exceptions are reviewed architecture decisions. Do not add wildcards or
+# directory-wide exclusions.
+std-view|source/system/include/vanguard/system/assert.hpp|System is below Containers in the dependency graph.
+std-view|source/system/include/vanguard/system/debug.hpp|System is below Containers in the dependency graph.
+std-view|source/system/src/assert.cpp|System is below Containers in the dependency graph.
+std-view|source/system/src/debug_win32.cpp|System is below Containers in the dependency graph.

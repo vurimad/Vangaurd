@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+	<Type Name="res::prv::ResourcePathCacheItem">
+		<Expand>
+			<Item Name="Hash">m_hash,16X</Item>
+			<Item Name="Path">m_path</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="res::ResourcePath">
+		<Expand>
+			<Item Name="Hash">m_hash,16X</Item>
+			<CustomListItems>
+				<Variable Name="pathCache" InitialValue="redReflection.dll!res::prv::s_resourcePathCacheForDebugging"/>
+				<Variable Name="elementIndex" InitialValue="pathCache->m_pathMap.m_buckets[((Uint32)m_hash) % pathCache->m_pathMap.m_capacity]"/>
+				<Variable Name="bucketsPoolBuffer" InitialValue="(redReflection.dll!res::prv::ResourcePathCache::PathMap::BucketElement*)pathCache->m_pathMap.m_bucketsPool.m_buffer"/>
+				<Variable Name="itemPtr" InitialValue="(redReflection.dll!res::prv::ResourcePathCache::PathMap::BucketElement*)0"/>
+
+				<Loop>
+					<If Condition="elementIndex == pathCache->m_pathMap.InvalidElementIndex">
+						<Item Name="Path">""</Item>
+						<Break/>
+					</If>
+					<Exec>itemPtr = bucketsPoolBuffer + elementIndex</Exec>
+					<If Condition="itemPtr->m_key == m_hash">
+						<Item Name="Path">itemPtr->m_value->m_path,s</Item>
+						<Break/>
+					</If>
+					<Exec>elementIndex = itemPtr->m_nextIndex</Exec>
+				</Loop>
+
+			</CustomListItems>
+		</Expand>
+	</Type>
+
+	<Type Name="res::ResourcePath" Priority="MediumLow">
+		<Expand>
+			<Item Name="Hash">m_hash,16X</Item>
+			<CustomListItems>
+				<Variable Name="pathCache" InitialValue="res::prv::s_resourcePathCacheForDebugging"/>
+				<Variable Name="elementIndex" InitialValue="pathCache->m_pathMap.m_buckets[((Uint32)m_hash) % pathCache->m_pathMap.m_capacity]"/>
+				<Variable Name="bucketsPoolBuffer" InitialValue="(res::prv::ResourcePathCache::PathMap::BucketElement*)pathCache->m_pathMap.m_bucketsPool.m_buffer"/>
+				<Variable Name="itemPtr" InitialValue="(res::prv::ResourcePathCache::PathMap::BucketElement*)0"/>
+
+				<Loop>
+					<If Condition="elementIndex == pathCache->m_pathMap.InvalidElementIndex">
+						<Item Name="Path">""</Item>
+						<Break/>
+					</If>
+					<Exec>itemPtr = bucketsPoolBuffer + elementIndex</Exec>
+					<If Condition="itemPtr->m_key == m_hash">
+						<Item Name="Path">itemPtr->m_value->m_path,s</Item>
+						<Break/>
+					</If>
+					<Exec>elementIndex = itemPtr->m_nextIndex</Exec>
+				</Loop>
+
+			</CustomListItems>
+		</Expand>
+	</Type>
+
+	<Type Name="red::ResourceReferenceScriptToken">
+		<DisplayString>ResRefScriptToken {m_resource.m_path}</DisplayString>
+	</Type>
+</AutoVisualizer>

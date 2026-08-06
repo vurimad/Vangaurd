@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+  <Type Name="red::AbsolutePath">
+    <DisplayString>{m_path}</DisplayString>
+  </Type>
+
+  <Type Name="CName">
+    <Expand>
+      <CustomListItems>
+        <Variable Name="nameRegistryHashTableSize" InitialValue="redCore.dll!red::c_nameRegistryHashTableSize" />
+        <Variable Name="bucketIndex" InitialValue="m_hash % nameRegistryHashTableSize" />
+        <Variable Name="currentStorage" InitialValue="redCore.dll!red::s_nameRegistryDebugger->m_hashTable[bucketIndex]" />
+        <Variable Name="nameEntryIndex" InitialValue="0xFFFFFF"/>
+        <Variable Name="storageSize" InitialValue="sizeof( redCore.dll!red::NameRegistry::Storage )" />
+
+        <Loop>
+          <Break Condition="currentStorage == nullptr" />
+          <If Condition="currentStorage->hash == m_hash">
+            <Exec>nameEntryIndex = currentStorage->index</Exec>
+            <Break/>
+          </If>
+          <Exec>currentStorage = currentStorage->next</Exec>
+        </Loop>
+
+        <If Condition="nameEntryIndex != 0xFFFFFF">
+          <Item Name="debugString">((const char*)currentStorage + storageSize),sb</Item>
+          <Item Name="debugStringLength">currentStorage->length</Item>
+        </If>
+        <Else>
+          <Item Name="Error">"## Couldn't find such entry ##"</Item>
+        </Else>
+
+        </CustomListItems>
+    </Expand>
+  </Type>
+
+  <Type Name="CName" Priority="Low">
+    <Expand>
+      <CustomListItems>
+        <Variable Name="nameRegistryHashTableSize" InitialValue="red::c_nameRegistryHashTableSize" />
+        <Variable Name="bucketIndex" InitialValue="m_hash % nameRegistryHashTableSize" />
+        <Variable Name="currentStorage" InitialValue="red::s_nameRegistryDebugger->m_hashTable[bucketIndex]"/>
+        <Variable Name="nameEntryIndex" InitialValue="0xFFFFFF"/>
+        <Variable Name="storageSize" InitialValue="sizeof( red::NameRegistry::Storage )" />
+
+        <Loop>
+          <Break Condition="currentStorage == nullptr" />
+          <If Condition="currentStorage->hash == m_hash">
+            <Exec>nameEntryIndex = currentStorage->index</Exec>
+            <Break />
+          </If>
+          <Exec>currentStorage = currentStorage->next</Exec>
+        </Loop>
+
+        <If Condition="nameEntryIndex != 0xFFFFFF">
+          <Item Name="debugString">((const char*)currentStorage + storageSize),sb</Item>
+          <Item Name="debugStringLength">currentStorage->length</Item>
+        </If>
+        <Else>
+          <Item Name="Error">"## Couldn't find such entry ##"</Item>
+        </Else>
+
+      </CustomListItems>
+    </Expand>
+  </Type>
+
+  <!--
+  #############################################################
+  ######################### TweakDBID #########################
+  #############################################################
+  -->
+
+  <Type Name="game::data::TweakDBID">
+    <Expand>
+      <CustomListItems>
+        <Variable Name="hashValue" InitialValue="m_hash.m_hash" />
+        <Variable Name="lengthValue" InitialValue="m_hash.m_length"/>
+        <Variable Name="tdbRegistry" InitialValue="{,,redCore.dll}game::data::s_tweakDBIDRegistryDebugger" />
+        <Variable Name="tdbHash" InitialValue="(redCore.dll!game::data::TweakDBIDRegistry*)(tdbRegistry)" />
+        <Variable Name="capacity" InitialValue="tdbHash->m_registry.m_capacity" />
+        <Variable Name="bucketsPoolBuffer" InitialValue="(redCore.dll!game::data::TweakDBIDRegistry::StorageMap::BucketElement*)tdbHash->m_registry.m_bucketsPool.m_buffer" />
+        <Variable Name="bucketIndex" InitialValue="hashValue % capacity" />
+        <Variable Name="elementIndex" InitialValue="tdbHash->m_registry.m_buckets[bucketIndex]" />
+        <Variable Name="bucketPtr" InitialValue="(redCore.dll!game::data::TweakDBIDRegistry::StorageMap::BucketElement*)0" />
+
+        <If Condition="hashValue == 0 || lengthValue == 0" >
+          <Item Name=" ">"Invalid ID"</Item>
+        </If>
+        <Else>
+          <Loop>
+            <If Condition="elementIndex == tdbHash->m_registry.InvalidElementIndex">
+              <Item Name="Error">"## Couldn't find such entry ##"</Item>
+              <Break/>
+            </If>
+            <Exec>bucketPtr = bucketsPoolBuffer + elementIndex</Exec>
+            <If Condition="bucketPtr->m_key.m_hash == hashValue &amp;&amp; bucketPtr->m_key.m_length == lengthValue" >
+              <Item Name="debugString">bucketPtr->m_value.str</Item>
+              <Break/>
+            </If>
+            <Exec>elementIndex = bucketPtr->m_nextIndex</Exec>
+          </Loop>
+        </Else>
+      </CustomListItems>
+    </Expand>
+  </Type>
+
+  <!-- Done similarly to CName, afaik it's a static lib hack -->
+  <Type Name="game::data::TweakDBID" Priority="Low">
+    <Expand>
+      <CustomListItems>
+        <Variable Name="hashValue" InitialValue="m_hash.m_hash" />
+        <Variable Name="lengthValue" InitialValue="m_hash.m_length"/>
+        <Variable Name="tdbRegistry" InitialValue="game::data::s_tweakDBIDRegistryDebugger" />
+        <Variable Name="tdbHash" InitialValue="(game::data::TweakDBIDRegistry*)(tdbRegistry)" />
+        <Variable Name="capacity" InitialValue="tdbHash->m_registry.m_capacity" />
+        <Variable Name="bucketsPoolBuffer" InitialValue="(game::data::TweakDBIDRegistry::StorageMap::BucketElement*)tdbHash->m_registry.m_bucketsPool.m_buffer" />
+        <Variable Name="bucketIndex" InitialValue="hashValue % capacity" />
+        <Variable Name="elementIndex" InitialValue="tdbHash->m_registry.m_buckets[bucketIndex]" />
+        <Variable Name="bucketPtr" InitialValue="(game::data::TweakDBIDRegistry::StorageMap::BucketElement*)0" />
+
+        <If Condition="hashValue == 0 || lengthValue == 0" >
+          <Item Name=" ">"Invalid ID"</Item>
+        </If>
+        <Else>
+          <Loop>
+            <If Condition="elementIndex == tdbHash->m_registry.InvalidElementIndex">
+              <Item Name="Error">"## Couldn't find such entry ##"</Item>
+              <Break/>
+            </If>
+            <Exec>bucketPtr = bucketsPoolBuffer + elementIndex</Exec>
+            <If Condition="bucketPtr->m_key.m_hash == hashValue &amp;&amp; bucketPtr->m_key.m_length == lengthValue" >
+              <Item Name="debugString">bucketPtr->m_value.str</Item>
+              <Break/>
+            </If>
+            <Exec>elementIndex = bucketPtr->m_nextIndex</Exec>
+          </Loop>
+        </Else>
+      </CustomListItems>
+    </Expand>
+  </Type>
+
+</AutoVisualizer>

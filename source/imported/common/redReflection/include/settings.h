@@ -1,0 +1,35 @@
+/**
+* Copyright (c) 2026 RED Vanguard, All Rights Reserved.
+*/
+
+#pragma once
+
+#if defined( RED_CONFIGURATION_DEBUG )
+
+	#define RED_USE_RESOURCEPATH_STRINGS
+	#define RED_ENABLE_DLC
+
+#elif defined( RED_CONFIGURATION_NOPTS )
+
+	#define RED_USE_RESOURCEPATH_STRINGS
+	#define RED_ENABLE_DLC
+
+#elif defined( RED_CONFIGURATION_RELEASE )
+
+	#define RED_USE_RESOURCEPATH_STRINGS
+	#define RED_ENABLE_DLC
+
+#elif defined( RED_CONFIGURATION_FINAL )
+
+#if defined( USE_PROFILER )
+	#define RED_ENABLE_RESOURCEPATH_DEBUGGING
+#endif
+	
+	#define NO_SCRIPT_DEBUG
+	#define NO_SCRIPT_FUNCTION_CALL_VALIDATION
+
+#endif
+
+#if !defined( RED_CONFIGURATION_FINAL ) && defined( RED_PLATFORM_WIN64 )
+	#define RED_MONITOR_SCRIPTABLE_THREAD_SAFETY
+#endif

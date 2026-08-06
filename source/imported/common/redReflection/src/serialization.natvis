@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+	<Type Name="redReflection.dll!serialization::DeferredDataBuffer">
+		<DisplayString>Deferred Data Buffer</DisplayString>
+		<Expand>
+			<Item Name="Async Buffer">*(redReflection.dll!serialization::IBufferAsyncProxy*)(((red::internal::AtomicSharedStorage*)&amp;m_asyncAccess)->m_pointee)</Item>
+			<Item Name="Sync Buffer">m_memoryBuffer</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="serialization::DeferredDataBuffer" Priority="MediumLow">
+		<DisplayString></DisplayString>
+		<Expand>
+			<Item Name="Async Buffer">m_asyncAccess</Item>
+			<Item Name="Sync Buffer">m_memoryBuffer</Item>
+		</Expand>
+	</Type>
+
+
+	<Type Name="serialization::FileTables">
+		<DisplayString></DisplayString>
+		<Expand>
+			<Synthetic Name="Processed">
+				<Expand>
+					<Synthetic Name="Strings">
+						<DisplayString>Bytes: {m_strings.m_size}</DisplayString>
+						<Expand>
+							<CustomListItems>
+								<Variable Name="index" InitialValue="0"/>
+								<Variable Name="start" InitialValue="0"/>
+								<Variable Name="count" InitialValue="0"/>
+								<Loop>
+									<If Condition="index == m_strings.m_size">
+										<Break/>
+									</If>
+									<If Condition="m_strings[index] == 0">
+										<Item Name="String[ {count} ] - m_strings[{start}]">(const char*)&amp;m_strings[start],s</Item>
+										<Exec>start = index + 1</Exec>
+										<Exec>count++</Exec>
+									</If>
+									<Exec>index++</Exec>
+								</Loop>
+							</CustomListItems>
+						</Expand>
+					</Synthetic>
+					<Synthetic Name="Names">
+						<DisplayString>Count: {m_names.m_size}</DisplayString>
+						<Expand>
+							<CustomListItems>
+								<Variable Name="index" InitialValue="0"/>
+								<Size>m_names.m_size</Size>
+								<Loop>
+									<Item Name="Name[ {index} ] : {(const char*)&amp;m_strings[ m_names[index].m_string ],s}">m_names[index]</Item>
+									<Exec>index++</Exec>
+								</Loop>
+							</CustomListItems>
+						</Expand>
+					</Synthetic>
+					<Synthetic Name="Imports">
+						<DisplayString>Count: {m_imports.m_size}</DisplayString>
+						<Expand>
+							<CustomListItems>
+								<Variable Name="index" InitialValue="0"/>
+								<Size>m_imports.m_size</Size>
+								<Loop>
+									<Item Name="Import[ {index} ] : {(const char*)&amp;m_strings[ m_imports[index].m_path ],s}">m_imports[index]</Item>
+									<Exec>index++</Exec>
+								</Loop>
+							</CustomListItems>
+						</Expand>
+					</Synthetic>
+					<Synthetic Name="Exports">
+						<DisplayString>Count: {m_exports.m_size}</DisplayString>
+						<Expand>
+							<CustomListItems>
+								<Variable Name="index" InitialValue="0"/>
+								<Size>m_exports.m_size</Size>
+								<Loop>
+									<Item Name="Export[ {index} ] : {(const char*)&amp;m_strings[ m_names[ m_exports[index].m_className ].m_string ],s}">m_exports[index]</Item>
+									<Exec>index++</Exec>
+								</Loop>
+							</CustomListItems>
+						</Expand>
+					</Synthetic>
+					<Synthetic Name="Buffers">
+						<DisplayString>Count: {m_buffers.m_size}</DisplayString>
+						<Expand>
+							<ArrayItems>
+								<Size>m_buffers.m_size</Size>
+								<ValuePointer>(serialization::FileTables::Buffer*)m_buffers.m_buffer</ValuePointer>
+							</ArrayItems>
+						</Expand>
+					</Synthetic>
+				</Expand>
+			</Synthetic>
+		</Expand>
+	</Type>
+
+	<Type Name="serialization::FileTables::Name">
+		<DisplayString>{{ hash={m_hash,x} }}</DisplayString>
+		<Expand>
+			<Item Name="m_string">m_string</Item>
+			<Item Name="m_hash">m_hash,x</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="serialization::FileTables::Import">
+		<DisplayString>{{ flags={m_flags} }}</DisplayString>
+		<Expand>
+			<Item Name="m_path">m_path</Item>
+			<Item Name="m_flags">m_flags</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="serialization::FileTables::Export">
+		<!-- 
+		Note that we display the parent value as what we interpret it as
+		So if the raw value is 0 it means no parent, otherwise we subtract one and that is the parent index
+		-->
+		<DisplayString Condition="m_parent == 0">{{ offset={m_dataOffset} size={m_dataSize} }}</DisplayString>
+		<DisplayString>{{ parent={m_parent - 1} offset={m_dataOffset} size={m_dataSize} }}</DisplayString>
+		<Expand>
+			<Item Name="m_className">m_className</Item>
+			<Item Name="m_parent" Condition="m_parent != 0">m_parent - 1</Item>
+			<Item Name="m_dataSize">m_dataSize</Item>
+			<Item Name="m_dataOffset">m_dataOffset</Item>
+			<Item Name="m_template">m_template</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="serialization::FileTables::Buffer">
+		<DisplayString>{{ offset={m_dataOffset} size={m_dataSizeInMemory} }}</DisplayString>
+		<Expand>
+			<Item Name="m_name">m_name</Item>
+			<Item Name="m_flags">m_flags,x</Item>
+			<Item Name="m_dataOffset">m_dataOffset</Item>
+			<Item Name="m_dataSizeOnDisk">m_dataSizeOnDisk</Item>
+			<Item Name="m_dataSizeInMemory">m_dataSizeInMemory</Item>
+			<Item Name="m_crc">m_crc,x</Item>
+		</Expand>
+	</Type>
+	
+</AutoVisualizer>

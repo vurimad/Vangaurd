@@ -1,0 +1,21 @@
+#pragma once
+
+#define IMATH_INTERNAL_NAMESPACE_CUSTOM 1
+#define IMATH_INTERNAL_NAMESPACE Imath_3_2
+#define IMATH_NAMESPACE_CUSTOM 0
+#define IMATH_NAMESPACE Imath
+#define IMATH_VERSION_STRING "3.2.0"
+#define IMATH_PACKAGE_STRING "Imath 3.2.0"
+#define IMATH_VERSION_MAJOR 3
+#define IMATH_VERSION_MINOR 2
+#define IMATH_VERSION_PATCH 0
+#define IMATH_VERSION_RELEASE_TYPE ""
+#define IMATH_VERSION_HEX 0x03020000
+#define IMATH_LIB_VERSION_STRING "30.3.2.0"
+#define IMATH_USE_NOEXCEPT 1
+#define IMATH_NOEXCEPT noexcept
+#define IMATH_FOREIGN_VECTOR_INTEROP 1
+#define IMATH_HOSTDEVICE
+#define IMATH_LIKELY(expression) (expression)
+#define IMATH_UNLIKELY(expression) (expression)
+#define IMATH_DEPRECATED(message) __declspec(deprecated(message))

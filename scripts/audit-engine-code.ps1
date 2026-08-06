@@ -1,0 +1,141 @@
+param(
+    [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+)
+
+$repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
+$sourceRoot = Join-Path $repository "source"
+$allowlistPath = Join-Path $repository `
+    "configs\engine\engine-code-audit-allowlist.txt"
+
+if (-not (Test-Path -LiteralPath $sourceRoot))
+{
+    throw "Vanguard source root was not found at '$sourceRoot'."
+}
+
+$allowed = @{}
+if (Test-Path -LiteralPath $allowlistPath)
+{
+    foreach ($line in Get-Content -LiteralPath $allowlistPath)
+    {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith("#"))
+        {
+            continue
+        }
+
+        $parts = $trimmed.Split("|", 3)
+        if ($parts.Count -ne 3 -or
+            [string]::IsNullOrWhiteSpace($parts[0]) -or
+            [string]::IsNullOrWhiteSpace($parts[1]) -or
+            [string]::IsNullOrWhiteSpace($parts[2]))
+        {
+            throw "Invalid audit allowlist entry: '$line'. Expected rule|path|reason."
+        }
+
+        $key = $parts[0].Trim() + "|" +
+            $parts[1].Trim().Replace("\", "/").ToLowerInvariant()
+        $allowed[$key] = $parts[2].Trim()
+    }
+}
+
+$rules = @(
+    @{
+        Id = "crt-allocation"
+        Pattern = "(?<![A-Za-z0-9_:])(?:(?:std|::)\s*::\s*)?(?:malloc|calloc|realloc|free)\s*\("
+        Message = "Use Vanguard Memory or inline/arena storage."
+    },
+    @{
+        Id = "raw-heap"
+        Pattern = "(?<![A-Za-z0-9_])(?:::)?new\s+(?!\()|\bdelete\s*(?:\[\s*\])?\s+(?!=)"
+        Message = "Use Vanguard Memory. Placement construction is permitted."
+    },
+    @{
+        Id = "console-output"
+        Pattern = "\bstd::(?:cout|cerr|clog|wcout|wcerr|wclog)\b|(?<![A-Za-z0-9_])(?:printf|fprintf|puts|fputs)\s*\("
+        Message = "Use Vanguard Diagnostics; tests and benchmarks are excluded."
+    },
+    @{
+        Id = "direct-red-logging"
+        Pattern = "\bRED_(?:LOG|LOG_[A-Z_]+|ERROR|WARNING)\b"
+        Message = "Use Vanguard Diagnostics so sinks, profiling, and editor ingestion remain unified."
+    },
+    @{
+        Id = "owning-std"
+        Pattern = "\bstd::(?:vector|deque|list|forward_list|map|multimap|set|multiset|unordered_[A-Za-z_]+|basic_string|string|wstring|u8string|u16string|u32string|unique_ptr|shared_ptr|weak_ptr|make_unique|make_shared|function|filesystem|thread|jthread|mutex|recursive_mutex|shared_mutex|condition_variable|future|promise|packaged_task|async|regex|pmr::[A-Za-z_]+)\b"
+        Message = "Use the Vanguard equivalent, or add a reviewed exception proving that none exists and the facility is appropriate."
+    },
+    @{
+        Id = "std-view"
+        Pattern = "\bstd::(?:span|string_view)\b"
+        Message = "Use Vanguard Containers ArraySpan/StringView unless this layer is below Containers."
+    }
+)
+
+$extensions = @(".h", ".hpp", ".inl", ".c", ".cc", ".cpp")
+$violations = [System.Collections.Generic.List[object]]::new()
+
+$files = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
+    Where-Object {
+        $extensions -contains $_.Extension -and
+        $_.FullName -notmatch "[\\/](?:imported|adapted|tests|benchmarks)[\\/]"
+    }
+
+foreach ($file in $files)
+{
+    $relative = $file.FullName.Substring(
+        $repository.TrimEnd("\").Length + 1).Replace("\", "/")
+    $normalized = $relative.ToLowerInvariant()
+    $content = [System.IO.File]::ReadAllText($file.FullName)
+
+    # Preserve line count while removing comments before line-oriented checks.
+    $content = [regex]::Replace(
+        $content,
+        "(?s)/\*.*?\*/",
+        {
+            param($match)
+            return "`n" * ([regex]::Matches($match.Value, "`n").Count)
+        })
+
+    $lines = $content -split "`r?`n"
+    for ($lineIndex = 0; $lineIndex -lt $lines.Count; ++$lineIndex)
+    {
+        $code = [regex]::Replace($lines[$lineIndex], "//.*$", "")
+        foreach ($rule in $rules)
+        {
+            if (-not [regex]::IsMatch($code, $rule.Pattern))
+            {
+                continue
+            }
+
+            $key = $rule.Id + "|" + $normalized
+            if ($allowed.ContainsKey($key))
+            {
+                continue
+            }
+
+            $violations.Add([pscustomobject]@{
+                Rule = $rule.Id
+                File = $relative
+                Line = $lineIndex + 1
+                Message = $rule.Message
+            })
+        }
+    }
+}
+
+if ($violations.Count -ne 0)
+{
+    Write-Error "Vanguard engine-service audit failed with $($violations.Count) violation(s)."
+    foreach ($violation in $violations)
+    {
+        Write-Host (
+            "{0}({1}): [{2}] {3}" -f
+            $violation.File,
+            $violation.Line,
+            $violation.Rule,
+            $violation.Message)
+    }
+    exit 1
+}
+
+Write-Host "Vanguard engine-service audit passed."

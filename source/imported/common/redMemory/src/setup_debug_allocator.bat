@@ -1,0 +1,87 @@
+ECHO OFF
+CLS
+
+SET GFLAGS="C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\gflags.exe"
+SET ENABLE=/p /enable
+SET DISABLE=/p /disable
+
+IF NOT EXIST %GFLAGS% (
+	ECHO COULD NOT FIND %GFLAGS%
+	PAUSE
+	GOTO EOF
+)
+
+:MENU
+ECHO.
+ECHO RED DEBUG ALLOCATOR OPTIONS
+ECHO.
+ECHO 1 - Detect Memory Stomp 
+ECHO 2 - Detect backward Memory Stomp
+ECHO 3 - Detect Heap Corruption (at performance cost)
+ECHO 4 - Disable Debug Allocator
+ECHO 5 - EXIT
+ECHO.
+SET /P M=Choose then press ENTER:
+
+IF %M%==1 GOTO FULL
+IF %M%==2 GOTO BACKWARD
+IF %M%==3 GOTO PROTECT
+IF %M%==4 GOTO DISABLE
+IF %M%==5 GOTO EOF
+
+:FULL
+CALL %GFLAGS% %ENABLE% cmdlet.exe /full
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% launcher.exe /full
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% cpLauncher.exe /full
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% editorLauncher.exe /full
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+GOTO EOF
+
+:BACKWARD
+
+CALL %GFLAGS% %ENABLE% cmdlet.exe /full /backwards
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% launcher.exe /full /backwards
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% cpLauncher.exe /full /backwards
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% editorLauncher.exe /full /backwards
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+
+GOTO EOF
+
+:PROTECT
+
+CALL %GFLAGS% %ENABLE% cmdlet.exe /full /protect
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% launcher.exe /full /protect
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% cpLauncher.exe /full /protect
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %ENABLE% editorLauncher.exe /full /protect
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+
+GOTO EOF
+
+:DISABLE
+
+CALL %GFLAGS% %DISABLE% cmdlet.exe
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %DISABLE% launcher.exe
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %DISABLE% cpLauncher.exe
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+CALL %GFLAGS% %DISABLE% editorLauncher.exe
+IF %ERRORLEVEL% == 1 GOTO GFLAGS_FAILED
+
+GOTO EOF
+
+:GFLAGS_FAILED
+
+ECHO GFLAGS FAILED
+PAUSE
+
+:EOF

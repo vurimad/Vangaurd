@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  
+  <Type Name="IScriptable">
+    <DisplayString>{m_class,na}</DisplayString>
+  </Type>
+
+  <Type Name="CObject">
+    <DisplayString>(Object)  {m_class->m_name}</DisplayString>
+  </Type>
+  
+  <Type Name="rtti::ClassType">
+    <DisplayString>(Class)  name={m_name}</DisplayString>
+  </Type>
+
+  <Type Name="rtti::Property">
+    <DisplayString Condition="m_parent">(Property)  {m_parent->m_name}::{m_name} ({*m_type})</DisplayString>
+    <DisplayString>(Property)  {m_name} ({*m_type}) (Property)</DisplayString>
+  </Type>
+
+  <Type Name="rtti::Function">
+    <DisplayString>(Function)  {m_class->m_name}::{m_familyName}(...) Line {m_code.m_sourceLine}</DisplayString>
+  </Type>
+
+  <Type Name="rtti::ArrayType">
+    <DisplayString>(Array)  {*m_innerType} </DisplayString>
+  </Type>
+
+  <Type Name="rtti::PointerType">
+    <DisplayString>Pointer)  {*m_pointedType}</DisplayString>
+  </Type>
+
+  <Type Name="rtti::HandleType">
+    <DisplayString>(Handle)  {*m_pointedType}</DisplayString>
+  </Type>
+
+  <Type Name="red::Event::SenderInfo">
+    <DisplayString Condition="m_scriptsStacktrace[0].m_function == nullptr">Event sent from C++</DisplayString>
+    <DisplayString Condition="m_scriptsStacktrace[0].m_function != nullptr">Event sent from Red Scripts</DisplayString>
+    <Expand>
+      <CustomListItems>
+        <Variable Name="currentScriptFunction" InitialValue="0"/>
+
+        <!-- Event from C++ -->
+        <Item Condition="m_scriptsStacktrace[0].m_function == nullptr" Name="C++ stacktrace">m_codeStacktrace</Item>
+        
+        <!-- Event from Red Scripts -->
+        <Loop>
+          <Break Condition="m_scriptsStacktrace[currentScriptFunction].m_function == nullptr" />
+          <Item Name="Script stacktrace [{currentScriptFunction}]">m_scriptsStacktrace[currentScriptFunction]</Item>
+          <Exec>++currentScriptFunction</Exec>
+        </Loop>
+        <Item Condition="m_scriptsStacktrace[0].m_function != nullptr &amp;&amp; m_codeStacktrace.m_framesCount != 0" Name="C++ stacktrace">m_codeStacktrace</Item>
+        
+      </CustomListItems>
+    </Expand>
+  </Type>
+
+  <Type Name="red::Event::SenderInfo::ScriptsStacktrace">
+    <DisplayString Condition="m_class != nullptr">{{ {m_class, sb}::{m_function, sb}(...), Line {m_line} }}</DisplayString>
+    <DisplayString Condition="m_class == nullptr">{{ {m_function, sb}(...), Line {m_line} }}</DisplayString>
+  </Type>
+
+  <Type Name="red::Event::SenderInfo::CodeStacktrace">
+    <Expand>
+      <ExpandedItem>m_frames,[m_framesCount]stackTrace</ExpandedItem>
+    </Expand>
+  </Type>
+  
+</AutoVisualizer>

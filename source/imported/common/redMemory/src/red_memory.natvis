@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+  <Type Name="red::SharedPtr&lt;*&gt;">
+    <AlternativeType Name="red::SharedStorage&lt;*&gt;" />
+    <AlternativeType Name="red::AtomicSharedPtr&lt;*&gt;" />
+    <AlternativeType Name="red::NonAtomicSharedPtr&lt;*&gt;" />
+    <DisplayString Condition="m_pointee == 0">nullptr</DisplayString>
+    <DisplayString Condition="(m_pointee != 0)">SharedPtr {m_pointee}</DisplayString>
+    <Expand>
+      <ExpandedItem Condition="m_pointee != 0">($T1*)m_pointee</ExpandedItem>
+      <Item Name="Strong">(*m_refCount).strong</Item>
+      <Item Name="Weak">(*m_refCount).weak</Item>
+    </Expand>
+  </Type>
+
+  <Type Name="red::WeakStorage&lt;*&gt;">
+    <AlternativeType Name="red::WeakPtr&lt;*&gt;" />
+    <AlternativeType Name="red::AtomicWeakPtr&lt;*&gt;" />
+    <AlternativeType Name="red::NonAtomicWeakPtr&lt;*&gt;" />
+    <DisplayString Condition="m_pointee == 0">nullptr</DisplayString>
+    <DisplayString Condition="(m_pointee != 0) &amp;&amp; (m_refCount == 0) ">WeakPtr expired [ strong=0 weak=0 ]</DisplayString>
+    <DisplayString Condition="(m_pointee != 0) &amp;&amp; ((*m_refCount).strong == 0) ">WeakPtr expired [ strong=0 weak={(*m_refCount).weak} ]</DisplayString>
+    <DisplayString Condition="(m_pointee != 0) &amp;&amp; ((*m_refCount).strong != 0) ">WeakPtr {m_pointee}</DisplayString>
+    <Expand>
+      <ExpandedItem Condition="m_pointee != 0">($T1*)m_pointee</ExpandedItem>
+      <Item Name="Strong">(*m_refCount).strong</Item>
+      <Item Name="Weak">(*m_refCount).weak</Item>
+    </Expand>
+  </Type>
+  
+  <Type Name="red::IntrusivePtr&lt;*&gt;">
+    <DisplayString Condition="m_pointee == 0">nullptr</DisplayString>
+    <DisplayString Condition="(m_pointee != 0)">IntrusivePtr {*($T1*)m_pointee}</DisplayString>
+    <Expand>
+      <ExpandedItem Condition="m_pointee != 0">($T1*)m_pointee</ExpandedItem>
+    </Expand>
+  </Type>
+
+  <Type Name="red::ScopedPtr&lt;*&gt;">
+    <DisplayString Condition="m_storage.m_pointer == 0">nullptr</DisplayString>
+    <DisplayString Condition="(m_storage.m_pointer != 0)">ScopedPtr {*m_storage.m_pointer }</DisplayString>
+    <Expand>
+      <ExpandedItem Condition="m_storage.m_pointer != 0">m_storage.m_pointer</ExpandedItem>
+    </Expand>
+  </Type>
+
+  <Type Name="red::UniquePtr&lt;*&gt;">
+    <DisplayString Condition="m_storage.m_pointer == 0">nullptr</DisplayString>
+    <DisplayString Condition="(m_storage.m_pointer != 0)">UniquePtr {*m_storage.m_pointer }</DisplayString>
+    <Expand>
+      <ExpandedItem Condition="m_storage.m_pointer != 0">m_storage.m_pointer</ExpandedItem>
+    </Expand>
+  </Type>
+
+  <Type Name="red::memory::LinearAllocator">
+    <DisplayString>Linear Allocator - Memory Used: {m_offset}, Free: {m_size - m_offset}, Total: {m_size}</DisplayString>
+  </Type>
+
+  <Type Name="red::UniqueBuffer">
+    <DisplayString>UniqueBuffer: {m_buffer,h} Size: {m_size}</DisplayString>
+    <Expand>
+      <Item Name="Buffer">m_buffer</Item>
+      <Item Name="Size">m_size</Item>
+      <Item Name="Alignment">m_alignment</Item>
+      <Item Name="Allocator">((uint64_t*)&amp;m_allocator),2h</Item>
+    </Expand>
+  </Type>
+  
+</AutoVisualizer>

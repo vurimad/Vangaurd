@@ -1,0 +1,387 @@
+// Test protocol file
+
+$struct Vector4
+{
+	$field x : float = 10;
+	$field y : float = 0;
+	$field z : float = 0;
+	$field w : float = 0;
+}
+
+$struct Matrix4
+{
+	$field x : Vector4;
+	$field y : Vector4;
+	$field z : Vector4;
+	$field w : Vector4;
+}
+
+$struct EulerAngles
+{
+	$field roll : float = 0;
+	$field pitch : float = 0;
+	$field yaw : float = 0;
+}
+
+$struct InteropTxID
+{
+	$field sequenceID	: uint32 = 0;
+	$field streamID		: uint8 = 0;
+}
+
+$message IsAliveResponse
+{
+	$field sth : uint64 = 0; 
+}
+
+$message IsAliveRequest
+{
+	$field sth : uint64 = 0;
+}
+
+$message InteropException : Exception
+{
+	$field ex : string;
+}
+
+$message InteropPropertyInfo
+{
+	$field metadata : string;
+	$field name : string;
+}
+
+$message InteropBlob
+{
+	$field metadata : string;
+	$field scalarValue: string;
+	$field txID : InteropTxID;
+	$array propertyInfos : InteropPropertyInfo;
+	$field requestID : uint64;
+}
+
+$message InteropNotifierEvent
+{
+	$field				notifierId: uint32;
+	$array				notiferArg: uint8;
+}
+
+// Deprecated!
+$message InteropCall
+{
+	$field				expr: string;
+	$array				args: string;
+	$optional $field	transactionStream : uint8;
+	$field				requestID : uint64;
+}
+
+$message InteropCallBatch
+{
+	$array				expr: string;
+	$array				args: string;
+	$optional $field	transactionStream : uint8;
+}
+
+$message InteropTxStreamResult
+{
+	$field txID : InteropTxID;
+}
+
+$message InteropOpenTxStream
+{
+	$field dummy: uint8;	// so can compile
+}
+
+$message InteropSyncTxStream
+{
+	$field streamID: uint8;
+}
+
+$message InteropCloseTxStream
+{
+	$field streamID : uint8;
+}
+
+$message InteropRollbackTxStream
+{
+	$field toTxID : InteropTxID;
+}
+
+$message AddPreviewObject
+{
+	$optional $field name : string;
+	$field id : int;
+	$field loc : Matrix4;
+}
+
+$message AddPreviewBox : AddPreviewObject
+{
+	$field center : Vector4;
+	$field extents : Vector4;
+}
+
+$message AddPreviewLine : AddPreviewObject
+{
+	$array points : Vector4;
+}
+
+$message AddPreviewMesh : AddPreviewObject
+{
+	$field res : string; // baron_castle
+}
+
+$message ToggleHeightReferenceDisplay
+{
+	$field enable : bool;
+}
+
+$message ListShowFlags
+{
+	$field resPath : string;
+}
+
+$message ListShowFlagsResponse
+{
+	$array showFlags : string;
+}
+
+$message ToggleShowFlag
+{
+	$field showFlagName : string;
+	$field enabled : bool;
+}
+
+$message AddSceneBatch
+{
+	$array objects : AddPreviewObject;
+	$array subgroups : AddSceneBatch;
+}
+
+$message DepList
+{
+	$field parent : DepList;
+}
+
+$message TestMessage
+{
+	$field text : string;
+}
+
+$message CreateService
+{
+	$field serviceName : string;
+	$field channel : string;
+}
+
+$message CreateServiceResponse
+{
+	$field serviceName : string;
+	$field channel : string;
+	$field success : bool;
+	$field errorInfo : string;
+}
+
+$message CloseService
+{
+	$field user : string;		// Any param
+}
+
+$message CreateTestService : CreateService
+{
+	$field channelName : string;
+}
+
+$struct Window
+{
+	$field hWnd : uint64;
+	$field width : int16;
+	$field height : int16;
+}
+
+$message CreatePreviewService : CreateService
+{
+	$field window : Window;
+}
+
+$message ClosePreviewService
+{
+	$field windowHandle : uint64;
+}
+
+$message UpdateLightning
+{
+	$field rotation : EulerAngles;
+}
+
+$message UpdateWind
+{
+	$field strength : float;
+}
+
+$message GetLodsCount
+{
+	$field path : string;
+}
+
+$message GetLodsCountResponse
+{
+	$field count : int;
+}
+
+$message ForceLod
+{
+	$field lod : int;
+}
+
+// Resource service messages
+
+$message OpenResourceEdition
+{
+	$field path : string;
+}
+
+$message OpenResourceEditionResponse
+{
+	$field succeed : bool;
+	$field path : string;
+	$field objectId : uint64;
+}
+
+$message CloseResourceEdition
+{
+	$field path : string;
+}
+
+$message GetPropertyValues
+{
+	$field objectId : uint64;
+	$field path : string;
+	$field recursive : bool;
+	$field asXml : bool;
+}
+
+// Change name, category and type to hashes of string in future
+$message EditorObjectView
+{
+	$field name : string;
+	$field category : string;
+	$field value : string;
+	$field type : string;
+	$array children : EditorObjectView;
+	$array actions : string;
+}
+
+$message GetPropertyValuesResponse
+{
+	$array views : EditorObjectView;
+}
+
+$message SetPropertyValues
+{
+	$field objectId : uint64;
+	$field path : string;
+	$field value : string;
+}
+
+// TODO: extend this to support more than one value, maybe even hierarchy of objects
+$message OnPropertyChanged
+{
+	$field objectId : uint64;
+	$field path : string;
+	$field value : string;
+}
+
+$message ExecuteViewAction
+{
+	$field objectId : uint64;
+	$field path : string;
+	$field action : string;
+}
+
+$message Exception
+{
+	$field text : string;
+}
+
+$message TerminateTarget
+{
+	$field reason : string;
+}
+
+$struct ServiceDescription
+{
+	$field name : string;
+}
+
+$message ListServices
+{
+	$field onlyOpened : bool;
+}
+
+$message ListServicesResponse
+{
+	$array services : ServiceDescription;
+}
+
+// SRT trees properties service messages
+$message CreateSrtTreeService : CreateService
+{
+	$field path : string;
+}
+
+$message GetSrtProperties
+{
+	$field path : string;
+}
+
+$struct SrtProperty
+{
+	$field name : string;
+	$field value : string;
+}
+
+$message GetSrtPropertiesResponse
+{
+	$array properties : SrtProperty;
+	$field success : bool;
+	$field errorInfo : string;
+}
+
+// Indicates that given object is ready (for object inspector)
+$message OnObjectIsReady
+{
+	$field objectId : uint64;		// SerializableID value
+}
+
+// Sent by app handle when it's released
+$message ReleaseApplicationHandle
+{
+	$field reason : string;
+	$field detach : bool = false;//detach rather than close, used by Functional Tests in 'single engine instance mode'
+}
+
+// DEPRECATED!!!
+$message InvalidInteropException : Exception
+{
+	$field requestID : uint64;
+}
+
+// DEPRECATED!!!
+$message InteropCallMethodResultArray
+{
+	$array value: string;
+	$array metatype: uint8;
+}
+
+// DEPRECATED!!!
+$message InteropCallMethodResult
+{
+	$field value: string;
+	$field metatype: uint8;
+}
+
+// DEPRECATED!!!
+$message InteropCallMethod
+{
+	$field path: string;
+	$array args: string;
+}

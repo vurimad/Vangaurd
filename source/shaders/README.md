@@ -1,0 +1,21 @@
+# Shaders
+
+The Shaders module owns Vanguard's cooked `vshader` contract. It does not compile source languages and does not create GPU objects. Tool-side compiler adapters emit native payloads and normalized reflection through `BuildDescription`; runtime renderer backends consume validated `ShaderFile` records.
+
+The design follows RED's separation of native shader entries, reflection records, stable program identity, and PSO compatibility metadata, while replacing RED's global shader caches with independently addressable Vanguard resources.
+
+## Ownership boundaries
+
+- `vshader` owns permutation identity, native stage payloads, descriptor and constant layouts, stage interfaces, and specialization constants.
+- A future pipeline resource owns rasterizer, depth/stencil, blend, topology, render-target formats, sample count, and the selected shader permutation.
+- Materials bind against `BindingLayoutFingerprint()`.
+- Pipeline descriptors and PSO caches bind against `PipelineInterfaceFingerprint()` and the selected shader permutation.
+- `LayoutFingerprint()` covers the complete normalized interface and is used for whole-resource validation.
+
+No source HLSL/Slang, editor graph, fixed-function PSO state, or backend object is stored in the runtime interface.
+
+## Runtime path
+
+`ShaderFile::Open` validates the Vanguard binary header, section table, section checksums, native bytecode SHA-256 digests, canonical reflection layout, all bounds and counts, and all three layout fingerprints before making the resource visible.
+
+`ValidatePipeline` provides the backend-independent compatibility gate. It checks program kind, primitive class, vertex inputs, render-target count and numeric classes, depth-output requirements, dual-source blending, and optional binding/pipeline fingerprints. GPU-specific PSO creation remains a renderer responsibility.

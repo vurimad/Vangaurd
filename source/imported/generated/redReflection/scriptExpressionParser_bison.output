@@ -1,0 +1,2010 @@
+Terminals unused in grammar
+
+   TOKEN_TDBID
+   TOKEN_RESREF
+   TOKEN_IMPORT
+   TOKEN_IMPORTONLY
+   TOKEN_HOLY
+   TOKEN_ABSTRACT
+   TOKEN_CONST
+   TOKEN_MUTABLE
+   TOKEN_EXTENDS
+   TOKEN_CLASS
+   TOKEN_ENUM
+   TOKEN_STRUCT
+   TOKEN_FUNCTION
+   TOKEN_DEF
+   TOKEN_EDITABLE
+   TOKEN_INSTANCE_EDITABLE
+   TOKEN_REPLICATED
+   TOKEN_PERSISTENT
+   TOKEN_FINAL
+   TOKEN_VIRTUAL
+   TOKEN_OVERRIDE
+   TOKEN_OUT
+   TOKEN_OPTIONAL
+   TOKEN_SKIP
+   TOKEN_INLINED
+   TOKEN_ARRAY
+   TOKEN_HINT
+   TOKEN_HINTS
+   TOKEN_DEFAULT
+   TOKEN_DEFAULTS
+   TOKEN_BROWSABLE
+   TOKEN_VAR
+   TOKEN_EXEC
+   TOKEN_TIMER
+   TOKEN_WEAK
+   TOKEN_OPERATOR
+   TOKEN_CAST
+   TOKEN_IMPLICIT
+   TOKEN_STATIC
+   TOKEN_VISUAL
+   TOKEN_CORE
+   TOKEN_LOGIC
+   TOKEN_MULTICAST
+   TOKEN_HOST
+   TOKEN_CLIENT
+   TOKEN_RELIABLE
+   TOKEN_QUEST
+   TOKEN_REF
+   TOKEN_DEBUG
+   TOKEN_SYNCHRONIZED
+   TOKEN_SIMPLE_TYPE
+   TOKEN_CLASS_TYPE
+   TOKEN_ENUM_TYPE
+   TOKEN_OP_IADD
+   TOKEN_OP_ISUB
+   TOKEN_OP_IMUL
+   TOKEN_OP_IDIV
+   TOKEN_OP_IAND
+   TOKEN_OP_IOR
+   TOKEN_NEW
+   TOKEN_IF
+   TOKEN_ELSE
+   TOKEN_SWITCH
+   TOKEN_CASE
+   TOKEN_FOR
+   TOKEN_WHILE
+   TOKEN_DO
+   TOKEN_RETURN
+   TOKEN_BREAK
+   TOKEN_CONTINUE
+   TOKEN_SUPER
+   TOKEN_PRIVATE
+   TOKEN_PROTECTED
+   TOKEN_PUBLIC
+   TOKEN_EVENT
+   TOKEN_TESTONLY
+   TOKEN_UNARY_LOGICAL_NOT
+   TOKEN_UNARY_BITWISE_NOT
+
+
+Grammar
+
+    0 $accept: statement $end
+
+    1 statement: expression
+
+    2 access: basic_access
+    3       | array
+
+    4 basic_access: TOKEN_IDENT
+    5             | TOKEN_THIS
+    6             | basic_access '.' TOKEN_IDENT
+    7             | array '.' TOKEN_IDENT
+
+    8 array_index: TOKEN_INTEGER
+    9            | basic_access
+   10            | array
+
+   11 array_start: '['
+
+   12 array_end: ']'
+
+   13 array: basic_access array_start array_index array_end
+
+   14 literal_token_base: TOKEN_BOOL_TRUE
+   15                   | TOKEN_BOOL_FALSE
+   16                   | TOKEN_INTEGER
+   17                   | TOKEN_FLOAT
+   18                   | TOKEN_NULL
+   19                   | TOKEN_STRING
+   20                   | TOKEN_NAME
+
+   21 literal_token: literal_token_base
+
+   22 basic_expression_component: literal_token
+   23                           | access
+
+   24 expression_component: basic_expression_component
+   25                     | unary_expression
+   26                     | binary_expression
+   27                     | '(' expression_component ')'
+
+   28 $@1: /* empty */
+
+   29 unary_expression: '-' $@1 basic_expression_component
+
+   30 $@2: /* empty */
+
+   31 unary_expression: '-' $@2 '(' expression_component ')'
+   32                 | '!' basic_expression_component
+   33                 | '!' '(' expression_component ')'
+   34                 | '~' basic_expression_component
+   35                 | '~' '(' expression_component ')'
+
+   36 binary_expression: expression_component '-' expression_component
+   37                  | expression_component '+' expression_component
+   38                  | expression_component '*' expression_component
+   39                  | expression_component '/' expression_component
+   40                  | expression_component '%' expression_component
+   41                  | expression_component '&' expression_component
+   42                  | expression_component '|' expression_component
+   43                  | expression_component '^' expression_component
+   44                  | expression_component '>' expression_component
+   45                  | expression_component '<' expression_component
+   46                  | expression_component TOKEN_OP_GREQ expression_component
+   47                  | expression_component TOKEN_OP_LEEQ expression_component
+   48                  | expression_component TOKEN_OP_EQUAL expression_component
+   49                  | expression_component TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component TOKEN_OP_LOGIC_AND expression_component
+
+   52 expression: expression_component
+
+
+Terminals, with rules where they appear
+
+$end (0) 0
+'!' (33) 32 33
+'%' (37) 40
+'&' (38) 41
+'(' (40) 27 31 33 35
+')' (41) 27 31 33 35
+'*' (42) 38
+'+' (43) 37
+'-' (45) 29 31 36
+'.' (46) 6 7
+'/' (47) 39
+'<' (60) 45
+'>' (62) 44
+'[' (91) 11
+']' (93) 12
+'^' (94) 43
+'|' (124) 42
+'~' (126) 34 35
+error (256)
+TOKEN_IDENT (258) 4 6 7
+TOKEN_INTEGER (259) 8 16
+TOKEN_FLOAT (260) 17
+TOKEN_NAME (261) 20
+TOKEN_STRING (262) 19
+TOKEN_TDBID (263)
+TOKEN_RESREF (264)
+TOKEN_BOOL_TRUE (265) 14
+TOKEN_BOOL_FALSE (266) 15
+TOKEN_NULL (267) 18
+TOKEN_IMPORT (268)
+TOKEN_IMPORTONLY (269)
+TOKEN_HOLY (270)
+TOKEN_ABSTRACT (271)
+TOKEN_CONST (272)
+TOKEN_MUTABLE (273)
+TOKEN_EXTENDS (274)
+TOKEN_CLASS (275)
+TOKEN_ENUM (276)
+TOKEN_STRUCT (277)
+TOKEN_FUNCTION (278)
+TOKEN_DEF (279)
+TOKEN_EDITABLE (280)
+TOKEN_INSTANCE_EDITABLE (281)
+TOKEN_REPLICATED (282)
+TOKEN_PERSISTENT (283)
+TOKEN_FINAL (284)
+TOKEN_VIRTUAL (285)
+TOKEN_OVERRIDE (286)
+TOKEN_OUT (287)
+TOKEN_OPTIONAL (288)
+TOKEN_SKIP (289)
+TOKEN_INLINED (290)
+TOKEN_ARRAY (291)
+TOKEN_HINT (292)
+TOKEN_HINTS (293)
+TOKEN_DEFAULT (294)
+TOKEN_DEFAULTS (295)
+TOKEN_BROWSABLE (296)
+TOKEN_VAR (297)
+TOKEN_EXEC (298)
+TOKEN_TIMER (299)
+TOKEN_WEAK (300)
+TOKEN_OPERATOR (301)
+TOKEN_CAST (302)
+TOKEN_IMPLICIT (303)
+TOKEN_STATIC (304)
+TOKEN_VISUAL (305)
+TOKEN_CORE (306)
+TOKEN_LOGIC (307)
+TOKEN_MULTICAST (308)
+TOKEN_HOST (309)
+TOKEN_CLIENT (310)
+TOKEN_RELIABLE (311)
+TOKEN_QUEST (312)
+TOKEN_REF (313)
+TOKEN_DEBUG (314)
+TOKEN_SYNCHRONIZED (315)
+TOKEN_SIMPLE_TYPE (316)
+TOKEN_CLASS_TYPE (317)
+TOKEN_ENUM_TYPE (318)
+TOKEN_OP_IADD (319)
+TOKEN_OP_ISUB (320)
+TOKEN_OP_IMUL (321)
+TOKEN_OP_IDIV (322)
+TOKEN_OP_IAND (323)
+TOKEN_OP_IOR (324)
+TOKEN_OP_LOGIC_OR (325) 50
+TOKEN_OP_LOGIC_AND (326) 51
+TOKEN_OP_EQUAL (327) 48
+TOKEN_OP_NOTEQUAL (328) 49
+TOKEN_OP_GREQ (329) 46
+TOKEN_OP_LEEQ (330) 47
+TOKEN_NEW (331)
+TOKEN_IF (332)
+TOKEN_ELSE (333)
+TOKEN_SWITCH (334)
+TOKEN_CASE (335)
+TOKEN_FOR (336)
+TOKEN_WHILE (337)
+TOKEN_DO (338)
+TOKEN_RETURN (339)
+TOKEN_BREAK (340)
+TOKEN_CONTINUE (341)
+TOKEN_THIS (342) 5
+TOKEN_SUPER (343)
+TOKEN_PRIVATE (344)
+TOKEN_PROTECTED (345)
+TOKEN_PUBLIC (346)
+TOKEN_EVENT (347)
+TOKEN_TESTONLY (348)
+TOKEN_UNARY_LOGICAL_NOT (349)
+TOKEN_UNARY_BITWISE_NOT (350)
+
+
+Nonterminals, with rules where they appear
+
+$accept (113)
+    on left: 0
+statement (114)
+    on left: 1, on right: 0
+access (115)
+    on left: 2 3, on right: 23
+basic_access (116)
+    on left: 4 5 6 7, on right: 2 6 9 13
+array_index (117)
+    on left: 8 9 10, on right: 13
+array_start (118)
+    on left: 11, on right: 13
+array_end (119)
+    on left: 12, on right: 13
+array (120)
+    on left: 13, on right: 3 7 10
+literal_token_base (121)
+    on left: 14 15 16 17 18 19 20, on right: 21
+literal_token (122)
+    on left: 21, on right: 22
+basic_expression_component (123)
+    on left: 22 23, on right: 24 29 32 34
+expression_component (124)
+    on left: 24 25 26 27, on right: 27 31 33 35 36 37 38 39 40 41 42
+    43 44 45 46 47 48 49 50 51 52
+unary_expression (125)
+    on left: 29 31 32 33 34 35, on right: 25
+$@1 (126)
+    on left: 28, on right: 29
+$@2 (127)
+    on left: 30, on right: 31
+binary_expression (128)
+    on left: 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51, on right:
+    26
+expression (129)
+    on left: 52, on right: 1
+
+
+state 0
+
+    0 $accept: . statement $end
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    statement                   go to state 14
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 21
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+    expression                  go to state 24
+
+
+state 1
+
+    4 basic_access: TOKEN_IDENT .
+
+    $default  reduce using rule 4 (basic_access)
+
+
+state 2
+
+   16 literal_token_base: TOKEN_INTEGER .
+
+    $default  reduce using rule 16 (literal_token_base)
+
+
+state 3
+
+   17 literal_token_base: TOKEN_FLOAT .
+
+    $default  reduce using rule 17 (literal_token_base)
+
+
+state 4
+
+   20 literal_token_base: TOKEN_NAME .
+
+    $default  reduce using rule 20 (literal_token_base)
+
+
+state 5
+
+   19 literal_token_base: TOKEN_STRING .
+
+    $default  reduce using rule 19 (literal_token_base)
+
+
+state 6
+
+   14 literal_token_base: TOKEN_BOOL_TRUE .
+
+    $default  reduce using rule 14 (literal_token_base)
+
+
+state 7
+
+   15 literal_token_base: TOKEN_BOOL_FALSE .
+
+    $default  reduce using rule 15 (literal_token_base)
+
+
+state 8
+
+   18 literal_token_base: TOKEN_NULL .
+
+    $default  reduce using rule 18 (literal_token_base)
+
+
+state 9
+
+    5 basic_access: TOKEN_THIS .
+
+    $default  reduce using rule 5 (basic_access)
+
+
+state 10
+
+   29 unary_expression: '-' . $@1 basic_expression_component
+   31                 | '-' . $@2 '(' expression_component ')'
+
+    '('       reduce using rule 30 ($@2)
+    $default  reduce using rule 28 ($@1)
+
+    $@1  go to state 25
+    $@2  go to state 26
+
+
+state 11
+
+   27 expression_component: '(' . expression_component ')'
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 27
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 12
+
+   32 unary_expression: '!' . basic_expression_component
+   33                 | '!' . '(' expression_component ')'
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '('               shift, and go to state 28
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 29
+
+
+state 13
+
+   34 unary_expression: '~' . basic_expression_component
+   35                 | '~' . '(' expression_component ')'
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '('               shift, and go to state 30
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 31
+
+
+state 14
+
+    0 $accept: statement . $end
+
+    $end  shift, and go to state 32
+
+
+state 15
+
+   23 basic_expression_component: access .
+
+    $default  reduce using rule 23 (basic_expression_component)
+
+
+state 16
+
+    2 access: basic_access .
+    6 basic_access: basic_access . '.' TOKEN_IDENT
+   13 array: basic_access . array_start array_index array_end
+
+    '.'  shift, and go to state 33
+    '['  shift, and go to state 34
+
+    $default  reduce using rule 2 (access)
+
+    array_start  go to state 35
+
+
+state 17
+
+    3 access: array .
+    7 basic_access: array . '.' TOKEN_IDENT
+
+    '.'  shift, and go to state 36
+
+    $default  reduce using rule 3 (access)
+
+
+state 18
+
+   21 literal_token: literal_token_base .
+
+    $default  reduce using rule 21 (literal_token)
+
+
+state 19
+
+   22 basic_expression_component: literal_token .
+
+    $default  reduce using rule 22 (basic_expression_component)
+
+
+state 20
+
+   24 expression_component: basic_expression_component .
+
+    $default  reduce using rule 24 (expression_component)
+
+
+state 21
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+   52 expression: expression_component .
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '<'                 shift, and go to state 43
+    '>'                 shift, and go to state 44
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 52 (expression)
+
+
+state 22
+
+   25 expression_component: unary_expression .
+
+    $default  reduce using rule 25 (expression_component)
+
+
+state 23
+
+   26 expression_component: binary_expression .
+
+    $default  reduce using rule 26 (expression_component)
+
+
+state 24
+
+    1 statement: expression .
+
+    $default  reduce using rule 1 (statement)
+
+
+state 25
+
+   29 unary_expression: '-' $@1 . basic_expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 53
+
+
+state 26
+
+   31 unary_expression: '-' $@2 . '(' expression_component ')'
+
+    '('  shift, and go to state 54
+
+
+state 27
+
+   27 expression_component: '(' expression_component . ')'
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '<'                 shift, and go to state 43
+    '>'                 shift, and go to state 44
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+    ')'                 shift, and go to state 55
+
+
+state 28
+
+   33 unary_expression: '!' '(' . expression_component ')'
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 56
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 29
+
+   32 unary_expression: '!' basic_expression_component .
+
+    $default  reduce using rule 32 (unary_expression)
+
+
+state 30
+
+   35 unary_expression: '~' '(' . expression_component ')'
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 57
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 31
+
+   34 unary_expression: '~' basic_expression_component .
+
+    $default  reduce using rule 34 (unary_expression)
+
+
+state 32
+
+    0 $accept: statement $end .
+
+    $default  accept
+
+
+state 33
+
+    6 basic_access: basic_access '.' . TOKEN_IDENT
+
+    TOKEN_IDENT  shift, and go to state 58
+
+
+state 34
+
+   11 array_start: '[' .
+
+    $default  reduce using rule 11 (array_start)
+
+
+state 35
+
+   13 array: basic_access array_start . array_index array_end
+
+    TOKEN_IDENT    shift, and go to state 1
+    TOKEN_INTEGER  shift, and go to state 59
+    TOKEN_THIS     shift, and go to state 9
+
+    basic_access  go to state 60
+    array_index   go to state 61
+    array         go to state 62
+
+
+state 36
+
+    7 basic_access: array '.' . TOKEN_IDENT
+
+    TOKEN_IDENT  shift, and go to state 63
+
+
+state 37
+
+   50 binary_expression: expression_component TOKEN_OP_LOGIC_OR . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 64
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 38
+
+   51 binary_expression: expression_component TOKEN_OP_LOGIC_AND . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 65
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 39
+
+   48 binary_expression: expression_component TOKEN_OP_EQUAL . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 66
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 40
+
+   49 binary_expression: expression_component TOKEN_OP_NOTEQUAL . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 67
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 41
+
+   46 binary_expression: expression_component TOKEN_OP_GREQ . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 68
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 42
+
+   47 binary_expression: expression_component TOKEN_OP_LEEQ . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 69
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 43
+
+   45 binary_expression: expression_component '<' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 70
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 44
+
+   44 binary_expression: expression_component '>' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 71
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 45
+
+   41 binary_expression: expression_component '&' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 72
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 46
+
+   42 binary_expression: expression_component '|' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 73
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 47
+
+   43 binary_expression: expression_component '^' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 74
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 48
+
+   36 binary_expression: expression_component '-' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 75
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 49
+
+   37 binary_expression: expression_component '+' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 76
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 50
+
+   38 binary_expression: expression_component '*' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 77
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 51
+
+   39 binary_expression: expression_component '/' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 78
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 52
+
+   40 binary_expression: expression_component '%' . expression_component
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 79
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 53
+
+   29 unary_expression: '-' $@1 basic_expression_component .
+
+    $default  reduce using rule 29 (unary_expression)
+
+
+state 54
+
+   31 unary_expression: '-' $@2 '(' . expression_component ')'
+
+    TOKEN_IDENT       shift, and go to state 1
+    TOKEN_INTEGER     shift, and go to state 2
+    TOKEN_FLOAT       shift, and go to state 3
+    TOKEN_NAME        shift, and go to state 4
+    TOKEN_STRING      shift, and go to state 5
+    TOKEN_BOOL_TRUE   shift, and go to state 6
+    TOKEN_BOOL_FALSE  shift, and go to state 7
+    TOKEN_NULL        shift, and go to state 8
+    TOKEN_THIS        shift, and go to state 9
+    '-'               shift, and go to state 10
+    '('               shift, and go to state 11
+    '!'               shift, and go to state 12
+    '~'               shift, and go to state 13
+
+    access                      go to state 15
+    basic_access                go to state 16
+    array                       go to state 17
+    literal_token_base          go to state 18
+    literal_token               go to state 19
+    basic_expression_component  go to state 20
+    expression_component        go to state 80
+    unary_expression            go to state 22
+    binary_expression           go to state 23
+
+
+state 55
+
+   27 expression_component: '(' expression_component ')' .
+
+    $default  reduce using rule 27 (expression_component)
+
+
+state 56
+
+   33 unary_expression: '!' '(' expression_component . ')'
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '<'                 shift, and go to state 43
+    '>'                 shift, and go to state 44
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+    ')'                 shift, and go to state 81
+
+
+state 57
+
+   35 unary_expression: '~' '(' expression_component . ')'
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '<'                 shift, and go to state 43
+    '>'                 shift, and go to state 44
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+    ')'                 shift, and go to state 82
+
+
+state 58
+
+    6 basic_access: basic_access '.' TOKEN_IDENT .
+
+    $default  reduce using rule 6 (basic_access)
+
+
+state 59
+
+    8 array_index: TOKEN_INTEGER .
+
+    $default  reduce using rule 8 (array_index)
+
+
+state 60
+
+    6 basic_access: basic_access . '.' TOKEN_IDENT
+    9 array_index: basic_access .
+   13 array: basic_access . array_start array_index array_end
+
+    '.'  shift, and go to state 33
+    '['  shift, and go to state 34
+
+    $default  reduce using rule 9 (array_index)
+
+    array_start  go to state 35
+
+
+state 61
+
+   13 array: basic_access array_start array_index . array_end
+
+    ']'  shift, and go to state 83
+
+    array_end  go to state 84
+
+
+state 62
+
+    7 basic_access: array . '.' TOKEN_IDENT
+   10 array_index: array .
+
+    '.'  shift, and go to state 36
+
+    $default  reduce using rule 10 (array_index)
+
+
+state 63
+
+    7 basic_access: array '.' TOKEN_IDENT .
+
+    $default  reduce using rule 7 (basic_access)
+
+
+state 64
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   50                  | expression_component TOKEN_OP_LOGIC_OR expression_component .
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 50 (binary_expression)
+
+
+state 65
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+   51                  | expression_component TOKEN_OP_LOGIC_AND expression_component .
+
+    '&'  shift, and go to state 45
+    '|'  shift, and go to state 46
+    '^'  shift, and go to state 47
+    '-'  shift, and go to state 48
+    '+'  shift, and go to state 49
+    '*'  shift, and go to state 50
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 51 (binary_expression)
+
+
+state 66
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   48                  | expression_component TOKEN_OP_EQUAL expression_component .
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 48 (binary_expression)
+
+
+state 67
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   49                  | expression_component TOKEN_OP_NOTEQUAL expression_component .
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 49 (binary_expression)
+
+
+state 68
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   46                  | expression_component TOKEN_OP_GREQ expression_component .
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 46 (binary_expression)
+
+
+state 69
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   47                  | expression_component TOKEN_OP_LEEQ expression_component .
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 47 (binary_expression)
+
+
+state 70
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   45                  | expression_component '<' expression_component .
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '>'                 shift, and go to state 44
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 45 (binary_expression)
+
+
+state 71
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   44                  | expression_component '>' expression_component .
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+
+    $default  reduce using rule 44 (binary_expression)
+
+
+state 72
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   41                  | expression_component '&' expression_component .
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '|'  shift, and go to state 46
+    '^'  shift, and go to state 47
+    '-'  shift, and go to state 48
+    '+'  shift, and go to state 49
+    '*'  shift, and go to state 50
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 41 (binary_expression)
+
+
+state 73
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   42                  | expression_component '|' expression_component .
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '^'  shift, and go to state 47
+    '-'  shift, and go to state 48
+    '+'  shift, and go to state 49
+    '*'  shift, and go to state 50
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 42 (binary_expression)
+
+
+state 74
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   43                  | expression_component '^' expression_component .
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '-'  shift, and go to state 48
+    '+'  shift, and go to state 49
+    '*'  shift, and go to state 50
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 43 (binary_expression)
+
+
+state 75
+
+   36 binary_expression: expression_component . '-' expression_component
+   36                  | expression_component '-' expression_component .
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '+'  shift, and go to state 49
+    '*'  shift, and go to state 50
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 36 (binary_expression)
+
+
+state 76
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   37                  | expression_component '+' expression_component .
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '*'  shift, and go to state 50
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 37 (binary_expression)
+
+
+state 77
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   38                  | expression_component '*' expression_component .
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '/'  shift, and go to state 51
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 38 (binary_expression)
+
+
+state 78
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   39                  | expression_component '/' expression_component .
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    '%'  shift, and go to state 52
+
+    $default  reduce using rule 39 (binary_expression)
+
+
+state 79
+
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   40                  | expression_component '%' expression_component .
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    $default  reduce using rule 40 (binary_expression)
+
+
+state 80
+
+   31 unary_expression: '-' $@2 '(' expression_component . ')'
+   36 binary_expression: expression_component . '-' expression_component
+   37                  | expression_component . '+' expression_component
+   38                  | expression_component . '*' expression_component
+   39                  | expression_component . '/' expression_component
+   40                  | expression_component . '%' expression_component
+   41                  | expression_component . '&' expression_component
+   42                  | expression_component . '|' expression_component
+   43                  | expression_component . '^' expression_component
+   44                  | expression_component . '>' expression_component
+   45                  | expression_component . '<' expression_component
+   46                  | expression_component . TOKEN_OP_GREQ expression_component
+   47                  | expression_component . TOKEN_OP_LEEQ expression_component
+   48                  | expression_component . TOKEN_OP_EQUAL expression_component
+   49                  | expression_component . TOKEN_OP_NOTEQUAL expression_component
+   50                  | expression_component . TOKEN_OP_LOGIC_OR expression_component
+   51                  | expression_component . TOKEN_OP_LOGIC_AND expression_component
+
+    TOKEN_OP_LOGIC_OR   shift, and go to state 37
+    TOKEN_OP_LOGIC_AND  shift, and go to state 38
+    TOKEN_OP_EQUAL      shift, and go to state 39
+    TOKEN_OP_NOTEQUAL   shift, and go to state 40
+    TOKEN_OP_GREQ       shift, and go to state 41
+    TOKEN_OP_LEEQ       shift, and go to state 42
+    '<'                 shift, and go to state 43
+    '>'                 shift, and go to state 44
+    '&'                 shift, and go to state 45
+    '|'                 shift, and go to state 46
+    '^'                 shift, and go to state 47
+    '-'                 shift, and go to state 48
+    '+'                 shift, and go to state 49
+    '*'                 shift, and go to state 50
+    '/'                 shift, and go to state 51
+    '%'                 shift, and go to state 52
+    ')'                 shift, and go to state 85
+
+
+state 81
+
+   33 unary_expression: '!' '(' expression_component ')' .
+
+    $default  reduce using rule 33 (unary_expression)
+
+
+state 82
+
+   35 unary_expression: '~' '(' expression_component ')' .
+
+    $default  reduce using rule 35 (unary_expression)
+
+
+state 83
+
+   12 array_end: ']' .
+
+    $default  reduce using rule 12 (array_end)
+
+
+state 84
+
+   13 array: basic_access array_start array_index array_end .
+
+    $default  reduce using rule 13 (array)
+
+
+state 85
+
+   31 unary_expression: '-' $@2 '(' expression_component ')' .
+
+    $default  reduce using rule 31 (unary_expression)

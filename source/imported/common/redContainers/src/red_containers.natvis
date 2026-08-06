@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+	<Type Name="red::String">
+		<DisplayString Condition="i.mode == SM_Internal">{i.buf,s}</DisplayString>
+		<DisplayString Condition="i.mode != SM_Internal">{e.buf,s}</DisplayString>
+		<StringView Condition="i.mode == SM_Internal">i.buf</StringView>
+		<StringView Condition="i.mode != SM_Internal">e.buf</StringView>
+		
+		<Expand>
+			<Item Name="Capacity" Condition="i.mode != SM_Internal">e.capacity</Item>
+			<Item Name="Length" Condition="i.mode != SM_Internal">e.length</Item>
+			<ArrayItems Condition="i.mode != SM_Internal">
+				<Size>e.length</Size>
+				<ValuePointer>e.buf</ValuePointer>
+			</ArrayItems>
+
+			<Item Name="Capacity" Condition="i.mode == SM_Internal">INTERNAL_CAPACITY</Item>
+			<Item Name="Length" Condition="i.mode == SM_Internal">i.length</Item>
+			<ArrayItems Condition="i.mode == SM_Internal">
+				<Size>i.length</Size>
+				<ValuePointer>i.buf</ValuePointer>
+			</ArrayItems>
+			
+			<Synthetic Name="Mode" Condition="i.mode == SM_Internal">
+				<DisplayString>Internal</DisplayString>
+			</Synthetic>
+			<Synthetic Name="Mode" Condition="i.mode == SM_External">
+				<DisplayString>External</DisplayString>
+			</Synthetic>
+			<Synthetic Name="Mode" Condition="i.mode == SM_Dynamic">
+				<DisplayString>Dynamic</DisplayString>
+			</Synthetic>
+			<Synthetic Name="Mode" Condition="i.mode >= SM_MAX">
+				<DisplayString>Invalid String, corrupted internal state.</DisplayString>
+			</Synthetic>
+		</Expand>
+	</Type>
+
+	<Type Name="red::StringView">
+		<DisplayString Condition="m_ptr == nullptr">Invalid StringView</DisplayString>
+		<DisplayString>{m_ptr,[m_length]}</DisplayString>
+		<Expand>
+			<Item Name="Pointer">m_ptr</Item>
+			<Item Name="Length">m_length</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="red::Utf8String">
+		<DisplayString Condition="str == nullptr">Utf8String [Empty]</DisplayString>
+		<DisplayString Condition="strSize != capacity">{str,s} [{strSize}/{capacity}]</DisplayString>
+		<DisplayString>{str,s}</DisplayString>
+		<Expand>
+			<Item Name="Size">strSize</Item>
+			<Item Name="Capacity">capacity</Item>
+			<Item Name="Data">str,sb</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="red::Utf16String">
+		<DisplayString Condition="str == nullptr">Utf16String [Empty]</DisplayString>
+		<DisplayString Condition="strSize != capacity">{str,su} [{strSize}/{capacity}]</DisplayString>
+		<DisplayString>{str,su}</DisplayString>
+		<Expand>
+			<Item Name="Size">strSize</Item>
+			<Item Name="Capacity">capacity</Item>
+			<Item Name="Data">str,sub</Item>
+		</Expand>
+	</Type>
+
+	<Type Name="red::ArraySpan&lt;*&gt;">
+		<DisplayString Condition="m_startPtr == nullptr">Invalid ArraySpan</DisplayString>
+		<DisplayString Condition="m_startPtr == m_endPtr">Empty ArraySpan</DisplayString>
+		<DisplayString>{m_startPtr,[m_endPtr - m_startPtr]}</DisplayString>
+		<Expand>
+			<Synthetic Name="Length">
+				<DisplayString>{m_endPtr - m_startPtr}</DisplayString>
+			</Synthetic>
+			<ArrayItems>
+				<Size>m_endPtr - m_startPtr</Size>
+				<ValuePointer>m_startPtr</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+
+	<Type Name="red::HashMap&lt;*,*,*&gt;::BucketElement">
+		<DisplayString>{m_key} -&gt; {m_value}</DisplayString>
+		<Expand>
+			<Item Name="Key">m_key</Item>
+			<Item Name="Value">m_value</Item>
+			<Item Name="Hash">m_hash,8X</Item>
+		</Expand>   
+	</Type>
+
+	<Type Name="red::HashMap&lt;*,*,*&gt;">
+		<DisplayString Condition="m_size == 0">Hash map [Empty]</DisplayString>
+		<DisplayString Condition="m_size &lt;= m_capacity">Hash map [{m_size}/{m_capacity}]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_size</Item>
+			<Item Name="Capacity">m_capacity</Item>
+			<Synthetic Name="Items">
+				<Expand>
+					<CustomListItems>
+						<Variable Name="bucketIndex" InitialValue="0" />
+						<Variable Name="elementIndex" InitialValue="m_buckets[0]" />
+						<Variable Name="itemPtr" InitialValue="(BucketElement*)m_bucketsPool.m_buffer + elementIndex" />
+						<Size>m_size</Size>
+						<Loop>
+							<If Condition="elementIndex == InvalidElementIndex">
+								<Exec>bucketIndex++</Exec>
+								<Exec>elementIndex = m_buckets[bucketIndex]</Exec>
+							</If>
+							<If Condition="elementIndex != InvalidElementIndex">
+								<Exec>itemPtr = (BucketElement*)m_bucketsPool.m_buffer + elementIndex</Exec>
+								<Item Name="m_buckets [{bucketIndex}]">*itemPtr</Item>
+								<Exec>elementIndex = itemPtr->m_nextIndex</Exec>
+							</If>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+		</Expand>
+	</Type>
+
+	<Type Name="red::Map&lt;*,*,*&gt;">
+		<DisplayString Condition="m_keys.m_size == 0">Map [Empty]</DisplayString>
+		<DisplayString>Map [{m_keys.m_size}/{m_keys.m_capacity}]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_keys.m_size</Item>
+			<Item Name="Capacity">m_keys.m_capacity</Item>
+			<Synthetic Name="Items">
+				<Expand>
+					<CustomListItems>
+						<Variable Name="i" InitialValue="0"/>
+						<Size>m_keys.m_size</Size>
+						<Loop>
+							<Item Name="{m_keys[i],na}">m_values[i]</Item>
+							<Exec>i++</Exec>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+		</Expand>
+	</Type>
+
+	<Type Name="red::HashSet&lt;*,*&gt;">
+		<DisplayString Condition="m_size == 0">Hash set [Empty]</DisplayString>
+		<DisplayString Condition="m_size &lt;= m_capacity">Hash set [{m_size}/{m_capacity}]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_size</Item>
+			<Item Name="Capacity">m_capacity</Item>
+			<ArrayItems>
+				<Size>m_size</Size>
+				<ValuePointer>m_elements</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+	
+	<Type Name="red::Set&lt;*,*&gt;">
+		<DisplayString Condition="m_elements.m_size == 0">Set [Empty]</DisplayString>
+		<DisplayString Condition="m_elements.m_size &lt;= m_elements.m_capacity">Set [{m_elements.m_size}/{m_elements.m_capacity}]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_elements.m_size</Item>
+			<Item Name="Capacity">m_elements.m_capacity</Item>
+			<ArrayItems>
+				<Size>m_elements.m_size</Size>
+				<ValuePointer>($T1*)m_elements.m_buffer</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+	
+	<Type Name="red::DynArray&lt;*&gt;">
+		<DisplayString Condition="m_size == 0">Dynamic Array [Empty]</DisplayString>
+		<DisplayString Condition="m_size &lt;= m_capacity">Dynamic Array [{m_size}/{m_capacity}]</DisplayString>
+		<DisplayString>Dynamic Array [Invalid]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_size</Item>
+			<Item Name="Capacity">m_capacity</Item>
+			<Item Name="Buffer">m_buffer</Item>
+			<ArrayItems>
+				<Size>m_size</Size>
+				<ValuePointer>($T1*)m_buffer</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+
+	<Type Name="red::StaticArray&lt;*,*&gt;">
+		<DisplayString Condition="m_size == 0">Static Array [Empty]</DisplayString>
+		<DisplayString Condition="m_size &lt;= (size_t)_Capacity">Static Array [{m_size}/{(size_t)_Capacity}]</DisplayString>
+		<DisplayString>Static Array [Invalid]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_size</Item>
+			<Item Name="Capacity">(size_t)_Capacity</Item>
+			<ArrayItems>
+				<Size>m_size</Size>
+				<ValuePointer>($T1*)m_buffer</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+
+	<Type Name="red::DynArrayAccessor">
+		<DisplayString Condition="m_size == 0">Dynamic Array Accessor [Empty]</DisplayString>
+		<DisplayString Condition="m_size &lt;= m_capacity">Dynamic Array Accessor [{m_size}/{m_capacity}]</DisplayString>
+		<DisplayString>Dynamic Array Accessor [Invalid]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_size</Item>
+			<Item Name="Capacity">m_capacity</Item>
+			<ArrayItems>
+				<Size>m_size</Size>
+				<ValuePointer>(unsigned char*)m_buffer</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+
+	<Type Name="red::CircularBuffer&lt;*&gt;">
+		<DisplayString Condition="m_size == 0">Circular Buffer [Empty]</DisplayString>
+		<DisplayString Condition="m_size &lt;= m_capacity">Circular Buffer [{m_size}/{m_capacity}]</DisplayString>
+		<DisplayString>Circular Buffer [Invalid]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_size</Item>
+			<Item Name="Capacity">m_capacity</Item>
+			<Item Name="Front">m_front</Item>
+			<Item Name="Back">m_back</Item>
+			<ArrayItems>
+				<Size>m_capacity</Size>
+				<ValuePointer>($T1*)m_buffer</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+
+	<Type Name="red::LockFreeQueue&lt;*,*,*&gt;">
+		<DisplayString Condition="m_queueImpl.m_size.m_target == 0">Lock-Free Queue [Empty]</DisplayString>
+		<DisplayString Condition="m_queueImpl.m_size.m_target &lt;= $T2 - 1">Lock-Free Queue [{m_queueImpl.m_size.m_target}/{$T2 - 1}]</DisplayString>
+		<DisplayString>Lock-Free Queue [Invalid]</DisplayString>
+		<Expand>
+			<Item Name="Size">m_queueImpl.m_size</Item>
+			<Item Name="Capacity">$T2 - 1</Item>
+			<Item Name="Data" Optional="true">m_queueImpl.m_data</Item>
+		</Expand>
+	</Type>
+
+</AutoVisualizer>

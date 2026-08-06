@@ -1,0 +1,10 @@
+$message OpenToolServices
+{
+	$field ip : string;
+	$field port : uint16 = 0;
+}
+
+$message ToolSrvCommand
+{
+	$field command : uint8 = 0;
+}

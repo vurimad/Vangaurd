@@ -1,0 +1,17 @@
+# Application
+
+The application module is Vanguard's engine-lifetime composition root. Phase 1 provides an immutable service graph that validates the selected application profile before constructing any service, starts services in deterministic dependency order, and unwinds them in reverse dependency order.
+
+Modules register service descriptors while the host is in `Building`. `Compile` selects the descriptors for a runtime, editor, tool, server, headless, or test profile; validates required dependencies, conflicts, capabilities, and cycles; and freezes the startup plan. `Start` constructs, initializes, and starts that plan. `Shutdown` performs global reverse-order quiesce, drain, stop, shutdown, and destruction passes so producers stop accepting work before their dependencies disappear.
+
+Service IDs and capability IDs are stable engine-owned values. Descriptor names are borrowed static strings; descriptor dependency arrays are copied into host-owned Runtime-pool storage. Service instances are owned exclusively by the host and may only be observed through borrowed pointers or generational handles. Handles become invalid when their instance is destroyed.
+
+Thread affinity and lifetime scope are explicit composition metadata in this phase. The application frame scheduler and asynchronous startup executor will enforce those policies in later phases; Phase 1 deliberately executes lifecycle callbacks on the composition thread.
+
+Root memory and the minimum diagnostics/containers bootstrap remain below `EngineHost`, because the host itself needs those facilities to store and report its graph. The eventual executable composition root initializes that small substrate, builds and runs `EngineHost`, then tears the substrate down after the host has stopped.
+
+`ApplicationRunner` is the portable process driver above that substrate. It initializes the injected `IPlatformHost`, asks an executable-owned `IApplicationComposition` to register services and states, compiles and starts the service graph, advances one native event pump and one application-state operation per iteration, and funnels every success or failure through the same reverse shutdown path. The native pump remains outside the running-state frame pipeline so asynchronous loading, transitions, failures, and shutdown stay responsive. Running states execute the engine-owned compiled frame schedule; other states retain the lightweight outer driver. Application states support explicit asynchronous `Enter`, `Tick`, and `Exit` operations; transitions are deferred until callback boundaries, and shutdown has a configurable tick budget.
+
+Native entry points do not live in this module. Runtime, editor, server, and tool executables each own a tiny `main`, `WinMain`, or console-specific entry function that creates their composition and calls the appropriate platform adapter. This keeps product selection and native ABI details out of the portable runner.
+
+Product code uses the compact framework façade. An executable derives its `RuntimeApplication`, `EditorApplication`, or tool application from `vanguard::Application`, returns its process profile and shutdown policy through `ApplicationTraits`, and implements service/state composition. Its platform-specific native entry constructs the appropriate `IPlatformHost` and calls `RunFramework(application, parameters, platform)`, making platform selection explicit without allowing native types into the portable framework.

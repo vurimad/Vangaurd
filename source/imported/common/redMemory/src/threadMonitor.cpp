@@ -1,0 +1,157 @@
+/**
+ * Copyright (c) 2015 CD Projekt Red. All Rights Reserved.
+ */
+
+#include "build.h"
+#include "threadMonitor.h"
+#include "assert.h"
+#include "scopedLock.h"
+#include "../../redSystem/include/redThreadsThread.h"
+
+namespace red
+{
+namespace memory
+{
+namespace
+{
+	static void NotifyThreadDied( void * userData )
+	{
+		ThreadMonitor * monitor = static_cast< ThreadMonitor* >( userData );
+		monitor->NotifyCurrentThreadDied();
+	}
+
+#if defined( RED_PLATFORM_ORBIS )
+	
+	static ScePthreadOnce s_orbisOnceControl = SCE_PTHREAD_ONCE_INIT;
+	static ScePthreadKey s_orbisThreadKey;
+	
+	void ThreadKeyIntialization()
+	{
+		auto result = scePthreadKeyCreate( &s_orbisThreadKey, NotifyThreadDied );
+		RED_MEMORY_ASSERT( result == SCE_OK, "scePthreadKeyCreate failed. Code: %d", result );
+		RED_UNUSED( result );
+	}
+
+#elif defined( RED_PLATFORM_LINUX )
+
+	static pthread_once_t s_linuxOnceControl = PTHREAD_ONCE_INIT;
+	static pthread_key_t s_linuxThreadKey;
+
+	void ThreadKeyIntialization()
+	{
+		auto result = pthread_key_create( &s_linuxThreadKey, NotifyThreadDied );
+		RED_MEMORY_ASSERT( result == 0, "pthread_key_create failed. Code: %d", result );
+		RED_UNUSED( result );
+	}
+	
+#endif
+
+}
+
+	ThreadMonitor::ThreadMonitor()
+		:	m_threadIdProvider( nullptr )
+	{
+		m_threadIdProvider = &m_threadIdproviderStorage;
+	}
+
+	ThreadMonitor::~ThreadMonitor()
+	{}
+
+	void ThreadMonitor::Uninitialize()
+	{
+		m_threadIdProvider = nullptr; // Can't notified allocator anymore.  
+	}
+
+	void ThreadMonitor::MonitorCurrentThread()
+	{
+#ifdef RED_COMPILER_MSC
+		auto fls_id = FlsAlloc( NotifyThreadDied );
+		FlsSetValue( fls_id, this );
+
+#elif defined( RED_PLATFORM_ORBIS )
+		scePthreadOnce( &s_orbisOnceControl, ThreadKeyIntialization ); 
+		auto result = scePthreadSetspecific( s_orbisThreadKey, this );
+		RED_MEMORY_ASSERT( result == SCE_OK, "scePthreadSetspecific failed. Code: %d", result );
+		RED_UNUSED( result );
+
+#elif defined( RED_PLATFORM_LINUX )
+		pthread_once( &s_linuxOnceControl, ThreadKeyIntialization );
+		auto result = pthread_setspecific( s_linuxThreadKey, this  ); 
+		RED_MEMORY_ASSERT( result == 0, "pthread_setspecific failed. Code: %d", result );
+		RED_UNUSED( result );
+
+#else
+		static_assert( 0, "Unknown Platform. Lockless allocators won't work correctly." );
+#endif	
+	}
+
+	void ThreadMonitor::RegisterOnThreadDiedSignal( OnThreadDieCallback callback, void * userData )
+	{
+		RED_SCOPE_LOCK( m_lock );
+		Observer * observerSlot = FindAvailableObserverSlot();
+		RED_MEMORY_ASSERT( observerSlot != nullptr, "ThreadMonitor do not have any slot available for new Observer." );
+		*observerSlot = std::make_pair( callback, userData );
+	}
+
+	void ThreadMonitor::UnregisterFromThreadDiedSignal( OnThreadDieCallback callback, void * userData )
+	{
+		auto beginIter = m_observers.Begin();
+		auto endIter = m_observers.End();
+		
+		RED_SCOPE_LOCK( m_lock );
+		auto iter = find( beginIter, endIter, std::make_pair( callback, userData ) );
+		if( iter != endIter )
+		{
+			*iter = std::make_pair( nullptr, nullptr );
+		}
+	}
+
+	void ThreadMonitor::NotifyCurrentThreadDied()
+	{
+		if( m_threadIdProvider )
+		{
+			const ThreadId threadId = m_threadIdProvider->GetCurrentId();
+			OnThreadDied( threadId );
+		}
+	}
+
+	ThreadMonitor::Observer * ThreadMonitor::FindAvailableObserverSlot()
+	{
+		for( u32 index = 0; index != c_threadMonitorMaxObservers; ++index )
+		{
+			Observer & observer = m_observers[ index ];
+
+			if( observer.first == nullptr )
+			{
+				return &observer;
+			}
+		}
+
+		return nullptr;
+	}
+
+	void ThreadMonitor::OnThreadDied( u32 threadId ) const
+	{
+		for( u32 index = 0; index != c_threadMonitorMaxObservers; ++index )
+		{
+			const Observer & observer = m_observers[ index ];
+			if( observer.first )
+			{
+				OnThreadDieCallback callback = observer.first;
+				void * userData = observer.second;
+				callback( threadId, userData );
+			}
+		}
+	}
+
+	void ThreadMonitor::InternalSetThreadIdProvider( ThreadIdProvider * provider )
+	{
+		m_threadIdProvider = provider;
+	}
+
+	void ThreadMonitor::InternalForceNotifyThreadDied( ThreadId id )
+	{
+		OnThreadDied( id );
+	}
+}
+}

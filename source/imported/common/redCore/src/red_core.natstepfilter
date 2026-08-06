@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>  
+<StepFilter xmlns="http://schemas.microsoft.com/vstudio/debugger/natstepfilter/2010">
+    <Function>
+        <Name>red::AbsolutePath::AbsolutePath</Name>
+        <Action>NoStepInto</Action>
+    </Function>
+    <Function>
+        <Name>red::AbsolutePath::operator.*</Name>
+        <Action>NoStepInto</Action>
+    </Function>
+    <Function>
+        <Name>red::AbsolutePath::To.*</Name>
+        <Action>NoStepInto</Action>
+    </Function>
+    <Function>
+        <Name>red::AbsolutePath::As.*</Name>
+        <Action>NoStepInto</Action>
+    </Function>
+</StepFilter>

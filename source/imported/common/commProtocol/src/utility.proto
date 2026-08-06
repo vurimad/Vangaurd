@@ -1,0 +1,5 @@
+
+$message OpenFile
+{
+	$field resourcePath : string;
+}

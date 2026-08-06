@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+  <Type Name="script::debug::Simple">
+    <DisplayString>{m_name}</DisplayString>
+  </Type>
+  
+  <Type Name="script::debug::Property">
+    <DisplayString>{*m_resolvedProperty.m_storage.m_pointer}</DisplayString>
+  </Type>
+
+  <Type Name="script::debug::AliasedObject">
+    <DisplayString>{m_alias} ({m_class->m_name})</DisplayString>
+  </Type>
+
+  <Type Name="script::debug::Object">
+    <DisplayString>{m_class->m_name}</DisplayString>
+  </Type>
+
+  <Type Name="script::debug::Handle">
+    <DisplayString >{m_name} ({((rtti::HandleType*)m_type)->m_pointedClass->m_name})</DisplayString>
+  </Type>
+
+  <Type Name="script::debug::WeakHandle">
+    <DisplayString>{m_handle.m_pointee}</DisplayString>
+  </Type>
+
+  <Type Name="redReflection.dll!CScriptStackFrame">
+    <DisplayString>{m_function}</DisplayString>
+    <Expand>
+      <CustomListItems>
+        <Variable Name="currentFrame" InitialValue="this"/>
+        <Loop>
+          <Item Name="Call Stack [{currentFrame->m_level}]">currentFrame->m_function,na</Item>
+          <Exec>currentFrame = currentFrame->m_parent</Exec>
+          <Break Condition="currentFrame == nullptr"/>
+        </Loop>
+      </CustomListItems>
+    </Expand>
+  </Type>
+  
+</AutoVisualizer>

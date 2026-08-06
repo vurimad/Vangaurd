@@ -1,0 +1,127 @@
+/**
+* Copyright (c) 2013 CD Projekt Red. All Rights Reserved.
+*/
+#ifndef RED_THREADS_PLATFORM_H
+#define RED_THREADS_PLATFORM_H
+#pragma once
+
+#include "../include/utility.h"
+#include "../src/systemAssert.h"
+
+#define REDTHR_NOCOPY_CLASS(cls)	\
+	private:						\
+		cls(const cls&);			\
+		void operator=(const cls&);	\
+
+#define REDTHR_NOCOPY_STRUCT(s)		\
+	REDTHR_NOCOPY_CLASS(s)			\
+	public:
+
+// #ifndef RED_ASSERT
+// //#define RED_ASSERT(x, message, ...) do{ if( !(x) ){fprintf(stderr, (message), ## __VA_ARGS__ ); __debugbreak();} }while(false)
+// # define RED_ASSERT(x, ...) do{ (void)(x); }while(false)
+// #ifndef RED_VERIFY
+// # define RED_VERIFY(x, ...) do{ (void)(x); }while(false)
+// #ifndef RED_HALT
+// # define RED_VERIFY(x, ...) do{ (void)(x); }while(false)
+#define REDTHR_ASSERT(x) RED_SYSTEM_ASSERT( (x), "" )
+
+//////////////////////////////////////////////////////////////////////////
+// Platform defines
+#if defined( RED_PLATFORM_WIN32 ) || defined ( RED_PLATFORM_WIN64 ) || defined( RED_PLATFORM_DURANGO )
+#define RED_THREADS_PLATFORM_WINDOWS_API
+#elif defined( RED_PLATFORM_ORBIS )
+#define RED_THREADS_PLATFORM_ORBIS_API
+#elif defined( RED_PLATFORM_LINUX )
+#define RED_THREADS_PLATFORM_LINUX_API
+#endif
+
+//////////////////////////////////////////////////////////////////////////
+// OS Namespaces for switching between platform-specific implementations
+#if defined( RED_THREADS_PLATFORM_WINDOWS_API )
+
+namespace red { namespace WinAPI {
+} } // Red { namespace WinAPI {
+
+namespace red {
+	namespace OSAPI = WinAPI;
+} // namespace red
+
+#elif defined( RED_THREADS_PLATFORM_ORBIS_API )
+
+namespace red { namespace OrbisAPI {
+} } // Red { namespace WinAPI {
+
+namespace red {
+	namespace OSAPI = OrbisAPI;
+} 
+
+#elif defined( RED_THREADS_PLATFORM_LINUX_API )
+
+namespace red
+{
+	namespace LinuxAPI
+	{
+	}
+}
+
+namespace red
+{
+	namespace OSAPI = LinuxAPI;
+}
+
+#endif
+
+//////////////////////////////////////////////////////////////////////////
+// OS specific types
+#include "redThreadsTypes.h"
+
+//////////////////////////////////////////////////////////////////////////
+// OS specific error check wrappers
+#if defined( RED_PLATFORM_ORBIS )
+#	ifdef RED_ASSERTS_ENABLED
+#		define REDTHR_SCE_CHECK( expression ) do{ int sceret_ = (expression); (void)sceret_; RED_SYSTEM_ASSERT( sceret_ == SCE_OK,  #expression  "\nReturn value: 0x%08X", sceret_ ); }while(false)
+#	else
+#		define REDTHR_SCE_CHECK( expression ) RED_VERIFY( (expression), "" )
+#	endif
+#else
+#	define REDTHR_SCE_CHECK( expression ) (void)(expression)
+#endif
+
+#ifdef RED_COMPILER_MSC
+#pragma warning( disable : 4127 ) // conditional expression is constant: from do{}while(false)
+#endif // RED_COMPILER_MSC
+
+#if defined( RED_PLATFORM_WIN32 ) || defined( RED_PLATFORM_WIN64 ) || defined( RED_PLATFORM_DURANGO )
+#	ifdef RED_ASSERTS_ENABLED
+// Speculatively GetLastError() in case assert checking changes it. Compare with != 0 so can check pointers, numbers, or bools without "performance" warnings.
+// Technically relies on "expression" not doing some conversion that could clobber last error...
+#		define REDTHR_WIN_CHECK( expression ) do{ red::Bool winret_ = ( (expression) != 0 ); DWORD lastError_ = ::GetLastError(); (void)lastError_; RED_SYSTEM_ASSERT( winret_, #expression "\nGetLastError() result: 0x%08X", lastError_ ); RED_UNUSED(winret_); }while(false)
+#	else
+#		define REDTHR_WIN_CHECK( expression ) RED_VERIFY( (expression), "" )
+#	endif
+#else
+#	define REDTHR_WIN_CHECK( expression ) (void)(expression)
+#endif
+
+#if defined( RED_PLATFORM_LINUX)
+#	ifdef RED_ASSERTS_ENABLED
+#		define REDTHR_PTHREAD_CHECK( expression ) do{ int ret_ = (expression); (void)ret_; RED_SYSTEM_ASSERT( ret_ == 0, #expression "\nReturn value: 0x%08X", ret_ ); }while(false)
+#	else
+#		define REDTHR_PTHREAD_CHECK( expression ) RED_VERIFY( (expression), "" )
+#	endif
+#else
+#	define REDTHR_PTHREAD_CHECK( expression ) (void)(expression)
+#endif
+
+#if defined( RED_PLATFORM_LINUX)
+#	ifdef RED_ASSERTS_ENABLED
+#		define REDTHR_SEMA_CHECK( expression ) do{ int ret_ = (expression); int err_ = errno; (void)ret_; (void)err_; RED_SYSTEM_ASSERT( ret_ != -1, #expression "\nError code: 0x%08X", err_ ); }while(false)
+#	else
+#		define REDTHR_SEMA_CHECK( expression ) RED_VERIFY( (expression), "" )
+#	endif
+#else
+#	define REDTHR_SEMA_CHECK( expression ) (void)(expression)
+#endif
+
+#endif // RED_THREADS_PLATFORM_H

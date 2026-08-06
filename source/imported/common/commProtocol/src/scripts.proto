@@ -1,0 +1,139 @@
+// Messages for debugging scripts
+
+$struct ScriptLocation
+{
+	$field file : string;
+	$field line : int;
+}
+
+$struct ScriptBreakpointRelative
+{
+	$field standard : ScriptLocation;
+	$field column : uint16;
+	$field length : uint16;
+}
+
+$struct ScriptBreakpointAbsolute
+{
+	$field standard : ScriptLocation;
+	$field position : uint32;
+}
+
+$struct ScriptLocal
+{
+	$field path : string;
+	$field name : string;
+	$field type : string;
+	$field value : string;
+	$field attributes : uint32 = 0;
+}
+
+$struct ScriptStackFrame
+{
+	$field func : string;
+	$field breakpoint : ScriptBreakpointRelative;
+	$field id : int;
+	$array locals : ScriptLocal;
+}
+
+$struct ScriptThread
+{
+	$field id : uint32;
+	$array frames : ScriptStackFrame;
+}
+
+$message ScriptLocalsRequest
+{
+	$field path : string;
+	$field threadId : uint32;
+	$field stackId : int;
+	$field children : bool = true;
+}
+
+$message ScriptLocals
+{
+	$array locals : ScriptLocal;
+}
+
+$message ScriptProcessInfoRequest
+{
+	$field dummy : uint8; // Because messages require data or else they won't compile
+}
+
+// Contains information about the process running scripts
+$message ScriptProcessInfo
+{
+	$field processId : int;
+	$field exe : string;
+	$field name : string;
+	$field user : string;
+}
+
+$message ScriptResumeExecution
+{
+	$field dummy : uint8;
+}
+
+// Break into running, or Step over paused
+$message ScriptBreakRequest
+{
+	$field type : string;
+	$field breakpointThreadId : uint32;
+}
+
+$message ScriptBreakpointRequest
+{
+	$field enabled : bool;
+	$field breakpoint : ScriptBreakpointAbsolute;
+}
+
+$message ScriptBreakpointConfirmation
+{
+	$field success : bool;
+	$field request : ScriptBreakpointAbsolute;
+	$field confirmed : ScriptBreakpointRelative;
+}
+
+$message ScriptBreakpointPasscount
+{
+	$field breakpoint : ScriptBreakpointAbsolute;
+	$field passcount : uint32;
+	$field style : uint8;
+}
+
+$message ScriptBreakpointSetHitcount
+{
+	$field breakpoint : ScriptBreakpointAbsolute;
+	$field hitcount : uint32;
+}
+
+$message ScriptBreakpointCondition
+{
+	$field breakpoint : ScriptBreakpointAbsolute;
+	$field expression : string;
+	$field style : uint8;
+}
+
+$message ScriptBreakpointSkipped
+{
+	$field breakpoint : ScriptBreakpointRelative;
+}
+
+$message ScriptBinaryReloaded
+{
+	$field dummy : uint8;
+}
+
+$message ScriptBreakpointUnbound
+{
+	$field breakpoint : ScriptBreakpointRelative;
+}
+
+// Requested Break/step completed
+$message ScriptBreakExecuted
+{
+	$field reason : string;
+	$field breakpoint : ScriptBreakpointRelative;
+	$field breakpointThreadId : uint32;
+	$array threads : ScriptThread;
+}

@@ -1,0 +1,24 @@
+# Generated projects and build products
+/build/projects/
+/build/obj/
+/bin/
+/obj/
+
+# Runtime output
+/cache/
+/logs/
+/temp/
+/vanguard_*_tests/
+/vanguard_*_conformance/
+
+# IDE and user state
+/.vs/
+/*.sln
+/*.vcxproj
+/*.vcxproj.filters
+/*.vcxproj.user
+/.vscode/
+
+# Operating-system files
+Thumbs.db
+Desktop.ini

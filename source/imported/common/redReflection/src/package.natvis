@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  
+  <Type Name="red::Package">
+    <DisplayString>Package</DisplayString>
+    <Expand>
+      <Synthetic Name="String Table">
+        <DisplayString>{stringTable.m_endPtr - stringTable.m_startPtr}</DisplayString>
+        <Expand>
+          <CustomListItems>
+            <Variable Name="stringIndex" InitialValue="0" />
+            <Variable Name="descriptorPtr" InitialValue="stringTable.m_startPtr"/>
+            <Size>stringTable.m_endPtr - stringTable.m_startPtr</Size>
+            <Loop>
+              <Item Name="{stringIndex}">(const char*)buffer.m_data + descriptorPtr->offset</Item>
+              <Exec>stringIndex++</Exec>
+              <Exec>descriptorPtr=stringTable.m_startPtr + stringIndex</Exec>
+            </Loop>
+          </CustomListItems>
+        </Expand>
+      </Synthetic>
+
+      <Synthetic Name="Root Object Table">
+        <DisplayString>{rootObjectTable.m_endPtr - rootObjectTable.m_startPtr}</DisplayString>
+        <Expand>
+          <CustomListItems>
+
+            <Variable Name="packageAddr" InitialValue="(void*)this"/>
+            <Variable Name="objectIndex" InitialValue="0" />
+            <Variable Name="descriptorPtr" InitialValue="objectTable.m_startPtr"/>
+
+            <Size>rootObjectTable.m_endPtr - rootObjectTable.m_startPtr</Size>
+            <Loop>
+              <Item Name="{(const char*)buffer.m_data + (stringTable.m_startPtr+descriptorPtr->typeNameIndex)->offset}">
+                descriptorPtr
+              </Item>
+              <Exec>objectIndex++</Exec>
+              <Exec>descriptorPtr=objectTable.m_startPtr + objectIndex</Exec>
+            </Loop>
+
+          </CustomListItems>
+        </Expand>
+
+      </Synthetic>
+
+      <Synthetic Name="All Object Table">
+        <DisplayString>{objectTable.m_endPtr - objectTable.m_startPtr}</DisplayString>
+        <Expand>
+          <CustomListItems>
+            
+            <Variable Name="packageAddr" InitialValue="(void*)this"/>
+            <Variable Name="objectIndex" InitialValue="0" />
+            <Variable Name="descriptorPtr" InitialValue="objectTable.m_startPtr"/>
+
+            <Size>objectTable.m_endPtr - objectTable.m_startPtr</Size>
+            <Loop>
+              <Item Name="{(const char*)buffer.m_data + (stringTable.m_startPtr+descriptorPtr->typeNameIndex)->offset}">
+                descriptorPtr
+              </Item>
+              <Exec>objectIndex++</Exec>
+              <Exec>descriptorPtr=objectTable.m_startPtr + objectIndex</Exec>
+            </Loop>
+          
+          </CustomListItems>
+        </Expand>
+        
+      </Synthetic>
+
+      <Synthetic Name="Resource Table">
+        <DisplayString>{resourceTable.m_endPtr - resourceTable.m_startPtr}</DisplayString>
+        <Expand>
+          <CustomListItems>
+            <Variable Name="resourceIndex" InitialValue="0" />
+            <Variable Name="descriptorPtr" InitialValue="resourceTable.m_startPtr"/>
+            <Size>resourceTable.m_endPtr - resourceTable.m_startPtr</Size>
+            <Loop>
+              <Item Name="{(const char*)buffer.m_data + descriptorPtr->offset, [descriptorPtr->size]}">descriptorPtr</Item>
+              <Exec>resourceIndex++</Exec>
+              <Exec>descriptorPtr=resourceTable.m_startPtr + resourceIndex</Exec>
+            </Loop>
+          </CustomListItems>
+        </Expand>
+      </Synthetic>
+      
+    </Expand>
+  </Type>
+  
+</AutoVisualizer>

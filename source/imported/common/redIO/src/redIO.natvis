@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010"> 
+
+	<Type Name="io::AsyncFileHandleCache::FileEntry">
+		<DisplayString Condition="m_file == nullptr">[Empty]</DisplayString>
+		<DisplayString>{m_absolutePath,s} ({m_refCount.m_target}) : {m_file}</DisplayString>
+	</Type>
+
+	<Type Name="io::AsyncFileHandleCache">
+		<DisplayString>File Handle Cache</DisplayString>
+		<Expand>
+			<Synthetic Name="Open Files">
+				<Expand>
+					<CustomListItems>
+						<Variable Name="index" InitialValue="0" />
+						<Size>m_freeEntries.m_numAllocated</Size>
+						<Loop>
+							<If Condition="m_entries[index].m_file != nullptr">
+								<Item Name="m_entries[{index}]">m_entries[index]</Item>
+							</If>
+							<Exec>index++</Exec>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>		</Expand>
+	</Type>
+	
+</AutoVisualizer>

@@ -1,0 +1,25 @@
+// Interop protocol messages
+
+// Calls interop expression
+$message InteropInvoke
+{
+	$array expression : uint8;				// (i.e. ".depot.files["whatever"]" or ".depot.open("whatever")")
+	$field expectedResponseID : uint64;		// Expect InteropResponse or InteropResponseException with this ID to be an answer to this call
+}
+
+// Carries result for interop invoke (call)
+// describes everything there is to know about that object.
+$message InteropResponse
+{
+	$field metaType : uint8;		// Is it a simple value, compound object, array or notifier (or maybe an exception)?
+	$field isReadonly : bool;		// Is this object read only?
+	$field defaultFlags : uint8;	// Default value flags for this object 0 for Not applicable, 1 for IsDefault 2 for Not default
+	$field type : string;			// Named type of the object, only for C# (so for example we can build proper UI controls)
+	$field responseID : uint64;		// Respone ID used to identify response with query
+	$optional $field profileStartTicks : uint64;
+	$optional $field profileEndTicks : uint64;
+	$array properties : string;		// List of properties of that object
+	$array categories : string;		// List of children categories
+	$array data : uint8;			// Data carried by the interop object (value for simple values, size for arrays)
+	// NO MORE FIELDS MAY COME AFTER data DUE TO A 64K PROPERTY SIZE BUG
+}

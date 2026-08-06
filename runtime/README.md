@@ -1,0 +1,7 @@
+# Runtime client
+
+`runtime` is a top-level product client, not an engine module. It owns `RuntimeApplication` and a native entry slice for each supported platform. The Windows slice is a windowed executable with a native `wWinMain` entry and enters the framework through the Windows adapter.
+
+Normal startup follows two explicit application states: `startupSession` and `running`. `startupSession` asks the managed World Session service to mount the canonical `DATA000.vpak` package set from the Filesystem service's game root, load the catalog's typed startup-world reference without blocking the main thread, and create the Flecs Game World after the `vworld`, streaming grid, and streaming executor are ready. Only then does the application enter `running`.
+
+On entry to `running`, the application compiles the managed Frame Pipeline after every service has registered its participants. Each running tick executes one timed frame through the fixed global phases. Game World participates in `Simulation` and receives the pipeline's variable simulation delta; it no longer hangs from a product-specific call in the application loop. On exit, the state requests full World Session release and polls it; it does not know the Game World, World, or package teardown sequence. Future world-switch states can request `ReleaseWorld` instead, retain the mounted `DATAxxx.vpak` set, and begin another world. `--validate-bootstrap` deliberately exits before executing a content frame, allowing native entry-point and service-graph validation without a cooked game image.

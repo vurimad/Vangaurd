@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="vanguard::math::Vector2">
+    <DisplayString>[{X}, {Y}]</DisplayString>
+    <StringView>X, Y</StringView>
+    <Expand>
+      <Item Name="x">X</Item>
+      <Item Name="y">Y</Item>
+    </Expand>
+  </Type>
+  
+  <Type Name="vanguard::math::Vector3">
+    <DisplayString>[{X}, {Y}, {Z}]</DisplayString>
+    <StringView>X, Y, Z</StringView>
+    <Expand>
+      <Item Name="x">X</Item>
+      <Item Name="y">Y</Item>
+      <Item Name="z">Z</Item>
+    </Expand>
+  </Type>
+  
+  <Type Name="vanguard::math::Vector4">
+    <DisplayString>[{X}, {Y}, {Z}, {W}]</DisplayString>
+    <StringView>X, Y, Z, W</StringView>
+    <Expand>
+      <Item Name="x">X</Item>
+      <Item Name="y">Y</Item>
+      <Item Name="z">Z</Item>
+      <Item Name="w">W</Item>
+    </Expand>
+  </Type>
+
+  <Type Name="vanguard::math::EulerAngles">
+    <DisplayString>[{Roll}, {Pitch}, {Yaw}]</DisplayString>
+    <StringView>Roll, Pitch, Yaw</StringView>
+    <Expand>
+      <Item Name="Roll (Y)">Roll</Item>
+      <Item Name="Pitch (X)">Pitch</Item>
+      <Item Name="Yaw (Z)">Yaw</Item>
+    </Expand>
+  </Type>
+
+  <Type Name="vanguard::math::Matrix">
+    <Expand>
+      <Synthetic Name="X">
+        <DisplayString>{V[0]}</DisplayString>
+      </Synthetic>
+      <Synthetic Name="Y">
+        <DisplayString>{V[1]}</DisplayString>
+      </Synthetic>
+      <Synthetic Name="Z">
+        <DisplayString>{V[2]}</DisplayString>
+      </Synthetic>
+      <Synthetic Name="W">
+        <DisplayString>{V[3]}</DisplayString>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <Type Name="vanguard::math::Quaternion">
+    <DisplayString>[{i}, {j}, {k}, {r}]</DisplayString>
+    <StringView>i, j, k, r</StringView>
+    <Expand>
+      <Item Name="i">i</Item>
+      <Item Name="j">j</Item>
+      <Item Name="k">k</Item>
+      <Item Name="r">r</Item>
+    </Expand>
+  </Type>
+
+  <Type Name="vanguard::math::Transform">
+    <DisplayString>p{m_position}, q{m_orientation}</DisplayString>
+    <StringView>m_position, m_orientation</StringView>
+    <Expand>
+      <Item Name="m_position">m_position</Item>
+      <Item Name="m_orientation">m_orientation</Item>
+    </Expand>
+  </Type>
+
+  <Type Name="vanguard::math::WorldTransform">
+    <DisplayString>p{m_position}, q{m_orientation}</DisplayString>
+    <StringView>m_position, m_orientation</StringView>
+    <Expand>
+      <Item Name="m_position">m_position</Item>
+      <Item Name="m_orientation">m_orientation</Item>
+    </Expand>
+  </Type>
+  
+  <Type Name="vanguard::math::WorldPosition">
+	  <!-- 1 / (1<<17) = 0.00000762939453125 (17 is a current radix point shift for world position -->
+	  <DisplayString>[{x.m_bits * 0.00000762939453125}, {y.m_bits * 0.00000762939453125}, {z.m_bits * 0.00000762939453125} ]</DisplayString>
+    <StringView>x, y, z</StringView>
+    <Expand>
+      <Item Name="x">x.m_bits * 0.00000762939453125</Item>
+      <Item Name="y">y.m_bits * 0.00000762939453125</Item>
+      <Item Name="z">z.m_bits * 0.00000762939453125</Item>
+    </Expand>
+  </Type>
+
+  <Type Name="redMath.dll!vanguard::math::Box">
+    <DisplayString>[{Min.X}, {Min.Y}, {Min.Z}] - [{Max.X}, {Max.Y}, {Max.Z}]</DisplayString>
+    <Expand>
+      <Item Name="Min">Min</Item>
+      <Item Name="Max">Max</Item>
+      <Synthetic Name="Size">
+        <DisplayString>[{Max.X - Min.X}, {Max.Y - Min.Y}, {Max.Z - Min.Z}]</DisplayString>
+      </Synthetic>
+      <Synthetic Name="Center">
+        <DisplayString>[{(Max.X + Min.X) * 0.5f}, {(Max.Y + Min.Y) * 0.5f}, {(Max.Z + Min.Z) * 0.5f}]</DisplayString>
+      </Synthetic>
+      <Synthetic Name="Extents">
+        <DisplayString>[{(Max.X - Min.X) * 0.5f}, {(Max.Y - Min.Y) * 0.5f}, {(Max.Z - Min.Z) * 0.5f}]</DisplayString>
+      </Synthetic>
+    </Expand>
+  </Type>
+  
+</AutoVisualizer>
