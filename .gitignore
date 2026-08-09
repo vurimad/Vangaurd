@@ -1,6 +1,7 @@
 # Generated projects and build products
 /build/projects/
 /build/obj/
+/build/output/
 /bin/
 /obj/
 
@@ -8,6 +9,7 @@
 /cache/
 /logs/
 /temp/
+/*.log
 /vanguard_*_tests/
 /vanguard_*_conformance/
 

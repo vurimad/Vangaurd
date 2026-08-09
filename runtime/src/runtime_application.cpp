@@ -145,7 +145,7 @@ namespace vanguard::runtime
 
     ApplicationTraits RuntimeApplication::GetTraits() const noexcept
     {
-        return {"runtime", application::ApplicationProfile::Runtime, 600};
+        return {"runtime", application::ApplicationProfile::Runtime, 600, nullptr};
     }
 
     application::CompositionStatus RuntimeApplication::Compose(
@@ -153,12 +153,15 @@ namespace vanguard::runtime
         application::EngineHost& services,
         application::ApplicationStateMachine& states) noexcept
     {
+        const filesystem::AbsolutePath runtimeRoot = filesystem::paths::GetExecutableDirectory();
+        m_filesystemConfig = {runtimeRoot, runtimeRoot, filesystem::paths::GetUserCacheDirectory()};
         m_runningState.ExitAfterFirstTick(startup.commandLine.HasArgument("--validate-bootstrap"));
         application::HostFailure failure;
         if (!engine::RegisterEngineModule(services, &failure) || !engine::RegisterIoService(services, &failure) ||
-            !engine::RegisterFilesystemService(services, &failure) ||
+            !engine::RegisterFilesystemService(services, m_filesystemConfig, &failure) ||
             !engine::RegisterJobsService(services, &failure) ||
             !engine::RegisterFramePipelineService(services, &failure) ||
+            !engine::RegisterReflectionService(services, &failure) ||
             !engine::RegisterWindowService(services, startup.platform, &failure) ||
             !engine::RegisterInputService(services, startup.platform->InputBackend(), &failure) ||
             !engine::RegisterGameInputService(services, &failure) ||

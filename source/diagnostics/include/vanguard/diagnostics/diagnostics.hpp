@@ -149,14 +149,17 @@ namespace vanguard::diagnostics
     void Flush(FlushMode mode = FlushMode::Asynchronous) noexcept;
 } // namespace vanguard::diagnostics
 
-#define VG_LOG_FATAL(category, ...) ::vanguard::diagnostics::Logf(::vanguard::diagnostics::Level::Fatal, category, __VA_ARGS__)
+#define VG_INTERNAL_LOG(levelValue, categoryValue, ...)                                                                  \
+    do                                                                                                                   \
+    {                                                                                                                    \
+        const ::vanguard::diagnostics::Category vgLogCategory = (categoryValue);                                        \
+        if (::vanguard::diagnostics::CanLog((levelValue), vgLogCategory))                                                \
+            ::vanguard::diagnostics::Logf((levelValue), vgLogCategory, __VA_ARGS__);                                    \
+    } while (false)
 
-#define VG_LOG_ERROR(category, ...) ::vanguard::diagnostics::Logf(::vanguard::diagnostics::Level::Error, category, __VA_ARGS__)
-
-#define VG_LOG_WARNING(category, ...) ::vanguard::diagnostics::Logf(::vanguard::diagnostics::Level::Warning, category, __VA_ARGS__)
-
-#define VG_LOG_INFO(category, ...) ::vanguard::diagnostics::Logf(::vanguard::diagnostics::Level::Info, category, __VA_ARGS__)
-
-#define VG_LOG_DEBUG(category, ...) ::vanguard::diagnostics::Logf(::vanguard::diagnostics::Level::Debug, category, __VA_ARGS__)
-
-#define VG_LOG_TRACE(category, ...) ::vanguard::diagnostics::Logf(::vanguard::diagnostics::Level::Trace, category, __VA_ARGS__)
+#define VG_LOG_FATAL(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Fatal, category, __VA_ARGS__)
+#define VG_LOG_ERROR(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Error, category, __VA_ARGS__)
+#define VG_LOG_WARNING(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Warning, category, __VA_ARGS__)
+#define VG_LOG_INFO(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Info, category, __VA_ARGS__)
+#define VG_LOG_DEBUG(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Debug, category, __VA_ARGS__)
+#define VG_LOG_TRACE(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Trace, category, __VA_ARGS__)

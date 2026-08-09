@@ -302,7 +302,7 @@ namespace vanguard::assets
 
         [[nodiscard]] Result Build(const BuildRequest& request, BuildOutput& output) noexcept;
 
-        // RED-style two-stage cooking. Prepare performs lightweight
+        // Two-stage cooking. Prepare performs lightweight
         // dependency discovery. Execute verifies the compiler generation,
         // requires all generated dependencies to be resolved, computes the
         // final fingerprint, then performs cache lookup or compilation.

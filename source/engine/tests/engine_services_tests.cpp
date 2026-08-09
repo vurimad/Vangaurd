@@ -301,6 +301,7 @@ int main()
     Check(vanguard::engine::RegisterFilesystemService(host, &failure), "Filesystem service registration");
     Check(vanguard::engine::RegisterJobsService(host, &failure), "Jobs service registration");
     Check(vanguard::engine::RegisterFramePipelineService(host, &failure), "Frame Pipeline service registration");
+    Check(vanguard::engine::RegisterReflectionService(host, &failure), "Reflection service registration");
     Check(vanguard::engine::RegisterInputService(host, &inputBackend, &failure), "Input service registration");
     Check(vanguard::engine::RegisterResourcesService(host, &failure), "Resources service registration");
     Check(vanguard::engine::RegisterResourceStreamingService(host, &failure),

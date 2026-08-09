@@ -153,12 +153,11 @@ namespace vanguard::application
         {
             if (output != nullptr && output->code == HostFailureCode::None)
                 *output = {code, service, related, capability, message};
-            if (diagnostics::IsInitialized())
-                VG_LOG_ERROR(diagnostics::Category::Services,
-                             "application lifecycle failure: code=%u service=%llu related=%llu capability=%llu message=%s",
-                             static_cast<u32>(code), static_cast<unsigned long long>(service),
-                             static_cast<unsigned long long>(related), static_cast<unsigned long long>(capability),
-                             message != nullptr ? message : "unspecified");
+            VG_LOG_ERROR(diagnostics::Category::Services,
+                         "application lifecycle failure: code=%u service=%llu related=%llu capability=%llu message=%s",
+                         static_cast<u32>(code), static_cast<unsigned long long>(service),
+                         static_cast<unsigned long long>(related), static_cast<unsigned long long>(capability),
+                         message != nullptr ? message : "unspecified");
         }
 
         void Emit(const ServiceRecord* const service, const LifecycleStage stage, const ServiceState stateValue,

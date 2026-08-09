@@ -779,7 +779,9 @@ namespace vanguard::streaming
             }
             for (ReadPiece* const read : load->reads)
             {
-                read->token.m_ioContext->RequestCancel();
+                // A read may complete and release its I/O context while sibling pieces are still pending. Cancellation
+                // therefore applies only to tokens that still own a live context; completion remains authoritative.
+                if (read->token.m_ioContext) read->token.m_ioContext->RequestCancel();
             }
         }
 

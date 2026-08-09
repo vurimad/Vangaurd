@@ -11,6 +11,7 @@ namespace vanguard
         settings.profile = traits.profile;
         settings.commandLine = parameters.commandLine;
         settings.maximumShutdownTicks = traits.maximumShutdownTicks;
+        settings.diagnosticsFilePath = traits.diagnosticsFilePath;
 
         application::ApplicationRunner runner;
         const application::RunnerResult result = runner.Run(platform, appInstance, settings);

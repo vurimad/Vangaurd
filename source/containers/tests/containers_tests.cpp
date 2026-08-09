@@ -180,7 +180,7 @@ int main()
 
     if (failures == 0)
     {
-        std::puts("containersTests: all RED-derived container checks passed");
+        std::puts("containersTests: all container checks passed");
     }
     return failures == 0 ? 0 : 1;
 }

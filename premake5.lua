@@ -64,8 +64,33 @@ workspace "REDVanguard"
 
     filter {}
 
-output_root = path.getabsolute("bin/%{cfg.buildcfg}")
+output_root = path.getabsolute("build/output/%{cfg.buildcfg}")
 object_root = path.getabsolute("build/obj/%{prj.name}/%{cfg.buildcfg}")
+runtime_output_root = path.getabsolute("bin/Runtime/%{cfg.buildcfg}")
+editor_output_root = path.getabsolute("bin/Editor/%{cfg.buildcfg}")
+tools_output_root = path.getabsolute("bin/Tools/%{prj.name}/%{cfg.buildcfg}")
+
+function deployVanguardRuntimeDependencies(includeSdl)
+    if includeSdl then
+        postbuildcommands {
+            '{COPYFILE} "' .. path.join(output_root, "SDL3.dll") .. '" "%{cfg.targetdir}/SDL3.dll"'
+        }
+    end
+    postbuildcommands {
+        '{COPYFILE} "' .. path.join(output_root, "nvToolsExt64_1.dll") .. '" "%{cfg.targetdir}/nvToolsExt64_1.dll"'
+    }
+    filter "configurations:Debug"
+        postbuildcommands {
+            '{COPYFILE} "' .. path.join(output_root, "oo2ext_7_win64_debug.dll") ..
+                '" "%{cfg.targetdir}/oo2ext_7_win64_debug.dll"'
+        }
+    filter "configurations:not Debug"
+        postbuildcommands {
+            '{COPYFILE} "' .. path.join(output_root, "oo2ext_7_win64.dll") ..
+                '" "%{cfg.targetdir}/oo2ext_7_win64.dll"'
+        }
+    filter {}
+end
 
 local repository_root = path.getabsolute(".")
 local engine_code_audit_script =
@@ -83,9 +108,9 @@ if audit_result ~= 0 and audit_result ~= true then
 end
 
 function enforceEngineCodePolicy()
-    prebuildcommands {
-        engine_code_audit_command
-    }
+    -- The repository-wide audit is the hard gate above during project generation. It must
+    -- not be a per-project build event: Visual Studio treats such events as launch-time work
+    -- and loses its fast up-to-date F5 path across the entire static-library dependency graph.
 end
 
 include "external/meshoptimizer"
@@ -94,6 +119,9 @@ include "external/compressonatorCore"
 include "external/imageCodecs"
 include "external/flecs"
 include "external/sdl3"
+include "external/nvrhi"
+include "tools/bootstrapImage"
+include "tools/nanovanguard"
 include "source/system"
 include "source/memory"
 include "source/diagnostics"
@@ -120,8 +148,12 @@ include "source/reflection"
 include "source/schemas"
 include "source/streaming"
 include "source/assets"
+include "source/projects"
 include "source/gameInputTools"
+include "source/rhi"
+include "source/rhi/nvrhi"
 include "source/shaders"
+include "source/rendering"
 include "source/textures"
 include "source/textureTools"
 include "source/meshes"

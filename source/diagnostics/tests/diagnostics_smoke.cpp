@@ -51,6 +51,13 @@ int main()
     CapturedMessages captured;
     diagnostics::SetSinkCallback(&Capture, &captured);
 
+    vanguard::u32 suppressedArgumentEvaluations = 0;
+    VG_LOG_INFO(diagnostics::Category::Core, "uninitialized argument: %u", ++suppressedArgumentEvaluations);
+    if (suppressedArgumentEvaluations != 0)
+    {
+        return 12;
+    }
+
     if (!diagnostics::Initialize(diagnostics::Mode::Synchronous, "diagnosticsSmoke"))
     {
         return 1;
@@ -75,9 +82,9 @@ int main()
     }
 
     diagnostics::Disable();
-    VG_LOG_ERROR(diagnostics::Category::Core, "this message must be filtered");
+    VG_LOG_ERROR(diagnostics::Category::Core, "this message must be filtered: %u", ++suppressedArgumentEvaluations);
 
-    if (captured.count != 2)
+    if (captured.count != 2 || suppressedArgumentEvaluations != 0)
     {
         return 4;
     }

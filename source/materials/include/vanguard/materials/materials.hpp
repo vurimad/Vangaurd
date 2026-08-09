@@ -19,7 +19,7 @@ namespace vanguard::materials
         LimitExceeded,
         DuplicateTechnique,
         DuplicateParameter,
-        DuplicateBinding,
+        DuplicateResource,
         UnknownShaderInterface,
         TypeMismatch,
         IoFailure
@@ -49,17 +49,31 @@ namespace vanguard::materials
         resources::DependencyKind dependency = resources::DependencyKind::Required;
     };
 
-    /// Describes a fully flattened runtime material. The selected buffer and
-    /// descriptor names identify the material-owned part of the shader interface;
-    /// their byte offsets, strides, scalar types and descriptor locations are
-    /// always derived from shaderReflection.
+    enum class ResourceParameterKind : u8
+    {
+        Texture,
+        Buffer,
+        Sampler,
+        AccelerationStructure
+    };
+
+    struct ResourceParameterBuildRecord
+    {
+        u64 name = 0;
+        u32 arrayCount = 1;
+        ResourceParameterKind kind = ResourceParameterKind::Texture;
+    };
+
+    /// Describes a fully flattened runtime material. Selected names identify the
+    /// material-owned part of the logical shader interface. Byte layout and value
+    /// types are derived from reflection; descriptor placement is renderer policy.
     struct BuildDescription
     {
         u64 name = 0;
         resources::ResourceReference shader;
         const shaders::ShaderFile* shaderReflection = nullptr;
         containers::ArraySpan<const u64> materialConstantBuffers;
-        containers::ArraySpan<const u64> materialResourceBindings;
+        containers::ArraySpan<const ResourceParameterBuildRecord> resourceParameters;
         containers::ArraySpan<const TechniqueBuildRecord> techniques;
         containers::ArraySpan<const ConstantValueBuildRecord> constants;
         containers::ArraySpan<const ResourceValueBuildRecord> resources;
@@ -74,8 +88,6 @@ namespace vanguard::materials
     struct ConstantBufferRecord
     {
         u64 name = 0;
-        u32 space = 0;
-        u32 binding = 0;
         u32 byteSize = 0;
         u32 dataOffset = 0;
         u32 firstParameter = 0;
@@ -96,13 +108,11 @@ namespace vanguard::materials
         bool rowMajor = false;
     };
 
-    struct ResourceBindingRecord
+    struct ResourceParameterRecord
     {
         u64 name = 0;
-        u32 space = 0;
-        u32 binding = 0;
         u32 arrayIndex = 0;
-        shaders::BindingKind kind = shaders::BindingKind::SampledTexture;
+        ResourceParameterKind kind = ResourceParameterKind::Texture;
         resources::ResourceReference resource;
         resources::DependencyKind dependency = resources::DependencyKind::Optional;
     };
@@ -119,7 +129,7 @@ namespace vanguard::materials
         u32 maximumTechniques = 256;
         u32 maximumConstantBuffers = 256;
         u32 maximumParameters = 16384;
-        u32 maximumResourceBindings = 16384;
+        u32 maximumResourceParameters = 16384;
         u32 maximumParameterBytes = 16u * 1024u * 1024u;
         u32 maximumDependencies = 32768;
     };
@@ -139,12 +149,11 @@ namespace vanguard::materials
         [[nodiscard]] bool IsOpen() const noexcept;
         [[nodiscard]] u64 Name() const noexcept;
         [[nodiscard]] const resources::ResourceReference& Shader() const noexcept;
-        [[nodiscard]] const crypto::Digest256& BindingLayoutFingerprint() const noexcept;
         [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
         [[nodiscard]] containers::ArraySpan<const TechniqueRecord> Techniques() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ConstantBufferRecord> ConstantBuffers() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ParameterRecord> Parameters() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ResourceBindingRecord> ResourceBindings() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ResourceParameterRecord> ResourceParameters() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ResourceDependency> Dependencies() const noexcept;
         [[nodiscard]] containers::ArraySpan<const u8> ParameterData() const noexcept;
         [[nodiscard]] containers::ArraySpan<const u8> ConstantBufferData(const ConstantBufferRecord& buffer) const noexcept;
@@ -152,12 +161,11 @@ namespace vanguard::materials
     private:
         u64 m_name = 0;
         resources::ResourceReference m_shader;
-        crypto::Digest256 m_bindingLayoutFingerprint;
         crypto::Digest256 m_contentFingerprint;
         containers::DynamicArray<TechniqueRecord> m_techniques;
         containers::DynamicArray<ConstantBufferRecord> m_constantBuffers;
         containers::DynamicArray<ParameterRecord> m_parameters;
-        containers::DynamicArray<ResourceBindingRecord> m_resourceBindings;
+        containers::DynamicArray<ResourceParameterRecord> m_resourceParameters;
         containers::DynamicArray<ResourceDependency> m_dependencies;
         containers::DynamicArray<u8> m_parameterData;
         bool m_open = false;

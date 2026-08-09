@@ -63,6 +63,7 @@ namespace vanguard::window
         WindowRole role = WindowRole::Primary;
         WindowRelationship relationship = WindowRelationship::Independent;
         BackendWindowPlacement placement;
+        InitialWindowPlacement initialPlacement = InitialWindowPlacement::Explicit;
         WindowConstraints constraints;
         PresentationSurfaceKind surfaceKind = PresentationSurfaceKind::PlatformNative;
         WindowFlag flags = WindowFlag::None;
@@ -95,7 +96,6 @@ namespace vanguard::window
         SafeAreaChanged,
         OcclusionChanged,
         HdrStateChanged,
-        Destroyed,
         Failure
     };
 
@@ -129,6 +129,9 @@ namespace vanguard::window
         IWindowBackend(const IWindowBackend&) = delete;
         IWindowBackend& operator=(const IWindowBackend&) = delete;
 
+        // Backend commands are synchronous and must not call WindowManager or deliver native events while they run.
+        // Native events are queued by the platform layer and delivered later through IWindowEventSink, in pump order.
+        // A successful DestroyWindow call means native destruction is complete; no later destruction event is emitted.
         [[nodiscard]] virtual BackendStatus EnumerateDisplays(BackendDisplaySnapshot* displays, u32 capacity,
                                                                u32& count) noexcept = 0;
         [[nodiscard]] virtual BackendStatus Create(const BackendWindowDescriptor& descriptor,

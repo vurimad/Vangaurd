@@ -139,7 +139,7 @@ int main()
         Check(normalStream.semantic == meshes::VertexSemantic::Normal &&
                   normalStream.format == meshes::VertexFormat::R10G10B10A2UNorm &&
                   normalStream.binding == 1 && normalStream.stride == 4,
-              "pack normal into the RED-style shading stream");
+              "pack normal into the interleaved shading stream");
         Check(mesh.Quantization().scale[0] == 1.0f && mesh.Quantization().scale[1] == 1.0f &&
                   mesh.Quantization().scale[2] == 1.0f,
               "store mesh-wide position decode scale");

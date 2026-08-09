@@ -6,6 +6,7 @@ namespace vanguard::window
 {
     inline constexpr u32 MaximumWindows = 64;
     inline constexpr u32 MaximumDisplays = 32;
+    inline constexpr u32 MaximumPresentationAttachments = MaximumWindows;
     inline constexpr u32 MaximumWindowTitleBytes = 256;
     inline constexpr u32 WindowEventJournalCapacity = 2048;
 
@@ -33,8 +34,22 @@ namespace vanguard::window
         [[nodiscard]] friend constexpr bool operator==(const DisplayHandle&, const DisplayHandle&) noexcept = default;
     };
 
+    struct PresentationAttachmentHandle
+    {
+        u32 index = ~u32{0};
+        u32 generation = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index < MaximumPresentationAttachments && generation != 0;
+        }
+        [[nodiscard]] friend constexpr bool operator==(const PresentationAttachmentHandle&,
+                                                       const PresentationAttachmentHandle&) noexcept = default;
+    };
+
     inline constexpr WindowHandle InvalidWindowHandle{};
     inline constexpr DisplayHandle InvalidDisplayHandle{};
+    inline constexpr PresentationAttachmentHandle InvalidPresentationAttachmentHandle{};
 
     struct WindowPoint
     {
@@ -97,12 +112,41 @@ namespace vanguard::window
         ExclusiveFullscreen
     };
 
+    // Controls how the native backend interprets the initial window position. The policy is
+    // consumed during creation; all subsequent position requests use explicit desktop coordinates.
+    enum class InitialWindowPlacement : u8
+    {
+        Explicit,
+        CenteredOnDisplay,
+        PlatformDefault
+    };
+
     enum class PresentationSurfaceKind : u8
     {
         None,           // Headless or non-rendered utility window
         PlatformNative, // Platform-specific surface (e.g., Win32, X11, Wayland, macOS)
         Vulkan          // SDL window created with SDL_WINDOW_VULKAN
     };
+
+    enum class PresentationRequirement : u32
+    {
+        None = 0,
+        SurfaceReconfigure = 1u << 0u,
+        PixelExtentResize = 1u << 1u,
+        Suspended = 1u << 2u,
+        Occluded = 1u << 3u
+    };
+
+    [[nodiscard]] constexpr PresentationRequirement operator|(const PresentationRequirement left,
+                                                               const PresentationRequirement right) noexcept
+    {
+        return static_cast<PresentationRequirement>(static_cast<u32>(left) | static_cast<u32>(right));
+    }
+    [[nodiscard]] constexpr bool HasRequirement(const PresentationRequirement requirements,
+                                                const PresentationRequirement requirement) noexcept
+    {
+        return (static_cast<u32>(requirements) & static_cast<u32>(requirement)) != 0;
+    }
 
     enum class WindowLifecycleState : u8
     {
@@ -173,6 +217,7 @@ namespace vanguard::window
         WindowRelationship relationship = WindowRelationship::Independent;
         WindowHandle parent;
         WindowPlacement placement;
+        InitialWindowPlacement initialPlacement = InitialWindowPlacement::Explicit;
         WindowConstraints constraints;
         PresentationSurfaceKind surfaceKind = PresentationSurfaceKind::PlatformNative;
         WindowFlag flags = WindowFlag::Resizable | WindowFlag::HighPixelDensity;
@@ -207,6 +252,7 @@ namespace vanguard::window
     struct WindowSnapshot
     {
         WindowHandle handle;
+        PresentationAttachmentHandle presentation;
         WindowHandle parent;
         WindowRole role = WindowRole::Primary;
         WindowRelationship relationship = WindowRelationship::Independent;
@@ -221,6 +267,32 @@ namespace vanguard::window
         u64 surfaceRevision = 0;
         u64 closeRequestSerial = 0;
         char title[MaximumWindowTitleBytes]{};
+    };
+
+    struct PresentationAttachmentSnapshot
+    {
+        PresentationAttachmentHandle handle;
+        WindowHandle window;
+        PresentationSurfaceKind surfaceKind = PresentationSurfaceKind::None;
+        PresentationRequirement requirements = PresentationRequirement::None;
+        WindowExtent pixelExtent;
+        DisplayHandle display;
+        WindowMode mode = WindowMode::Windowed;
+        u64 windowStateRevision = 0;
+        u64 requiredPixelExtentRevision = 0;
+        u64 requiredSurfaceRevision = 0;
+        u64 acknowledgedPixelExtentRevision = 0;
+        u64 acknowledgedSurfaceRevision = 0;
+        bool visible = false;
+        bool minimized = false;
+        bool occluded = false;
+        bool hdrCapable = false;
+    };
+
+    struct PresentationAcknowledgement
+    {
+        u64 pixelExtentRevision = 0;
+        u64 surfaceRevision = 0;
     };
 
     struct DisplaySnapshot
@@ -252,6 +324,7 @@ namespace vanguard::window
 
     struct WindowEventCursor
     {
+        u64 journalIdentity = 0;
         u64 nextSequence = 0;
     };
 
@@ -284,6 +357,7 @@ namespace vanguard::window
         DisplayAdded,
         DisplayRemoved,
         DisplayUpdated,
+        DisplayInvalidated,
         BackendFailure
     };
 
@@ -308,6 +382,7 @@ namespace vanguard::window
         u32 count = 0;
         u64 lostEvents = 0;
         u64 newestSequence = 0;
+        bool invalidCursor = false;
     };
 
     enum class FailureCode : u8
@@ -324,6 +399,11 @@ namespace vanguard::window
         ParentHasChildren,
         DisplayUnavailable,
         BackendFailure,
+        BackendReentry,
+        PresentationUnavailable,
+        PresentationAlreadyAttached,
+        PresentationStillAttached,
+        InvalidPresentationRevision,
         EventsUnavailable,
         WindowsRemainAlive
     };
@@ -341,6 +421,7 @@ namespace vanguard::window
     {
         u32 activeWindows = 0;
         u32 activeDisplays = 0;
+        u32 activePresentationAttachments = 0;
         u64 topologyRevision = 0;
         u64 publishedEvents = 0;
         u64 overwrittenEvents = 0;

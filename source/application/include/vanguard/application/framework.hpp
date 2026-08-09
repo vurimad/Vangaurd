@@ -9,6 +9,7 @@ namespace vanguard
         const char* processName = nullptr;
         application::ApplicationProfile profile = application::ApplicationProfile::Runtime;
         u32 maximumShutdownTicks = 600;
+        const char* diagnosticsFilePath = nullptr;
     };
 
     class Application : public application::IApplicationComposition

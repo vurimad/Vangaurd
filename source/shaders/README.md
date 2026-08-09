@@ -18,4 +18,6 @@ No source HLSL/Slang, editor graph, fixed-function PSO state, or backend object 
 
 `ShaderFile::Open` validates the Vanguard binary header, section table, section checksums, native bytecode SHA-256 digests, canonical reflection layout, all bounds and counts, and all three layout fingerprints before making the resource visible.
 
+Descriptor reflection preserves the native CBV, SRV, UAV and sampler namespaces, so equal numeric registers such as `b0`, `t0` and `s0` may coexist in one register space. Fixed arrays carry a bounded descriptor count. Unbounded arrays carry `BindingFlags::Bindless` together with `UnboundedDescriptorCount`; runtime device capacity is selected by the renderer and is intentionally not cooked into shader identity.
+
 `ValidatePipeline` provides the backend-independent compatibility gate. It checks program kind, primitive class, vertex inputs, render-target count and numeric classes, depth-output requirements, dual-source blending, and optional binding/pipeline fingerprints. GPU-specific PSO creation remains a renderer responsibility.

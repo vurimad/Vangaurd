@@ -25,6 +25,7 @@ int main()
     descriptor.title = "Vanguard SDL backend test";
     descriptor.placement.display = displays[0].id;
     descriptor.placement.logicalExtent = {640, 360};
+    descriptor.initialPlacement = InitialWindowPlacement::CenteredOnDisplay;
     descriptor.placement.visible = false;
     descriptor.constraints = {{320, 180}, {1920, 1080}};
     BackendWindowId window;

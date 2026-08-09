@@ -126,7 +126,7 @@ namespace vanguard::texture_tools
 
         TextureCookingProfileId profile = profiles::Color;
         Execution execution = Execution::Automatic;
-        /// Upper bound passed directly to RED-style parallel dispatch. Zero lets the scheduler select its batch size.
+        /// Upper bound passed directly to parallel dispatch. Zero lets the scheduler select its batch size.
         u32 maximumBlocksPerJobBatch = 256;
         u32 maximumDimension = 131072;
         u32 maximumSubresources = 1048576;

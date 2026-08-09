@@ -465,7 +465,7 @@ int main()
     world::WorldStreamingGrid streamingGrid;
     world::StreamingGridConfig streamingConfig;
     streamingConfig.maximumStreamInsPerUpdate = 8;
-    Check(streamingGrid.Initialize(worldFile, streamingConfig), "initialize RED-style world streaming grid");
+    Check(streamingGrid.Initialize(worldFile, streamingConfig), "initialize world streaming grid");
     containers::DynamicArray<world::StreamingCommand> streamingCommands(memory::pools::World::GetInstance());
     world::StreamingObserver streamingObserver;
     streamingObserver.predictedPosition[0] = 4000.0;
@@ -475,7 +475,7 @@ int main()
     Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Size() == 2 &&
               streamingCommands[0].key == world::StreamingNodeKey{100, world::StreamingNodeKind::DistantProxy} &&
               streamingCommands[0].priority == world::StreamingPriority::Critical,
-          "far skyline proxy streams before ordinary coarse cell by RED priority");
+          "far skyline proxy streams before an ordinary coarse cell by explicit priority");
     for (const world::StreamingCommand& command : streamingCommands)
         Check(streamingGrid.NotifyStreamInComplete(command.key, true, true), "complete far representation stream-in");
 

@@ -3,7 +3,7 @@
 `engine` is the composition layer above portable Application contracts and below product clients. It owns lifecycle
 adapters for concrete engine subsystems without forcing low-level modules to depend on the application framework.
 
-I/O, Filesystem, Jobs, Frame Pipeline, Input, Resources, Resource Streaming, World, Game World, and World Session are the first managed services. I/O owns the low-level asynchronous worker and publishes the
+I/O, Filesystem, Jobs, Reflection, Frame Pipeline, Input, Resources, Resource Streaming, World, Game World, and World Session are the first managed services. I/O owns the low-level asynchronous worker and publishes the
 I/O system capability. Filesystem requires I/O, owns the physical file-manager lifetime, and publishes the filesystem
 capability. Its default launch layout uses the application root as the engine root, `root/data` as the game-data root,
 and `root/cache` as the derived-data root. Jobs starts after Filesystem when it is present, follows the active application
@@ -17,6 +17,8 @@ caller-owned. It refuses quiesce or shutdown while loads, reads, or staging allo
 after the startup resource is ready. The service explicitly rejects shutdown until the application releases that state, so
 its reverse dependency ordering is guaranteed rather than hidden in a product loop. Runtime and editor use the same adapters;
 entity materialization and rendering services can consume the World capability without taking ownership of its resources.
+
+Reflection is initialized through an explicit process-scoped service and capability before Game World. This guarantees that component schema registration and cell materialization never depend on an incidental module-level initialization call. The imported reflection backend currently retains process-lifetime static type metadata and does not expose reversible shutdown; the service records that boundary while still enforcing deterministic startup ownership.
 
 Input requires Frame Pipeline and a platform-supplied `IInputBackend`. It consumes the bounded platform batch in the Input phase and publishes persistent keyboard, mouse, and gamepad state, one-frame transitions, ordered buffered events, focus state, last-active-device identity, hot-plug state, rumble output, and loss/reset telemetry. The physical layer is allocation-free per frame and emits synthetic releases on focus loss, device removal, explicit reset, or queue overflow. Gameplay mappings and editor command contexts remain a separate consumer layer.
 

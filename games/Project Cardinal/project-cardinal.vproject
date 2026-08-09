@@ -1,0 +1,25 @@
+vproject 1.0
+
+project.id = "120e09c4-f94b-4525-b7c7-a576edd6d730"
+project.name = "Project Cardinal"
+project.technicalName = "project-cardinal"
+
+engine.minimum = "0.1.0"
+engine.maximum = "0.1.x"
+
+paths.assets = "Assets"
+paths.derivedData = "DerivedData"
+paths.intermediate = "Intermediate"
+paths.saved = "Saved"
+paths.builds = "Builds"
+paths.config = "Config"
+paths.plugins = "Plugins"
+
+target = "windows-x64"
+
+policy.cooking = "default"
+policy.packaging = "default"
+
+startup.editorWorld = ""
+startup.runtimeWorld = ""
+startup.input = ""

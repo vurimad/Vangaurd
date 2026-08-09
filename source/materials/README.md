@@ -1,23 +1,23 @@
 # Materials
 
-The Materials module owns Vanguard's cooked `vmat` contract. A material is a small immutable runtime resource containing exact shader-derived constant-buffer bytes, typed descriptor resources, named `vpipeline` techniques, and the fingerprints required to reject stale interfaces before renderer object creation.
+The Materials module owns Vanguard's cooked `vmat` contract. A material is a small immutable runtime resource containing shader-derived parameter bytes, logical typed resource parameters and named `vpipeline` techniques.
 
 ## Ownership boundaries
 
 - `vshader` owns native shader bytecode and normalized reflection.
 - `vpipeline` owns fixed-function state and the selected shader permutation.
-- `vmat` selects the material-owned portion of that shader interface and supplies its values and resource references.
+- `vmat` selects the material-owned portion of that shader interface and supplies logical values and resource references without storing descriptor locations.
 - `vtex` and future buffer resources own the referenced payloads.
-- NVRHI descriptor sets, constant-buffer allocations, residency and native objects belong to the renderer.
+- Global descriptor domains, bindless indices, GPU material records, residency and native objects belong to the renderer.
 - Source graphs, inheritance and instances belong to authoring and are flattened by the cooker.
 
-The format has no built-in PBR, cloth, hair, terrain or decal schema. A cooker explicitly selects material-owned constant buffers and descriptor bindings from an opened `ShaderFile`; `WriteMaterial` copies their reflected offsets, sizes, strides and scalar types. Values whose names or sizes do not exactly match reflection are rejected. Each named technique is checked against an opened `PipelineFile` and must select the same shader resource, permutation, binding-layout fingerprint and pipeline-interface fingerprint.
+The format has no built-in PBR, cloth, hair, terrain or decal schema. A cooker selects material-owned parameter blocks from shader reflection and supplies logical resource-parameter declarations from the material interface produced by the shader toolchain. `WriteMaterial` copies reflected offsets, sizes, strides and scalar types but never descriptor spaces, registers or bindless indices. Each named technique is checked against an opened `PipelineFile` and must select a compatible shader resource and permutation.
 
 ## Runtime and streaming
 
 `MaterialFile::Open` validates the document header, section layout, CRC64, SHA-256 content fingerprint, canonical ordering, record domains, byte ranges and dependency types before publishing any state. Parameter blocks are already laid out for GPU upload. Runtime code does not rebuild a schema by name and does not translate material values.
 
-`Dependencies()` returns a canonical, deduplicated list containing the shader, every technique pipeline and every bound resource. VPAK stores `vmat` as an opaque memory-resident segment and copies those dependencies into its resource table. A streamed mesh therefore resolves as:
+`Dependencies()` returns a canonical, deduplicated list containing the shader, every technique pipeline and every referenced resource. VPAK stores `vmat` as an opaque memory-resident segment and copies those dependencies into its resource table. A streamed mesh therefore resolves as:
 
 ```text
 Flecs render entity -> vmesh -> material slot -> vmat
@@ -26,7 +26,3 @@ Flecs render entity -> vmesh -> material slot -> vmat
 ```
 
 The generic asset layer will later own source watching, inheritance flattening, DDC lookup and recooking. None of those editor services are embedded in this runtime module.
-
-## RED lineage
-
-The design retains RED's useful separation between material definitions, instances, typed parameters, shader techniques and extracted render data. Vanguard deliberately excludes RED serialization, depot paths, runtime inheritance chains, hardcoded material classes and renderer-owned objects.

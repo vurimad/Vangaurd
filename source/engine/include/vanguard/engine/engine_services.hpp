@@ -4,6 +4,7 @@
 
 namespace vanguard::input { class IInputBackend; }
 namespace vanguard::application { class IPlatformHost; }
+namespace vanguard::filesystem { struct Config; }
 
 namespace vanguard::engine
 {
@@ -12,6 +13,7 @@ namespace vanguard::engine
     inline constexpr application::ServiceId FilesystemServiceId = 0x66696c6573797301ull;
     inline constexpr application::ServiceId JobsServiceId = 0x6a6f627300000001ull;
     inline constexpr application::ServiceId FramePipelineServiceId = 0x6672616d65737601ull;
+    inline constexpr application::ServiceId ReflectionServiceId = 0x7265666c65637401ull;
     inline constexpr application::ServiceId InputServiceId = 0x696e707574737601ull;
     inline constexpr application::ServiceId WindowServiceId = 0x77696e646f777301ull;
     inline constexpr application::ServiceId GameInputServiceId = 0x67616d65696e7301ull;
@@ -28,6 +30,7 @@ namespace vanguard::engine
     inline constexpr application::CapabilityId FilesystemCapabilityId = 0x66696c6573797302ull;
     inline constexpr application::CapabilityId JobSchedulerCapabilityId = 0x6a6f627363686401ull;
     inline constexpr application::CapabilityId FramePipelineCapabilityId = 0x6672616d65737611ull;
+    inline constexpr application::CapabilityId ReflectionCapabilityId = 0x7265666c65637411ull;
     inline constexpr application::CapabilityId ResourceRegistryCapabilityId = 0x7265737265676973ull;
     inline constexpr application::CapabilityId ResourcePipelineCapabilityId = 0x726573706970656cull;
     inline constexpr application::CapabilityId ResourceStreamingCapabilityId = 0x7273747265616d02ull;
@@ -42,10 +45,15 @@ namespace vanguard::engine
                                          application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterFilesystemService(application::EngineHost& host,
                                                  application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterFilesystemService(application::EngineHost& host,
+                                                 const filesystem::Config& config,
+                                                 application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterJobsService(application::EngineHost& host,
                                            application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterFramePipelineService(application::EngineHost& host,
                                                     application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterReflectionService(application::EngineHost& host,
+                                                 application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterWindowService(application::EngineHost& host, application::IPlatformHost* platform,
                                              application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterInputService(application::EngineHost& host, input::IInputBackend* backend,

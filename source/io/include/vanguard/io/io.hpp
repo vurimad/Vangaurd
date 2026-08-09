@@ -2,7 +2,7 @@
 
 #include <vanguard/containers/containers.hpp>
 
-// Complete RED I/O image. This header is the sole Vanguard public adaptation
+// Complete compatibility I/O image. This header is the sole Vanguard public adaptation
 // boundary; normal engine code uses vanguard::io and never ::io directly.
 #if defined(_MSC_VER)
 #pragma warning(push)

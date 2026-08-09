@@ -88,6 +88,19 @@ namespace vanguard::shaders
         ReadWrite
     };
 
+    enum class BindingFlags : u16
+    {
+        None = 0,
+        Bindless = 1u << 0u
+    };
+
+    [[nodiscard]] constexpr bool HasFlag(const BindingFlags value, const BindingFlags flag) noexcept
+    {
+        return (static_cast<u16>(value) & static_cast<u16>(flag)) != 0;
+    }
+
+    inline constexpr u32 UnboundedDescriptorCount = 0xffffffffu;
+
     enum class ScalarType : u8
     {
         Bool,
@@ -168,6 +181,7 @@ namespace vanguard::shaders
         BindingKind kind = BindingKind::SampledTexture;
         BindingAccess access = BindingAccess::Read;
         StageMask stages = 0;
+        BindingFlags flags = BindingFlags::None;
     };
 
     struct ConstantBuffer

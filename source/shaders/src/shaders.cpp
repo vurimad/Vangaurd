@@ -191,6 +191,17 @@ namespace
 
     [[nodiscard]] shader::Result Canonicalize(const shader::BuildDescription& description, CanonicalData& output) noexcept
     {
+        enum class DescriptorNamespace : u8 { ConstantBuffer, ShaderResource, UnorderedAccess, Sampler };
+        const auto bindingNamespace = [](const shader::BindingKind kind) noexcept
+        {
+            if (kind == shader::BindingKind::ConstantBuffer) return DescriptorNamespace::ConstantBuffer;
+            if (kind == shader::BindingKind::Sampler) return DescriptorNamespace::Sampler;
+            if (kind == shader::BindingKind::StorageTexture || kind == shader::BindingKind::ReadWriteStructuredBuffer ||
+                kind == shader::BindingKind::ReadWriteByteAddressBuffer)
+                return DescriptorNamespace::UnorderedAccess;
+            return DescriptorNamespace::ShaderResource;
+        };
+
         CopySpan(description.stages, output.stages);
         CopySpan(description.bindings, output.bindings);
         CopySpan(description.vertexInputs, output.vertexInputs);
@@ -200,8 +211,15 @@ namespace
         std::sort(output.stages.Begin(), output.stages.End(),
                   [](const shader::StageBuildRecord& left, const shader::StageBuildRecord& right) { return left.stage < right.stage; });
         std::sort(output.bindings.Begin(), output.bindings.End(),
-                  [](const shader::DescriptorBinding& left, const shader::DescriptorBinding& right)
-                  { return left.space != right.space ? left.space < right.space : left.binding < right.binding; });
+                  [&bindingNamespace](const shader::DescriptorBinding& left, const shader::DescriptorBinding& right)
+                  {
+                      if (left.space != right.space) return left.space < right.space;
+                      const DescriptorNamespace leftNamespace = bindingNamespace(left.kind);
+                      const DescriptorNamespace rightNamespace = bindingNamespace(right.kind);
+                      if (leftNamespace != rightNamespace) return leftNamespace < rightNamespace;
+                      if (left.binding != right.binding) return left.binding < right.binding;
+                      return left.kind < right.kind;
+                  });
         std::sort(output.vertexInputs.Begin(), output.vertexInputs.End(),
                   [](const shader::VertexInput& left, const shader::VertexInput& right)
                   { return left.location != right.location ? left.location < right.location : left.semanticIndex < right.semanticIndex; });
@@ -264,17 +282,32 @@ namespace
         for (u32 index = 0; index < output.bindings.Size(); ++index)
         {
             const shader::DescriptorBinding& binding = output.bindings[index];
+            const u16 flags = static_cast<u16>(binding.flags);
+            const bool bindless = shader::HasFlag(binding.flags, shader::BindingFlags::Bindless);
             if (binding.name == 0 || binding.arrayCount == 0 || !IsValidBindingKind(binding.kind) || !IsValidAccess(binding.access) ||
-                binding.stages == 0 || (binding.stages & ~description.pipelineInterface.stages) != 0)
+                binding.stages == 0 || (binding.stages & ~description.pipelineInterface.stages) != 0 ||
+                (flags & ~static_cast<u16>(shader::BindingFlags::Bindless)) != 0 ||
+                bindless != (binding.arrayCount == shader::UnboundedDescriptorCount) ||
+                (!bindless && (binding.arrayCount > 0xffffu ||
+                               static_cast<u64>(binding.binding) + binding.arrayCount > 0x100000000ull)))
             {
                 return shader::Result::InvalidLayout;
             }
-            if (index != 0)
+            for (u32 previousIndex = 0; previousIndex < index; ++previousIndex)
             {
-                const shader::DescriptorBinding& previous = output.bindings[index - 1];
-                if (previous.space == binding.space && previous.binding == binding.binding)
+                const shader::DescriptorBinding& previous = output.bindings[previousIndex];
+                if (previous.space == binding.space && bindingNamespace(previous.kind) == bindingNamespace(binding.kind))
                 {
-                    return previous.kind == binding.kind ? shader::Result::DuplicateBinding : shader::Result::OverlappingBinding;
+                    const u64 previousEnd = previous.arrayCount == shader::UnboundedDescriptorCount
+                                                ? 0x100000000ull
+                                                : static_cast<u64>(previous.binding) + previous.arrayCount;
+                    const u64 bindingEnd = binding.arrayCount == shader::UnboundedDescriptorCount
+                                               ? 0x100000000ull
+                                               : static_cast<u64>(binding.binding) + binding.arrayCount;
+                    if (static_cast<u64>(binding.binding) < previousEnd && static_cast<u64>(previous.binding) < bindingEnd)
+                        return previous.binding == binding.binding && previous.kind == binding.kind
+                                   ? shader::Result::DuplicateBinding
+                                   : shader::Result::OverlappingBinding;
                 }
             }
         }
@@ -389,22 +422,23 @@ namespace
     {
         return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) &&
                writer.WriteU32(value.arrayCount) && writer.WriteU8(static_cast<u8>(value.kind)) &&
-               writer.WriteU8(static_cast<u8>(value.access)) && writer.WriteU16(0) && writer.WriteU32(value.stages);
+               writer.WriteU8(static_cast<u8>(value.access)) && writer.WriteU16(static_cast<u16>(value.flags)) && writer.WriteU32(value.stages);
     }
 
     [[nodiscard]] bool ReadBinding(serialization::BinaryReader& reader, shader::DescriptorBinding& value) noexcept
     {
         u8 kind = 0;
         u8 access = 0;
-        u16 reserved = 0;
+        u16 flags = 0;
         if (!reader.ReadU64(value.name) || !reader.ReadU32(value.space) || !reader.ReadU32(value.binding) ||
-            !reader.ReadU32(value.arrayCount) || !reader.ReadU8(kind) || !reader.ReadU8(access) || !reader.ReadU16(reserved) ||
-            !reader.ReadU32(value.stages) || reserved != 0)
+            !reader.ReadU32(value.arrayCount) || !reader.ReadU8(kind) || !reader.ReadU8(access) || !reader.ReadU16(flags) ||
+            !reader.ReadU32(value.stages))
         {
             return false;
         }
         value.kind = static_cast<shader::BindingKind>(kind);
         value.access = static_cast<shader::BindingAccess>(access);
+        value.flags = static_cast<shader::BindingFlags>(flags);
         return true;
     }
 

@@ -8,8 +8,10 @@ project "runtime"
     fatalwarnings "All"
     disablewarnings { "4127" }
     targetname "Vanguard"
-    targetdir(output_root)
+    targetdir(runtime_output_root)
     objdir(object_root)
+    debugdir(runtime_output_root)
+    deployVanguardRuntimeDependencies(true)
     files { "src/**.hpp", "src/**.cpp", "platform/windows/**.cpp", "README.md" }
     includedirs {
         "src", "../source/application/include", "../source/engine/include", "../source/jobs/include",

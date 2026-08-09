@@ -114,7 +114,7 @@ namespace vanguard::memory
     [[nodiscard]] bool GetPoolSnapshot(PoolId pool, PoolSnapshot& snapshot) noexcept;
     void VisitPools(PoolVisitor visitor, void* userData = nullptr) noexcept;
 
-    // RED frame-pool lifecycle is explicit. The composition root calls these
+    // Frame-pool lifecycle is explicit. The composition root calls these
     // once at the corresponding frame boundary after all users are finished.
     void ResetFramePools() noexcept;
     void PrepareMetricsForNextFrame() noexcept;

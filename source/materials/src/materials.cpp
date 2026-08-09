@@ -21,18 +21,17 @@ namespace
             : techniques(memory::pools::Rendering::GetInstance()),
               buffers(memory::pools::Rendering::GetInstance()),
               parameters(memory::pools::Rendering::GetInstance()),
-              bindings(memory::pools::Rendering::GetInstance()),
+              resourceParameters(memory::pools::Rendering::GetInstance()),
               parameterData(memory::pools::Rendering::GetInstance())
         {
         }
 
         u64 name = 0;
         resources::ResourceReference shader;
-        crypto::Digest256 bindingLayout;
         containers::DynamicArray<material::TechniqueRecord> techniques;
         containers::DynamicArray<material::ConstantBufferRecord> buffers;
         containers::DynamicArray<material::ParameterRecord> parameters;
-        containers::DynamicArray<material::ResourceBindingRecord> bindings;
+        containers::DynamicArray<material::ResourceParameterRecord> resourceParameters;
         containers::DynamicArray<u8> parameterData;
     };
 
@@ -115,12 +114,9 @@ namespace
         return reference.IsValid() && reference.ExpectedType() == type;
     }
 
-    [[nodiscard]] bool IsMaterialResourceKind(const shaders::BindingKind kind) noexcept
+    [[nodiscard]] bool IsResourceParameterKindValid(const material::ResourceParameterKind kind) noexcept
     {
-        return kind == shaders::BindingKind::SampledTexture || kind == shaders::BindingKind::StorageTexture ||
-               kind == shaders::BindingKind::StructuredBuffer || kind == shaders::BindingKind::ReadWriteStructuredBuffer ||
-               kind == shaders::BindingKind::ByteAddressBuffer || kind == shaders::BindingKind::ReadWriteByteAddressBuffer ||
-               kind == shaders::BindingKind::AccelerationStructure;
+        return kind <= material::ResourceParameterKind::AccelerationStructure;
     }
 
     [[nodiscard]] const shaders::ConstantBuffer* FindBuffer(const shaders::ShaderFile& shader, const u64 name,
@@ -136,19 +132,6 @@ namespace
         return found;
     }
 
-    [[nodiscard]] const shaders::DescriptorBinding* FindBinding(const shaders::ShaderFile& shader, const u64 name,
-                                                                bool& ambiguous) noexcept
-    {
-        const shaders::DescriptorBinding* found = nullptr;
-        for (const shaders::DescriptorBinding& binding : shader.Bindings())
-        {
-            if (binding.name != name) continue;
-            if (found != nullptr) ambiguous = true;
-            found = &binding;
-        }
-        return found;
-    }
-
     [[nodiscard]] bool TechniqueLess(const material::TechniqueRecord& left,
                                      const material::TechniqueRecord& right) noexcept
     {
@@ -159,17 +142,14 @@ namespace
     [[nodiscard]] bool BufferPointerLess(const shaders::ConstantBuffer* left,
                                          const shaders::ConstantBuffer* right) noexcept
     {
-        if (left->space != right->space) return left->space < right->space;
-        if (left->binding != right->binding) return left->binding < right->binding;
         return left->name < right->name;
     }
 
-    [[nodiscard]] bool BindingPointerLess(const shaders::DescriptorBinding* left,
-                                          const shaders::DescriptorBinding* right) noexcept
+    [[nodiscard]] bool ResourceParameterLess(const material::ResourceParameterBuildRecord& left,
+                                             const material::ResourceParameterBuildRecord& right) noexcept
     {
-        if (left->space != right->space) return left->space < right->space;
-        if (left->binding != right->binding) return left->binding < right->binding;
-        return left->name < right->name;
+        if (left.name != right.name) return left.name < right.name;
+        return left.kind < right.kind;
     }
 
     [[nodiscard]] material::Result Canonicalize(const material::BuildDescription& description,
@@ -181,7 +161,6 @@ namespace
 
         output.name = description.name;
         output.shader = description.shader;
-        output.bindingLayout = description.shaderReflection->BindingLayoutFingerprint();
 
         output.techniques.Reserve(description.techniques.Size());
         for (const material::TechniqueBuildRecord& source : description.techniques)
@@ -218,7 +197,7 @@ namespace
         if (selectedBuffers.Size() != description.materialConstantBuffers.Size()) return material::Result::LimitExceeded;
         std::sort(selectedBuffers.Begin(), selectedBuffers.End(), BufferPointerLess);
         for (u32 index = 1; index < selectedBuffers.Size(); ++index)
-            if (selectedBuffers[index - 1u] == selectedBuffers[index]) return material::Result::DuplicateBinding;
+            if (selectedBuffers[index - 1u] == selectedBuffers[index]) return material::Result::DuplicateResource;
 
         const containers::ArraySpan<const shaders::ConstantMember> shaderMembers = description.shaderReflection->ConstantMembers();
         u64 totalDataSize = 0;
@@ -229,8 +208,6 @@ namespace
             if (source->byteSize > 0xffffffffull - totalDataSize) return material::Result::LimitExceeded;
             material::ConstantBufferRecord buffer;
             buffer.name = source->name;
-            buffer.space = source->space;
-            buffer.binding = source->binding;
             buffer.byteSize = source->byteSize;
             buffer.dataOffset = static_cast<u32>(totalDataSize);
             buffer.firstParameter = output.parameters.Size();
@@ -273,41 +250,40 @@ namespace
             CopyBytes(output.parameterData.TypedData() + buffer.dataOffset + found->byteOffset, value.data, value.byteSize);
         }
 
-        containers::DynamicArray<const shaders::DescriptorBinding*> selectedBindings(memory::pools::Rendering::GetInstance());
-        selectedBindings.Reserve(description.materialResourceBindings.Size());
-        for (const u64 name : description.materialResourceBindings)
+        containers::DynamicArray<material::ResourceParameterBuildRecord> selectedResources(memory::pools::Rendering::GetInstance());
+        selectedResources.Reserve(description.resourceParameters.Size());
+        for (const material::ResourceParameterBuildRecord& parameter : description.resourceParameters)
         {
-            bool ambiguous = false;
-            const shaders::DescriptorBinding* const binding = FindBinding(*description.shaderReflection, name, ambiguous);
-            if (binding == nullptr || ambiguous || !IsMaterialResourceKind(binding->kind) || binding->arrayCount == 0)
-                return material::Result::UnknownShaderInterface;
-            selectedBindings.PushBack(binding);
+            if (parameter.name == 0 || parameter.arrayCount == 0 ||
+                !IsResourceParameterKindValid(parameter.kind)) return material::Result::InvalidArgument;
+            selectedResources.PushBack(parameter);
         }
-        if (selectedBindings.Size() != description.materialResourceBindings.Size()) return material::Result::LimitExceeded;
-        std::sort(selectedBindings.Begin(), selectedBindings.End(), BindingPointerLess);
-        for (u32 index = 1; index < selectedBindings.Size(); ++index)
-            if (selectedBindings[index - 1u] == selectedBindings[index]) return material::Result::DuplicateBinding;
-        for (const shaders::DescriptorBinding* const source : selectedBindings)
+        if (selectedResources.Size() != description.resourceParameters.Size()) return material::Result::LimitExceeded;
+        std::sort(selectedResources.Begin(), selectedResources.End(), ResourceParameterLess);
+        for (u32 index = 1; index < selectedResources.Size(); ++index)
+            if (selectedResources[index - 1u].name == selectedResources[index].name)
+                return material::Result::DuplicateResource;
+        for (const material::ResourceParameterBuildRecord& source : selectedResources)
         {
-            if (source->arrayCount > 0xffffffffu - output.bindings.Size()) return material::Result::LimitExceeded;
-            for (u32 arrayIndex = 0; arrayIndex < source->arrayCount; ++arrayIndex)
+            if (source.arrayCount > 0xffffffffu - output.resourceParameters.Size()) return material::Result::LimitExceeded;
+            for (u32 arrayIndex = 0; arrayIndex < source.arrayCount; ++arrayIndex)
             {
-                const u32 expectedSize = output.bindings.Size() + 1u;
-                output.bindings.PushBack({source->name, source->space, source->binding, arrayIndex, source->kind,
-                                          {}, resources::DependencyKind::Optional});
-                if (output.bindings.Size() != expectedSize) return material::Result::LimitExceeded;
+                const u32 expectedSize = output.resourceParameters.Size() + 1u;
+                output.resourceParameters.PushBack({source.name, arrayIndex, source.kind,
+                                                    {}, resources::DependencyKind::Optional});
+                if (output.resourceParameters.Size() != expectedSize) return material::Result::LimitExceeded;
             }
         }
 
         for (u32 valueIndex = 0; valueIndex < description.resources.Size(); ++valueIndex)
         {
             const material::ResourceValueBuildRecord& value = description.resources[valueIndex];
-            material::ResourceBindingRecord* found = nullptr;
-            for (material::ResourceBindingRecord& binding : output.bindings)
-                if (binding.name == value.name && binding.arrayIndex == value.arrayIndex)
+            material::ResourceParameterRecord* found = nullptr;
+            for (material::ResourceParameterRecord& parameter : output.resourceParameters)
+                if (parameter.name == value.name && parameter.arrayIndex == value.arrayIndex)
                 {
                     if (found != nullptr) return material::Result::UnknownShaderInterface;
-                    found = &binding;
+                    found = &parameter;
                 }
             if (found == nullptr || value.dependency > resources::DependencyKind::Soft)
                 return material::Result::UnknownShaderInterface;
@@ -332,8 +308,7 @@ namespace
     [[nodiscard]] bool WriteBuffer(serialization::BinaryWriter& writer,
                                    const material::ConstantBufferRecord& value) noexcept
     {
-        return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) &&
-               writer.WriteU32(value.byteSize) && writer.WriteU32(value.dataOffset) &&
+        return writer.WriteU64(value.name) && writer.WriteU32(value.byteSize) && writer.WriteU32(value.dataOffset) &&
                writer.WriteU32(value.firstParameter) && writer.WriteU32(value.parameterCount);
     }
 
@@ -346,24 +321,24 @@ namespace
                writer.WriteU8(value.columns) && writer.WriteBool(value.rowMajor);
     }
 
-    [[nodiscard]] bool WriteBinding(serialization::BinaryWriter& writer,
-                                    const material::ResourceBindingRecord& value) noexcept
+    [[nodiscard]] bool WriteResourceParameter(serialization::BinaryWriter& writer,
+                                              const material::ResourceParameterRecord& value) noexcept
     {
-        return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) &&
-               writer.WriteU32(value.arrayIndex) && writer.WriteU8(static_cast<u8>(value.kind)) &&
+        return writer.WriteU64(value.name) && writer.WriteU32(value.arrayIndex) && writer.WriteU8(static_cast<u8>(value.kind)) &&
                writer.WriteU8(static_cast<u8>(value.dependency)) && writer.WriteU16(0) && WriteReference(writer, value.resource);
     }
 
     [[nodiscard]] material::Result WriteBody(serialization::BinaryWriter& writer, const CanonicalData& data) noexcept
     {
-        if (!writer.WriteU64(data.name) || !WriteReference(writer, data.shader) || !WriteDigest(writer, data.bindingLayout) ||
+        if (!writer.WriteU64(data.name) || !WriteReference(writer, data.shader) ||
             !writer.WriteU32(data.techniques.Size()) || !writer.WriteU32(data.buffers.Size()) ||
-            !writer.WriteU32(data.parameters.Size()) || !writer.WriteU32(data.bindings.Size()) ||
+            !writer.WriteU32(data.parameters.Size()) || !writer.WriteU32(data.resourceParameters.Size()) ||
             !writer.WriteU32(data.parameterData.Size())) return WriterResult(writer);
         for (const material::TechniqueRecord& value : data.techniques) if (!WriteTechnique(writer, value)) return WriterResult(writer);
         for (const material::ConstantBufferRecord& value : data.buffers) if (!WriteBuffer(writer, value)) return WriterResult(writer);
         for (const material::ParameterRecord& value : data.parameters) if (!WriteParameter(writer, value)) return WriterResult(writer);
-        for (const material::ResourceBindingRecord& value : data.bindings) if (!WriteBinding(writer, value)) return WriterResult(writer);
+        for (const material::ResourceParameterRecord& value : data.resourceParameters)
+            if (!WriteResourceParameter(writer, value)) return WriterResult(writer);
         if (!writer.WriteBytes(data.parameterData.Data(), data.parameterData.Size())) return WriterResult(writer);
         return material::Result::Success;
     }
@@ -431,8 +406,7 @@ namespace
 
     [[nodiscard]] bool ReadBuffer(serialization::BinaryReader& reader, material::ConstantBufferRecord& value) noexcept
     {
-        return reader.ReadU64(value.name) && reader.ReadU32(value.space) && reader.ReadU32(value.binding) &&
-               reader.ReadU32(value.byteSize) && reader.ReadU32(value.dataOffset) &&
+        return reader.ReadU64(value.name) && reader.ReadU32(value.byteSize) && reader.ReadU32(value.dataOffset) &&
                reader.ReadU32(value.firstParameter) && reader.ReadU32(value.parameterCount);
     }
 
@@ -447,15 +421,16 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool ReadBinding(serialization::BinaryReader& reader, material::ResourceBindingRecord& value) noexcept
+    [[nodiscard]] bool ReadResourceParameter(serialization::BinaryReader& reader,
+                                             material::ResourceParameterRecord& value) noexcept
     {
         u8 kind = 0;
         u8 dependency = 0;
         u16 reserved = 0;
-        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.space) || !reader.ReadU32(value.binding) ||
-            !reader.ReadU32(value.arrayIndex) || !reader.ReadU8(kind) || !reader.ReadU8(dependency) ||
+        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.arrayIndex) ||
+            !reader.ReadU8(kind) || !reader.ReadU8(dependency) ||
             !reader.ReadU16(reserved) || !ReadReference(reader, value.resource) || reserved != 0) return false;
-        value.kind = static_cast<shaders::BindingKind>(kind);
+        value.kind = static_cast<material::ResourceParameterKind>(kind);
         value.dependency = static_cast<resources::DependencyKind>(dependency);
         return true;
     }
@@ -464,7 +439,7 @@ namespace
                                                   const containers::DynamicArray<material::TechniqueRecord>& techniques,
                                                   const containers::DynamicArray<material::ConstantBufferRecord>& buffers,
                                                   const containers::DynamicArray<material::ParameterRecord>& parameters,
-                                                  const containers::DynamicArray<material::ResourceBindingRecord>& bindings,
+                                                  const containers::DynamicArray<material::ResourceParameterRecord>& resourceParameters,
                                                   const containers::DynamicArray<u8>& data) noexcept
     {
         if (name == 0 || !IsTypedReference(shader, shaders::ShaderResourceType) || techniques.Empty())
@@ -477,8 +452,6 @@ namespace
         }
         u32 expectedParameter = 0;
         u32 expectedDataOffset = 0;
-        u32 previousSpace = 0;
-        u32 previousBinding = 0;
         for (u32 index = 0; index < buffers.Size(); ++index)
         {
             const material::ConstantBufferRecord& buffer = buffers[index];
@@ -486,8 +459,7 @@ namespace
             if (buffer.name == 0 || buffer.byteSize == 0 || buffer.firstParameter != expectedParameter ||
                 buffer.dataOffset != expectedDataOffset ||
                 buffer.dataOffset > data.Size() || buffer.byteSize > data.Size() - buffer.dataOffset ||
-                (index > 0 && (buffer.space < previousSpace ||
-                 (buffer.space == previousSpace && buffer.binding <= previousBinding)))) return material::Result::InvalidLayout;
+                (index > 0 && buffer.name <= buffers[index - 1u].name)) return material::Result::InvalidLayout;
             if (buffer.parameterCount > parameters.Size() - expectedParameter) return material::Result::InvalidLayout;
             u32 previousEnd = 0;
             for (u32 member = 0; member < buffer.parameterCount; ++member)
@@ -503,27 +475,24 @@ namespace
             expectedParameter += buffer.parameterCount;
             if (buffer.byteSize > 0xffffffffu - expectedDataOffset) return material::Result::InvalidLayout;
             expectedDataOffset += buffer.byteSize;
-            previousSpace = buffer.space;
-            previousBinding = buffer.binding;
         }
         if (expectedParameter != parameters.Size() || expectedDataOffset != data.Size()) return material::Result::InvalidLayout;
-        for (u32 index = 0; index < bindings.Size(); ++index)
+        for (u32 index = 0; index < resourceParameters.Size(); ++index)
         {
-            const material::ResourceBindingRecord& binding = bindings[index];
-            if (binding.name == 0 || !IsMaterialResourceKind(binding.kind) ||
-                binding.dependency > resources::DependencyKind::Soft ||
-                (!binding.resource.IsValid() && binding.dependency == resources::DependencyKind::Required) ||
-                (binding.resource.IsValid() && !binding.resource.IsTyped())) return material::Result::InvalidLayout;
+            const material::ResourceParameterRecord& parameter = resourceParameters[index];
+            if (parameter.name == 0 || !IsResourceParameterKindValid(parameter.kind) ||
+                parameter.dependency > resources::DependencyKind::Soft ||
+                (!parameter.resource.IsValid() && parameter.dependency == resources::DependencyKind::Required) ||
+                (parameter.resource.IsValid() && !parameter.resource.IsTyped())) return material::Result::InvalidLayout;
             if (index > 0)
             {
-                const material::ResourceBindingRecord& prior = bindings[index - 1u];
-                if (binding.space < prior.space || (binding.space == prior.space && binding.binding < prior.binding) ||
-                    (binding.space == prior.space && binding.binding == prior.binding &&
-                     (binding.name != prior.name || binding.arrayIndex != prior.arrayIndex + 1u)))
+                const material::ResourceParameterRecord& prior = resourceParameters[index - 1u];
+                if (parameter.name < prior.name ||
+                    (parameter.name == prior.name && parameter.arrayIndex != prior.arrayIndex + 1u))
                     return material::Result::InvalidLayout;
             }
-            if (index == 0 || binding.space != bindings[index - 1u].space || binding.binding != bindings[index - 1u].binding)
-                if (binding.arrayIndex != 0) return material::Result::InvalidLayout;
+            if ((index == 0 || parameter.name != resourceParameters[index - 1u].name) && parameter.arrayIndex != 0)
+                return material::Result::InvalidLayout;
         }
         return material::Result::Success;
     }
@@ -568,7 +537,7 @@ namespace vanguard::materials
         case Result::LimitExceeded: return "LimitExceeded";
         case Result::DuplicateTechnique: return "DuplicateTechnique";
         case Result::DuplicateParameter: return "DuplicateParameter";
-        case Result::DuplicateBinding: return "DuplicateBinding";
+        case Result::DuplicateResource: return "DuplicateResource";
         case Result::UnknownShaderInterface: return "UnknownShaderInterface";
         case Result::TypeMismatch: return "TypeMismatch";
         case Result::IoFailure: return "IoFailure";
@@ -580,7 +549,7 @@ namespace vanguard::materials
         : m_techniques(memory::pools::Rendering::GetInstance()),
           m_constantBuffers(memory::pools::Rendering::GetInstance()),
           m_parameters(memory::pools::Rendering::GetInstance()),
-          m_resourceBindings(memory::pools::Rendering::GetInstance()),
+          m_resourceParameters(memory::pools::Rendering::GetInstance()),
           m_dependencies(memory::pools::Resources::GetInstance()),
           m_parameterData(memory::pools::Rendering::GetInstance())
     {
@@ -621,25 +590,26 @@ namespace vanguard::materials
         u32 techniqueCount = 0;
         u32 bufferCount = 0;
         u32 parameterCount = 0;
-        u32 bindingCount = 0;
+        u32 resourceParameterCount = 0;
         u32 dataSize = 0;
         if (!metadataReader.ReadU64(m_name) || !ReadReference(metadataReader, m_shader) ||
-            !ReadDigest(metadataReader, m_bindingLayoutFingerprint) || !metadataReader.ReadU32(techniqueCount) ||
+            !metadataReader.ReadU32(techniqueCount) ||
             !metadataReader.ReadU32(bufferCount) || !metadataReader.ReadU32(parameterCount) ||
-            !metadataReader.ReadU32(bindingCount) || !metadataReader.ReadU32(dataSize)) return ReaderResult(metadataReader);
+            !metadataReader.ReadU32(resourceParameterCount) || !metadataReader.ReadU32(dataSize)) return ReaderResult(metadataReader);
         if (!ResizeChecked(m_techniques, techniqueCount, limits.maximumTechniques) ||
             !ResizeChecked(m_constantBuffers, bufferCount, limits.maximumConstantBuffers) ||
             !ResizeChecked(m_parameters, parameterCount, limits.maximumParameters) ||
-            !ResizeChecked(m_resourceBindings, bindingCount, limits.maximumResourceBindings) ||
+            !ResizeChecked(m_resourceParameters, resourceParameterCount, limits.maximumResourceParameters) ||
             !ResizeChecked(m_parameterData, dataSize, limits.maximumParameterBytes)) return Result::LimitExceeded;
         for (TechniqueRecord& value : m_techniques) if (!ReadTechnique(metadataReader, value)) return ReaderResult(metadataReader);
         for (ConstantBufferRecord& value : m_constantBuffers) if (!ReadBuffer(metadataReader, value)) return ReaderResult(metadataReader);
         for (ParameterRecord& value : m_parameters) if (!ReadParameter(metadataReader, value)) return ReaderResult(metadataReader);
-        for (ResourceBindingRecord& value : m_resourceBindings) if (!ReadBinding(metadataReader, value)) return ReaderResult(metadataReader);
+        for (ResourceParameterRecord& value : m_resourceParameters)
+            if (!ReadResourceParameter(metadataReader, value)) return ReaderResult(metadataReader);
         if (!metadataReader.ReadBytes(m_parameterData.Data(), m_parameterData.Size())) return ReaderResult(metadataReader);
         if (metadataReader.Position() != metadataReader.Size()) return Result::InvalidLayout;
         const Result validation = ValidateLoaded(m_name, m_shader, m_techniques, m_constantBuffers, m_parameters,
-                                                 m_resourceBindings, m_parameterData);
+                                                 m_resourceParameters, m_parameterData);
         if (validation != Result::Success)
         {
             Close();
@@ -648,8 +618,8 @@ namespace vanguard::materials
         bool dependenciesValid = AddDependency(m_dependencies, m_shader, resources::DependencyKind::Required);
         for (const TechniqueRecord& technique : m_techniques)
             dependenciesValid = AddDependency(m_dependencies, technique.pipeline, resources::DependencyKind::Required) && dependenciesValid;
-        for (const ResourceBindingRecord& binding : m_resourceBindings)
-            dependenciesValid = AddDependency(m_dependencies, binding.resource, binding.dependency) && dependenciesValid;
+        for (const ResourceParameterRecord& parameter : m_resourceParameters)
+            dependenciesValid = AddDependency(m_dependencies, parameter.resource, parameter.dependency) && dependenciesValid;
         if (!dependenciesValid || m_dependencies.Size() > limits.maximumDependencies)
         {
             Close();
@@ -664,12 +634,11 @@ namespace vanguard::materials
     {
         m_name = 0;
         m_shader = {};
-        m_bindingLayoutFingerprint = {};
         m_contentFingerprint = {};
         m_techniques.Clear();
         m_constantBuffers.Clear();
         m_parameters.Clear();
-        m_resourceBindings.Clear();
+        m_resourceParameters.Clear();
         m_dependencies.Clear();
         m_parameterData.Clear();
         m_open = false;
@@ -678,12 +647,14 @@ namespace vanguard::materials
     bool MaterialFile::IsOpen() const noexcept { return m_open; }
     u64 MaterialFile::Name() const noexcept { return m_name; }
     const resources::ResourceReference& MaterialFile::Shader() const noexcept { return m_shader; }
-    const crypto::Digest256& MaterialFile::BindingLayoutFingerprint() const noexcept { return m_bindingLayoutFingerprint; }
     const crypto::Digest256& MaterialFile::ContentFingerprint() const noexcept { return m_contentFingerprint; }
     containers::ArraySpan<const TechniqueRecord> MaterialFile::Techniques() const noexcept { return m_techniques; }
     containers::ArraySpan<const ConstantBufferRecord> MaterialFile::ConstantBuffers() const noexcept { return m_constantBuffers; }
     containers::ArraySpan<const ParameterRecord> MaterialFile::Parameters() const noexcept { return m_parameters; }
-    containers::ArraySpan<const ResourceBindingRecord> MaterialFile::ResourceBindings() const noexcept { return m_resourceBindings; }
+    containers::ArraySpan<const ResourceParameterRecord> MaterialFile::ResourceParameters() const noexcept
+    {
+        return m_resourceParameters;
+    }
     containers::ArraySpan<const ResourceDependency> MaterialFile::Dependencies() const noexcept { return m_dependencies; }
     containers::ArraySpan<const u8> MaterialFile::ParameterData() const noexcept { return m_parameterData; }
 

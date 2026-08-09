@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/application/application.hpp>
+#include <vanguard/filesystem/filesystem.hpp>
 
 namespace vanguard::runtime
 {
@@ -39,6 +40,7 @@ namespace vanguard::runtime
             application::ApplicationStateMachine& states) noexcept override;
 
     private:
+        filesystem::Config m_filesystemConfig;
         StartupSessionState m_startupSessionState;
         RunningState m_runningState;
     };

@@ -123,6 +123,37 @@ foreach ($file in $files)
     }
 }
 
+$commentRoots = @("source", "editor", "runtime", "tools") |
+    ForEach-Object { Join-Path $repository $_ } |
+    Where-Object { Test-Path -LiteralPath $_ }
+$commentFiles = $commentRoots |
+    ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File } |
+    Where-Object {
+        $extensions -contains $_.Extension -and
+        $_.FullName -notmatch "[\\/](?:imported|adapted|compat)[\\/]"
+    }
+
+foreach ($file in $commentFiles)
+{
+    $relative = $file.FullName.Substring($repository.TrimEnd("\").Length + 1).Replace("\", "/")
+    $content = [System.IO.File]::ReadAllText($file.FullName)
+    foreach ($comment in [regex]::Matches($content, "(?s)/\*.*?\*/|//[^`r`n]*"))
+    {
+        if (-not [regex]::IsMatch($comment.Value, "(?i)\bRED(?:engine)?\b|RED-style|RED-derived|RED-backed"))
+        {
+            continue
+        }
+
+        $line = 1 + [regex]::Matches($content.Substring(0, $comment.Index), "`n").Count
+        $violations.Add([pscustomobject]@{
+            Rule = "source-lineage-comment"
+            File = $relative
+            Line = $line
+            Message = "Describe Vanguard behavior only; record implementation lineage in UPSTREAM.md or docs/migration."
+        })
+    }
+}
+
 if ($violations.Count -ne 0)
 {
     Write-Error "Vanguard engine-service audit failed with $($violations.Count) violation(s)."

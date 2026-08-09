@@ -26,18 +26,13 @@ namespace
         return hash;
     }
 
-    [[nodiscard]] u64 DisplayFingerprint(const SDL_DisplayID display, const SDL_Rect& bounds,
-                                         const SDL_DisplayMode& mode) noexcept
+    [[nodiscard]] u64 DisplayFingerprint(const SDL_DisplayID display) noexcept
     {
         u64 hash = 14695981039346656037ull;
+        hash = HashBytes(hash, &display, sizeof(display));
         const char* const name = SDL_GetDisplayName(display);
         if (name != nullptr)
             for (const char* cursor = name; *cursor != '\0'; ++cursor) hash = (hash ^ static_cast<u8>(*cursor)) * 1099511628211ull;
-        hash = HashBytes(hash, &bounds, sizeof(bounds));
-        hash = HashBytes(hash, &mode.w, sizeof(mode.w));
-        hash = HashBytes(hash, &mode.h, sizeof(mode.h));
-        hash = HashBytes(hash, &mode.refresh_rate_numerator, sizeof(mode.refresh_rate_numerator));
-        hash = HashBytes(hash, &mode.refresh_rate_denominator, sizeof(mode.refresh_rate_denominator));
         return hash != 0 ? hash : 1;
     }
 
@@ -279,7 +274,7 @@ namespace vanguard::window::sdl
             BackendDisplaySnapshot& snapshot = displays[index];
             snapshot = {};
             snapshot.id = {static_cast<u64>(id)};
-            snapshot.fingerprint = DisplayFingerprint(id, bounds, *mode);
+            snapshot.fingerprint = DisplayFingerprint(id);
             snapshot.bounds = {{bounds.x, bounds.y}, {static_cast<u32>(bounds.w), static_cast<u32>(bounds.h)}};
             snapshot.workArea = {{workArea.x, workArea.y}, {static_cast<u32>(workArea.w), static_cast<u32>(workArea.h)}};
             snapshot.desktopPixelExtent = {static_cast<u32>(mode->w * mode->pixel_density),
@@ -317,11 +312,29 @@ namespace vanguard::window::sdl
 
         SDL_PropertiesID properties = SDL_CreateProperties();
         if (properties == 0) return SdlFailure("failed to allocate SDL window properties");
+        Sint64 initialX = descriptor.placement.position.x;
+        Sint64 initialY = descriptor.placement.position.y;
+        const SDL_DisplayID initialDisplay = static_cast<SDL_DisplayID>(descriptor.placement.display.value);
+        switch (descriptor.initialPlacement)
+        {
+        case InitialWindowPlacement::Explicit: break;
+        case InitialWindowPlacement::CenteredOnDisplay:
+            initialX = SDL_WINDOWPOS_CENTERED_DISPLAY(initialDisplay);
+            initialY = SDL_WINDOWPOS_CENTERED_DISPLAY(initialDisplay);
+            break;
+        case InitialWindowPlacement::PlatformDefault:
+            initialX = SDL_WINDOWPOS_UNDEFINED_DISPLAY(initialDisplay);
+            initialY = SDL_WINDOWPOS_UNDEFINED_DISPLAY(initialDisplay);
+            break;
+        default:
+            SDL_DestroyProperties(properties);
+            return BackendStatus::Failure(-1, "SDL window initial placement policy is invalid");
+        }
         bool propertiesValid = SDL_SetStringProperty(properties, SDL_PROP_WINDOW_CREATE_TITLE_STRING, descriptor.title) &&
                                SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, descriptor.placement.logicalExtent.width) &&
                                SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, descriptor.placement.logicalExtent.height) &&
-                               SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_X_NUMBER, descriptor.placement.position.x) &&
-                               SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_Y_NUMBER, descriptor.placement.position.y) &&
+                               SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_X_NUMBER, initialX) &&
+                               SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_Y_NUMBER, initialY) &&
                                SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, static_cast<Sint64>(flags));
         if (parent != nullptr) propertiesValid = propertiesValid && SDL_SetPointerProperty(properties, SDL_PROP_WINDOW_CREATE_PARENT_POINTER, parent);
         SDL_Window* native = propertiesValid ? SDL_CreateWindowWithProperties(properties) : nullptr;

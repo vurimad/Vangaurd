@@ -75,16 +75,16 @@ namespace
             descriptor.title = editor ? "RED Vanguard Editor" : "RED Vanguard";
             descriptor.role = editor ? win::WindowRole::EditorMain : win::WindowRole::Primary;
             descriptor.placement.display = m_manager.PrimaryDisplay();
-            descriptor.placement.logicalExtent = editor ? win::WindowExtent{1600, 900} : win::WindowExtent{1280, 720};
+            descriptor.placement.logicalExtent = editor ? win::WindowExtent{1920, 1080} : win::WindowExtent{1920, 1080};
+            descriptor.initialPlacement = win::InitialWindowPlacement::CenteredOnDisplay;
             descriptor.placement.visible = true;
             win::Failure failure;
             if (!m_manager.Create(descriptor, m_primaryWindow, &failure))
             {
-                if (vanguard::diagnostics::IsInitialized())
-                    VG_LOG_ERROR(vanguard::diagnostics::Category::Engine,
-                                 "primary window creation failed: code=%u backend=%d message=%s",
-                                 static_cast<vanguard::u32>(failure.code), failure.backendCode,
-                                 failure.message != nullptr ? failure.message : "unspecified");
+                VG_LOG_ERROR(vanguard::diagnostics::Category::Engine,
+                             "primary window creation failed: code=%u backend=%d message=%s",
+                             static_cast<vanguard::u32>(failure.code), failure.backendCode,
+                             failure.message != nullptr ? failure.message : "unspecified");
                 return app::LifecycleStatus::Failure("primary application window creation failed");
             }
             return app::LifecycleStatus::Success();

@@ -163,7 +163,7 @@ namespace vanguard::entities
 
     bool ComponentRegistry::Seal() noexcept
     {
-        if (m_impl == nullptr || m_impl->descriptors.Empty()) return false;
+        if (m_impl == nullptr) return false;
         m_impl->sealed = true;
         return true;
     }

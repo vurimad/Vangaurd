@@ -6,7 +6,7 @@
 
 #include <vanguard/memory/memory.hpp>
 
-// This is the Vanguard-facing adaptation boundary for RED's compile-time
+// This is the Vanguard-facing adaptation boundary for the compile-time
 // pool machinery. Engine code uses only the VANGUARD_* surface below.
 #if defined(_MSC_VER) && !defined(RED_COMPILER_MSC)
 #define RED_COMPILER_MSC
@@ -88,7 +88,7 @@ namespace vanguard::memory
     } // namespace pools
 } // namespace vanguard::memory
 
-// Pool declaration and storage follow RED's compile-time model exactly.
+// Pool declaration and storage use compile-time type identity.
 #define VANGUARD_MEMORY_POOL_STATIC(poolName, allocatorType) RED_MEMORY_POOL_STATIC(poolName, allocatorType)
 
 #define VANGUARD_MEMORY_POOL(poolName, allocatorType, moduleApi) RED_MEMORY_POOL(poolName, allocatorType, moduleApi)
@@ -97,7 +97,7 @@ namespace vanguard::memory
 
 #define VANGUARD_INITIALIZE_MEMORY_POOL(...) RED_INITIALIZE_MEMORY_POOL(__VA_ARGS__)
 
-// Object-to-pool resolution follows RED's static and polymorphic contracts.
+// Object-to-pool resolution supports static and polymorphic contracts.
 #define VANGUARD_USE_MEMORY_POOL(poolName) RED_USE_MEMORY_POOL(poolName)
 
 #define VANGUARD_USE_POLYMORPHIC_MEMORY_POOL(poolName) RED_USE_POLYMORPHIC_MEMORY_POOL(poolName)
@@ -109,7 +109,7 @@ namespace vanguard::memory
 #define VANGUARD_DELETE_ARRAY(...) RED_DELETE_ARRAY(__VA_ARGS__)
 
 // Raw pool operations used by allocator-aware containers and specialized
-// storage. The proxy argument is a pool type, matching RED's API.
+// storage. The proxy argument is a pool type.
 #define VANGUARD_ALLOCATE(poolProxy, size) RED_ALLOCATE(poolProxy, size)
 
 #define VANGUARD_ALLOCATE_ALIGNED(poolProxy, size, alignment) RED_ALLOCATE_ALIGNED(poolProxy, size, alignment)

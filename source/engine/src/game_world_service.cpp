@@ -320,6 +320,7 @@ namespace vanguard::engine
     {
         constexpr application::ServiceDependency dependencies[]{
             {FramePipelineServiceId, application::DependencyKind::Required},
+            {ReflectionServiceId, application::DependencyKind::Required},
             {WorldServiceId, application::DependencyKind::Required},
             {ResourceStreamingServiceId, application::DependencyKind::Required}};
         constexpr application::CapabilityId providedCapabilities[]{GameWorldCapabilityId};
@@ -329,7 +330,7 @@ namespace vanguard::engine
         descriptor.profiles = application::ApplicationProfile::Runtime | application::ApplicationProfile::Editor;
         descriptor.scope = application::ServiceScope::Engine;
         descriptor.affinity = application::ThreadAffinity::MainThread;
-        descriptor.dependencies = {dependencies, 3};
+        descriptor.dependencies = {dependencies, 4};
         descriptor.provides = {providedCapabilities, 1};
         descriptor.create = CreateGameWorldService;
         descriptor.destroy = DestroyGameWorldService;

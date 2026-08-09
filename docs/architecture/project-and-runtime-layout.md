@@ -38,6 +38,8 @@ MyGame/
 
 `MyGame.vproject` is an editor-only authored project definition. It establishes project identity, source and derived-data roots, target platforms, plugins, cooking policy, package construction policy, and default editor/runtime worlds. It is never required by a shipped runtime.
 
+The normative grammar, validation levels, identity rules, and transactional creation contract are defined in [`../formats/vproject-format.md`](../formats/vproject-format.md). The editor and `nanovanguard` must consume the same shared parser and validator; neither product may maintain a private interpretation.
+
 ### Assets
 
 `Assets` is the authoritative source-data tree. It contains original files such as PNG, TIFF, OpenEXR, FBX, glTF, WAV, shader source, and authored world or prefab documents. Cooked `.vxxx` resources must not be written beside these sources.

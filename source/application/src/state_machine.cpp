@@ -59,11 +59,10 @@ namespace vanguard::application
                            const StateId state, const StateId requestedState, const char* const message) const noexcept
         {
             if (output != nullptr) *output = {code, state, requestedState, message};
-            if (diagnostics::IsInitialized())
-                VG_LOG_ERROR(diagnostics::Category::GameStateMachine,
-                             "application state failure: code=%u state=%llu requested=%llu message=%s",
-                             static_cast<u32>(code), static_cast<unsigned long long>(state),
-                             static_cast<unsigned long long>(requestedState), message != nullptr ? message : "unspecified");
+            VG_LOG_ERROR(diagnostics::Category::GameStateMachine,
+                         "application state failure: code=%u state=%llu requested=%llu message=%s",
+                         static_cast<u32>(code), static_cast<unsigned long long>(state),
+                         static_cast<unsigned long long>(requestedState), message != nullptr ? message : "unspecified");
         }
 
         containers::DynamicArray<StateRecord*> states;

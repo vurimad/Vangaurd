@@ -1,0 +1,1159 @@
+#pragma once
+
+#include <vanguard/system/types.hpp>
+
+namespace vanguard::rhi
+{
+    inline constexpr u32 InvalidReferenceIndex = 0xffffffffu;
+    inline constexpr u32 MaximumResourceReferenceIndex = 0x0fffffffu;
+    inline constexpr u32 MaximumColorAttachments = 8;
+    inline constexpr u32 MaximumCommandListsPerSubmission = 128;
+    inline constexpr u32 MaximumBindingLayoutEntries = 64;
+    inline constexpr u32 MaximumBindingLayoutsPerPipeline = 16;
+    inline constexpr u32 MaximumDescriptorDomainsPerPipeline = 4;
+    inline constexpr u32 MaximumFixedBindingArraySize = 65535;
+    inline constexpr u32 MaximumVertexBindings = 16;
+    inline constexpr u32 MaximumVertexAttributes = 32;
+    inline constexpr u32 MaximumViewports = 16;
+    inline constexpr u32 MaximumVertexSemanticNameLength = 32;
+    inline constexpr u32 MaximumRayTracingShaders = 4096;
+    inline constexpr u32 MaximumRayTracingHitGroups = 4096;
+    inline constexpr u32 MaximumTextureSubresourcesPerUpload = 4096;
+
+    template <typename Tag> struct Reference
+    {
+        u32 index = InvalidReferenceIndex;
+        u32 generation = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index != InvalidReferenceIndex && generation != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
+        [[nodiscard]] friend constexpr bool operator==(const Reference&, const Reference&) noexcept = default;
+    };
+
+    struct TextureTag;
+    struct BufferTag;
+    struct HeapTag;
+    struct SamplerStateTag;
+    struct ShaderTag;
+    struct VertexLayoutTag;
+    struct PipelineTag;
+    struct BindingLayoutTag;
+    struct DescriptorDomainTag;
+    struct AccelerationStructureTag;
+    struct QueryPoolTag;
+    struct SwapChainTag;
+    struct CommandListTag;
+
+    using TextureRef = Reference<TextureTag>;
+    using BufferRef = Reference<BufferTag>;
+    using HeapRef = Reference<HeapTag>;
+    using SamplerStateRef = Reference<SamplerStateTag>;
+    using ShaderRef = Reference<ShaderTag>;
+    using VertexLayoutRef = Reference<VertexLayoutTag>;
+    using PipelineRef = Reference<PipelineTag>;
+    using BindingLayoutRef = Reference<BindingLayoutTag>;
+    using DescriptorDomainRef = Reference<DescriptorDomainTag>;
+    using AccelerationStructureRef = Reference<AccelerationStructureTag>;
+    using QueryPoolRef = Reference<QueryPoolTag>;
+    using SwapChainRef = Reference<SwapChainTag>;
+    using CommandListRef = Reference<CommandListTag>;
+
+    template <typename ReferenceType> inline constexpr bool IsReferenceCountedResource = false;
+    template <> inline constexpr bool IsReferenceCountedResource<TextureRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<BufferRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<HeapRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<SamplerStateRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<ShaderRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<PipelineRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<BindingLayoutRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<DescriptorDomainRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<AccelerationStructureRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<SwapChainRef> = true;
+
+    enum class ResourceKind : u8
+    {
+        None,
+        Texture,
+        Buffer,
+        Heap,
+        SamplerState,
+        Shader,
+        VertexLayout,
+        Pipeline,
+        BindingLayout,
+        DescriptorDomain,
+        AccelerationStructure,
+        SwapChain,
+        CommandList,
+        Count
+    };
+    static_assert(static_cast<u8>(ResourceKind::Count) <= 16, "ResourceRef reserves four bits for resource kind");
+
+    // Type-erased GPU identity used by allocators and resource tables. It is never accepted by recording APIs
+    // without an explicit checked conversion back to a typed reference.
+    struct ResourceRef
+    {
+        u64 value = 0;
+
+        constexpr ResourceRef() noexcept = default;
+        constexpr ResourceRef(const TextureRef reference) noexcept
+            : value(Pack(ResourceKind::Texture, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const BufferRef reference) noexcept : value(Pack(ResourceKind::Buffer, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const HeapRef reference) noexcept : value(Pack(ResourceKind::Heap, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const SamplerStateRef reference) noexcept
+            : value(Pack(ResourceKind::SamplerState, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const ShaderRef reference) noexcept : value(Pack(ResourceKind::Shader, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const VertexLayoutRef reference) noexcept
+            : value(Pack(ResourceKind::VertexLayout, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const PipelineRef reference) noexcept
+            : value(Pack(ResourceKind::Pipeline, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const BindingLayoutRef reference) noexcept
+            : value(Pack(ResourceKind::BindingLayout, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const DescriptorDomainRef reference) noexcept
+            : value(Pack(ResourceKind::DescriptorDomain, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const AccelerationStructureRef reference) noexcept
+            : value(Pack(ResourceKind::AccelerationStructure, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const SwapChainRef reference) noexcept
+            : value(Pack(ResourceKind::SwapChain, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const CommandListRef reference) noexcept
+            : value(Pack(ResourceKind::CommandList, reference.index, reference.generation))
+        {
+        }
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return Kind() != ResourceKind::None && Index() <= MaximumResourceReferenceIndex && Generation() != 0;
+        }
+        [[nodiscard]] constexpr ResourceKind Kind() const noexcept
+        {
+            return static_cast<ResourceKind>(value >> 60u);
+        }
+        [[nodiscard]] constexpr u32 Index() const noexcept
+        {
+            return static_cast<u32>(value & MaximumResourceReferenceIndex);
+        }
+        [[nodiscard]] constexpr u32 Generation() const noexcept
+        {
+            return static_cast<u32>((value >> 28u) & 0xffffffffu);
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
+        [[nodiscard]] friend constexpr bool operator==(const ResourceRef&, const ResourceRef&) noexcept = default;
+
+        [[nodiscard]] static constexpr ResourceRef FromParts(const ResourceKind kind, const u32 index, const u32 generation) noexcept
+        {
+            ResourceRef result;
+            result.value = Pack(kind, index, generation);
+            return result;
+        }
+
+    private:
+        [[nodiscard]] static constexpr u64 Pack(const ResourceKind kind, const u32 index, const u32 generation) noexcept
+        {
+            return kind != ResourceKind::None && index <= MaximumResourceReferenceIndex && generation != 0
+                       ? (static_cast<u64>(kind) << 60u) | (static_cast<u64>(generation) << 28u) | index
+                       : 0;
+        }
+    };
+
+    static_assert(sizeof(ResourceRef) == sizeof(TextureRef));
+
+    template <typename ReferenceType> [[nodiscard]] constexpr ResourceKind GetResourceKind() noexcept;
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<TextureRef>() noexcept
+    {
+        return ResourceKind::Texture;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<BufferRef>() noexcept
+    {
+        return ResourceKind::Buffer;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<HeapRef>() noexcept
+    {
+        return ResourceKind::Heap;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<SamplerStateRef>() noexcept
+    {
+        return ResourceKind::SamplerState;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<ShaderRef>() noexcept
+    {
+        return ResourceKind::Shader;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<VertexLayoutRef>() noexcept
+    {
+        return ResourceKind::VertexLayout;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<PipelineRef>() noexcept
+    {
+        return ResourceKind::Pipeline;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<BindingLayoutRef>() noexcept
+    {
+        return ResourceKind::BindingLayout;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<DescriptorDomainRef>() noexcept
+    {
+        return ResourceKind::DescriptorDomain;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<AccelerationStructureRef>() noexcept
+    {
+        return ResourceKind::AccelerationStructure;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<SwapChainRef>() noexcept
+    {
+        return ResourceKind::SwapChain;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<CommandListRef>() noexcept
+    {
+        return ResourceKind::CommandList;
+    }
+
+    template <typename ReferenceType> [[nodiscard]] constexpr ReferenceType CastResourceRef(const ResourceRef resource) noexcept
+    {
+        return resource.Kind() == GetResourceKind<ReferenceType>() && resource.IsValid()
+                   ? ReferenceType{resource.Index(), resource.Generation()}
+                   : ReferenceType{};
+    }
+
+    enum class BackendKind : u8
+    {
+        Unknown,
+        D3D12,
+        Vulkan
+    };
+    enum class DeviceVendor : u8
+    {
+        Unknown,
+        Nvidia,
+        Amd,
+        Intel
+    };
+    enum class DeviceState : u8
+    {
+        Operational,
+        ResetRequired,
+        Removed,
+        Suspended,
+        Unknown
+    };
+    enum class QueueType : u8
+    {
+        Graphics,
+        Compute,
+        Copy
+    };
+
+    // Command-list roles describe submission and synchronization behavior rather than backend API types.
+    enum class CommandListType : u8
+    {
+        None,
+        Default,
+        CopySync,
+        CopyAsync,
+        Compute
+    };
+    enum class CommandListSyncType : u8
+    {
+        None,
+        ForkAsyncCompute,
+        JoinAsyncCompute
+    };
+
+    [[nodiscard]] constexpr QueueType GetQueueType(const CommandListType type) noexcept
+    {
+        if (type == CommandListType::Compute)
+            return QueueType::Compute;
+        if (type == CommandListType::CopyAsync)
+            return QueueType::Copy;
+        return QueueType::Graphics;
+    }
+
+    enum class Format : u16
+    {
+        Unknown,
+        R8UNorm,
+        R8SNorm,
+        R8UInt,
+        R8G8UNorm,
+        R8G8SNorm,
+        R8G8UInt,
+        R8G8B8A8UNorm,
+        R8G8B8A8UNormSrgb,
+        R8G8B8A8SNorm,
+        R8G8B8A8UInt,
+        B8G8R8A8UNorm,
+        B8G8R8A8UNormSrgb,
+        R16UNorm,
+        R16SNorm,
+        R16UInt,
+        R16Float,
+        R16G16UNorm,
+        R16G16SNorm,
+        R16G16UInt,
+        R16G16Float,
+        R16G16B16A16UNorm,
+        R16G16B16A16SNorm,
+        R16G16B16A16UInt,
+        R16G16B16A16Float,
+        R32UInt,
+        R32Float,
+        R32G32UInt,
+        R32G32Float,
+        R32G32B32Float,
+        R32G32B32A32Float,
+        R10G10B10A2UNorm,
+        R11G11B10Float,
+        D16UNorm,
+        D24UNormS8UInt,
+        D32Float,
+        D32FloatS8UInt,
+        BC1UNorm,
+        BC1UNormSrgb,
+        BC2UNorm,
+        BC2UNormSrgb,
+        BC3UNorm,
+        BC3UNormSrgb,
+        BC4UNorm,
+        BC4SNorm,
+        BC5UNorm,
+        BC5SNorm,
+        BC6HUFloat,
+        BC6HSFloat,
+        BC7UNorm,
+        BC7UNormSrgb
+    };
+
+    enum class TextureDimension : u8
+    {
+        Texture1D,
+        Texture2D,
+        Texture3D,
+        TextureCube
+    };
+    enum class MemoryType : u8
+    {
+        DeviceLocal,
+        Upload,
+        Readback
+    };
+    enum class ShaderStage : u8
+    {
+        Vertex,
+        Hull,
+        Domain,
+        Geometry,
+        Pixel,
+        Compute,
+        Mesh,
+        Amplification,
+        RayGeneration,
+        Miss,
+        ClosestHit,
+        AnyHit,
+        Intersection,
+        Callable,
+        Count
+    };
+    using ShaderStageMask = u32;
+    [[nodiscard]] constexpr ShaderStageMask ShaderStageBit(const ShaderStage stage) noexcept
+    {
+        return stage < ShaderStage::Count ? 1u << static_cast<u32>(stage) : 0;
+    }
+    enum class QueryType : u8
+    {
+        Occlusion,
+        PipelineStatistics,
+        Timestamp,
+        AccelerationStructureCompactedSize
+    };
+
+    enum class TextureUsage : u32
+    {
+        None = 0,
+        ShaderResource = 1u << 0u,
+        UnorderedAccess = 1u << 1u,
+        RenderTarget = 1u << 2u,
+        DepthStencil = 1u << 3u,
+        CopySource = 1u << 4u,
+        CopyDestination = 1u << 5u,
+        ResolveSource = 1u << 6u,
+        ResolveDestination = 1u << 7u,
+        Present = 1u << 8u,
+        ShadingRate = 1u << 9u,
+        RayTracing = 1u << 10u
+    };
+
+    enum class BufferUsage : u32
+    {
+        None = 0,
+        Vertex = 1u << 0u,
+        Index = 1u << 1u,
+        Constant = 1u << 2u,
+        Structured = 1u << 3u,
+        Raw = 1u << 4u,
+        IndirectArguments = 1u << 5u,
+        ShaderResource = 1u << 6u,
+        UnorderedAccess = 1u << 7u,
+        CopySource = 1u << 8u,
+        CopyDestination = 1u << 9u,
+        AccelerationStructure = 1u << 10u,
+        ShaderBindingTable = 1u << 11u
+    };
+
+    enum class ResourceState : u32
+    {
+        Unknown = 0,
+        Common = 1u << 0u,
+        CopySource = 1u << 1u,
+        CopyDestination = 1u << 2u,
+        ShaderResourceGraphics = 1u << 3u,
+        ShaderResourceCompute = 1u << 4u,
+        UnorderedAccess = 1u << 5u,
+        RenderTarget = 1u << 6u,
+        DepthWrite = 1u << 7u,
+        DepthRead = 1u << 8u,
+        VertexBuffer = 1u << 9u,
+        IndexBuffer = 1u << 10u,
+        ConstantBuffer = 1u << 11u,
+        IndirectArgument = 1u << 12u,
+        AccelerationStructureRead = 1u << 13u,
+        AccelerationStructureWrite = 1u << 14u,
+        Present = 1u << 15u
+    };
+
+    template <typename Enum> [[nodiscard]] constexpr Enum CombineFlags(const Enum left, const Enum right) noexcept
+    {
+        return static_cast<Enum>(static_cast<u32>(left) | static_cast<u32>(right));
+    }
+    [[nodiscard]] constexpr TextureUsage operator|(const TextureUsage left, const TextureUsage right) noexcept
+    {
+        return CombineFlags(left, right);
+    }
+    [[nodiscard]] constexpr BufferUsage operator|(const BufferUsage left, const BufferUsage right) noexcept
+    {
+        return CombineFlags(left, right);
+    }
+    [[nodiscard]] constexpr ResourceState operator|(const ResourceState left, const ResourceState right) noexcept
+    {
+        return CombineFlags(left, right);
+    }
+
+    struct Extent3D
+    {
+        u32 width = 1;
+        u32 height = 1;
+        u32 depth = 1;
+    };
+    struct SubresourceRange
+    {
+        u16 firstMip = 0;
+        u16 mipCount = 0xffffu;
+        u16 firstSlice = 0;
+        u16 sliceCount = 0xffffu;
+    };
+
+    struct DeviceParams
+    {
+        u32 adapterIndex = 0;
+        bool editor = false;
+        bool enableValidation = false;
+        bool preferHighPerformanceAdapter = true;
+    };
+
+    struct Capabilities
+    {
+        BackendKind backend = BackendKind::Unknown;
+        DeviceVendor vendor = DeviceVendor::Unknown;
+        u32 vendorId = 0;
+        u32 deviceId = 0;
+        u64 dedicatedVideoMemory = 0;
+        u64 uploadBufferAlignment = 1;
+        u64 constantBufferAlignment = 1;
+        u32 maximumTextureDimension2D = 0;
+        u32 maximumTextureArrayLayers = 0;
+        u32 maximumBindlessResources = 0;
+        u32 maximumBindlessSamplers = 0;
+        u32 maximumPushConstantBytes = 0;
+        bool bindlessResources = false;
+        bool bindlessSamplers = false;
+        bool descriptorIndexing = false;
+        bool asyncCompute = false;
+        bool copyQueue = false;
+        bool transientHeaps = false;
+        bool resourceAliasing = false;
+        bool rayTracing = false;
+        bool rayTracingPipeline = false;
+        bool meshShaders = false;
+        bool variableRateShading = false;
+        char adapterName[128]{};
+    };
+
+    struct TextureDesc
+    {
+        Extent3D extent;
+        TextureDimension dimension = TextureDimension::Texture2D;
+        Format format = Format::Unknown;
+        u16 mipCount = 1;
+        u16 arraySize = 1;
+        u8 sampleCount = 1;
+        TextureUsage usage = TextureUsage::ShaderResource;
+        ResourceState initialState = ResourceState::Common;
+        bool virtualResource = false;
+    };
+
+    struct BufferDesc
+    {
+        u64 size = 0;
+        u32 structureStride = 0;
+        Format format = Format::Unknown;
+        BufferUsage usage = BufferUsage::None;
+        ResourceState initialState = ResourceState::Common;
+        MemoryType memoryType = MemoryType::DeviceLocal;
+        bool virtualResource = false;
+    };
+
+    struct BufferInitData
+    {
+        const void* data = nullptr;
+        u64 size = 0;
+    };
+    struct TextureSubresourceData
+    {
+        const void* data = nullptr;
+        u64 size = 0;
+        u64 rowPitch = 0;
+        u64 depthPitch = 0;
+        u16 mipLevel = 0;
+        u16 arraySlice = 0;
+    };
+    struct TextureInitData
+    {
+        const TextureSubresourceData* subresources = nullptr;
+        u32 subresourceCount = 0;
+    };
+    struct MemoryRequirements
+    {
+        u64 size = 0;
+        u64 alignment = 0;
+        u64 compatibilityClass = 0;
+    };
+    struct HeapDesc
+    {
+        u64 size = 0;
+        u64 alignment = 0;
+        u64 compatibilityClass = 0;
+        MemoryType memoryType = MemoryType::DeviceLocal;
+    };
+
+    enum class FilterMode : u8
+    {
+        Nearest,
+        Linear
+    };
+    enum class SamplerAddressMode : u8
+    {
+        Clamp,
+        Wrap,
+        Mirror,
+        Border
+    };
+    enum class ComparisonFunction : u8
+    {
+        Never,
+        Less,
+        Equal,
+        LessEqual,
+        Greater,
+        NotEqual,
+        GreaterEqual,
+        Always
+    };
+    struct SamplerStateDesc
+    {
+        FilterMode minification = FilterMode::Linear;
+        FilterMode magnification = FilterMode::Linear;
+        FilterMode mip = FilterMode::Linear;
+        SamplerAddressMode addressU = SamplerAddressMode::Wrap;
+        SamplerAddressMode addressV = SamplerAddressMode::Wrap;
+        SamplerAddressMode addressW = SamplerAddressMode::Wrap;
+        ComparisonFunction comparison = ComparisonFunction::Never;
+        f32 mipLodBias = 0.0f;
+        f32 minimumLod = 0.0f;
+        f32 maximumLod = 1000.0f;
+        f32 maximumAnisotropy = 1.0f;
+        f32 borderColor[4]{};
+    };
+
+    struct ShaderDesc
+    {
+        ShaderStage stage = ShaderStage::Vertex;
+        const void* bytecode = nullptr;
+        u64 bytecodeSize = 0;
+        const char* entryPoint = nullptr;
+    };
+
+    enum class VertexInputRate : u8
+    {
+        PerVertex,
+        PerInstance
+    };
+    struct VertexBindingDesc
+    {
+        u8 binding = 0;
+        u16 stride = 0;
+        VertexInputRate inputRate = VertexInputRate::PerVertex;
+        u16 instanceStepRate = 1;
+    };
+    struct VertexAttributeDesc
+    {
+        u8 location = 0;
+        u8 binding = 0;
+        u16 offset = 0;
+        Format format = Format::Unknown;
+        const char* semanticName = nullptr;
+        u32 semanticIndex = 0;
+    };
+    struct VertexLayoutDesc
+    {
+        const VertexBindingDesc* bindings = nullptr;
+        u32 bindingCount = 0;
+        const VertexAttributeDesc* attributes = nullptr;
+        u32 attributeCount = 0;
+    };
+
+    enum class BindingType : u8
+    {
+        ConstantBuffer,
+        TextureShaderResource,
+        TextureUnorderedAccess,
+        TypedBufferShaderResource,
+        TypedBufferUnorderedAccess,
+        StructuredBufferShaderResource,
+        StructuredBufferUnorderedAccess,
+        ByteAddressBufferShaderResource,
+        ByteAddressBufferUnorderedAccess,
+        Sampler,
+        AccelerationStructure,
+        PushConstants
+    };
+    struct BindingLayoutEntry
+    {
+        u32 slot = 0;
+        u32 arrayCount = 1;
+        BindingType type = BindingType::TextureShaderResource;
+    };
+    struct BindingLayoutDesc
+    {
+        const BindingLayoutEntry* entries = nullptr;
+        u32 entryCount = 0;
+        u32 registerSpace = 0;
+        ShaderStageMask visibility = 0;
+    };
+
+    enum class PipelineKind : u8
+    {
+        Graphics,
+        Compute,
+        RayTracing
+    };
+    enum class PrimitiveTopology : u8
+    {
+        PointList,
+        LineList,
+        LineStrip,
+        TriangleList,
+        TriangleStrip,
+        PatchList
+    };
+    enum class RasterFillMode : u8
+    {
+        Solid,
+        Wireframe
+    };
+    enum class RasterCullMode : u8
+    {
+        None,
+        Front,
+        Back
+    };
+    enum class BlendFactor : u8
+    {
+        Zero,
+        One,
+        SourceColor,
+        OneMinusSourceColor,
+        DestinationColor,
+        OneMinusDestinationColor,
+        SourceAlpha,
+        OneMinusSourceAlpha,
+        DestinationAlpha,
+        OneMinusDestinationAlpha,
+        ConstantColor,
+        OneMinusConstantColor,
+        SourceAlphaSaturate,
+        SourceOneColor,
+        OneMinusSourceOneColor,
+        SourceOneAlpha,
+        OneMinusSourceOneAlpha
+    };
+    enum class BlendOperation : u8
+    {
+        Add,
+        Subtract,
+        ReverseSubtract,
+        Minimum,
+        Maximum
+    };
+    enum class StencilOperation : u8
+    {
+        Keep,
+        Zero,
+        Replace,
+        IncrementClamp,
+        DecrementClamp,
+        Invert,
+        IncrementWrap,
+        DecrementWrap
+    };
+
+    struct RasterizerStateDesc
+    {
+        RasterFillMode fill = RasterFillMode::Solid;
+        RasterCullMode cull = RasterCullMode::Back;
+        bool frontCounterClockwise = true;
+        bool depthClipEnable = true;
+        bool scissorEnable = true;
+        bool multisampleEnable = false;
+        bool antialiasedLineEnable = false;
+        bool conservativeRasterization = false;
+        i32 depthBias = 0;
+        f32 depthBiasClamp = 0.0f;
+        f32 slopeScaledDepthBias = 0.0f;
+    };
+
+    struct StencilFaceStateDesc
+    {
+        StencilOperation fail = StencilOperation::Keep;
+        StencilOperation depthFail = StencilOperation::Keep;
+        StencilOperation pass = StencilOperation::Keep;
+        ComparisonFunction comparison = ComparisonFunction::Always;
+    };
+
+    struct DepthStencilStateDesc
+    {
+        bool depthTestEnable = false;
+        bool depthWriteEnable = false;
+        ComparisonFunction depthComparison = ComparisonFunction::LessEqual;
+        bool stencilEnable = false;
+        u8 stencilReadMask = 0xff;
+        u8 stencilWriteMask = 0xff;
+        bool dynamicStencilReference = true;
+        u8 stencilReference = 0;
+        StencilFaceStateDesc front;
+        StencilFaceStateDesc back;
+    };
+
+    struct BlendAttachmentStateDesc
+    {
+        bool blendEnable = false;
+        BlendFactor sourceColor = BlendFactor::One;
+        BlendFactor destinationColor = BlendFactor::Zero;
+        BlendOperation colorOperation = BlendOperation::Add;
+        BlendFactor sourceAlpha = BlendFactor::One;
+        BlendFactor destinationAlpha = BlendFactor::Zero;
+        BlendOperation alphaOperation = BlendOperation::Add;
+        u8 colorWriteMask = 0x0f;
+    };
+
+    struct BlendStateDesc
+    {
+        BlendAttachmentStateDesc attachments[MaximumColorAttachments]{};
+        bool alphaToCoverageEnable = false;
+    };
+
+    struct PipelineAttachmentSignature
+    {
+        Format colorFormats[MaximumColorAttachments]{};
+        u32 colorCount = 0;
+        Format depthStencilFormat = Format::Unknown;
+        u8 sampleCount = 1;
+        u8 sampleQuality = 0;
+    };
+
+    struct GraphicsPipelineDesc
+    {
+        ShaderRef vertexShader;
+        ShaderRef hullShader;
+        ShaderRef domainShader;
+        ShaderRef geometryShader;
+        ShaderRef pixelShader;
+        VertexLayoutRef vertexLayout;
+        const BindingLayoutRef* bindingLayouts = nullptr;
+        u32 bindingLayoutCount = 0;
+        const DescriptorDomainRef* descriptorDomains = nullptr;
+        u32 descriptorDomainCount = 0;
+        PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+        u32 patchControlPoints = 0;
+        RasterizerStateDesc rasterizer;
+        DepthStencilStateDesc depthStencil;
+        BlendStateDesc blend;
+        PipelineAttachmentSignature attachments;
+    };
+
+    struct ComputePipelineDesc
+    {
+        ShaderRef computeShader;
+        const BindingLayoutRef* bindingLayouts = nullptr;
+        u32 bindingLayoutCount = 0;
+        const DescriptorDomainRef* descriptorDomains = nullptr;
+        u32 descriptorDomainCount = 0;
+    };
+
+    struct RayTracingShaderDesc
+    {
+        const char* exportName = nullptr;
+        ShaderRef shader;
+        BindingLayoutRef localBindingLayout;
+    };
+
+    struct RayTracingHitGroupDesc
+    {
+        const char* exportName = nullptr;
+        ShaderRef closestHitShader;
+        ShaderRef anyHitShader;
+        ShaderRef intersectionShader;
+        BindingLayoutRef localBindingLayout;
+        bool proceduralPrimitive = false;
+    };
+
+    struct RayTracingPipelineDesc
+    {
+        const RayTracingShaderDesc* shaders = nullptr;
+        u32 shaderCount = 0;
+        const RayTracingHitGroupDesc* hitGroups = nullptr;
+        u32 hitGroupCount = 0;
+        const BindingLayoutRef* globalBindingLayouts = nullptr;
+        u32 globalBindingLayoutCount = 0;
+        const DescriptorDomainRef* descriptorDomains = nullptr;
+        u32 descriptorDomainCount = 0;
+        u32 maximumPayloadBytes = 0;
+        u32 maximumAttributeBytes = 8;
+        u32 maximumRecursionDepth = 1;
+    };
+
+    struct ViewportDesc
+    {
+        f32 x = 0.0f;
+        f32 y = 0.0f;
+        f32 width = 0.0f;
+        f32 height = 0.0f;
+        f32 minimumDepth = 0.0f;
+        f32 maximumDepth = 1.0f;
+    };
+
+    struct Rect
+    {
+        i32 x = 0;
+        i32 y = 0;
+        i32 width = 0;
+        i32 height = 0;
+    };
+
+    struct RenderTargetAttachment
+    {
+        TextureRef texture;
+        Format format = Format::Unknown;
+        u16 mipLevel = 0;
+        u16 arraySlice = 0;
+        bool readOnly = false;
+    };
+
+    struct RenderTargetSetup
+    {
+        RenderTargetAttachment colorTargets[MaximumColorAttachments]{};
+        u32 colorTargetCount = 0;
+        RenderTargetAttachment depthStencilTarget;
+    };
+
+    struct VertexBufferBinding
+    {
+        BufferRef buffer;
+        u64 offset = 0;
+        u8 binding = 0;
+    };
+
+    enum class IndexFormat : u8
+    {
+        UInt16,
+        UInt32
+    };
+
+    struct IndexBufferBinding
+    {
+        BufferRef buffer;
+        u64 offset = 0;
+        IndexFormat format = IndexFormat::UInt16;
+    };
+
+    struct DrawArguments
+    {
+        u32 vertexCount = 0;
+        u32 instanceCount = 1;
+        u32 firstVertex = 0;
+        u32 firstInstance = 0;
+    };
+
+    struct DrawIndexedArguments
+    {
+        u32 indexCount = 0;
+        u32 instanceCount = 1;
+        u32 firstIndex = 0;
+        i32 baseVertex = 0;
+        u32 firstInstance = 0;
+    };
+
+    // These structures are the portable byte layouts consumed by indirect draw and dispatch commands.
+    struct IndirectDrawArguments
+    {
+        u32 vertexCount = 0;
+        u32 instanceCount = 1;
+        u32 firstVertex = 0;
+        u32 firstInstance = 0;
+    };
+    struct IndirectDrawIndexedArguments
+    {
+        u32 indexCount = 0;
+        u32 instanceCount = 1;
+        u32 firstIndex = 0;
+        i32 baseVertex = 0;
+        u32 firstInstance = 0;
+    };
+    struct IndirectDispatchArguments
+    {
+        u32 groupCountX = 1;
+        u32 groupCountY = 1;
+        u32 groupCountZ = 1;
+    };
+    struct TextureViewDesc
+    {
+        Format format = Format::Unknown;
+        SubresourceRange subresources;
+    };
+    struct BufferViewDesc
+    {
+        Format format = Format::Unknown;
+        u64 offset = 0;
+        u64 size = 0;
+        u32 structureStride = 0;
+    };
+
+    enum class DescriptorDomainKind : u8
+    {
+        Resources,
+        Samplers
+    };
+
+    struct GpuFence;
+
+    struct DescriptorDomainDesc
+    {
+        DescriptorDomainKind kind = DescriptorDomainKind::Resources;
+        u32 capacity = 0;
+        u32 firstShaderSlot = 0;
+        ShaderStageMask visibility = 0;
+    };
+
+    // CPU-safe descriptor identity. Index is the value stored in GPU-visible records; generation is retained on
+    // the CPU and rejects stale release or rewrite attempts after the slot has been recycled.
+    struct DescriptorHandle
+    {
+        u32 index = InvalidReferenceIndex;
+        u32 generation = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index != InvalidReferenceIndex && generation != 0;
+        }
+        [[nodiscard]] constexpr u32 GpuIndex() const noexcept
+        {
+            return index;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
+        [[nodiscard]] friend constexpr bool operator==(const DescriptorHandle&, const DescriptorHandle&) noexcept = default;
+    };
+
+    struct DescriptorRetirement
+    {
+        u64 graphicsFence = 0;
+        u64 computeFence = 0;
+        u64 copyFence = 0;
+
+        void Include(GpuFence fence) noexcept;
+    };
+
+    struct DescriptorDomainStats
+    {
+        u32 capacity = 0;
+        u32 allocated = 0;
+        u32 populated = 0;
+        u32 pendingRetirement = 0;
+        u32 exhaustedSlots = 0;
+        u32 free = 0;
+        u32 peakAllocated = 0;
+        u64 completedRetirements = 0;
+        u64 staleHandleOperations = 0;
+        u64 rejectedWrites = 0;
+        u64 allocationFailures = 0;
+    };
+
+    struct QueryPoolDesc
+    {
+        QueryType type = QueryType::Timestamp;
+        u32 capacity = 0;
+    };
+
+    struct ResourceLifetimeStats
+    {
+        u32 liveResources = 0;
+        u32 pendingRetirements = 0;
+        u32 peakPendingRetirements = 0;
+        u32 destroyingResources = 0;
+        u64 totalReferences = 0;
+        u64 completedRetirements = 0;
+        u64 staleReferenceOperations = 0;
+        u64 retirementQueueRecoveries = 0;
+        u64 retirementBucketOverflows = 0;
+        bool reclamationJobActive = false;
+    };
+
+    enum class PresentationSurfaceKind : u8
+    {
+        None,
+        Win32,
+        Vulkan
+    };
+    struct PresentationSurface
+    {
+        PresentationSurfaceKind kind = PresentationSurfaceKind::None;
+        void* nativeWindow = nullptr;
+        void* nativeDisplay = nullptr;
+    };
+
+    enum class PresentMode : u8
+    {
+        Immediate,
+        Mailbox,
+        Fifo
+    };
+    enum class ColorSpace : u8
+    {
+        Srgb,
+        Hdr10,
+        ScRgb
+    };
+    struct SwapChainDesc
+    {
+        PresentationSurface surface;
+        u32 width = 0;
+        u32 height = 0;
+        u8 bufferCount = 3;
+        Format format = Format::B8G8R8A8UNorm;
+        PresentMode presentMode = PresentMode::Fifo;
+        ColorSpace colorSpace = ColorSpace::Srgb;
+        bool allowTearing = false;
+    };
+
+    struct GpuFence
+    {
+        QueueType queue = QueueType::Graphics;
+        u64 value = 0;
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
+        [[nodiscard]] friend constexpr bool operator==(const GpuFence&, const GpuFence&) noexcept = default;
+    };
+
+    enum class FailureCode : u8
+    {
+        None,
+        NotInitialized,
+        AlreadyInitialized,
+        InvalidArgument,
+        InvalidReference,
+        InvalidCommandList,
+        NoBoundCommandList,
+        Unsupported,
+        CapacityExceeded,
+        OutOfMemory,
+        DeviceLost,
+        BackendFailure,
+        Busy,
+        IncompatibleBinding,
+        MissingBinding
+    };
+
+    struct Failure
+    {
+        FailureCode code = FailureCode::None;
+        i64 backendCode = 0;
+        char message[192]{};
+    };
+
+    struct BackendStatus
+    {
+        bool success = true;
+        FailureCode code = FailureCode::None;
+        i64 backendCode = 0;
+        const char* message = nullptr;
+
+        [[nodiscard]] static constexpr BackendStatus Success() noexcept
+        {
+            return {};
+        }
+        [[nodiscard]] static constexpr BackendStatus Failure(const FailureCode code, const i64 backendCode,
+                                                             const char* const message) noexcept
+        {
+            return {false, code, backendCode, message};
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return success;
+        }
+    };
+} // namespace vanguard::rhi

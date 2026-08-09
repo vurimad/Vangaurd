@@ -70,6 +70,7 @@ namespace vanguard::entities
     /// World-scoped mapping from stable cooked schema identities to transient Flecs component types.
     /// Registration is serialized startup work. Seal freezes the mapping, after which Decode and Queue
     /// may run concurrently because descriptors are immutable and ECS command submission is synchronized.
+    /// An empty mapping is valid for worlds whose prefabs contain no application-defined components.
     class ComponentRegistry final
     {
     public:

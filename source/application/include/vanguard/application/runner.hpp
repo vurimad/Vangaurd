@@ -47,6 +47,7 @@ namespace vanguard::application
         ApplicationProfile profile = ApplicationProfile::Runtime;
         CommandLineView commandLine;
         u32 maximumShutdownTicks = 600;
+        const char* diagnosticsFilePath = nullptr;
     };
 
     enum class RunnerFailureCode : u8

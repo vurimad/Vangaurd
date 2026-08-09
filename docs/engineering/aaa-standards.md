@@ -159,6 +159,17 @@ through a Vanguard-owned boundary. Legacy names, compatibility macros,
 platform branches, and module boundaries do not become normal Vanguard
 surface area merely because the implementation was retained.
 
+### 16. Source comments use Vanguard terminology
+
+Vanguard-owned source comments, API documentation comments, diagnostics, and
+test descriptions explain Vanguard behavior only. They must not name the
+reference engine or label an API as inherited, derived, adapted, mirrored, or
+"style"-compatible with it. Implementation lineage belongs in the module's
+`UPSTREAM.md` or a `docs/migration` record, where provenance can be reviewed
+without contaminating the engine vocabulary. Quarantined imported source and
+compatibility bridges are exempt because they must preserve attribution and
+name the implementation they directly compile against.
+
 ## Module acceptance checklist
 
 A module is ready to become a dependency only when:

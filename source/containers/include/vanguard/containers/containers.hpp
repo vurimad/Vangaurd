@@ -2,7 +2,7 @@
 
 #include <vanguard/memory/pool.hpp>
 
-// Complete RED Containers image. This is the sole Vanguard public adaptation
+// Complete compatibility container image. This is the sole Vanguard public adaptation
 // boundary; callers use the Vanguard namespace below.
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -142,7 +142,7 @@ namespace vanguard::containers
     using ::red::TrimLeft;
     using ::red::TrimRight;
 
-    // RED keeps these two allocator types in the global namespace.
+    // These two compatibility allocator types remain in the global namespace.
     using ::CAnsiToUnicode;
     using ::CStaticTokenizer;
     using ::CStringPrinter;

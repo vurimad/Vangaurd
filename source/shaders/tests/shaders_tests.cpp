@@ -166,12 +166,34 @@ int main()
     Check(shaders::ValidatePipeline(shader, pipeline) == shaders::Result::IncompatiblePipeline, "PSO binding layout mismatch");
 
     {
+        Fixture separateNamespaces;
+        separateNamespaces.bindings[0].space = separateNamespaces.bindings[1].space;
+        separateNamespaces.bindings[0].binding = separateNamespaces.bindings[1].binding;
+        ByteArray accepted(memory::pools::Rendering::GetInstance());
+        Check(WriteFixture(separateNamespaces.description, accepted) == shaders::Result::Success,
+              "CBV and SRV registers may share a numeric slot in one register space");
+    }
+    {
         Fixture duplicate;
         duplicate.bindings[0].space = duplicate.bindings[1].space;
         duplicate.bindings[0].binding = duplicate.bindings[1].binding;
+        duplicate.bindings[1].kind = shaders::BindingKind::SampledTexture;
         ByteArray rejected(memory::pools::Rendering::GetInstance());
-        Check(WriteFixture(duplicate.description, rejected) == shaders::Result::OverlappingBinding,
-              "overlapping descriptor binding rejection");
+        Check(WriteFixture(duplicate.description, rejected) == shaders::Result::DuplicateBinding,
+              "overlapping descriptors in the same register namespace are rejected");
+    }
+    {
+        Fixture bindless;
+        bindless.bindings[0].arrayCount = shaders::UnboundedDescriptorCount;
+        bindless.bindings[0].flags = shaders::BindingFlags::Bindless;
+        ByteArray cooked(memory::pools::Rendering::GetInstance());
+        Check(WriteFixture(bindless.description, cooked) == shaders::Result::Success, "bindless reflection cooking");
+        filesystem::MemoryFileReader bindlessFile(cooked, 0);
+        shaders::ShaderFile reflected;
+        Check(reflected.Open(bindlessFile) == shaders::Result::Success && reflected.Bindings().Size() == 2 &&
+                  shaders::HasFlag(reflected.Bindings()[1].flags, shaders::BindingFlags::Bindless) &&
+                  reflected.Bindings()[1].arrayCount == shaders::UnboundedDescriptorCount,
+              "bindless declaration round trip");
     }
     {
         ByteArray corrupt(first);

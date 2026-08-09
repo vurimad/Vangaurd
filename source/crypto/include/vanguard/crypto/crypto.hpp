@@ -16,7 +16,7 @@ namespace vanguard::crypto
         [[nodiscard]] friend bool operator<(const Digest256& left, const Digest256& right) noexcept;
     };
 
-    // Incremental SHA-256 adapted from RED's redCrypto implementation. The
+    // Incremental SHA-256 implementation. The
     // Vanguard contract preserves the complete 64-bit message length and does
     // not allocate.
     class Sha256Builder final

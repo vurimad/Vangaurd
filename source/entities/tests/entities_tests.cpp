@@ -295,6 +295,12 @@ int main()
     Check(collidingCellFile.Open(collidingCellReader) == world::Result::Success,
           "open cell with a colliding placement identity");
 
+    ecs::World emptyRegistryWorld;
+    entities::ComponentRegistry emptyRegistry;
+    Check(emptyRegistryWorld.Initialize() && emptyRegistry.Initialize(emptyRegistryWorld) && emptyRegistry.Seal() &&
+              emptyRegistry.IsSealed() && emptyRegistry.Shutdown() && emptyRegistryWorld.Shutdown(),
+          "seal an empty component registry for component-free bootstrap worlds");
+
     ecs::World ecsWorld;
     Check(ecsWorld.Initialize(), "initialize materialization ECS world");
     entities::ComponentRegistry componentRegistry;

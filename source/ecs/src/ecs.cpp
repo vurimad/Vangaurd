@@ -70,7 +70,6 @@ namespace
 
     void FlecsLog(const i32 level, const char* const file, const i32 line, const char* const message)
     {
-        if (!diagnostics::IsInitialized()) return;
         diagnostics::Level output = diagnostics::Level::Trace;
         if (level <= -4) output = diagnostics::Level::Fatal;
         else if (level == -3) output = diagnostics::Level::Error;

@@ -42,6 +42,8 @@ namespace vanguard::application
             result.message = "diagnostics bootstrap failed";
             return result;
         }
+        const bool diagnosticsFileOpened = diagnosticsOwned && settings.diagnosticsFilePath != nullptr &&
+                                           diagnostics::OpenFileSink(settings.diagnosticsFilePath);
         if (!containers::IsInitialized() && !containers::Initialize())
         {
             result.failure = RunnerFailureCode::ContainersBootstrapFailure;
@@ -156,9 +158,14 @@ namespace vanguard::application
             if (platformInitialized) platform.Shutdown();
         }
 
-        if (result.failure != RunnerFailureCode::None && diagnostics::IsInitialized())
+        if (result.failure != RunnerFailureCode::None)
             VG_LOG_ERROR(diagnostics::Category::Engine, "application runner failed: code=%u message=%s",
                          static_cast<u32>(result.failure), result.message != nullptr ? result.message : "unspecified");
+        if (diagnosticsFileOpened)
+        {
+            diagnostics::Flush(diagnostics::FlushMode::Synchronous);
+            diagnostics::CloseFileSink();
+        }
         if (diagnosticsOwned) diagnostics::Shutdown();
         return result;
     }

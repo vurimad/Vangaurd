@@ -6,8 +6,8 @@
 
 namespace vanguard::jobs
 {
-    // RED Jobs 2's Windows ceiling when RED memory extended thread
-    // registration is enabled by the imported WinPC configuration.
+    // Windows worker ceiling when extended thread registration is enabled by
+    // the imported WinPC configuration.
     inline constexpr u32 MaximumWorkerCount = 27;
 
     enum class Priority : u8
@@ -120,8 +120,7 @@ namespace vanguard::jobs
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] bool IsFinished() const noexcept;
 
-        // Finishes the RED completion deferral. Calling Finish twice is a
-        // contract violation, matching RED Jobs 2.
+        // Finishes the completion deferral. Calling Finish twice is a contract violation.
         void Finish() noexcept;
 
     private:
@@ -148,12 +147,12 @@ namespace vanguard::jobs
 
         [[nodiscard]] bool Wait(bool processLatent = false, i32 timeoutMilliseconds = -1) const noexcept;
 
-        // Adds one RED completion deferral to this counter. The counter cannot
+        // Adds one completion deferral to this counter. The counter cannot
         // become ready until the returned object is finished or destroyed.
         [[nodiscard]] CompletionDeferral CreateDeferral(const char* staticDebugName = nullptr,
                                                         const void* debugUserData = nullptr) noexcept;
 
-        // Emits RED's blocker/dependency/deferral analysis through its logger.
+        // Emits blocker, dependency, and deferral analysis through Vanguard Diagnostics.
         // Config::enableDebugger must be enabled for the complete report.
         void Analyze() const noexcept;
 

@@ -1,7 +1,7 @@
 #pragma once
 
-// RED Math is an inline/SIMD-heavy library. This boundary deliberately exposes
-// the complete adapted image under Vanguard ownership instead of placing a
+// This is an inline/SIMD-heavy library. The boundary deliberately exposes the
+// complete adapted image under Vanguard ownership instead of placing a
 // function-call wrapper in every arithmetic operation.
 #include "../../../adapted/include/redMathPublic.h"
 

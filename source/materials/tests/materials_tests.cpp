@@ -125,7 +125,8 @@ int main()
         {0x9000, resources::ResourceReference(resources::ResourcePath::FromString("pipelines/gbuffer.vpipeline"),
                                                vanguard::pipelines::PipelineResourceType), &pipeline}}};
     const std::array<vanguard::u64, 1> selectedBuffers{{0x1000}};
-    const std::array<vanguard::u64, 1> selectedBindings{{0x2000}};
+    const std::array<materials::ResourceParameterBuildRecord, 1> selectedResources{{
+        {0x2000, 2, materials::ResourceParameterKind::Texture}}};
     const std::array<float, 4> baseColor{{0.25f, 0.5f, 0.75f, 1.0f}};
     const std::array<float, 4> surface{{0.8f, 0.2f, 0.0f, 0.0f}};
     const std::array<materials::ConstantValueBuildRecord, 2> constants{{
@@ -141,7 +142,7 @@ int main()
     description.shader = shaderReference;
     description.shaderReflection = &shader;
     description.materialConstantBuffers = {selectedBuffers.data(), static_cast<vanguard::u32>(selectedBuffers.size())};
-    description.materialResourceBindings = {selectedBindings.data(), static_cast<vanguard::u32>(selectedBindings.size())};
+    description.resourceParameters = {selectedResources.data(), static_cast<vanguard::u32>(selectedResources.size())};
     description.techniques = {techniques.data(), static_cast<vanguard::u32>(techniques.size())};
     description.constants = {constants.data(), static_cast<vanguard::u32>(constants.size())};
     description.resources = {resourceValues.data(), static_cast<vanguard::u32>(resourceValues.size())};
@@ -165,8 +166,6 @@ int main()
     filesystem::MemoryFileReader materialReader(first, 0);
     materials::MaterialFile material;
     Check(material.Open(materialReader) == materials::Result::Success && material.IsOpen(), "open vmat");
-    Check(material.BindingLayoutFingerprint() == shader.BindingLayoutFingerprint(),
-          "vmat stores the exact shader binding-layout fingerprint");
     Check(material.Techniques().Size() == 2 && material.Techniques()[0].name == 0x9000 &&
           material.Techniques()[1].name == 0x9001, "techniques are canonical and pipeline-addressable");
     Check(material.ConstantBuffers().Size() == 1 && material.Parameters().Size() == 2 &&
@@ -176,9 +175,9 @@ int main()
     Check(parameterBytes.Size() == 32 && parameterBytes[0] == reinterpret_cast<const vanguard::u8*>(baseColor.data())[0] &&
           parameterBytes[16] == reinterpret_cast<const vanguard::u8*>(surface.data())[0],
           "constant overrides are written directly at reflected byte offsets");
-    Check(material.ResourceBindings().Size() == 2 && material.ResourceBindings()[0].resource == albedo &&
-          !material.ResourceBindings()[1].resource.IsValid() && material.Dependencies().Size() == 4,
-          "descriptor arrays retain explicit bound/unbound slots and deduplicated dependencies");
+    Check(material.ResourceParameters().Size() == 2 && material.ResourceParameters()[0].resource == albedo &&
+          !material.ResourceParameters()[1].resource.IsValid() && material.Dependencies().Size() == 4,
+          "resource arrays retain logical bound/unbound values and deduplicated dependencies");
 
     {
         const std::array<vanguard::u64, 1> unknownBuffer{{0xdead}};
