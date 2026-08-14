@@ -16,7 +16,7 @@ project "diagnosticsCompat"
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../imported/common/redSystem/include",
         "../imported/common/redSystem/src"
@@ -66,13 +66,13 @@ project "diagnostics"
 
     files {
         "include/**.hpp",
-        "src/**.hpp",
+        "private/**.hpp",
         "src/**.cpp"
     }
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include"
     }
 
@@ -83,8 +83,8 @@ project "diagnostics"
 
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
+        ["Private API/*"] = { "private/**.hpp" },
         ["Source/*"] = {
-            "src/**.hpp",
             "src/**.cpp"
         }
     }

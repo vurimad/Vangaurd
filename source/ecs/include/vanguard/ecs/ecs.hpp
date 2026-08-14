@@ -99,10 +99,47 @@ namespace vanguard::ecs
         u32 rejected = 0;
     };
 
+    enum class CommittedChangeKind : u8
+    {
+        EntityCreated,
+        EntityDestroyed,
+        ComponentAdded,
+        ComponentSet,
+        ComponentRemoved,
+        ComponentEnabled,
+        ComponentDisabled
+    };
+
+    /// Exact identity-level record published only after a structural operation commits successfully.
+    /// The component field is invalid for entity creation and destruction records.
+    struct CommittedChange
+    {
+        u64 sequence = 0;
+        EntityId entity = InvalidEntityId;
+        ComponentId component = InvalidComponentId;
+        CommandBatchId commandBatch = InvalidCommandBatchId;
+        CommittedChangeKind kind = CommittedChangeKind::EntityCreated;
+    };
+
+    struct CommittedChangeCursor
+    {
+        /// Zero starts at the oldest retained record. Otherwise this is the next sequence to read.
+        u64 nextSequence = 0;
+    };
+
+    struct CommittedChangeReadResult
+    {
+        u64 firstSequence = 0;
+        u64 nextSequence = 0;
+        u32 records = 0;
+        u32 lostRecords = 0;
+    };
+
     struct WorldConfig
     {
         u32 initialEntityCapacity = 16 * 1024;
         u32 initialActionCapacity = 4 * 1024;
+        u32 committedChangeCapacity = 64 * 1024;
     };
 
     struct WorldStats
@@ -120,6 +157,8 @@ namespace vanguard::ecs
         u64 enabledComponents = 0;
         u64 disabledComponents = 0;
         u64 rejectedComponentActions = 0;
+        u64 committedChanges = 0;
+        u64 overwrittenCommittedChanges = 0;
         bool progressing = false;
     };
 
@@ -243,6 +282,17 @@ namespace vanguard::ecs
         }
 
         [[nodiscard]] bool FlushComponentActions(ComponentActionReport* report = nullptr) noexcept;
+        /// Reads retained committed changes without consuming them for other subscribers. A slow reader is
+        /// advanced to the oldest retained sequence and receives an exact lost-record count.
+        [[nodiscard]] bool ReadCommittedChanges(CommittedChangeCursor& cursor,
+                                                containers::DynamicArray<CommittedChange>& changes,
+                                                u32 maximumRecords,
+                                                CommittedChangeReadResult* result = nullptr) const noexcept;
+        /// Tiny observer boundary for intentional native Flecs writers. Observer callbacks may publish only
+        /// the exact identity/component/event record; derived-system work remains outside Flecs execution.
+        [[nodiscard]] bool CaptureNativeComponentChange(EntityId entity, ComponentId component,
+                                                        CommittedChangeKind kind) noexcept;
+        [[nodiscard]] u64 NextCommittedChangeSequence() const noexcept;
         [[nodiscard]] bool Progress(f32 deltaSeconds) noexcept;
 
         [[nodiscard]] Entity Resolve(EntityId identity) const noexcept;

@@ -139,7 +139,10 @@ namespace vanguard::window::sdl
             state.minimized = (flags & SDL_WINDOW_MINIMIZED) != 0;
             state.maximized = (flags & SDL_WINDOW_MAXIMIZED) != 0;
             state.occluded = (flags & SDL_WINDOW_OCCLUDED) != 0;
-            state.hdrCapable = SDL_GetBooleanProperty(SDL_GetWindowProperties(record.native),
+            const SDL_PropertiesID properties = SDL_GetWindowProperties(record.native);
+            state.sdrWhiteLevel = SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 1.0f);
+            state.hdrHeadroom = SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 1.0f);
+            state.hdrCapable = SDL_GetBooleanProperty(properties,
                                                        SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false);
             return BackendStatus::Success();
         }
@@ -417,6 +420,24 @@ namespace vanguard::window::sdl
         Impl::Record* const record = m_impl->Find(window);
         if (record == nullptr) return BackendStatus::Failure(-1, "SDL window handle is invalid");
         return SDL_SetWindowTitle(record->native, title) ? BackendStatus::Success() : SdlFailure("failed to set SDL window title");
+    }
+
+    BackendStatus SdlWindowBackend::ResolvePresentationSurface(const BackendWindowId window,
+                                                               NativePresentationSurface& surface) noexcept
+    {
+        surface = {};
+        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        Impl::Record* const record = m_impl->Find(window);
+        if (record == nullptr) return BackendStatus::Failure(-1, "SDL window handle is invalid");
+#if defined(_WIN32)
+        void* const nativeWindow = SDL_GetPointerProperty(SDL_GetWindowProperties(record->native),
+                                                          SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+        if (nativeWindow == nullptr) return SdlFailure("SDL did not expose a Win32 presentation surface");
+        surface = {NativePresentationSurfaceKind::Win32, nativeWindow, nullptr};
+        return BackendStatus::Success();
+#else
+        return BackendStatus::Failure(-1, "the current SDL platform has no presentation-surface adapter");
+#endif
     }
 
     BackendStatus SdlWindowBackend::DestroyWindow(const BackendWindowId window) noexcept

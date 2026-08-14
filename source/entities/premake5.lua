@@ -1,5 +1,3 @@
-local flecsRoot = path.getabsolute("../../../vendors/flecs")
-
 group "Engine/Runtime"
 
 project "entities"
@@ -19,11 +17,11 @@ project "entities"
         "../resources/include", "../reflection/include", "../schemas/include", "../prefabs/include",
         "../world/include", "../concurrency/include", "../ecs/include", "../gameWorld/include",
         "../streaming/include", "../packages/include", "../jobs/include",
-        "../meshes/include",
-        path.join(flecsRoot, "distr")
+        "../meshes/include", "../rendering/include",
+        path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
-    links { "gameWorld", "ecs", "flecs", "world", "prefabs", "schemas", "reflection", "serialization", "resources",
+    links { "rendering", "gameWorld", "ecs", "flecs", "world", "prefabs", "schemas", "reflection", "serialization", "resources",
             "filesystem", "jobs", "containers", "concurrency", "diagnostics", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" }, ["Source/*"] = { "src/**.cpp" },
@@ -48,12 +46,12 @@ project "entitiesTests"
         "../resources/include", "../reflection/include", "../schemas/include", "../prefabs/include",
         "../world/include", "../concurrency/include", "../ecs/include", "../gameWorld/include",
         "../streaming/include", "../packages/include", "../jobs/include",
-        "../meshes/include",
-        path.join(flecsRoot, "distr")
+        "../meshes/include", "../rendering/include", "../rhi/include", "../pipelines/include", "../shaders/include",
+        path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "entities", "gameWorld", "ecs", "flecs", "world", "prefabs", "schemas", "reflection", "serialization",
+        "entities", "rendering", "gameWorld", "ecs", "flecs", "world", "prefabs", "schemas", "reflection", "serialization",
         "resources", "filesystem", "jobs", "containers", "concurrency", "diagnostics", "memory", "system"
     }
     vpaths { ["Tests/*"] = { "tests/**.cpp" } }

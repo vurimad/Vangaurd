@@ -10,8 +10,8 @@ project "rhi"
     targetdir(output_root)
     objdir(object_root)
     files { "include/**.hpp", "src/**.cpp", "README.md", "UPSTREAM.md" }
-    includedirs { "include", "../system/include", "../memory/include", "../containers/include" }
-    links { "containers", "memory", "system" }
+    includedirs { "include", "../system/include", "../memory/include", "../containers/include", "../concurrency/include" }
+    links { "concurrency", "containers", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" }, ["Source/*"] = { "src/**.cpp" },
         ["Documentation"] = { "README.md", "UPSTREAM.md" }
@@ -28,9 +28,9 @@ project "rhiTests"
     targetdir(output_root)
     objdir(object_root)
     files { "tests/**.cpp" }
-    includedirs { "include", "../system/include", "../memory/include", "../containers/include" }
+    includedirs { "include", "../system/include", "../memory/include", "../containers/include", "../concurrency/include" }
     links {
-        "rhi", "containers", "containersCompat", "memory", "redSystemCompat", "system",
+        "rhi", "concurrency", "containers", "containersCompat", "memory", "redSystemCompat", "system",
         "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Version"
     }
     vpaths { ["Tests/*"] = { "tests/**.cpp" } }

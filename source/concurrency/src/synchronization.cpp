@@ -1,6 +1,6 @@
 #include <vanguard/concurrency/synchronization.hpp>
 
-#include "concurrency_backend.hpp"
+#include <vanguard/concurrency/concurrency_backend.hpp>
 
 namespace vanguard::concurrency
 {

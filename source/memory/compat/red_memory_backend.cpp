@@ -1,6 +1,6 @@
 #include "build.h"
 
-#include "../src/memory_backend.hpp"
+#include <vanguard/memory/memory_backend.hpp>
 #include <vanguard/memory/pool.hpp>
 
 #include "../../imported/common/redMemory/include/defaultAllocator.h"

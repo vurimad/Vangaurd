@@ -1,4 +1,4 @@
-#include "../src/jobs_backend.hpp"
+#include <vanguard/jobs/jobs_backend.hpp>
 
 #include "../../imported/common/redJobs2/include/redJobs2Public.h"
 #include "../../imported/common/redCore/include/corePool.h"

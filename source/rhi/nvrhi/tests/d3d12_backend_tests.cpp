@@ -4,8 +4,11 @@
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/rhi/d3d12/backend.hpp>
 #include <vanguard/rhi/backend/resource_lifetime.hpp>
+#include <vanguard/rhi/gpu_counters.hpp>
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/rendering/pipeline_cache.hpp>
+#include <vanguard/rendering/presentation_service.hpp>
+#include <vanguard/window/window_manager.hpp>
 
 #include <cstdio>
 #include <d3dcompiler.h>
@@ -15,6 +18,8 @@
 namespace
 {
     namespace gpu = vanguard::rhi;
+    namespace rendering = vanguard::rendering;
+    namespace window = vanguard::window;
 
     struct FenceHarness
     {
@@ -388,12 +393,74 @@ namespace
         if (!texture)
             return false;
 
+        gpu::TextureDesc copySourceDesc = textureDesc;
+        copySourceDesc.usage = gpu::TextureUsage::CopySource;
+        gpu::Texture copySource(gpu::AdoptReference, gpu::CreateTexture(copySourceDesc, {&textureSubresource, 1}, &failure));
+        if (!copySource)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] texture transfer resource creation failed: copy source: %s\n", failure.message);
+            return false;
+        }
+        gpu::TextureDesc copyDestinationDesc = textureDesc;
+        copyDestinationDesc.usage = gpu::TextureUsage::CopyDestination | gpu::TextureUsage::ShaderResource;
+        gpu::Texture copyDestination(gpu::AdoptReference, gpu::CreateTexture(copyDestinationDesc, {}, &failure));
+        if (!copyDestination)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] texture transfer resource creation failed: copy destination: %s\n", failure.message);
+            return false;
+        }
+        gpu::TextureReadback textureReadback;
+
+        gpu::TextureDesc resolveSourceDesc{};
+        resolveSourceDesc.extent = {4, 4, 1};
+        resolveSourceDesc.format = gpu::Format::R8G8B8A8UNorm;
+        resolveSourceDesc.sampleCount = 4;
+        resolveSourceDesc.usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::ResolveSource;
+        gpu::Texture resolveSource(gpu::AdoptReference, gpu::CreateTexture(resolveSourceDesc, {}, &failure));
+        if (!resolveSource)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] texture transfer resource creation failed: resolve source: %s\n", failure.message);
+            return false;
+        }
+        gpu::TextureDesc resolveDestinationDesc = resolveSourceDesc;
+        resolveDestinationDesc.sampleCount = 1;
+        resolveDestinationDesc.usage = gpu::TextureUsage::ResolveDestination | gpu::TextureUsage::ShaderResource;
+        gpu::Texture resolveDestination(gpu::AdoptReference, gpu::CreateTexture(resolveDestinationDesc, {}, &failure));
+        if (!resolveDestination)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] texture transfer resource creation failed: resolve destination: %s\n", failure.message);
+            return false;
+        }
+
+        gpu::TextureDesc integerTextureDesc{};
+        integerTextureDesc.extent = {4, 4, 1};
+        integerTextureDesc.format = gpu::Format::R8G8B8A8UInt;
+        integerTextureDesc.usage = gpu::TextureUsage::ShaderResource | gpu::TextureUsage::UnorderedAccess;
+        integerTextureDesc.initialState = gpu::ResourceState::Common;
+        gpu::Texture integerTexture(gpu::AdoptReference, gpu::CreateTexture(integerTextureDesc, {}, &failure));
+        if (!integerTexture)
+        {
+            std::printf("[rhiNvrhiTests] integer UAV texture creation failed: %s\n", failure.message);
+            return false;
+        }
+
         gpu::TextureDesc renderTargetDesc{};
         renderTargetDesc.extent = {64, 64, 1};
         renderTargetDesc.format = gpu::Format::R8G8B8A8UNorm;
         renderTargetDesc.usage = gpu::TextureUsage::RenderTarget | gpu::TextureUsage::ShaderResource | gpu::TextureUsage::CopySource;
         renderTargetDesc.initialState = gpu::ResourceState::Common;
         gpu::Texture renderTarget(gpu::AdoptReference, gpu::CreateTexture(renderTargetDesc, {}, &failure));
+        gpu::TextureDesc depthTargetDesc{};
+        depthTargetDesc.extent = {64, 64, 1};
+        depthTargetDesc.format = gpu::Format::D24UNormS8UInt;
+        depthTargetDesc.usage = gpu::TextureUsage::DepthStencil;
+        depthTargetDesc.initialState = gpu::ResourceState::Common;
+        gpu::Texture depthTarget(gpu::AdoptReference, gpu::CreateTexture(depthTargetDesc, {}, &failure));
+        if (!depthTarget)
+        {
+            std::printf("[rhiNvrhiTests] depth-stencil texture creation failed: %s\n", failure.message);
+            return false;
+        }
         const float vertices[] = {-1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, -1.0f, 0.0f};
         gpu::BufferDesc vertexBufferDesc{};
         vertexBufferDesc.size = sizeof(vertices);
@@ -426,7 +493,7 @@ namespace
         indirectCountBufferDesc.initialState = gpu::ResourceState::Common;
         gpu::Buffer indirectCountBuffer(
             gpu::AdoptReference, gpu::CreateBuffer(indirectCountBufferDesc, {&indirectCountValue, sizeof(indirectCountValue)}, &failure));
-        if (!renderTarget || !vertexBuffer || !indexBuffer || !indirectBuffer || !indirectCountBuffer)
+        if (!renderTarget || !depthTarget || !vertexBuffer || !indexBuffer || !indirectBuffer || !indirectCountBuffer)
         {
             std::printf("[rhiNvrhiTests] draw resource creation failed: rt=%u vb=%u ib=%u indirect=%u count=%u %s\n",
                         static_cast<unsigned>(static_cast<bool>(renderTarget)), static_cast<unsigned>(static_cast<bool>(vertexBuffer)),
@@ -448,6 +515,23 @@ namespace
         if (!aliasBufferBefore || !aliasBufferAfter || aliasRequirements.size == 0 || !aliasHeap ||
             !gpu::BindMemory(aliasBufferBefore, aliasHeap, 0, &failure) || !gpu::BindMemory(aliasBufferAfter, aliasHeap, 0, &failure))
             return false;
+        gpu::MemoryBudgetSnapshot localBudget;
+        const gpu::ResourceRef residencyResources[] = {gpu::ResourceRef(aliasHeap.GetRef())};
+        if (!gpu::QueryMemoryBudget(gpu::MemorySegment::Local, localBudget, &failure) || localBudget.budget == 0 ||
+            !gpu::SetResidencyPriority(gpu::ResourceRef(aliasHeap.GetRef()), gpu::ResidencyPriority::High, &failure) ||
+            !gpu::SetResidencyPinned(gpu::ResourceRef(aliasHeap.GetRef()), true, &failure))
+        {
+            std::printf("[rhiNvrhiTests] residency setup failed: %s\n", failure.message);
+            return false;
+        }
+        if (gpu::Evict({residencyResources, 1}, {}, &failure) || failure.code != gpu::FailureCode::Busy ||
+            !gpu::SetResidencyPinned(gpu::ResourceRef(aliasHeap.GetRef()), false, &failure) ||
+            !gpu::Evict({residencyResources, 1}, {}, &failure))
+        {
+            std::printf("[rhiNvrhiTests] pinned residency contract failed: code=%u %s\n",
+                        static_cast<unsigned>(failure.code), failure.message);
+            return false;
+        }
 
         gpu::SamplerState sampler(gpu::AdoptReference, gpu::RequestSamplerState({}, &failure));
         if (!sampler)
@@ -652,28 +736,116 @@ namespace
         if (domainPipelineCache.InvalidateAll() != 1 || !domainPipelineCache.Shutdown())
             return false;
 
+        gpu::QueryPool timestampQueries(gpu::AdoptReference,
+                                        gpu::CreateQueryPool({gpu::QueryType::Timestamp, 2}, &failure));
+        gpu::QueryPool occlusionQueries(gpu::AdoptReference,
+                                        gpu::CreateQueryPool({gpu::QueryType::Occlusion, 1}, &failure));
+        gpu::QueryPool statisticsQueries(gpu::AdoptReference,
+                                         gpu::CreateQueryPool({gpu::QueryType::PipelineStatistics, 1}, &failure));
+        gpu::TimestampCalibration calibration{};
+        if (!timestampQueries || !occlusionQueries || !statisticsQueries ||
+            gpu::GetTimestampFrequency(gpu::QueueType::Graphics, &failure) == 0 ||
+            !gpu::CalibrateTimestamps(gpu::QueueType::Graphics, calibration, &failure) || !calibration.IsValid())
+            return false;
+        gpu::SetResourceDebugName(timestampQueries.GetRef(), "RHI Timestamp Queries");
+        gpu::SetResourceDebugName(occlusionQueries.GetRef(), "RHI Occlusion Queries");
+        gpu::SetResourceDebugName(statisticsQueries.GetRef(), "RHI Pipeline Statistics");
+
         gpu::CommandListRef commandList = gpu::CreateCommandList(gpu::CommandListType::Default, 0x56474e44524849ull, &failure);
         if (!commandList || !gpu::BindCommandList(commandList, &failure))
+            return false;
+        if (gpu::EndGpuEvent(&failure) || failure.code != gpu::FailureCode::InvalidArgument)
             return false;
         const gpu::RenderTargetSetup renderTargets{{{renderTarget, gpu::Format::Unknown, 0, 0, false}}, 1, {}};
         const gpu::VertexBufferBinding vertexBindingState{vertexBuffer, 0, 0};
         const gpu::IndexBufferBinding indexBindingState{indexBuffer, 0, gpu::IndexFormat::UInt16};
         const vanguard::u32 pushConstants[] = {textureDescriptor.GpuIndex(), bufferDescriptor.GpuIndex(), samplerDescriptor.GpuIndex(), 0};
-        if (!gpu::TransitionTexture(renderTarget, gpu::ResourceState::Common, gpu::ResourceState::RenderTarget, {}, &failure) ||
+        const gpu::Rect partialClear{8, 8, 32, 32};
+        if (gpu::TransitionTexture(renderTarget, gpu::ResourceState::CopySource, gpu::ResourceState::RenderTarget, {}, &failure) ||
+            failure.code != gpu::FailureCode::ResourceStateMismatch ||
+            gpu::TransitionBuffer(vertexBuffer, gpu::ResourceState::CopySource, gpu::ResourceState::VertexBuffer, &failure) ||
+            failure.code != gpu::FailureCode::ResourceStateMismatch ||
+            !gpu::TransitionTexture(renderTarget, gpu::ResourceState::Common, gpu::ResourceState::RenderTarget, {}, &failure) ||
             !gpu::TransitionBuffer(vertexBuffer, gpu::ResourceState::Common, gpu::ResourceState::VertexBuffer, &failure) ||
             !gpu::TransitionBuffer(indexBuffer, gpu::ResourceState::Common, gpu::ResourceState::IndexBuffer, &failure) ||
             !gpu::TransitionBuffer(indirectBuffer, gpu::ResourceState::Common, gpu::ResourceState::IndirectArgument, &failure) ||
-            !gpu::TransitionBuffer(indirectCountBuffer, gpu::ResourceState::Common, gpu::ResourceState::IndirectArgument, &failure) ||
+            !gpu::TransitionBuffer(indirectCountBuffer, gpu::ResourceState::Common, gpu::ResourceState::IndirectArgument, &failure))
+            return false;
+        const auto requireTransfer = [&failure](const bool condition, const char* const stage) noexcept
+        {
+            if (!condition)
+                std::fprintf(stderr, "[rhiNvrhiTests] texture transfer stage failed: %s: code=%u message=%s\n", stage,
+                             static_cast<unsigned>(failure.code), failure.message);
+            return condition;
+        };
+        const gpu::TextureCopyRegion outOfBoundsCopy{{}, {}, 3, 0, 0, 0, 0, 0, {2, 1, 1}};
+        const gpu::TextureCopyRegion partialCopy{{}, {}, 0, 0, 0, 2, 2, 0, {2, 2, 1}};
+        const gpu::TextureReadbackRegion partialReadback{{}, 1, 1, 0, {2, 2, 1}};
+        if (!requireTransfer(!gpu::CopyTexture(copyDestination, copySource, outOfBoundsCopy, &failure) &&
+                             failure.code == gpu::FailureCode::InvalidArgument, "copy bounds rejection") ||
+            !requireTransfer(!gpu::CopyTexture(copyDestination, copySource, {}, &failure) &&
+                             failure.code == gpu::FailureCode::ResourceStateMismatch, "copy state rejection") ||
+            !requireTransfer(gpu::TransitionTexture(copySource, gpu::ResourceState::Common,
+                                                    gpu::ResourceState::CopySource, {}, &failure), "source copy transition") ||
+            !requireTransfer(gpu::TransitionTexture(copyDestination, gpu::ResourceState::Common,
+                                                    gpu::ResourceState::CopyDestination, {}, &failure), "destination copy transition") ||
+            !requireTransfer((textureReadback = gpu::TextureReadback(
+                                  gpu::AdoptReference, gpu::RequestTextureReadback(copySource, partialReadback, &failure)))
+                                 .IsValid(),
+                             "texture readback request") ||
+            !requireTransfer(gpu::CopyTexture(copyDestination, copySource, {}, &failure), "texture copy") ||
+            !requireTransfer(gpu::CopyTexture(copyDestination, copySource, partialCopy, &failure), "texture region copy") ||
+            !requireTransfer(!gpu::ResolveTexture(resolveDestination, resolveSource, {}, &failure) &&
+                             failure.code == gpu::FailureCode::ResourceStateMismatch, "resolve state rejection") ||
+            !requireTransfer(gpu::TransitionTexture(resolveSource, gpu::ResourceState::Common,
+                                                    gpu::ResourceState::RenderTarget, {}, &failure), "resolve source render transition") ||
+            !requireTransfer(gpu::ClearColorTarget(resolveSource, {0.125f, 0.25f, 0.5f, 1.0f}, {}, nullptr, &failure),
+                             "resolve source clear") ||
+            !requireTransfer(gpu::TransitionTexture(resolveSource, gpu::ResourceState::RenderTarget,
+                                                    gpu::ResourceState::ResolveSource, {}, &failure), "resolve source transition") ||
+            !requireTransfer(gpu::TransitionTexture(resolveDestination, gpu::ResourceState::Common,
+                                                    gpu::ResourceState::ResolveDestination, {}, &failure),
+                             "resolve destination transition") ||
+            !requireTransfer(gpu::ResolveTexture(resolveDestination, resolveSource, {}, &failure), "texture resolve"))
+            return false;
+        gpu::TextureReadbackInfo readbackInfo{};
+        gpu::TextureReadbackMapping prematureMapping{};
+        if (!gpu::GetTextureReadbackInfo(textureReadback, readbackInfo, &failure) ||
+            readbackInfo.state != gpu::TextureReadbackState::PendingSubmission ||
+            gpu::MapTextureReadback(textureReadback, prematureMapping, &failure) || failure.code != gpu::FailureCode::Busy)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] completed texture readback contract failed: code=%u message=%s state=%u\n",
+                         static_cast<unsigned>(failure.code), failure.message, static_cast<unsigned>(readbackInfo.state));
+            return false;
+        }
+        if (!gpu::BeginGpuEvent("RHI Native Conformance", &failure) ||
+            !gpu::SetGpuMarker("Resource setup", &failure) || !gpu::IssueQuery(timestampQueries.GetRef(), 0, &failure) ||
+            !gpu::ClearColorTarget(renderTarget, {0.0f, 0.0f, 0.0f, 1.0f}, {}, nullptr, &failure) ||
+            !gpu::ClearColorTarget(renderTarget, {0.25f, 0.5f, 0.75f, 1.0f}, {0, 1, 0, 1}, &partialClear, &failure) ||
+            !gpu::ClearDepthTarget(depthTarget, 0.0f, {}, nullptr, &failure) ||
+            !gpu::ClearStencilTarget(depthTarget, 3, {0, 1, 0, 1}, &partialClear, &failure) ||
+            !gpu::ClearDepthStencilTarget(depthTarget, 1.0f, 0, {}, nullptr, &failure) ||
+            !gpu::ClearTextureUav(texture, gpu::ColorValue{0.0f, 0.0f, 0.0f, 0.0f}, {}, &failure) ||
+            !gpu::ClearTextureUav(integerTexture, 0x10203040u, {}, &failure) ||
             !gpu::BarrierBufferAliasing(false, aliasBufferAfter, aliasBufferBefore, &failure) ||
+            !gpu::ClearBufferUav(aliasBufferAfter, 0u, &failure) ||
+            !gpu::DiscardTexture(depthTarget, {}, &failure) || !gpu::DiscardBuffer(aliasBufferAfter, &failure) ||
             !gpu::SetPipeline(executionGraphicsPipeline, &failure) || !gpu::SetupRenderTargets(renderTargets, &failure) ||
             !gpu::SetViewport({0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f}, &failure) || !gpu::SetScissors({0, 0, 64, 64}, &failure) ||
+            !gpu::SetStencilRefValue(17, &failure) || !gpu::SetBlendFactor({0.25f, 0.5f, 0.75f, 1.0f}, &failure) ||
             !gpu::BindVertexBuffers(0, {&vertexBindingState, 1}, &failure) || !gpu::BindIndexBuffer(indexBindingState, &failure) ||
             !gpu::BindIndirectArguments(indirectBuffer, {}, &failure) ||
-            !gpu::SetPushConstants(pushConstants, sizeof(pushConstants), &failure) || !gpu::DrawPrimitive({3, 1, 0, 0}, &failure) ||
+            !gpu::SetPushConstants(pushConstants, sizeof(pushConstants), &failure) ||
+            !gpu::BeginGpuEvent("Graphics queries", &failure) ||
+            !gpu::BeginQuery(occlusionQueries.GetRef(), 0, &failure) ||
+            !gpu::BeginQuery(statisticsQueries.GetRef(), 0, &failure) ||
+            !gpu::DrawPrimitive({3, 1, 0, 0}, &failure) ||
             !gpu::DrawIndexedPrimitive({3, 1, 0, 0, 0}, &failure) || !gpu::DrawPrimitiveIndirect(0, 1, &failure) ||
             !gpu::DrawIndexedPrimitiveIndirect(sizeof(gpu::IndirectDrawArguments), 1, &failure) ||
             !gpu::BindIndirectArguments(indirectBuffer, indirectCountBuffer, &failure) ||
             !gpu::DrawIndexedPrimitiveIndirectCount(sizeof(gpu::IndirectDrawArguments), 0, 1, &failure) ||
+            !gpu::EndQuery(statisticsQueries.GetRef(), 0, &failure) ||
+            !gpu::EndQuery(occlusionQueries.GetRef(), 0, &failure) || !gpu::EndGpuEvent(&failure) ||
             !gpu::BindIndirectArguments(indirectBuffer, {}, &failure) || !gpu::SetPipeline(computePipeline, &failure) ||
             !gpu::DispatchCompute(1, 1, 1, &failure) ||
             !gpu::DispatchIndirectCompute(sizeof(gpu::IndirectDrawArguments) + sizeof(gpu::IndirectDrawIndexedArguments), &failure) ||
@@ -685,7 +857,12 @@ namespace
             !gpu::TransitionBuffer(destination, gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, &failure) ||
             !gpu::CopyBuffer(destination, 0, source, 0, sizeof(sourceData), &failure) ||
             !gpu::TransitionBuffer(destination, gpu::ResourceState::CopyDestination, gpu::ResourceState::CopySource, &failure) ||
-            !gpu::CopyBuffer(readback, 0, destination, 0, sizeof(sourceData), &failure) || !gpu::FlushPendingBarriers(&failure))
+            !gpu::CopyBuffer(readback, 0, destination, 0, sizeof(sourceData), &failure) ||
+            !gpu::IssueQuery(timestampQueries.GetRef(), 1, &failure) ||
+            !gpu::ResolveQueries(timestampQueries.GetRef(), 0, 2, &failure) ||
+            !gpu::ResolveQueries(occlusionQueries.GetRef(), 0, 1, &failure) ||
+            !gpu::ResolveQueries(statisticsQueries.GetRef(), 0, 1, &failure) || !gpu::EndGpuEvent(&failure) ||
+            !gpu::FlushPendingBarriers(&failure))
         {
             std::printf("[rhiNvrhiTests] graphics/compute command recording failed: %s\n", failure.message);
             gpu::UnbindCommandList();
@@ -693,11 +870,17 @@ namespace
             return false;
         }
         gpu::UnbindCommandList();
+        if (gpu::AcquireQueries(timestampQueries.GetRef(), 0, 2, &failure) || failure.code != gpu::FailureCode::Busy)
+            return false;
         const gpu::CommandListRef submission[] = {commandList};
         gpu::GpuFence completion{};
         if (!gpu::CloseAndSubmitCommandLists("rhi resource conformance", {submission, 1}, gpu::CommandListSyncType::None, completion,
                                              &failure) ||
             !completion.IsValid())
+            return false;
+        gpu::ResidencyFenceSet inFlightUse;
+        inFlightUse.Include({completion.queue, completion.value + 1u});
+        if (gpu::Evict({residencyResources, 1}, inFlightUse, &failure) || failure.code != gpu::FailureCode::Busy)
             return false;
 
         if (resourceDescriptors)
@@ -712,6 +895,96 @@ namespace
         }
         if (!gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure) || !gpu::RetireResources(&failure))
             return false;
+        if (!gpu::Evict({residencyResources, 1}, {}, &failure) ||
+            !gpu::MakeResident({residencyResources, 1}, &failure))
+            return false;
+        gpu::TextureReadbackMapping textureMapping{};
+        if (!gpu::GetTextureReadbackInfo(textureReadback, readbackInfo, &failure) ||
+            readbackInfo.state != gpu::TextureReadbackState::Ready || readbackInfo.completion != completion ||
+            !gpu::MapTextureReadback(textureReadback, textureMapping, &failure) ||
+            textureMapping.format != gpu::Format::R8G8B8A8UNorm || textureMapping.extent.width != 2 ||
+            textureMapping.extent.height != 2 || textureMapping.rowPitch < 8 || textureMapping.depthPitch < 16)
+            return false;
+        bool textureReadbackMatches = true;
+        const auto* const mappedPixels = static_cast<const vanguard::u8*>(textureMapping.data);
+        for (vanguard::u32 row = 0; row < 2; ++row)
+            for (vanguard::u32 byte = 0; byte < 8; ++byte)
+                textureReadbackMatches = textureReadbackMatches &&
+                                         mappedPixels[row * textureMapping.rowPitch + byte] == pixels[(row + 1) * 16 + 4 + byte];
+        if (!textureReadbackMatches || !gpu::UnmapTextureReadback(textureReadback, &failure))
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] texture readback bytes/unmap failed: match=%u code=%u message=%s\n",
+                         textureReadbackMatches ? 1u : 0u, static_cast<unsigned>(failure.code), failure.message);
+            return false;
+        }
+
+        gpu::TextureDesc discardedSourceDesc = copySourceDesc;
+        discardedSourceDesc.initialState = gpu::ResourceState::CopySource;
+        gpu::Texture discardedSource(gpu::AdoptReference,
+                                     gpu::CreateTexture(discardedSourceDesc, {&textureSubresource, 1}, &failure));
+        gpu::CommandListRef discardedCommand = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5244424b44495343ull, &failure);
+        if (!discardedSource || !discardedCommand || !gpu::BindCommandList(discardedCommand, &failure))
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] discarded readback setup failed: %s\n", failure.message);
+            return false;
+        }
+        gpu::TextureReadback discardedReadback(
+            gpu::AdoptReference, gpu::RequestTextureReadback(discardedSource, {}, &failure));
+        gpu::UnbindCommandList();
+        if (!discardedReadback)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] discarded readback request failed: %s\n", failure.message);
+            return false;
+        }
+        gpu::DiscardCommandList(discardedCommand);
+        gpu::TextureReadbackInfo discardedInfo{};
+        if (!gpu::GetTextureReadbackInfo(discardedReadback, discardedInfo, &failure) ||
+            discardedInfo.state != gpu::TextureReadbackState::Failed || discardedInfo.completion.IsValid() ||
+            gpu::MapTextureReadback(discardedReadback, textureMapping, &failure) ||
+            failure.code != gpu::FailureCode::BackendFailure)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] discarded readback state failed: state=%u code=%u message=%s\n",
+                         static_cast<unsigned>(discardedInfo.state), static_cast<unsigned>(failure.code), failure.message);
+            return false;
+        }
+        discardedReadback.Reset();
+        discardedSource.Reset();
+        vanguard::u64 timestampBegin = 0;
+        vanguard::u64 timestampEnd = 0;
+        vanguard::u64 visibleSamples = 0;
+        gpu::PipelineStatistics statistics{};
+        if (!gpu::AcquireQueries(timestampQueries.GetRef(), 0, 2, &failure) ||
+            !gpu::GetQueryResult(timestampQueries.GetRef(), 0, timestampBegin, &failure) ||
+            !gpu::GetQueryResult(timestampQueries.GetRef(), 1, timestampEnd, &failure))
+            return false;
+        gpu::ReleaseQueries(timestampQueries.GetRef());
+        if (!gpu::AcquireQueries(occlusionQueries.GetRef(), 0, 1, &failure) ||
+            !gpu::GetQueryResult(occlusionQueries.GetRef(), 0, visibleSamples, &failure))
+            return false;
+        gpu::ReleaseQueries(occlusionQueries.GetRef());
+        if (!gpu::AcquireQueries(statisticsQueries.GetRef(), 0, 1, &failure) ||
+            !gpu::GetQueryResult(statisticsQueries.GetRef(), 0, statistics, &failure))
+            return false;
+        gpu::ReleaseQueries(statisticsQueries.GetRef());
+        if (timestampBegin == 0 || timestampEnd < timestampBegin || statistics.inputAssemblerVertices == 0)
+            return false;
+        const gpu::ResidencyStats residencyStats = gpu::GetResidencyStats();
+        if (residencyStats.budgetQueries == 0 || residencyStats.priorityChanges == 0 || residencyStats.makeResidentCalls == 0 ||
+            residencyStats.objectsMadeResident == 0 || residencyStats.objectsEvicted == 0 || residencyStats.rejectedEvictions == 0 ||
+            residencyStats.automaticWorkingSetChecks == 0 || residencyStats.automaticMakeResidentCalls != 1 ||
+            residencyStats.automaticObjectsMadeResident != 1 || residencyStats.automaticWorkingSetFailures != 0 ||
+            residencyStats.policyMaintenanceCalls == 0 || residencyStats.policyPinnedObjects != 0 ||
+            residencyStats.trackedAllocations == 0 || residencyStats.trackedResidentBytes + residencyStats.trackedEvictedBytes == 0 ||
+            residencyStats.lastObservedBudget == 0)
+        {
+            std::printf("[rhiNvrhiTests] residency telemetry contract failed: tracked=%llu resident=%llu evicted=%llu maintenance=%llu pinned=%llu\n",
+                        static_cast<unsigned long long>(residencyStats.trackedAllocations),
+                        static_cast<unsigned long long>(residencyStats.trackedResidentBytes),
+                        static_cast<unsigned long long>(residencyStats.trackedEvictedBytes),
+                        static_cast<unsigned long long>(residencyStats.policyMaintenanceCalls),
+                        static_cast<unsigned long long>(residencyStats.policyPinnedObjects));
+            return false;
+        }
         if (resourceDescriptors)
         {
             const gpu::DescriptorHandle recycledTexture = gpu::AllocateDescriptor(resourceDescriptors, &failure);
@@ -741,7 +1014,14 @@ namespace
         source.Reset();
         destination.Reset();
         readback.Reset();
+        textureReadback.Reset();
+        copySource.Reset();
+        copyDestination.Reset();
+        resolveSource.Reset();
+        resolveDestination.Reset();
+        discardedSource.Reset();
         renderTarget.Reset();
+        depthTarget.Reset();
         vertexBuffer.Reset();
         indexBuffer.Reset();
         indirectBuffer.Reset();
@@ -750,6 +1030,7 @@ namespace
         aliasBufferAfter.Reset();
         aliasHeap.Reset();
         texture.Reset();
+        integerTexture.Reset();
         sampler.Reset();
         executionGraphicsPipeline.Reset();
         pushConstantLayout.Reset();
@@ -757,7 +1038,408 @@ namespace
         bindingLayout.Reset();
         resourceDescriptors.Reset();
         samplerDescriptors.Reset();
-        return gpu::RetireResources(&failure) && gpu::WaitIdle(&failure) && gpu::RetireResources(&failure);
+        timestampQueries.Reset();
+        occlusionQueries.Reset();
+        statisticsQueries.Reset();
+        if (!gpu::RetireResources(&failure) || !gpu::FlushRetiredResources(&failure)) return false;
+        const gpu::ResidencyStats retiredResidencyStats = gpu::GetResidencyStats();
+        if (retiredResidencyStats.trackedAllocations != 0 || retiredResidencyStats.trackedResidentBytes != 0 ||
+            retiredResidencyStats.trackedEvictedBytes != 0)
+            std::printf("[rhiNvrhiTests] retired residency accounting failed: tracked=%llu resident=%llu evicted=%llu\n",
+                        static_cast<unsigned long long>(retiredResidencyStats.trackedAllocations),
+                        static_cast<unsigned long long>(retiredResidencyStats.trackedResidentBytes),
+                        static_cast<unsigned long long>(retiredResidencyStats.trackedEvictedBytes));
+        return retiredResidencyStats.trackedAllocations == 0 && retiredResidencyStats.trackedResidentBytes == 0 &&
+               retiredResidencyStats.trackedEvictedBytes == 0;
+    }
+
+    [[nodiscard]] bool TestGpuCounters(gpu::Failure& failure) noexcept
+    {
+        gpu::GpuCounterSystem counters;
+        gpu::GpuCounterFrameHandle frame;
+        gpu::GpuCounterScopeToken scope;
+        gpu::CommandListRef commandList;
+        bool commandListBound = false;
+
+        const auto cleanup = [&]() noexcept
+        {
+            if (scope.IsValid() && commandListBound) static_cast<void>(counters.EndScope(scope));
+            if (commandListBound)
+            {
+                gpu::UnbindCommandList();
+                commandListBound = false;
+            }
+            if (commandList.IsValid()) gpu::DiscardCommandList(commandList);
+            if (frame.IsValid() && counters.GetFrameState(frame) != gpu::GpuCounterFrameState::Empty)
+                static_cast<void>(counters.DiscardFrame(frame));
+            if (counters.IsInitialized()) static_cast<void>(counters.Shutdown());
+        };
+
+        const gpu::GpuCounterScopeId scopeId = gpu::MakeGpuCounterScopeId("Native.Counter.Conformance");
+        if (!counters.Initialize({3, 8, 4, gpu::QueueType::Graphics, true}, &failure) ||
+            !counters.RegisterScope(scopeId, "Native.Counter.Conformance", &failure))
+        {
+            cleanup();
+            return false;
+        }
+        commandList = gpu::CreateCommandList(gpu::CommandListType::Default, 0x475055434f554e54ull, &failure);
+        if (!commandList || !gpu::BindCommandList(commandList, &failure))
+        {
+            cleanup();
+            return false;
+        }
+        commandListBound = true;
+        if (!counters.BeginFrame(42, frame, &failure) || !counters.BeginScope(frame, scopeId, scope, &failure) ||
+            !counters.EndScope(scope, &failure) || !counters.EndFrame(frame, &failure))
+        {
+            cleanup();
+            return false;
+        }
+        gpu::UnbindCommandList();
+        commandListBound = false;
+        const gpu::CommandListRef submission[] = {commandList};
+        gpu::GpuFence completion;
+        if (!gpu::CloseAndSubmitCommandLists("GPU counter conformance", {submission, 1},
+                                             gpu::CommandListSyncType::None, completion, &failure))
+        {
+            cleanup();
+            return false;
+        }
+        commandList = {};
+        if (!counters.CommitFrame(frame, completion, &failure) ||
+            !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure) || counters.Collect(&failure) != 1)
+        {
+            cleanup();
+            return false;
+        }
+        gpu::GpuCounterFrameView view;
+        if (!counters.GetOldestReadyFrame(view, &failure) || view.handle != frame || view.frameNumber != 42 ||
+            view.sampleCount != 1 || !view.samples[0].valid || view.samples[0].scope != scopeId ||
+            view.gpuEnd < view.gpuBegin || view.samples[0].gpuEnd < view.samples[0].gpuBegin ||
+            !view.hasPipelineStatistics || !view.calibration.IsValid() ||
+            !counters.ConsumeFrame(frame, &failure) || !counters.Shutdown(&failure))
+        {
+            cleanup();
+            return false;
+        }
+        return true;
+    }
+
+    class PresentationWindowBackend final : public window::IWindowBackend
+    {
+    public:
+        explicit PresentationWindowBackend(const HWND nativeWindow) noexcept : m_nativeWindow(nativeWindow)
+        {
+            m_state.placement.logicalExtent = {320, 180};
+            m_state.placement.display = {1};
+            m_state.placement.visible = true;
+            m_state.pixelExtent = {320, 180};
+            m_state.safeArea = {{0, 0}, {320, 180}};
+            m_state.contentScale = 1.0f;
+        }
+
+        window::BackendStatus EnumerateDisplays(window::BackendDisplaySnapshot* const displays,
+                                                const vanguard::u32 capacity,
+                                                vanguard::u32& count) noexcept override
+        {
+            count = 1;
+            if (displays == nullptr || capacity == 0)
+                return window::BackendStatus::Failure(-1, "presentation test display storage is unavailable");
+            displays[0].id = {1};
+            displays[0].fingerprint = 1;
+            displays[0].bounds = {{0, 0}, {1920, 1080}};
+            displays[0].workArea = displays[0].bounds;
+            displays[0].desktopPixelExtent = {1920, 1080};
+            displays[0].desktopRefreshRate = {60, 1};
+            displays[0].contentScale = 1.0f;
+            displays[0].primary = true;
+            return {};
+        }
+
+        window::BackendStatus Create(const window::BackendWindowDescriptor&,
+                                     window::BackendWindowId& windowId,
+                                     window::BackendWindowState& state) noexcept override
+        {
+            if (m_alive) return window::BackendStatus::Failure(-1, "presentation test window already exists");
+            m_alive = true;
+            windowId = {1};
+            state = m_state;
+            return {};
+        }
+
+        window::BackendStatus ApplyWindowState(window::BackendWindowId,
+                                               const window::BackendWindowRequest&,
+                                               window::BackendWindowState& state) noexcept override
+        {
+            if (!m_alive) return window::BackendStatus::Failure(-1, "presentation test window is unavailable");
+            state = m_state;
+            return {};
+        }
+
+        window::BackendStatus SetWindowTitle(window::BackendWindowId, const char*) noexcept override
+        {
+            return m_alive ? window::BackendStatus::Success()
+                           : window::BackendStatus::Failure(-1, "presentation test window is unavailable");
+        }
+
+        window::BackendStatus ResolvePresentationSurface(
+            window::BackendWindowId, window::NativePresentationSurface& surface) noexcept override
+        {
+            surface = {};
+            if (!m_alive || m_nativeWindow == nullptr)
+                return window::BackendStatus::Failure(-1, "presentation test native surface is unavailable");
+            surface = {window::NativePresentationSurfaceKind::Win32, m_nativeWindow, nullptr};
+            return {};
+        }
+
+        window::BackendStatus DestroyWindow(window::BackendWindowId) noexcept override
+        {
+            if (!m_alive) return window::BackendStatus::Failure(-1, "presentation test window is unavailable");
+            m_alive = false;
+            return {};
+        }
+
+        [[nodiscard]] window::BackendWindowEvent ChangeState(const window::BackendEventType type,
+                                                              const window::WindowExtent extent,
+                                                              const bool minimized,
+                                                              const bool hdrCapable) noexcept
+        {
+            m_state.placement.logicalExtent = extent;
+            m_state.pixelExtent = extent;
+            m_state.safeArea = {{0, 0}, extent};
+            m_state.minimized = minimized;
+            m_state.hdrCapable = hdrCapable;
+            return {type, {1}, m_state, 1, 0};
+        }
+
+    private:
+        HWND m_nativeWindow = nullptr;
+        window::BackendWindowState m_state;
+        bool m_alive = false;
+    };
+
+    rendering::RenderFrameExecutionStatus ExecutePresentationFrame(const rendering::RenderFrameInfo&,
+                                                                    const vanguard::jobs::JobContext&,
+                                                                    void*) noexcept
+    {
+        return rendering::RenderFrameExecutionStatus::Success();
+    }
+
+    [[nodiscard]] bool TestPresentationService() noexcept
+    {
+        const auto require = [](const bool condition, const char* const stage) noexcept
+        {
+            if (!condition) std::fprintf(stderr, "[rhiNvrhiTests] presentation stage failed: %s\n", stage);
+            return condition;
+        };
+        const HWND nativeWindow = CreateWindowExW(0, L"STATIC", L"Vanguard Presentation Service Test",
+                                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                                   320, 180, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!require(nativeWindow != nullptr, "native window create")) return false;
+        ShowWindow(nativeWindow, SW_SHOWNA);
+        UpdateWindow(nativeWindow);
+        PresentationWindowBackend backend(nativeWindow);
+        window::WindowManager windows;
+        window::Failure windowFailure;
+        if (!require(windows.Initialize(backend, &windowFailure), "window manager initialize")) return false;
+
+        window::WindowDescriptor windowDesc;
+        windowDesc.title = "Presentation Service Test";
+        windowDesc.placement.logicalExtent = {320, 180};
+        windowDesc.placement.visible = true;
+        window::WindowHandle windowHandle;
+        if (!require(windows.Create(windowDesc, windowHandle, &windowFailure), "window create")) return false;
+
+        rendering::RenderFrameDispatcher dispatcher;
+        rendering::ViewportFailure viewportFailure;
+        if (!require(dispatcher.Initialize(&ExecutePresentationFrame, nullptr, &viewportFailure), "dispatcher initialize")) return false;
+        rendering::ViewportManager viewports;
+        if (!require(viewports.Initialize(dispatcher, &viewportFailure), "viewport manager initialize")) return false;
+
+        rendering::PresentationService presentation;
+        rendering::PresentationFailure presentationFailure;
+        if (!require(presentation.Initialize(windows, viewports, &presentationFailure), "presentation initialize")) return false;
+        rendering::PresentationOutputDesc outputDesc;
+        outputDesc.name = "Primary Presentation";
+        outputDesc.window = windowHandle;
+        outputDesc.renderExtent = {320, 180};
+        rendering::PresentationOutputHandle output;
+        if (!require(presentation.CreateOutput(outputDesc, output, &presentationFailure), "output create")) return false;
+        if (!presentation.Tick(&presentationFailure))
+        {
+            std::fprintf(stderr,
+                         "[rhiNvrhiTests] initial reconcile failed: code=%u window=%u viewport=%u rhi=%u message=%s\n",
+                         static_cast<unsigned>(presentationFailure.code),
+                         static_cast<unsigned>(presentationFailure.windowFailure.code),
+                         static_cast<unsigned>(presentationFailure.viewportFailure.code),
+                         static_cast<unsigned>(presentationFailure.rhiFailure.code),
+                         presentationFailure.message != nullptr ? presentationFailure.message : "none");
+            return false;
+        }
+
+        rendering::PresentationOutputSnapshot outputSnapshot;
+        if (!require(presentation.Snapshot(output, outputSnapshot) &&
+                     outputSnapshot.state == rendering::PresentationOutputState::Ready &&
+                     outputSnapshot.swapChainCreations == 1, "initial output snapshot")) return false;
+        window::PresentationAttachmentSnapshot attachment;
+        if (!require(windows.Snapshot(outputSnapshot.attachment, attachment) &&
+                     attachment.acknowledgedPixelExtentRevision == attachment.requiredPixelExtentRevision &&
+                     attachment.acknowledgedSurfaceRevision == attachment.requiredSurfaceRevision,
+                     "initial acknowledgement")) return false;
+
+        rendering::EngineViewportDesc engineDesc;
+        engineDesc.contextName = "PresentationTest";
+        engineDesc.output = outputSnapshot.renderViewport;
+        rendering::EngineViewportHandle engineViewport;
+        if (!require(viewports.CreateEngineViewport(engineDesc, engineViewport, &viewportFailure),
+                     "engine viewport create")) return false;
+        if (!require(!presentation.DestroyOutput(output, &presentationFailure) &&
+                     presentationFailure.code == rendering::PresentationFailureCode::Busy,
+                     "referenced output destroy rejection")) return false;
+
+        window::BackendWindowEvent event = backend.ChangeState(window::BackendEventType::PixelExtentChanged,
+                                                                {400, 240}, false, false);
+        if (!require(windows.ProcessBackendEvent(event, &windowFailure) && presentation.Tick(&presentationFailure),
+                     "resize reconcile")) return false;
+        if (!require(presentation.Snapshot(output, outputSnapshot) && outputSnapshot.resizeApplications == 1,
+                     "resize telemetry")) return false;
+
+        event = backend.ChangeState(window::BackendEventType::Minimized, {400, 240}, true, false);
+        if (!require(windows.ProcessBackendEvent(event, &windowFailure) && presentation.Tick(&presentationFailure) &&
+                     presentation.Snapshot(output, outputSnapshot) &&
+                     outputSnapshot.state == rendering::PresentationOutputState::Suspended,
+                     "suspension reconcile")) return false;
+
+        event = backend.ChangeState(window::BackendEventType::HdrStateChanged, {400, 240}, false, true);
+        if (!require(windows.ProcessBackendEvent(event, &windowFailure), "surface event") ||
+            !require(presentation.Tick(&presentationFailure), "surface tick") ||
+            !require(presentation.Snapshot(output, outputSnapshot), "surface snapshot")) return false;
+        if (!require(outputSnapshot.state == rendering::PresentationOutputState::Ready &&
+                     outputSnapshot.surfaceReplacements == 1 && outputSnapshot.swapChainCreations == 2,
+                     "surface replacement telemetry"))
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] surface state=%u replacements=%llu creations=%llu\n",
+                         static_cast<unsigned>(outputSnapshot.state),
+                         static_cast<unsigned long long>(outputSnapshot.surfaceReplacements),
+                         static_cast<unsigned long long>(outputSnapshot.swapChainCreations));
+            return false;
+        }
+
+        if (!require(viewports.DestroyEngineViewport(engineViewport, &viewportFailure), "engine viewport destroy") ||
+            !require(presentation.DestroyOutput(output, &presentationFailure), "output destroy") ||
+            !require(presentation.Shutdown(&presentationFailure), "presentation shutdown") ||
+            !require(viewports.Shutdown(&viewportFailure), "viewport shutdown") ||
+            !require(dispatcher.Shutdown(&viewportFailure), "dispatcher shutdown") ||
+            !require(windows.DestroyWindow(windowHandle, &windowFailure), "window destroy") ||
+            !require(windows.Shutdown(&windowFailure), "window manager shutdown")) return false;
+        const bool retired = gpu::WaitIdle() && gpu::RetireResources();
+        DestroyWindow(nativeWindow);
+        return retired;
+    }
+
+    [[nodiscard]] bool TestSwapChain(const HWND window, gpu::Failure& failure) noexcept
+    {
+        ShowWindow(window, SW_SHOWNA);
+        UpdateWindow(window);
+        gpu::SwapChainDesc desc{};
+        desc.surface = {gpu::PresentationSurfaceKind::Win32, window, nullptr};
+        desc.width = 320;
+        desc.height = 180;
+        desc.bufferCount = 3;
+        desc.format = gpu::Format::B8G8R8A8UNorm;
+        desc.presentMode = gpu::PresentMode::Fifo;
+        desc.allowTearing = true;
+        desc.colorSpace = gpu::ColorSpace::Srgb;
+        gpu::SwapChainDesc invalidLatencyDesc = desc;
+        invalidLatencyDesc.frameLatency.maximumFramesInFlight = 0;
+        if (gpu::CreateSwapChainWithBackBuffer(invalidLatencyDesc, &failure).IsValid() ||
+            failure.code != gpu::FailureCode::InvalidArgument) return false;
+        gpu::SwapChain swapChain(gpu::AdoptReference, gpu::CreateSwapChainWithBackBuffer(desc, &failure));
+        if (!swapChain) return false;
+        gpu::SetResourceDebugName(swapChain, "RHI Conformance SwapChain");
+
+        if (gpu::SetSwapChainPresentParameters(swapChain, {gpu::PresentMode::Immediate, 1, false}, &failure) ||
+            failure.code != gpu::FailureCode::InvalidArgument) return false;
+        if (!gpu::SetSwapChainPresentParameters(swapChain, {gpu::PresentMode::Immediate, 0, false}, &failure)) return false;
+
+        gpu::AcquiredBackBuffer abandonedBackBuffer;
+        if (!gpu::AcquireBackBuffer(swapChain, abandonedBackBuffer, &failure) || !abandonedBackBuffer.IsValid()) return false;
+        gpu::AcquiredBackBuffer duplicateAcquisition;
+        if (gpu::AcquireBackBuffer(swapChain, duplicateAcquisition, &failure) || failure.code != gpu::FailureCode::Busy)
+            return false;
+        if (gpu::ResizeBackbuffer(400, 240, swapChain, &failure) || failure.code != gpu::FailureCode::Busy) return false;
+
+        gpu::TextureRef retainedBackBuffer = abandonedBackBuffer.texture;
+        gpu::AddRef(retainedBackBuffer);
+        if (!gpu::AbandonBackBuffer(abandonedBackBuffer, &failure))
+        {
+            static_cast<void>(gpu::SafeRelease(retainedBackBuffer));
+            return false;
+        }
+        if (gpu::ResizeBackbuffer(400, 240, swapChain, &failure) || failure.code != gpu::FailureCode::Busy)
+        {
+            static_cast<void>(gpu::SafeRelease(retainedBackBuffer));
+            return false;
+        }
+        static_cast<void>(gpu::SafeRelease(retainedBackBuffer));
+        if (!gpu::ResizeBackbuffer(400, 240, swapChain, &failure)) return false;
+
+        gpu::AcquiredBackBuffer backBuffer;
+        if (!gpu::AcquireBackBuffer(swapChain, backBuffer, &failure) || backBuffer.width != 400 || backBuffer.height != 240)
+            return false;
+        gpu::AcquiredBackBuffer staleBackBuffer = backBuffer;
+        ++staleBackBuffer.serial;
+        if (gpu::AbandonBackBuffer(staleBackBuffer, &failure) || failure.code != gpu::FailureCode::InvalidReference)
+            return false;
+
+        gpu::CommandListRef commandList =
+            gpu::CreateCommandList(gpu::CommandListType::Default, 0x5357415043484149ull, &failure);
+        if (!commandList || !gpu::BindCommandList(commandList, &failure) ||
+            !gpu::TransitionSwapChainPresent(backBuffer, &failure))
+        {
+            if (gpu::GetBoundCommandList().IsValid()) gpu::UnbindCommandList();
+            if (commandList.IsValid()) gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        if (gpu::TransitionSwapChainPresent(backBuffer, &failure) || failure.code != gpu::FailureCode::InvalidArgument)
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        gpu::UnbindCommandList();
+        if (gpu::Present(backBuffer, &failure) || failure.code != gpu::FailureCode::Busy)
+        {
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        const gpu::CommandListRef submissions[] = {commandList};
+        gpu::GpuFence completion{};
+        if (!gpu::CloseAndSubmitCommandLists("swap-chain present transition", {submissions, 1},
+                                             gpu::CommandListSyncType::None, completion, &failure)) return false;
+        if (!gpu::Present(backBuffer, &failure)) return false;
+        if (gpu::Present(backBuffer, &failure) || failure.code != gpu::FailureCode::InvalidReference) return false;
+        if (!gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure)) return false;
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (!gpu::ResizeBackbuffer(480, 270, swapChain, &failure)) return false;
+        gpu::AcquiredBackBuffer finalBackBuffer;
+        if (!gpu::AcquireBackBuffer(swapChain, finalBackBuffer, &failure) ||
+            !gpu::AbandonBackBuffer(finalBackBuffer, &failure)) return false;
+        const gpu::SwapChainStats stats = gpu::GetSwapChainStats(swapChain);
+        if (stats.state != gpu::SwapChainState::Available || stats.acquisitions != 3 ||
+            stats.abandonedAcquisitions != 2 || stats.presentedFrames != 1 || stats.resizeCount != 2 ||
+            stats.width != 480 || stats.height != 270 || stats.rejectedOperations < 4 ||
+            !stats.frameLatency.enabled || stats.frameLatency.maximumFramesInFlight != 2 ||
+            stats.frameLatencyWaits != stats.acquisitions || stats.frameLatencyTimeouts != 0 ||
+            stats.colorSpace != gpu::ColorSpace::Srgb) return false;
+
+        swapChain.Reset();
+        return gpu::WaitIdle(&failure) && gpu::RetireResources(&failure);
     }
 } // namespace
 
@@ -803,9 +1485,37 @@ int main()
 
     const vanguard::rhi::Capabilities& capabilities = vanguard::rhi::GetCapabilities();
     if (capabilities.backend != vanguard::rhi::BackendKind::D3D12 || capabilities.adapterName[0] == '\0' ||
-        vanguard::rhi::TestDeviceState() != vanguard::rhi::DeviceState::Operational)
+        vanguard::rhi::TestDeviceState() != vanguard::rhi::DeviceState::Operational ||
+        !capabilities.occlusionQueries || !capabilities.pipelineStatisticsQueries || !capabilities.timestampQueries ||
+        !capabilities.timestampCalibration || !capabilities.gpuMarkers || !capabilities.memoryBudgetQueries ||
+        !capabilities.explicitResidency || capabilities.rayTracing ||
+        capabilities.rayTracingPipeline || capabilities.meshShaders || capabilities.variableRateShading)
     {
         std::printf("[rhiNvrhiTests] invalid device capability contract\n");
+        static_cast<void>(vanguard::jobs::Shutdown());
+        return 1;
+    }
+    const HWND presentationWindow = CreateWindowExW(0, L"STATIC", L"Vanguard RHI SwapChain Test",
+                                                     WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                                     320, 180, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (presentationWindow == nullptr || !TestSwapChain(presentationWindow, failure))
+    {
+        std::fprintf(stderr, "[rhiNvrhiTests] swap-chain test failed: %s (0x%llx)\n", failure.message,
+                     static_cast<unsigned long long>(failure.backendCode));
+        static_cast<void>(vanguard::rhi::WaitIdle());
+        static_cast<void>(vanguard::rhi::RetireResources());
+        static_cast<void>(vanguard::rhi::Shutdown());
+        if (presentationWindow != nullptr) DestroyWindow(presentationWindow);
+        static_cast<void>(vanguard::jobs::Shutdown());
+        return 1;
+    }
+    if (!TestPresentationService())
+    {
+        std::fprintf(stderr, "[rhiNvrhiTests] presentation service integration test failed\n");
+        static_cast<void>(vanguard::rhi::WaitIdle());
+        static_cast<void>(vanguard::rhi::RetireResources());
+        static_cast<void>(vanguard::rhi::Shutdown());
+        DestroyWindow(presentationWindow);
         static_cast<void>(vanguard::jobs::Shutdown());
         return 1;
     }
@@ -815,6 +1525,17 @@ int main()
         static_cast<void>(vanguard::rhi::WaitIdle());
         static_cast<void>(vanguard::rhi::RetireResources());
         static_cast<void>(vanguard::rhi::Shutdown());
+        DestroyWindow(presentationWindow);
+        static_cast<void>(vanguard::jobs::Shutdown());
+        return 1;
+    }
+    if (!TestGpuCounters(failure))
+    {
+        std::printf("[rhiNvrhiTests] GPU counter test failed: %s\n", failure.message);
+        static_cast<void>(vanguard::rhi::WaitIdle());
+        static_cast<void>(vanguard::rhi::RetireResources());
+        static_cast<void>(vanguard::rhi::Shutdown());
+        DestroyWindow(presentationWindow);
         static_cast<void>(vanguard::jobs::Shutdown());
         return 1;
     }
@@ -825,8 +1546,10 @@ int main()
         std::printf("[rhiNvrhiTests] clean shutdown failed: %s (live=%u, pending=%u, references=%llu)\n", failure.message,
                     stats.liveResources, stats.pendingRetirements, static_cast<unsigned long long>(stats.totalReferences));
         static_cast<void>(vanguard::jobs::Shutdown());
+        DestroyWindow(presentationWindow);
         return 1;
     }
+    DestroyWindow(presentationWindow);
 
     if (!vanguard::jobs::Shutdown())
     {

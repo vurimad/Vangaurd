@@ -202,6 +202,8 @@ namespace vanguard::window
         WindowExtent pixelExtent{1280, 720};
         WindowRect safeArea{{0, 0}, {1280, 720}};
         f32 contentScale = 1.0f;
+        f32 sdrWhiteLevel = 1.0f;
+        f32 hdrHeadroom = 1.0f;
         bool focused = false;
         bool mouseFocus = false;
         bool minimized = false;
@@ -283,6 +285,8 @@ namespace vanguard::window
         u64 requiredSurfaceRevision = 0;
         u64 acknowledgedPixelExtentRevision = 0;
         u64 acknowledgedSurfaceRevision = 0;
+        f32 sdrWhiteLevel = 1.0f;
+        f32 hdrHeadroom = 1.0f;
         bool visible = false;
         bool minimized = false;
         bool occluded = false;

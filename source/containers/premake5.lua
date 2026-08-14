@@ -89,7 +89,7 @@ project "containersCompat"
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include",
         redContainersRoot,
@@ -121,13 +121,13 @@ project "containers"
 
     files {
         "include/**.hpp",
-        "src/**.hpp",
+        "private/**.hpp",
         "src/**.cpp"
     }
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include"
     }
@@ -136,7 +136,8 @@ project "containers"
 
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
-        ["Source/*"] = { "src/**.hpp", "src/**.cpp" }
+        ["Private API/*"] = { "private/**.hpp" },
+        ["Source/*"] = { "src/**.cpp" }
     }
 
 group "Tests/Containers"

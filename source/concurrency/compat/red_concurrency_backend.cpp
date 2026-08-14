@@ -1,6 +1,6 @@
 #include "build.h"
 
-#include "../src/concurrency_backend.hpp"
+#include <vanguard/concurrency/concurrency_backend.hpp>
 
 #include "redThreadsThread.h"
 

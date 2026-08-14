@@ -1,5 +1,4 @@
-local sdlRoot = path.getabsolute("../../../vendors/SDL-release-3.4.14")
-local sdlProject = path.join(sdlRoot, "VisualC/SDL/SDL.vcxproj")
+local sdlProject = path.join(sdl_root, "VisualC/SDL/SDL.vcxproj")
 local msbuild = '"$(MSBuildToolsPath)\\MSBuild.exe"'
 
 group "External"
@@ -7,7 +6,7 @@ group "External"
 project "SDL3"
     kind "Makefile"
     location(path.join(path.getabsolute("../.."), "build/projects/%{_ACTION}"))
-    files { "README.md" }
+    files { "README.md", "UPSTREAM.md", path.join(sdl_root, "LICENSE.txt") }
 
     filter "configurations:Debug"
         buildcommands {

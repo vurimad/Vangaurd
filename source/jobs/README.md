@@ -125,4 +125,4 @@ does not simulate those capabilities. See
 
 `jobsBenchmarks` is an informational performance executable, not a unit test.
 Its methodology and interpretation rules are in
-[`BENCHMARKS.md`](BENCHMARKS.md).
+[`docs/benchmarks.md`](docs/benchmarks.md).

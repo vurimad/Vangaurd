@@ -1,6 +1,6 @@
 #include <vanguard/platform/windows/windows_framework.hpp>
 
-#include "runtime_application.hpp"
+#include <vanguard/runtime/runtime_application.hpp>
 
 #include <Windows.h>
 

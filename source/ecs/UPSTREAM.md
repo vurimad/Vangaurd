@@ -2,7 +2,7 @@
 
 ## Flecs
 
-Vanguard integrates the vendored Flecs 4.1.6 amalgamation from `D:/vendors/flecs`. It is compiled as a static C dependency with a deliberately small add-on set. The public Vanguard boundary keeps `ecs_world_t` opaque unless a caller explicitly includes `vanguard/ecs/native.hpp`.
+Vanguard integrates the repository-contained Flecs 4.1.6 amalgamation from `external/flecs/upstream`. It is compiled as a static C dependency with a deliberately small add-on set. The public Vanguard boundary keeps `ecs_world_t` opaque unless a caller explicitly includes `vanguard/ecs/native.hpp`.
 
 ## RED architecture studied
 

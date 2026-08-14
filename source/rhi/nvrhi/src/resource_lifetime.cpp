@@ -404,6 +404,8 @@ namespace vanguard::rhi::backend
         jobs::JobName reclamationJobName{"RHI/RetireResources"};
         FenceCompleteCallback fenceComplete = nullptr;
         void* fenceContext = nullptr;
+        ResourceDestroyedCallback resourceDestroyed = nullptr;
+        void* resourceDestroyedContext = nullptr;
         concurrency::Atomic<u32> liveResources;
         concurrency::Atomic<u32> pendingRetirements;
         concurrency::Atomic<u32> peakPendingRetirements;
@@ -512,6 +514,7 @@ namespace vanguard::rhi::backend
         {
             static_cast<void>(destroyingResources.Increment());
             if (destroy != nullptr) destroy(destroyContext, resource, payload);
+            if (resourceDestroyed != nullptr) resourceDestroyed(resourceDestroyedContext, resource);
             table.FinishDestroy(resource);
             static_cast<void>(destroyingResources.Decrement());
             static_cast<void>(pendingRetirements.Decrement());
@@ -607,6 +610,7 @@ namespace vanguard::rhi::backend
 
                     static_cast<void>(destroyingResources.Increment());
                     if (destroy != nullptr) destroy(destroyContext, resource, payload);
+                    if (resourceDestroyed != nullptr) resourceDestroyed(resourceDestroyedContext, resource);
                     table.FinishDestroy(resource);
                     static_cast<void>(destroyingResources.Decrement());
                     if (references == 0)
@@ -652,7 +656,9 @@ namespace vanguard::rhi::backend
     }
 
     bool ResourceLifetimeManager::Initialize(const ResourceLifetimeConfig& config,
-                                             const FenceCompleteCallback fenceComplete, void* const fenceContext) noexcept
+                                             const FenceCompleteCallback fenceComplete, void* const fenceContext,
+                                             const ResourceDestroyedCallback resourceDestroyed,
+                                             void* const resourceDestroyedContext) noexcept
     {
         if (m_impl != nullptr || !memory::IsInitialized() || config.retirementBucketCount < 2 ||
             config.retirementBucketCount > MaximumRetirementBuckets)
@@ -662,13 +668,16 @@ namespace vanguard::rhi::backend
         m_impl = new (block.address) Impl();
         m_impl->fenceComplete = fenceComplete;
         m_impl->fenceContext = fenceContext;
+        m_impl->resourceDestroyed = resourceDestroyed;
+        m_impl->resourceDestroyedContext = resourceDestroyedContext;
         m_impl->bucketCount = config.retirementBucketCount;
 
         const u32 capacities[static_cast<u32>(ResourceKind::Count)] = {
             0, config.textureCapacity, config.bufferCapacity, config.heapCapacity, config.samplerStateCapacity,
             config.shaderCapacity, 1, config.pipelineCapacity, config.bindingLayoutCapacity,
-            config.descriptorDomainCapacity, config.accelerationStructureCapacity, config.swapChainCapacity,
-            config.commandListCapacity};
+            config.descriptorDomainCapacity, config.accelerationStructureCapacity, config.shaderTableCapacity,
+            config.swapChainCapacity,
+            config.commandListCapacity, config.textureReadbackCapacity};
         u32 totalCapacity = 0;
         for (u32 index = 1; index < static_cast<u32>(ResourceKind::Count); ++index)
         {
@@ -864,6 +873,14 @@ namespace vanguard::rhi::backend
         const i32 remainingReferences = Release(resource);
         VG_ASSERT_MSG(remainingReferences >= 0, "RHI resource became invalid while recording its submission fence");
         return true;
+    }
+
+    FenceSet ResourceLifetimeManager::GetLastUse(const ResourceRef resource) const noexcept
+    {
+        if (!IsInitialized() || !resource.IsValid()) return {};
+        const ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        const ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
+        return slot != nullptr ? m_impl->GetLastUse(*slot) : FenceSet{};
     }
 
     void ResourceLifetimeManager::SealRetirementEpoch(const FenceSet& submittedFences) noexcept

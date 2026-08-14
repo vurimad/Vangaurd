@@ -98,6 +98,7 @@ project "memory"
         redMemoryRoot,
         path.join(redMemoryRoot, "include"),
         path.join(redMemoryRoot, "src"),
+        "private",
         path.join(redSystemRoot, "include"),
         "../system/include",
         "include"
@@ -118,7 +119,7 @@ project "memory"
         path.join(redMemoryRoot, "src/**.natvis"),
         path.join(redMemoryRoot, "src/**.natstepfilter"),
         "include/**.hpp",
-        "src/**.hpp",
+        "private/**.hpp",
         "src/vanguard_memory.cpp",
         "compat/**.cpp"
     }
@@ -150,8 +151,8 @@ project "memory"
 
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
+        ["Private API/*"] = { "private/**.hpp" },
         ["Source/*"] = {
-            "src/**.hpp",
             "src/vanguard_memory.cpp"
         },
         ["Compatibility/*"] = { "compat/**.cpp" },

@@ -1,6 +1,6 @@
 #include "build.h"
 
-#include "../src/diagnostics_backend.hpp"
+#include <vanguard/diagnostics/diagnostics_backend.hpp>
 
 #include "log.h"
 #include "logMessage.h"

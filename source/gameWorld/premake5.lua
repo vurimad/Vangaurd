@@ -1,5 +1,3 @@
-local flecsRoot = path.getabsolute("../../../vendors/flecs")
-
 group "Engine/Runtime"
 
 project "gameWorld"
@@ -15,7 +13,7 @@ project "gameWorld"
     files { "include/**.hpp", "src/**.cpp", "README.md", "UPSTREAM.md" }
     includedirs {
         "include", "../system/include", "../memory/include", "../diagnostics/include", "../concurrency/include",
-        "../containers/include", "../ecs/include", path.join(flecsRoot, "distr")
+        "../containers/include", "../ecs/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links { "ecs", "flecs", "diagnostics", "containers", "concurrency", "memory", "system" }
@@ -38,7 +36,7 @@ project "gameWorldTests"
     files { "tests/**.cpp" }
     includedirs {
         "include", "../system/include", "../memory/include", "../diagnostics/include", "../concurrency/include",
-        "../containers/include", "../ecs/include", path.join(flecsRoot, "distr")
+        "../containers/include", "../ecs/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {

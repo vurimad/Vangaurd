@@ -1,6 +1,6 @@
 #include <vanguard/platform/windows/windows_framework.hpp>
 
-#include "editor_application.hpp"
+#include <vanguard/editor/editor_application.hpp>
 
 #include <Windows.h>
 

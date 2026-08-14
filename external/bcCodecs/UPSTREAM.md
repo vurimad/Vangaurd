@@ -3,7 +3,7 @@
 - Source: https://github.com/richgel999/bc7enc_rdo
 - Commit: `b9438627eef73a1157e84201b6fa6eb2ffd6d9f0`
 - License: MIT or public domain (`LICENSE`)
-- Imported from the user-provided checkout at `D:\vendors\bc7enc_rdo`
+- Repository copy: `external/bcCodecs/upstream`
 - Imported content: `rgbcx` BC1/BC3/BC4/BC5 encoder, the portable C++ BC7 encoder, and its BC7 conformance decoder
 - Local source patches: none
 - Owning Vanguard module: `textureTools`

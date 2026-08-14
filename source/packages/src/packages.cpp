@@ -1,6 +1,6 @@
 #include <vanguard/packages/packages.hpp>
 
-#include "package_codec_backend.hpp"
+#include <vanguard/packages/package_codec_backend.hpp>
 
 #include <vanguard/crypto/crypto.hpp>
 

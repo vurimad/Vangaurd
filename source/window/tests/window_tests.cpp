@@ -129,6 +129,17 @@ namespace
             return {};
         }
 
+        [[nodiscard]] win::BackendStatus ResolvePresentationSurface(
+            const win::BackendWindowId window, win::NativePresentationSurface& surface) noexcept override
+        {
+            surface = {};
+            if (failNext) return ConsumeFailure();
+            Window* const record = Find(window);
+            if (record == nullptr) return win::BackendStatus::Failure(5, "fake window is unavailable");
+            surface = {win::NativePresentationSurfaceKind::Win32, record, nullptr};
+            return {};
+        }
+
         [[nodiscard]] win::BackendStatus DestroyWindow(const win::BackendWindowId window) noexcept override
         {
             if (failNext) return ConsumeFailure();
@@ -341,6 +352,10 @@ int main()
               win::HasRequirement(presentationSnapshot.requirements,
                                   win::PresentationRequirement::PixelExtentResize),
           "new presentation attachment requests initial surface creation and pixel extent setup");
+    win::NativePresentationSurface nativeSurface{};
+    Check(manager.ResolvePresentationSurface(presentation, nativeSurface, &failure) && nativeSurface.IsValid() &&
+              nativeSurface.kind == win::NativePresentationSurfaceKind::Win32,
+          "presentation attachment resolves its backend-owned native surface without exposing backend window identity");
     win::PresentationAttachmentHandle duplicatePresentation{};
     Check(!manager.AttachPresentation(primary, duplicatePresentation, &failure) &&
               failure.code == win::FailureCode::PresentationAlreadyAttached,

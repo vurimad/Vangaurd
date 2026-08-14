@@ -1,4 +1,4 @@
-#include "../src/io_backend.hpp"
+#include <vanguard/io/io_backend.hpp>
 
 namespace
 {

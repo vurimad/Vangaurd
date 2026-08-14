@@ -74,6 +74,34 @@ $rules = @(
 $extensions = @(".h", ".hpp", ".inl", ".c", ".cc", ".cpp")
 $violations = [System.Collections.Generic.List[object]]::new()
 
+# Third-party checkouts are import sources, never build inputs. Keeping this gate in project
+# generation prevents a locally available checkout from hiding a non-reproducible dependency.
+$premakeFiles = Get-ChildItem -LiteralPath $repository -Recurse -File -Filter "premake5.lua" |
+    Where-Object {
+        $_.FullName -notmatch "[\\/]build[\\/]" -and
+        $_.FullName -notmatch "[\\/]external[\\/].*[\\/]upstream[\\/]"
+    }
+
+foreach ($file in $premakeFiles)
+{
+    $relative = $file.FullName.Substring($repository.TrimEnd("\").Length + 1).Replace("\", "/")
+    $content = [System.IO.File]::ReadAllText($file.FullName)
+    $matches = [regex]::Matches(
+        $content,
+        "(?i)D:[\\/]vendors\b|(?:(?:\.\.)[\\/]){2,}vendors\b")
+
+    foreach ($match in $matches)
+    {
+        $line = 1 + [regex]::Matches($content.Substring(0, $match.Index), "`n").Count
+        $violations.Add([pscustomobject]@{
+            Rule = "external-build-input"
+            File = $relative
+            Line = $line
+            Message = "Copy pinned third-party sources under external/ and build the repository-contained copy."
+        })
+    }
+}
+
 $files = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
     Where-Object {
         $extensions -contains $_.Extension -and
@@ -152,6 +180,50 @@ foreach ($file in $commentFiles)
             Message = "Describe Vanguard behavior only; record implementation lineage in UPSTREAM.md or docs/migration."
         })
     }
+}
+
+# Vanguard-owned implementation directories contain translation units only. Headers that
+# form a public contract live under include/vanguard/<module>; private contracts live under
+# private/vanguard/<module>. Imported and mechanically adapted source trees preserve their
+# upstream layout and are intentionally excluded.
+$layoutRoots = @("source", "editor", "runtime", "tools") |
+    ForEach-Object { Join-Path $repository $_ } |
+    Where-Object { Test-Path -LiteralPath $_ }
+$misplacedHeaders = $layoutRoots |
+    ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File } |
+    Where-Object {
+        $_.Extension -in @(".h", ".hpp", ".inl") -and
+        $_.FullName -match "[\\/]src[\\/]" -and
+        $_.FullName -notmatch "[\\/](?:imported|adapted|external)[\\/]"
+    }
+
+foreach ($file in $misplacedHeaders)
+{
+    $relative = $file.FullName.Substring($repository.TrimEnd("\").Length + 1).Replace("\", "/")
+    $violations.Add([pscustomobject]@{
+        Rule = "header-in-source"
+        File = $relative
+        Line = 1
+        Message = "Move public headers to include/vanguard/<module> or private headers to private/vanguard/<module>."
+    })
+}
+
+$nestedIncludeDirectories = $layoutRoots |
+    ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -Directory -ErrorAction SilentlyContinue } |
+    Where-Object {
+        $_.FullName -match "[\\/]include[\\/].*[\\/]include(?:[\\/]|$)" -and
+        $_.FullName -notmatch "[\\/](?:imported|external)[\\/]"
+    }
+
+foreach ($directory in $nestedIncludeDirectories)
+{
+    $relative = $directory.FullName.Substring($repository.TrimEnd("\").Length + 1).Replace("\", "/")
+    $violations.Add([pscustomobject]@{
+        Rule = "nested-include-root"
+        File = $relative
+        Line = 1
+        Message = "A module has one include root; namespace folders belong below it without another include directory."
+    })
 }
 
 if ($violations.Count -ne 0)

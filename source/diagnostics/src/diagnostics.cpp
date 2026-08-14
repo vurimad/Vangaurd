@@ -1,6 +1,6 @@
 #include <vanguard/diagnostics/diagnostics.hpp>
 
-#include "diagnostics_backend.hpp"
+#include <vanguard/diagnostics/diagnostics_backend.hpp>
 
 #include <cstdio>
 

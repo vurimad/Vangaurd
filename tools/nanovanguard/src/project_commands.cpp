@@ -1,6 +1,6 @@
-#include "project_commands.hpp"
+#include <vanguard/nanovanguard/project_commands.hpp>
 
-#include "project_platform.hpp"
+#include <vanguard/nanovanguard/project_platform.hpp>
 
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/projects/project.hpp>

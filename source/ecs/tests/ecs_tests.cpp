@@ -216,6 +216,31 @@ int main()
 #endif
     Check(world.Shutdown(), "shutdown empty ECS world explicitly");
 
+    ecs::World journalWorld;
+    ecs::WorldConfig journalConfig;
+    journalConfig.initialEntityCapacity = 8;
+    journalConfig.initialActionCapacity = 8;
+    journalConfig.committedChangeCapacity = 2;
+    Check(journalWorld.Initialize(journalConfig) && journalWorld.QueueCreate(1) &&
+              journalWorld.QueueCreate(2) && journalWorld.QueueCreate(3) && journalWorld.FlushActions(),
+          "publish committed identities into a bounded ECS change journal");
+    ecs::CommittedChangeCursor slowCursor{1};
+    ecs::CommittedChangeReadResult journalRead;
+    vanguard::containers::DynamicArray<ecs::CommittedChange> journalChanges(
+        vanguard::memory::pools::Gameplay::GetInstance());
+    Check(journalWorld.ReadCommittedChanges(slowCursor, journalChanges, 8, &journalRead) &&
+              journalRead.lostRecords == 1 && journalRead.records == 2 &&
+              journalChanges[0].entity == 2 && journalChanges[1].entity == 3,
+          "report exact subscriber loss and resume at the oldest retained committed change");
+    ecs::CommittedChangeCursor independentCursor;
+    journalChanges.Clear();
+    Check(journalWorld.ReadCommittedChanges(independentCursor, journalChanges, 8, &journalRead) &&
+              journalRead.lostRecords == 0 && journalRead.records == 2,
+          "retain independent committed-change cursors without destructive consumption");
+    Check(journalWorld.QueueDestroy(1) && journalWorld.QueueDestroy(2) && journalWorld.QueueDestroy(3) &&
+              journalWorld.FlushActions() && journalWorld.Shutdown(),
+          "drain the bounded committed-change journal test world");
+
     vanguard::diagnostics::Shutdown();
     std::printf("ecsTests: %s\n", g_failures == 0 ? "PASS" : "FAIL");
     return g_failures == 0 ? 0 : 1;

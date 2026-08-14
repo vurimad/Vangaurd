@@ -1,4 +1,4 @@
-#include "../../src/project_platform.hpp"
+#include <vanguard/nanovanguard/project_platform.hpp>
 
 #include <vanguard/memory/memory.hpp>
 

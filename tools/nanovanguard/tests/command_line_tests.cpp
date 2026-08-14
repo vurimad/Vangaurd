@@ -1,6 +1,6 @@
-#include "command_line.hpp"
-#include "nanovanguard.hpp"
-#include "project_platform.hpp"
+#include <vanguard/nanovanguard/command_line.hpp>
+#include <vanguard/nanovanguard/nanovanguard.hpp>
+#include <vanguard/nanovanguard/project_platform.hpp>
 
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/memory/memory.hpp>

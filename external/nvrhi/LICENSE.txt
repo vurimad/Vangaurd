@@ -1,2 +1,2 @@
 NVRHI is Copyright (c) 2014-2021 NVIDIA CORPORATION and is used under the MIT License.
-The complete license is available at D:/vendors/NVRHI/LICENSE.txt.
+The complete license is available at `external/nvrhi/upstream/LICENSE.txt`.

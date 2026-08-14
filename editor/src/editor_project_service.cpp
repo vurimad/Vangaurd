@@ -1,4 +1,4 @@
-#include "editor_project_service.hpp"
+#include <vanguard/editor/editor_project_service.hpp>
 
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/engine/engine_services.hpp>

@@ -1,5 +1,3 @@
-local flecsRoot = path.getabsolute("../../../vendors/flecs")
-
 group "External"
 
 project "flecs"
@@ -10,10 +8,12 @@ project "flecs"
     targetdir(output_root)
     objdir(object_root)
     files {
-        path.join(flecsRoot, "distr/flecs.c"),
-        path.join(flecsRoot, "distr/flecs.h")
+        path.join(flecs_root, "distr/flecs.c"),
+        path.join(flecs_root, "distr/flecs.h"),
+        path.join(flecs_root, "LICENSE"),
+        "UPSTREAM.md"
     }
-    includedirs { path.join(flecsRoot, "distr") }
+    includedirs { path.join(flecs_root, "distr") }
     defines {
         "FLECS_CUSTOM_BUILD",
         "FLECS_CPP",
@@ -22,4 +22,7 @@ project "flecs"
         "FLECS_PIPELINE",
         "FLECS_TIMER"
     }
-    vpaths { ["Flecs/*"] = { path.join(flecsRoot, "distr/**") } }
+    vpaths {
+        ["Flecs/*"] = { path.join(flecs_root, "distr/**") },
+        ["Documentation"] = { path.join(flecs_root, "LICENSE"), "UPSTREAM.md" }
+    }

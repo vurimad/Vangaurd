@@ -39,6 +39,9 @@ namespace vanguard::window
         [[nodiscard]] bool AcknowledgePresentation(PresentationAttachmentHandle attachment,
                                                    const PresentationAcknowledgement& acknowledgement,
                                                    Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ResolvePresentationSurface(PresentationAttachmentHandle attachment,
+                                                      NativePresentationSurface& surface,
+                                                      Failure* failure = nullptr) noexcept;
 
         [[nodiscard]] bool ProcessBackendEvent(const BackendWindowEvent& event,
                                                Failure* failure = nullptr) noexcept;

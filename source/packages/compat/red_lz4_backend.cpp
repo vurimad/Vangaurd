@@ -1,4 +1,4 @@
-#include "../src/package_codec_backend.hpp"
+#include <vanguard/packages/package_codec_backend.hpp>
 
 #include "../../imported/common/redCompression/src/lz4/lz4.h"
 

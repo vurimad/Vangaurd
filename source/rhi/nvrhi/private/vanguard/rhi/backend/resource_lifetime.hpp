@@ -20,6 +20,7 @@ namespace vanguard::rhi::backend
     struct ResourceLifetimeConfig
     {
         u32 textureCapacity = 65535;
+        u32 textureReadbackCapacity = 4096;
         u32 bufferCapacity = 65535;
         u32 heapCapacity = 8192;
         u32 samplerStateCapacity = 4096;
@@ -28,6 +29,7 @@ namespace vanguard::rhi::backend
         u32 bindingLayoutCapacity = 16384;
         u32 descriptorDomainCapacity = 64;
         u32 accelerationStructureCapacity = 32768;
+        u32 shaderTableCapacity = 4096;
         u32 swapChainCapacity = 64;
         u32 commandListCapacity = 4096;
         u32 retirementBucketCount = 32;
@@ -35,6 +37,7 @@ namespace vanguard::rhi::backend
 
     using FenceCompleteCallback = bool (*)(void* context, QueueType queue, u64 value) noexcept;
     using DestroyResourceCallback = void (*)(void* context, ResourceRef resource, void* payload) noexcept;
+    using ResourceDestroyedCallback = void (*)(void* context, ResourceRef resource) noexcept;
 
     class ResourceLifetimeManager final
     {
@@ -45,7 +48,8 @@ namespace vanguard::rhi::backend
         ResourceLifetimeManager& operator=(const ResourceLifetimeManager&) = delete;
 
         [[nodiscard]] bool Initialize(const ResourceLifetimeConfig& config, FenceCompleteCallback fenceComplete,
-                                      void* fenceContext) noexcept;
+                                      void* fenceContext, ResourceDestroyedCallback resourceDestroyed = nullptr,
+                                      void* resourceDestroyedContext = nullptr) noexcept;
         // Requires the GPU to be idle and all externally owned references to be released.
         [[nodiscard]] bool ShutdownAfterGpuIdle() noexcept;
         // Emergency backend teardown after device idle/removal. Outstanding owners are invalidated and
@@ -65,6 +69,7 @@ namespace vanguard::rhi::backend
 
         // Recording holds a reference until submission, then records the returned queue fence before releasing it.
         [[nodiscard]] bool RecordUse(ResourceRef resource, QueueType queue, u64 submissionFence) noexcept;
+        [[nodiscard]] FenceSet GetLastUse(ResourceRef resource) const noexcept;
 
         // Seals the current retirement bucket, advances the producer epoch, and schedules reclamation.
         void SealRetirementEpoch(const FenceSet& submittedFences) noexcept;

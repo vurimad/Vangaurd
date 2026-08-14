@@ -1,5 +1,3 @@
-local sdlRoot = path.getabsolute("../../../../../vendors/SDL-release-3.4.14")
-
 group "Engine/Platform"
 
 project "windowSdl"
@@ -14,7 +12,7 @@ project "windowSdl"
     files { "include/**.hpp", "src/**.cpp", "README.md" }
     includedirs {
         "include", "../include", "../../system/include", "../../memory/include", "../../containers/include",
-        "../../concurrency/include", path.join(sdlRoot, "include")
+        "../../concurrency/include", path.join(sdl_root, "include")
     }
     dependson { "SDL3" }
     links { path.join(output_root, "SDL3.lib"), "window", "memory" }
@@ -36,7 +34,7 @@ project "sdlWindowBackendTests"
     files { "tests/**.cpp" }
     includedirs {
         "include", "../include", "../../system/include", "../../memory/include", "../../containers/include",
-        "../../concurrency/include", path.join(sdlRoot, "include")
+        "../../concurrency/include", path.join(sdl_root, "include")
     }
     links {
         "windowSdl", "window", "concurrency", "concurrencyCompat", "containers", "containersCompat", "memory",

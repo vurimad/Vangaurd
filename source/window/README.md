@@ -10,4 +10,8 @@ The module deliberately contains no swapchain or rendering-API object. A rendere
 
 Presentation ownership is an explicit destruction barrier. The renderer must stop submitting work, wait for the relevant GPU completion point, release its back buffers/swapchain, and call `DetachPresentation` before the native window can be destroyed. The window manager never stores or destroys renderer pointers. Visibility/minimization and occlusion are exposed as independent requirements so a renderer may suspend acquisition or presentation without pretending it resized or recreated a surface.
 
+`ResolvePresentationSurface` is the narrow native bridge used only by the presentation owner. The manager validates the
+attachment and asks its backend for a platform-tagged, non-owning native surface. Backend window identities, SDL objects,
+and rendering types remain private to their respective modules.
+
 At runtime, the engine `WindowService` owns `WindowManager` for the entire process service lifetime. The platform host supplies the backend and remains the sole native event pump. Closing the primary window requests application-state shutdown; the service explicitly accepts that close transaction during stop. Loading states, world transitions, and error states therefore retain the same responsive native window without owning its lifetime themselves.

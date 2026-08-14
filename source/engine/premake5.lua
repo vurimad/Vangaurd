@@ -1,5 +1,3 @@
-local flecsRoot = path.getabsolute("../../../vendors/flecs")
-
 group "Engine/Runtime"
 
 project "engine"
@@ -19,10 +17,11 @@ project "engine"
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../prefabs/include", "../crypto/include", "../math/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
-        "../gameInput/include", path.join(flecsRoot, "distr")
+        "../rendering/include",
+        "../gameInput/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
-    links { "application", "gameInput", "input", "window", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "jobs", "memory", "system" }
+    links { "application", "gameInput", "input", "window", "rendering", "rhi", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "jobs", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" }, ["Source/*"] = { "src/**.cpp" },
         ["Documentation"] = { "README.md", "UPSTREAM.md" }
@@ -45,12 +44,13 @@ project "engineServicesTests"
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../prefabs/include", "../crypto/include", "../math/include",
-        "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include", "../gameInput/include",
-        path.join(flecsRoot, "distr")
+        "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
+        "../rendering/include", "../rhi/include", "../gameInput/include",
+        path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "engine", "application", "gameInput", "input", "window", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization",
+        "engine", "application", "gameInput", "input", "window", "rendering", "rhi", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization",
         "filesystem", "io", "jobs", "jobsCompat", "redJobsCompat", "redCoreCompat", "ioCompat",
         "redIOCompat", "redFileSystemCompat", "filesystemCompat", "serializationCompat", "redCompressionCompat",
         "redCompressionThirdPartyCompat", "packagesCompat", "reflectionCompat", "redReflectionCompat",
@@ -75,11 +75,12 @@ project "framePipelineCycleTests"
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../prefabs/include", "../crypto/include", "../math/include",
-        "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include", path.join(flecsRoot, "distr")
+        "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
+        "../rendering/include", "../rhi/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "engine", "application", "input", "window", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization",
+        "engine", "application", "input", "window", "rendering", "rhi", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization",
         "filesystem", "io", "jobs", "jobsCompat", "redJobsCompat", "redCoreCompat", "ioCompat",
         "redIOCompat", "redFileSystemCompat", "filesystemCompat", "serializationCompat", "redCompressionCompat",
         "redCompressionThirdPartyCompat", "packagesCompat", "reflectionCompat", "redReflectionCompat",
@@ -105,11 +106,12 @@ project "inputServiceTests"
         "../containers/include", "../concurrency/include", "../resources/include", "../streaming/include",
         "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../world/include", "../meshes/include", "../prefabs/include", "../crypto/include", "../math/include",
-        "../entities/include", "../gameWorld/include", "../ecs/include", "../gameInput/include", path.join(flecsRoot, "distr")
+        "../entities/include", "../gameWorld/include", "../ecs/include", "../rendering/include", "../rhi/include",
+        "../gameInput/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "engine", "gameInput", "input", "window", "application", "entities", "gameWorld", "ecs", "flecs", "world", "streaming",
+        "engine", "gameInput", "input", "window", "rendering", "rhi", "application", "entities", "gameWorld", "ecs", "flecs", "world", "streaming",
         "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "jobs",
         "jobsCompat", "redJobsCompat", "redCoreCompat", "ioCompat", "redIOCompat", "redFileSystemCompat",
         "filesystemCompat", "serializationCompat", "redCompressionCompat", "redCompressionThirdPartyCompat",

@@ -69,6 +69,11 @@ object_root = path.getabsolute("build/obj/%{prj.name}/%{cfg.buildcfg}")
 runtime_output_root = path.getabsolute("bin/Runtime/%{cfg.buildcfg}")
 editor_output_root = path.getabsolute("bin/Editor/%{cfg.buildcfg}")
 tools_output_root = path.getabsolute("bin/Tools/%{prj.name}/%{cfg.buildcfg}")
+external_root = path.getabsolute("external")
+nvrhi_root = path.join(external_root, "nvrhi/upstream")
+directx_headers_root = path.join(external_root, "directXHeaders/upstream")
+flecs_root = path.join(external_root, "flecs/upstream")
+sdl_root = path.join(external_root, "sdl3/upstream")
 
 function deployVanguardRuntimeDependencies(includeSdl)
     if includeSdl then

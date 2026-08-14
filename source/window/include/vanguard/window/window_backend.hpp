@@ -48,6 +48,8 @@ namespace vanguard::window
         WindowExtent pixelExtent;
         WindowRect safeArea;
         f32 contentScale = 1.0f;
+        f32 sdrWhiteLevel = 1.0f;
+        f32 hdrHeadroom = 1.0f;
         bool focused = false;
         bool mouseFocus = false;
         bool minimized = false;
@@ -122,6 +124,28 @@ namespace vanguard::window
         [[nodiscard]] constexpr explicit operator bool() const noexcept { return success; }
     };
 
+    enum class NativePresentationSurfaceKind : u8
+    {
+        None,
+        Win32,
+        Xlib,
+        Xcb,
+        Wayland,
+        Cocoa
+    };
+
+    struct NativePresentationSurface
+    {
+        NativePresentationSurfaceKind kind = NativePresentationSurfaceKind::None;
+        void* window = nullptr;
+        void* display = nullptr;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return kind != NativePresentationSurfaceKind::None && window != nullptr;
+        }
+    };
+
     class IWindowBackend
     {
     public:
@@ -141,6 +165,8 @@ namespace vanguard::window
                                                              const BackendWindowRequest& request,
                                                              BackendWindowState& state) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetWindowTitle(BackendWindowId window, const char* title) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ResolvePresentationSurface(BackendWindowId window,
+                                                                       NativePresentationSurface& surface) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DestroyWindow(BackendWindowId window) noexcept = 0;
 
     protected:

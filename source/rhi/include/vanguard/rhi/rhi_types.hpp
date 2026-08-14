@@ -4,6 +4,8 @@
 
 namespace vanguard::rhi
 {
+    struct GpuFence;
+
     inline constexpr u32 InvalidReferenceIndex = 0xffffffffu;
     inline constexpr u32 MaximumResourceReferenceIndex = 0x0fffffffu;
     inline constexpr u32 MaximumColorAttachments = 8;
@@ -37,6 +39,7 @@ namespace vanguard::rhi
     };
 
     struct TextureTag;
+    struct TextureReadbackTag;
     struct BufferTag;
     struct HeapTag;
     struct SamplerStateTag;
@@ -46,11 +49,13 @@ namespace vanguard::rhi
     struct BindingLayoutTag;
     struct DescriptorDomainTag;
     struct AccelerationStructureTag;
+    struct ShaderTableTag;
     struct QueryPoolTag;
     struct SwapChainTag;
     struct CommandListTag;
 
     using TextureRef = Reference<TextureTag>;
+    using TextureReadbackRef = Reference<TextureReadbackTag>;
     using BufferRef = Reference<BufferTag>;
     using HeapRef = Reference<HeapTag>;
     using SamplerStateRef = Reference<SamplerStateTag>;
@@ -60,12 +65,14 @@ namespace vanguard::rhi
     using BindingLayoutRef = Reference<BindingLayoutTag>;
     using DescriptorDomainRef = Reference<DescriptorDomainTag>;
     using AccelerationStructureRef = Reference<AccelerationStructureTag>;
+    using ShaderTableRef = Reference<ShaderTableTag>;
     using QueryPoolRef = Reference<QueryPoolTag>;
     using SwapChainRef = Reference<SwapChainTag>;
     using CommandListRef = Reference<CommandListTag>;
 
     template <typename ReferenceType> inline constexpr bool IsReferenceCountedResource = false;
     template <> inline constexpr bool IsReferenceCountedResource<TextureRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<TextureReadbackRef> = true;
     template <> inline constexpr bool IsReferenceCountedResource<BufferRef> = true;
     template <> inline constexpr bool IsReferenceCountedResource<HeapRef> = true;
     template <> inline constexpr bool IsReferenceCountedResource<SamplerStateRef> = true;
@@ -74,6 +81,7 @@ namespace vanguard::rhi
     template <> inline constexpr bool IsReferenceCountedResource<BindingLayoutRef> = true;
     template <> inline constexpr bool IsReferenceCountedResource<DescriptorDomainRef> = true;
     template <> inline constexpr bool IsReferenceCountedResource<AccelerationStructureRef> = true;
+    template <> inline constexpr bool IsReferenceCountedResource<ShaderTableRef> = true;
     template <> inline constexpr bool IsReferenceCountedResource<SwapChainRef> = true;
 
     enum class ResourceKind : u8
@@ -89,8 +97,10 @@ namespace vanguard::rhi
         BindingLayout,
         DescriptorDomain,
         AccelerationStructure,
+        ShaderTable,
         SwapChain,
         CommandList,
+        TextureReadback,
         Count
     };
     static_assert(static_cast<u8>(ResourceKind::Count) <= 16, "ResourceRef reserves four bits for resource kind");
@@ -104,6 +114,10 @@ namespace vanguard::rhi
         constexpr ResourceRef() noexcept = default;
         constexpr ResourceRef(const TextureRef reference) noexcept
             : value(Pack(ResourceKind::Texture, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const TextureReadbackRef reference) noexcept
+            : value(Pack(ResourceKind::TextureReadback, reference.index, reference.generation))
         {
         }
         constexpr ResourceRef(const BufferRef reference) noexcept : value(Pack(ResourceKind::Buffer, reference.index, reference.generation))
@@ -135,6 +149,10 @@ namespace vanguard::rhi
         }
         constexpr ResourceRef(const AccelerationStructureRef reference) noexcept
             : value(Pack(ResourceKind::AccelerationStructure, reference.index, reference.generation))
+        {
+        }
+        constexpr ResourceRef(const ShaderTableRef reference) noexcept
+            : value(Pack(ResourceKind::ShaderTable, reference.index, reference.generation))
         {
         }
         constexpr ResourceRef(const SwapChainRef reference) noexcept
@@ -191,6 +209,10 @@ namespace vanguard::rhi
     {
         return ResourceKind::Texture;
     }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<TextureReadbackRef>() noexcept
+    {
+        return ResourceKind::TextureReadback;
+    }
     template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<BufferRef>() noexcept
     {
         return ResourceKind::Buffer;
@@ -226,6 +248,10 @@ namespace vanguard::rhi
     template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<AccelerationStructureRef>() noexcept
     {
         return ResourceKind::AccelerationStructure;
+    }
+    template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<ShaderTableRef>() noexcept
+    {
+        return ResourceKind::ShaderTable;
     }
     template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<SwapChainRef>() noexcept
     {
@@ -364,6 +390,19 @@ namespace vanguard::rhi
         Upload,
         Readback
     };
+    enum class MemorySegment : u8
+    {
+        Local,
+        NonLocal
+    };
+    enum class ResidencyPriority : u8
+    {
+        Minimum,
+        Low,
+        Normal,
+        High,
+        Maximum
+    };
     enum class ShaderStage : u8
     {
         Vertex,
@@ -393,6 +432,77 @@ namespace vanguard::rhi
         PipelineStatistics,
         Timestamp,
         AccelerationStructureCompactedSize
+    };
+
+    enum class VariableRateShadingTier : u8
+    {
+        None,
+        PerDraw,
+        ShadingRateImage
+    };
+    enum class ShadingRate : u8
+    {
+        Rate1x1,
+        Rate1x2,
+        Rate2x1,
+        Rate2x2,
+        Rate2x4,
+        Rate4x2,
+        Rate4x4,
+        Count
+    };
+    using ShadingRateMask = u32;
+    [[nodiscard]] constexpr ShadingRateMask ShadingRateBit(const ShadingRate rate) noexcept
+    {
+        return rate < ShadingRate::Count ? 1u << static_cast<u32>(rate) : 0;
+    }
+    enum class ShadingRateCombiner : u8
+    {
+        Passthrough,
+        Override,
+        Minimum,
+        Maximum,
+        ApplyRelative,
+        Count
+    };
+    using ShadingRateCombinerMask = u32;
+    [[nodiscard]] constexpr ShadingRateCombinerMask ShadingRateCombinerBit(const ShadingRateCombiner combiner) noexcept
+    {
+        return combiner < ShadingRateCombiner::Count ? 1u << static_cast<u32>(combiner) : 0;
+    }
+
+    struct VariableRateShadingCapabilities
+    {
+        VariableRateShadingTier tier = VariableRateShadingTier::None;
+        ShadingRateMask supportedRates = ShadingRateBit(ShadingRate::Rate1x1);
+        ShadingRateCombinerMask supportedCombiners = ShadingRateCombinerBit(ShadingRateCombiner::Passthrough);
+        u16 shadingRateImageTileWidth = 0;
+        u16 shadingRateImageTileHeight = 0;
+        bool perPrimitive = false;
+
+        [[nodiscard]] constexpr bool Supports(const ShadingRate rate) const noexcept
+        {
+            return (supportedRates & ShadingRateBit(rate)) != 0;
+        }
+        [[nodiscard]] constexpr bool Supports(const ShadingRateCombiner combiner) const noexcept
+        {
+            return (supportedCombiners & ShadingRateCombinerBit(combiner)) != 0;
+        }
+    };
+
+    struct PipelineStatistics
+    {
+        u64 inputAssemblerVertices = 0;
+        u64 inputAssemblerPrimitives = 0;
+        u64 vertexShaderInvocations = 0;
+        u64 geometryShaderInvocations = 0;
+        u64 geometryShaderPrimitives = 0;
+        u64 clippingInvocations = 0;
+        u64 clippingPrimitives = 0;
+        u64 pixelShaderInvocations = 0;
+        u64 hullShaderInvocations = 0;
+        u64 domainShaderInvocations = 0;
+        u64 computeShaderInvocations = 0;
     };
 
     enum class TextureUsage : u32
@@ -446,7 +556,10 @@ namespace vanguard::rhi
         IndirectArgument = 1u << 12u,
         AccelerationStructureRead = 1u << 13u,
         AccelerationStructureWrite = 1u << 14u,
-        Present = 1u << 15u
+        Present = 1u << 15u,
+        ResolveSource = 1u << 16u,
+        ResolveDestination = 1u << 17u,
+        ShadingRate = 1u << 18u
     };
 
     template <typename Enum> [[nodiscard]] constexpr Enum CombineFlags(const Enum left, const Enum right) noexcept
@@ -483,6 +596,16 @@ namespace vanguard::rhi
     struct DeviceParams
     {
         u32 adapterIndex = 0;
+        struct ResidencyPolicy
+        {
+            /// Begin local-memory pressure recovery above this percentage of the operating-system budget.
+            u8 pressureThresholdPercent = 95;
+            /// Stop selecting allocations after estimated usage reaches this lower hysteresis threshold.
+            u8 recoveryThresholdPercent = 85;
+            /// Upper bound on native allocations evicted by one maintenance call.
+            u16 maximumEvictionsPerMaintenance = 256;
+            bool enabled = true;
+        } residencyPolicy;
         bool editor = false;
         bool enableValidation = false;
         bool preferHighPerformanceAdapter = true;
@@ -513,7 +636,68 @@ namespace vanguard::rhi
         bool rayTracingPipeline = false;
         bool meshShaders = false;
         bool variableRateShading = false;
+        VariableRateShadingCapabilities variableRateShadingDetails;
+        bool occlusionQueries = false;
+        bool pipelineStatisticsQueries = false;
+        bool timestampQueries = false;
+        bool timestampCalibration = false;
+        bool gpuMarkers = false;
+        bool memoryBudgetQueries = false;
+        bool explicitResidency = false;
         char adapterName[128]{};
+    };
+
+    struct MemoryBudgetSnapshot
+    {
+        u64 budget = 0;
+        u64 currentUsage = 0;
+        u64 availableForReservation = 0;
+        u64 currentReservation = 0;
+        MemorySegment segment = MemorySegment::Local;
+
+        [[nodiscard]] constexpr u64 Available() const noexcept
+        {
+            return currentUsage < budget ? budget - currentUsage : 0;
+        }
+        [[nodiscard]] constexpr bool IsOverBudget() const noexcept { return currentUsage > budget; }
+    };
+
+    struct ResidencyFenceSet
+    {
+        u64 graphics = 0;
+        u64 compute = 0;
+        u64 copy = 0;
+
+        void Include(GpuFence fence) noexcept;
+    };
+
+    struct ResidencyStats
+    {
+        u64 budgetQueries = 0;
+        u64 priorityChanges = 0;
+        u64 makeResidentCalls = 0;
+        u64 evictCalls = 0;
+        u64 objectsMadeResident = 0;
+        u64 objectsEvicted = 0;
+        u64 rejectedEvictions = 0;
+        u64 residencyFailures = 0;
+        u64 automaticWorkingSetChecks = 0;
+        u64 automaticMakeResidentCalls = 0;
+        u64 automaticObjectsMadeResident = 0;
+        u64 automaticWorkingSetFailures = 0;
+        u64 policyMaintenanceCalls = 0;
+        u64 policyPressureEvents = 0;
+        u64 policyObjectsEvicted = 0;
+        u64 policyBytesEvicted = 0;
+        u64 policyPinnedObjects = 0;
+        u64 policyInFlightSkips = 0;
+        u64 policyNoCandidateEvents = 0;
+        u64 policyFailures = 0;
+        u64 trackedAllocations = 0;
+        u64 trackedResidentBytes = 0;
+        u64 trackedEvictedBytes = 0;
+        u64 lastObservedBudget = 0;
+        u64 lastObservedUsage = 0;
     };
 
     struct TextureDesc
@@ -558,6 +742,29 @@ namespace vanguard::rhi
     {
         const TextureSubresourceData* subresources = nullptr;
         u32 subresourceCount = 0;
+    };
+    struct TextureSubresource
+    {
+        u16 mipLevel = 0;
+        u16 arraySlice = 0;
+    };
+    struct TextureCopyRegion
+    {
+        TextureSubresource source;
+        TextureSubresource destination;
+        u32 sourceX = 0;
+        u32 sourceY = 0;
+        u32 sourceZ = 0;
+        u32 destinationX = 0;
+        u32 destinationY = 0;
+        u32 destinationZ = 0;
+        // An all-zero extent selects the complete source mip. Partially zero extents are invalid.
+        Extent3D extent{0, 0, 0};
+    };
+    struct TextureResolveRegion
+    {
+        TextureSubresource source;
+        TextureSubresource destination;
     };
     struct MemoryRequirements
     {
@@ -869,6 +1076,152 @@ namespace vanguard::rhi
         u32 maximumRecursionDepth = 1;
     };
 
+    enum class IndexFormat : u8
+    {
+        UInt16,
+        UInt32
+    };
+
+    enum class AccelerationStructureKind : u8
+    {
+        BottomLevel,
+        TopLevel
+    };
+    enum class RayTracingGeometryType : u8
+    {
+        Triangles,
+        AxisAlignedBoundingBoxes
+    };
+    enum class RayTracingGeometryFlags : u8
+    {
+        None = 0,
+        Opaque = 1u << 0u,
+        NoDuplicateAnyHitInvocation = 1u << 1u
+    };
+    enum class AccelerationStructureBuildFlags : u8
+    {
+        None = 0,
+        AllowUpdate = 1u << 0u,
+        AllowCompaction = 1u << 1u,
+        PreferFastTrace = 1u << 2u,
+        PreferFastBuild = 1u << 3u,
+        MinimizeMemory = 1u << 4u
+    };
+    [[nodiscard]] constexpr RayTracingGeometryFlags operator|(const RayTracingGeometryFlags left,
+                                                               const RayTracingGeometryFlags right) noexcept
+    {
+        return CombineFlags(left, right);
+    }
+    [[nodiscard]] constexpr AccelerationStructureBuildFlags operator|(const AccelerationStructureBuildFlags left,
+                                                                       const AccelerationStructureBuildFlags right) noexcept
+    {
+        return CombineFlags(left, right);
+    }
+
+    struct RayTracingTriangleGeometryDesc
+    {
+        BufferRef vertexBuffer;
+        u64 vertexOffset = 0;
+        u32 vertexCount = 0;
+        u32 vertexStride = 0;
+        Format positionFormat = Format::R32G32B32Float;
+        BufferRef indexBuffer;
+        u64 indexOffset = 0;
+        u32 indexCount = 0;
+        IndexFormat indexFormat = IndexFormat::UInt32;
+        BufferRef transformBuffer;
+        u64 transformOffset = 0;
+    };
+    struct RayTracingAabbGeometryDesc
+    {
+        BufferRef buffer;
+        u64 offset = 0;
+        u32 count = 0;
+        u32 stride = 24;
+    };
+    struct RayTracingGeometryDesc
+    {
+        RayTracingGeometryType type = RayTracingGeometryType::Triangles;
+        RayTracingGeometryFlags flags = RayTracingGeometryFlags::None;
+        RayTracingTriangleGeometryDesc triangles;
+        RayTracingAabbGeometryDesc axisAlignedBoundingBoxes;
+    };
+    struct AccelerationStructureDesc
+    {
+        AccelerationStructureKind kind = AccelerationStructureKind::BottomLevel;
+        const RayTracingGeometryDesc* geometries = nullptr;
+        u32 geometryCount = 0;
+        u32 maximumInstanceCount = 0;
+        AccelerationStructureBuildFlags buildFlags = AccelerationStructureBuildFlags::PreferFastTrace;
+    };
+    enum class AccelerationStructureBuildMode : u8
+    {
+        Build,
+        Update
+    };
+    enum class AccelerationStructureCopyMode : u8
+    {
+        Clone,
+        Compact
+    };
+    enum class RayTracingInstanceFlags : u8
+    {
+        None = 0,
+        TriangleCullDisable = 1u << 0u,
+        TriangleFrontCounterClockwise = 1u << 1u,
+        ForceOpaque = 1u << 2u,
+        ForceNonOpaque = 1u << 3u
+    };
+    struct RayTracingInstanceDesc
+    {
+        /// Row-major 3x4 object-to-world transform.
+        f32 transform[12]{1.0f, 0.0f, 0.0f, 0.0f,
+                          0.0f, 1.0f, 0.0f, 0.0f,
+                          0.0f, 0.0f, 1.0f, 0.0f};
+        AccelerationStructureRef bottomLevel;
+        u32 instanceId = 0;
+        u32 instanceMask = 0xffu;
+        u32 hitGroupOffset = 0;
+        RayTracingInstanceFlags flags = RayTracingInstanceFlags::None;
+    };
+    struct RayTracingGpuInstanceDesc
+    {
+        /// Row-major 3x4 object-to-world transform.
+        f32 transform[12]{1.0f, 0.0f, 0.0f, 0.0f,
+                          0.0f, 1.0f, 0.0f, 0.0f,
+                          0.0f, 0.0f, 1.0f, 0.0f};
+        /// Low 24 bits contain the instance id; high 8 bits contain the visibility mask.
+        u32 instanceIdAndMask = 0xff000000u;
+        /// Low 24 bits contain the hit-group offset; high 8 bits contain RayTracingInstanceFlags.
+        u32 hitGroupOffsetAndFlags = 0;
+        u64 bottomLevelDeviceAddress = 0;
+    };
+    static_assert(sizeof(RayTracingGpuInstanceDesc) == 64);
+
+    struct ShaderTableRecord
+    {
+        const char* exportName = nullptr;
+        const void* localData = nullptr;
+        u32 localDataSize = 0;
+    };
+    struct ShaderTableDesc
+    {
+        PipelineRef pipeline;
+        ShaderTableRecord rayGeneration;
+        const ShaderTableRecord* missRecords = nullptr;
+        u32 missRecordCount = 0;
+        const ShaderTableRecord* hitGroupRecords = nullptr;
+        u32 hitGroupRecordCount = 0;
+        const ShaderTableRecord* callableRecords = nullptr;
+        u32 callableRecordCount = 0;
+    };
+    struct DispatchRaysArguments
+    {
+        u32 width = 1;
+        u32 height = 1;
+        u32 depth = 1;
+    };
+
     struct ViewportDesc
     {
         f32 x = 0.0f;
@@ -887,6 +1240,14 @@ namespace vanguard::rhi
         i32 height = 0;
     };
 
+    struct ColorValue
+    {
+        f32 red = 0.0f;
+        f32 green = 0.0f;
+        f32 blue = 0.0f;
+        f32 alpha = 0.0f;
+    };
+
     struct RenderTargetAttachment
     {
         TextureRef texture;
@@ -903,17 +1264,21 @@ namespace vanguard::rhi
         RenderTargetAttachment depthStencilTarget;
     };
 
+    struct VariableRateShadingState
+    {
+        ShadingRate rate = ShadingRate::Rate1x1;
+        ShadingRateCombiner primitiveCombiner = ShadingRateCombiner::Passthrough;
+        ShadingRateCombiner imageCombiner = ShadingRateCombiner::Passthrough;
+        TextureRef image;
+        SubresourceRange imageSubresources;
+        bool enabled = false;
+    };
+
     struct VertexBufferBinding
     {
         BufferRef buffer;
         u64 offset = 0;
         u8 binding = 0;
-    };
-
-    enum class IndexFormat : u8
-    {
-        UInt16,
-        UInt32
     };
 
     struct IndexBufferBinding
@@ -1037,10 +1402,26 @@ namespace vanguard::rhi
         u64 allocationFailures = 0;
     };
 
+    inline constexpr u32 MaximumQueryPoolEntries = 65'536;
+    inline constexpr u32 MaximumResidencyBatchSize = 1'024;
+
     struct QueryPoolDesc
     {
         QueryType type = QueryType::Timestamp;
         u32 capacity = 0;
+    };
+
+    struct TimestampCalibration
+    {
+        u64 gpuTimestamp = 0;
+        u64 cpuTimestamp = 0;
+        u64 gpuFrequency = 0;
+        u64 cpuFrequency = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return gpuFrequency != 0 && cpuFrequency != 0;
+        }
     };
 
     struct ResourceLifetimeStats
@@ -1082,6 +1463,46 @@ namespace vanguard::rhi
         Hdr10,
         ScRgb
     };
+
+    struct Chromaticity
+    {
+        f32 x = 0.0f;
+        f32 y = 0.0f;
+    };
+
+    struct Hdr10Metadata
+    {
+        Chromaticity redPrimary{0.708f, 0.292f};
+        Chromaticity greenPrimary{0.170f, 0.797f};
+        Chromaticity bluePrimary{0.131f, 0.046f};
+        Chromaticity whitePoint{0.3127f, 0.3290f};
+        f32 maximumMasteringLuminanceNits = 1'000.0f;
+        f32 minimumMasteringLuminanceNits = 0.001f;
+        u16 maximumContentLightLevelNits = 1'000;
+        u16 maximumFrameAverageLightLevelNits = 400;
+    };
+
+    struct FrameLatencyPolicy
+    {
+        u8 maximumFramesInFlight = 2;
+        u32 waitTimeoutMilliseconds = 5'000;
+        bool enabled = true;
+    };
+
+    struct DisplayColorCapabilities
+    {
+        Chromaticity redPrimary;
+        Chromaticity greenPrimary;
+        Chromaticity bluePrimary;
+        Chromaticity whitePoint;
+        f32 minimumLuminanceNits = 0.0f;
+        f32 maximumLuminanceNits = 0.0f;
+        f32 maximumFullFrameLuminanceNits = 0.0f;
+        u8 bitsPerColor = 0;
+        bool hdr10Output = false;
+        bool hdrActive = false;
+    };
+
     struct SwapChainDesc
     {
         PresentationSurface surface;
@@ -1091,7 +1512,71 @@ namespace vanguard::rhi
         Format format = Format::B8G8R8A8UNorm;
         PresentMode presentMode = PresentMode::Fifo;
         ColorSpace colorSpace = ColorSpace::Srgb;
+        Hdr10Metadata hdr10Metadata;
+        FrameLatencyPolicy frameLatency;
         bool allowTearing = false;
+    };
+    inline constexpr u32 MaximumSwapChainBuffers = 8;
+
+    enum class SwapChainState : u8
+    {
+        Available,
+        Acquired,
+        Reconfiguring,
+        Failed
+    };
+
+    struct PresentParameters
+    {
+        PresentMode mode = PresentMode::Fifo;
+        u8 synchronizationInterval = 1;
+        bool allowTearing = false;
+    };
+
+    struct AcquiredBackBuffer
+    {
+        SwapChainRef swapChain;
+        TextureRef texture;
+        u64 serial = 0;
+        u32 bufferIndex = 0;
+        u32 width = 0;
+        u32 height = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return swapChain.IsValid() && texture.IsValid() && serial != 0 && width != 0 && height != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+    };
+
+    struct SwapChainStats
+    {
+        SwapChainState state = SwapChainState::Failed;
+        PresentParameters presentParameters;
+        u64 acquisitions = 0;
+        u64 abandonedAcquisitions = 0;
+        u64 presentedFrames = 0;
+        u64 acquireWaits = 0;
+        u64 acquireWaitNanoseconds = 0;
+        u64 longestAcquireWaitNanoseconds = 0;
+        u64 frameLatencyWaits = 0;
+        u64 frameLatencyWaitNanoseconds = 0;
+        u64 longestFrameLatencyWaitNanoseconds = 0;
+        u64 frameLatencyTimeouts = 0;
+        u64 presentationFailures = 0;
+        u64 rejectedOperations = 0;
+        u64 resizeCount = 0;
+        u64 lastAcquisitionSerial = 0;
+        u64 lastPresentationFence = 0;
+        u32 currentBufferIndex = 0;
+        u32 bufferCount = 0;
+        u32 width = 0;
+        u32 height = 0;
+        ColorSpace colorSpace = ColorSpace::Srgb;
+        FrameLatencyPolicy frameLatency;
+        DisplayColorCapabilities displayColor;
+        bool tearingSupported = false;
+        bool tearingEnabled = false;
     };
 
     struct GpuFence
@@ -1109,6 +1594,47 @@ namespace vanguard::rhi
         [[nodiscard]] friend constexpr bool operator==(const GpuFence&, const GpuFence&) noexcept = default;
     };
 
+    // A readback request copies one mip and one array slice into owned CPU-visible staging storage. The source
+    // region remains in its native format; row and depth pitches describe backend padding and must be respected.
+    struct TextureReadbackRegion
+    {
+        TextureSubresource source;
+        u32 sourceX = 0;
+        u32 sourceY = 0;
+        u32 sourceZ = 0;
+        // An all-zero extent selects the complete source mip. Partially zero extents are invalid.
+        Extent3D extent{0, 0, 0};
+    };
+    enum class TextureReadbackState : u8
+    {
+        PendingSubmission,
+        PendingGpu,
+        Ready,
+        Mapped,
+        Failed
+    };
+    struct TextureReadbackInfo
+    {
+        Format format = Format::Unknown;
+        Extent3D extent{};
+        TextureReadbackState state = TextureReadbackState::Failed;
+        GpuFence completion;
+    };
+    struct TextureReadbackMapping
+    {
+        const void* data = nullptr;
+        u64 rowPitch = 0;
+        u64 depthPitch = 0;
+        u64 dataSize = 0;
+        Format format = Format::Unknown;
+        Extent3D extent{};
+
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return data != nullptr;
+        }
+    };
+
     enum class FailureCode : u8
     {
         None,
@@ -1124,8 +1650,10 @@ namespace vanguard::rhi
         DeviceLost,
         BackendFailure,
         Busy,
+        Timeout,
         IncompatibleBinding,
-        MissingBinding
+        MissingBinding,
+        ResourceStateMismatch
     };
 
     struct Failure

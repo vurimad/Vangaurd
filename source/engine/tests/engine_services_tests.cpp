@@ -4,6 +4,7 @@
 #include <vanguard/engine/game_world_service.hpp>
 #include <vanguard/engine/input_service.hpp>
 #include <vanguard/engine/resource_streaming_service.hpp>
+#include <vanguard/engine/render_scene_service.hpp>
 #include <vanguard/engine/resources_service.hpp>
 #include <vanguard/engine/streaming_observer_service.hpp>
 #include <vanguard/engine/world_service.hpp>
@@ -312,6 +313,7 @@ int main()
     Check(vanguard::engine::RegisterStreamingObserverService(host, &failure),
           "Streaming Observer service registration");
     Check(vanguard::engine::RegisterWorldSessionService(host, &failure), "World Session service registration");
+    Check(vanguard::engine::RegisterRenderSceneService(host, &failure), "Render Scene service registration");
     Check(host.Compile(vanguard::application::ApplicationProfile::Runtime, &failure), "engine graph compilation");
     Check(host.Start(&failure), "engine graph startup");
     Check(host.StateOf(vanguard::engine::JobsServiceId) == vanguard::application::ServiceState::Running,
@@ -335,6 +337,8 @@ int main()
           "Streaming Observer service running state");
     Check(host.StateOf(vanguard::engine::WorldSessionServiceId) == vanguard::application::ServiceState::Running,
           "World Session service running state");
+    Check(host.StateOf(vanguard::engine::RenderSceneServiceId) == vanguard::application::ServiceState::Running,
+          "Render Scene service running state");
     Check(host.FindCapability(vanguard::engine::IoCapabilityId) != nullptr, "I/O capability publication");
     Check(host.FindCapability(vanguard::engine::FilesystemCapabilityId) != nullptr,
           "Filesystem capability publication");
@@ -346,6 +350,8 @@ int main()
           "Streaming Observer capability publication");
     Check(host.FindCapability(vanguard::engine::WorldSessionCapabilityId) != nullptr,
           "World Session capability publication");
+    Check(host.FindCapability(vanguard::engine::RenderSceneCapabilityId) != nullptr,
+          "Render Scene capability publication");
     Check(host.FindCapability(vanguard::engine::ResourceRegistryCapabilityId) != nullptr &&
               host.FindCapability(vanguard::engine::ResourceRegistryCapabilityId) ==
                   host.FindCapability(vanguard::engine::ResourcePipelineCapabilityId),
@@ -363,6 +369,10 @@ int main()
               resourceStreamingStats.stagingBudgetBytes == 512ull * 1024ull * 1024ull &&
               resourceStreamingStats.activeLoads == 0 && resourceStreamingStats.activeReads == 0,
           "typed Resource Streaming service access and default budget");
+    vanguard::engine::RenderSceneService* const renderSceneService = vanguard::engine::FindRenderSceneService(host);
+    Check(renderSceneService != nullptr && renderSceneService->Scenes().IsInitialized() &&
+              renderSceneService->Scenes().GetStats().activeScenes == 0,
+          "typed Render Scene service access and empty startup state");
     vanguard::engine::WorldService* const worldService = vanguard::engine::FindWorldService(host);
     Check(worldService != nullptr && worldService->Status() == vanguard::engine::WorldResourceStatus::Idle &&
               worldService->Resource() == nullptr && worldService->Grid() == nullptr && worldService->Executor() == nullptr,

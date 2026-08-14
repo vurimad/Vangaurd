@@ -1,4 +1,4 @@
-#include "runtime_application.hpp"
+#include <vanguard/runtime/runtime_application.hpp>
 
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/engine/engine_services.hpp>

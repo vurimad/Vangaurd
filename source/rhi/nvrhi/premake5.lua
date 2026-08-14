@@ -12,8 +12,8 @@ project "rhiNvrhi"
     files { "include/**.hpp", "private/**.hpp", "src/**.hpp", "src/**.cpp", "README.md", "UPSTREAM.md" }
     includedirs {
         "include", "private", "../include", "../../system/include", "../../memory/include", "../../containers/include",
-        "../../concurrency/include", "../../diagnostics/include", "../../jobs/include", "../../../../vendors/DirectX-Headers/include",
-        "../../../../vendors/NVRHI/include"
+        "../../concurrency/include", "../../diagnostics/include", "../../jobs/include",
+        path.join(directx_headers_root, "include"), path.join(nvrhi_root, "include"), path.join(nvrhi_root, "src")
     }
     links { "rhi", "nvrhiD3D12", "nvrhiCore", "directXGuids", "jobs", "diagnostics", "concurrency", "containers", "memory", "system" }
     vpaths {
@@ -40,10 +40,11 @@ project "rhiNvrhiTests"
         "include", "private", "../include", "../../system/include", "../../memory/include", "../../containers/include",
         "../../concurrency/include", "../../diagnostics/include", "../../jobs/include", "../../rendering/include",
         "../../pipelineCache/include", "../../pipelines/include", "../../shaders/include", "../../crypto/include",
-        "../../serialization/include", "../../resources/include", "../../filesystem/include", "../../io/include"
+        "../../serialization/include", "../../resources/include", "../../filesystem/include", "../../io/include",
+        "../../window/include"
     }
     links {
-        "rendering", "pipelineCache", "pipelines", "shaders", "crypto", "serialization", "resources", "filesystem", "io",
+        "rendering", "pipelineCache", "pipelines", "shaders", "crypto", "serialization", "resources", "filesystem", "io", "window",
         "rhiNvrhi", "rhi", "nvrhiD3D12", "nvrhiCore", "directXGuids", "jobs", "diagnostics", "concurrency", "containers",
         "containersCompat", "memory", "redSystemCompat", "system", "d3d12", "dxgi",
         "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Version"

@@ -1,5 +1,3 @@
-local sdlRoot = path.getabsolute("../../../../vendors/SDL-release-3.4.14")
-
 group "Engine/Platform"
 
 project "platformWindows"
@@ -16,7 +14,7 @@ project "platformWindows"
     includedirs {
         "include", "../../application/include", "../../input/include", "../../system/include", "../../memory/include",
         "../../containers/include", "../../concurrency/include", "../../window/include", "../../window/sdl/include",
-        path.join(sdlRoot, "include")
+        path.join(sdl_root, "include")
     }
     dependson { "SDL3" }
     links { path.join(output_root, "SDL3.lib"), "windowSdl", "window", "application", "input", "concurrency", "memory" }
@@ -40,7 +38,7 @@ project "platformWindowsTests"
     includedirs {
         "include", "../../application/include", "../../input/include", "../../system/include", "../../memory/include",
         "../../diagnostics/include", "../../containers/include", "../../concurrency/include", "../../window/include",
-        "../../window/sdl/include", path.join(sdlRoot, "include")
+        "../../window/sdl/include", path.join(sdl_root, "include")
     }
     links {
         "platformWindows", "windowSdl", "window", "application", "input", "concurrency", "concurrencyCompat", "diagnostics", "diagnosticsCompat",

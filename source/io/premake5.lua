@@ -106,7 +106,7 @@ project "ioCompat"
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include",
         "../diagnostics/include",
@@ -147,13 +147,13 @@ project "io"
 
     files {
         "include/**.hpp",
-        "src/**.hpp",
+        "private/**.hpp",
         "src/**.cpp"
     }
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include",
         "../diagnostics/include",
@@ -170,7 +170,8 @@ project "io"
 
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
-        ["Source/*"] = { "src/**.hpp", "src/**.cpp" }
+        ["Private API/*"] = { "private/**.hpp" },
+        ["Source/*"] = { "src/**.cpp" }
     }
 
 group "Tests/IO"

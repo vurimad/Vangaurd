@@ -2,6 +2,7 @@
 
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/system/assert.hpp>
 
 #include <new>
 
@@ -127,6 +128,78 @@ namespace vanguard::rhi::backend
             }
         }
 
+        [[nodiscard]] constexpr bool IsDepthFormat(const Format format) noexcept
+        {
+            return format == Format::D16UNorm || format == Format::D24UNormS8UInt || format == Format::D32Float ||
+                   format == Format::D32FloatS8UInt;
+        }
+
+        [[nodiscard]] constexpr bool HasStencilPlane(const Format format) noexcept
+        {
+            return format == Format::D24UNormS8UInt || format == Format::D32FloatS8UInt;
+        }
+
+        [[nodiscard]] constexpr bool IsUnsignedIntegerFormat(const Format format) noexcept
+        {
+            return format == Format::R8UInt || format == Format::R8G8UInt || format == Format::R8G8B8A8UInt ||
+                   format == Format::R16UInt || format == Format::R16G16UInt || format == Format::R16G16B16A16UInt ||
+                   format == Format::R32UInt || format == Format::R32G32UInt;
+        }
+
+        [[nodiscard]] bool ResolveSubresources(const TextureDesc& desc, const SubresourceRange& requested,
+                                               SubresourceRange& resolved) noexcept
+        {
+            if (requested.firstMip >= desc.mipCount || requested.firstSlice >= desc.arraySize)
+                return false;
+            const u32 mipCount = requested.mipCount == 0xffffu ? desc.mipCount - requested.firstMip : requested.mipCount;
+            const u32 sliceCount = requested.sliceCount == 0xffffu ? desc.arraySize - requested.firstSlice : requested.sliceCount;
+            if (mipCount == 0 || sliceCount == 0 || mipCount > static_cast<u32>(desc.mipCount - requested.firstMip) ||
+                sliceCount > static_cast<u32>(desc.arraySize - requested.firstSlice))
+                return false;
+            resolved = {requested.firstMip, static_cast<u16>(mipCount), requested.firstSlice, static_cast<u16>(sliceCount)};
+            return true;
+        }
+
+        [[nodiscard]] constexpr u32 MipDimension(const u32 dimension, const u16 mipLevel) noexcept
+        {
+            const u32 value = dimension >> mipLevel;
+            return value != 0 ? value : 1;
+        }
+
+        [[nodiscard]] Extent3D GetMipExtent(const TextureDesc& desc, const u16 mipLevel) noexcept
+        {
+            return {MipDimension(desc.extent.width, mipLevel),
+                    desc.dimension == TextureDimension::Texture1D ? 1u : MipDimension(desc.extent.height, mipLevel),
+                    desc.dimension == TextureDimension::Texture3D ? MipDimension(desc.extent.depth, mipLevel) : 1u};
+        }
+
+        [[nodiscard]] constexpr bool IsBlockCompressed(const Format format) noexcept
+        {
+            return format >= Format::BC1UNorm && format <= Format::BC7UNormSrgb;
+        }
+
+        [[nodiscard]] constexpr bool IsBlockRegionValid(const u32 offset, const u32 extent, const u32 dimension) noexcept
+        {
+            return offset % 4u == 0 && (extent % 4u == 0 || offset + extent == dimension);
+        }
+
+        [[nodiscard]] constexpr bool RegionsOverlap(const u32 firstOffset, const u32 firstExtent,
+                                                    const u32 secondOffset, const u32 secondExtent) noexcept
+        {
+            return firstOffset < secondOffset + secondExtent && secondOffset < firstOffset + firstExtent;
+        }
+
+        [[nodiscard]] bool ValidateClearRectangle(const TextureDesc& desc, const SubresourceRange& range,
+                                                  const Rect& rectangle) noexcept
+        {
+            if (range.mipCount != 1 || rectangle.x < 0 || rectangle.y < 0 || rectangle.width <= 0 || rectangle.height <= 0)
+                return false;
+            const u32 mipWidth = desc.extent.width >> range.firstMip != 0 ? desc.extent.width >> range.firstMip : 1;
+            const u32 mipHeight = desc.extent.height >> range.firstMip != 0 ? desc.extent.height >> range.firstMip : 1;
+            return static_cast<u32>(rectangle.x) <= mipWidth && static_cast<u32>(rectangle.width) <= mipWidth - rectangle.x &&
+                   static_cast<u32>(rectangle.y) <= mipHeight && static_cast<u32>(rectangle.height) <= mipHeight - rectangle.y;
+        }
+
         [[nodiscard]] nvrhi::ResourceStates ToNativeState(const ResourceState state) noexcept
         {
             u32 result = 0;
@@ -163,6 +236,12 @@ namespace vanguard::rhi::backend
                 include(nvrhi::ResourceStates::AccelStructWrite);
             if (HasFlag(state, ResourceState::Present))
                 include(nvrhi::ResourceStates::Present);
+            if (HasFlag(state, ResourceState::ResolveSource))
+                include(nvrhi::ResourceStates::ResolveSource);
+            if (HasFlag(state, ResourceState::ResolveDestination))
+                include(nvrhi::ResourceStates::ResolveDest);
+            if (HasFlag(state, ResourceState::ShadingRate))
+                include(nvrhi::ResourceStates::ShadingRateSurface);
             return static_cast<nvrhi::ResourceStates>(result);
         }
 
@@ -462,6 +541,19 @@ namespace vanguard::rhi::backend
             return block ? new (block.address) Payload(static_cast<Args&&>(args)...) : nullptr;
         }
 
+        void CopyDebugName(char* const destination, const u32 capacity, const char* const source) noexcept
+        {
+            if (destination == nullptr || capacity == 0) return;
+            u32 length = 0;
+            if (source != nullptr)
+                while (length + 1u < capacity && source[length] != '\0')
+                {
+                    destination[length] = source[length];
+                    ++length;
+                }
+            destination[length] = '\0';
+        }
+
         template <typename Payload> void DestroyPayload(void*, ResourceRef, void* const address) noexcept
         {
             if (address == nullptr)
@@ -475,27 +567,69 @@ namespace vanguard::rhi::backend
         {
             nvrhi::TextureHandle native;
             TextureDesc desc;
+            HeapRef boundHeap;
+            char debugName[96]{};
         };
+        struct TextureReadbackPayload
+        {
+            nvrhi::StagingTextureHandle native;
+            mutable concurrency::SpinLock lock;
+            Format format = Format::Unknown;
+            Extent3D extent{};
+            GpuFence completion;
+            TextureReadbackState state = TextureReadbackState::PendingSubmission;
+            bool mapped = false;
+            char debugName[96]{};
+        };
+
+        void DestroyTextureReadback(void* const context, ResourceRef, void* const address) noexcept
+        {
+            if (address == nullptr)
+                return;
+            auto& common = *static_cast<CommonBackend*>(context);
+            auto* const payload = static_cast<TextureReadbackPayload*>(address);
+            if (payload->mapped)
+                common.Device()->unmapStagingTexture(payload->native);
+            DestroyPayload<TextureReadbackPayload>(nullptr, {}, payload);
+        }
+
+        void CompleteTextureReadbackSubmission(void* const context, const GpuFence completion, const u64 value) noexcept
+        {
+            auto& common = *static_cast<CommonBackend*>(context);
+            ResourceRef resource;
+            resource.value = value;
+            auto* const payload = static_cast<TextureReadbackPayload*>(common.GetResourcePayload(resource));
+            if (payload == nullptr)
+                return;
+            concurrency::ScopedLock guard(payload->lock);
+            payload->completion = completion;
+            payload->state = completion.IsValid() ? TextureReadbackState::PendingGpu : TextureReadbackState::Failed;
+        }
         struct BufferPayload
         {
             nvrhi::BufferHandle native;
             BufferDesc desc;
+            HeapRef boundHeap;
+            char debugName[96]{};
             bool mapped = false;
         };
         struct HeapPayload
         {
             nvrhi::HeapHandle native;
             HeapDesc desc;
+            char debugName[96]{};
         };
         struct SamplerPayload
         {
             nvrhi::SamplerHandle native;
             SamplerStateDesc desc;
+            char debugName[96]{};
         };
         struct ShaderPayload
         {
             nvrhi::ShaderHandle native;
             ShaderStage stage = ShaderStage::Vertex;
+            char debugName[96]{};
         };
         struct StoredVertexAttribute
         {
@@ -509,6 +643,7 @@ namespace vanguard::rhi::backend
             u64 hash = 0;
             u32 bindingCount = 0;
             u32 attributeCount = 0;
+            char debugName[96]{};
         };
         struct PipelinePayload
         {
@@ -523,6 +658,7 @@ namespace vanguard::rhi::backend
             u32 fixedBindingCount = 0;
             u32 descriptorDomainCount = 0;
             u32 pushConstantSize = 0;
+            char debugName[96]{};
         };
         struct BindingLayoutPayload
         {
@@ -629,13 +765,24 @@ namespace vanguard::rhi::backend
         }
         struct CommandListPayload
         {
+            struct SubmissionCallback
+            {
+                CommandSubmissionCallback callback = nullptr;
+                void* context = nullptr;
+                u64 value = 0;
+            };
+
             explicit CommandListPayload(nvrhi::CommandListHandle&& commandList, const CommandListType commandListType) noexcept
                 : native(static_cast<nvrhi::CommandListHandle&&>(commandList)), resources(memory::pools::Rendering::GetInstance()),
+                  residencyResources(memory::pools::Rendering::GetInstance()),
+                  submissionCallbacks(memory::pools::Rendering::GetInstance()),
                   type(commandListType)
             {
             }
             nvrhi::CommandListHandle native;
             containers::DynamicArray<ResourceRef> resources;
+            containers::DynamicArray<ResourceRef> residencyResources;
+            containers::DynamicArray<SubmissionCallback> submissionCallbacks;
             nvrhi::FramebufferHandle framebuffer;
             PipelineRef pipeline;
             ViewportDesc viewport;
@@ -645,8 +792,11 @@ namespace vanguard::rhi::backend
             BufferRef indirectArguments;
             BufferRef indirectCount;
             u8 pushConstants[nvrhi::c_MaxPushConstantSize]{};
+            ColorValue blendFactor{1.0f, 1.0f, 1.0f, 1.0f};
             u32 vertexBufferCount = 0;
             u32 pushConstantSize = 0;
+            u32 markerDepth = 0;
+            u8 stencilReference = 0;
             CommandListType type = CommandListType::None;
             bool renderTargetsSet = false;
             bool viewportSet = false;
@@ -654,6 +804,7 @@ namespace vanguard::rhi::backend
             bool indexBufferSet = false;
             bool vertexBufferSet[MaximumVertexBindings]{};
             bool open = true;
+            char debugName[96]{};
         };
 
         void DestroyPipeline(void* const context, ResourceRef, void* const address) noexcept
@@ -669,18 +820,55 @@ namespace vanguard::rhi::backend
 
         [[nodiscard]] bool TrackCommandResource(CommonBackend& common, CommandListPayload& command, const ResourceRef resource) noexcept
         {
+            bool retained = false;
             for (const ResourceRef tracked : command.resources)
                 if (tracked == resource)
-                    return true;
-            if (!common.IsResourceReferenceValid(resource))
-                return false;
-            common.AddRef(resource);
-            const u32 expected = command.resources.Size() + 1u;
-            command.resources.PushBack(resource);
-            if (command.resources.Size() == expected)
+                {
+                    retained = true;
+                    break;
+                }
+            if (!retained)
+            {
+                if (!common.IsResourceReferenceValid(resource))
+                    return false;
+                common.AddRef(resource);
+                const u32 expected = command.resources.Size() + 1u;
+                command.resources.PushBack(resource);
+                if (command.resources.Size() != expected)
+                {
+                    static_cast<void>(common.Release(resource));
+                    return false;
+                }
+            }
+
+            const ResourceRef allocation = common.GetResidencyAllocation(resource);
+            if (!allocation.IsValid())
                 return true;
-            static_cast<void>(common.Release(resource));
-            return false;
+            if (allocation != resource)
+            {
+                bool allocationRetained = false;
+                for (const ResourceRef tracked : command.resources)
+                    allocationRetained = allocationRetained || tracked == allocation;
+                if (!allocationRetained)
+                {
+                    if (!common.IsResourceReferenceValid(allocation))
+                        return false;
+                    common.AddRef(allocation);
+                    const u32 expected = command.resources.Size() + 1u;
+                    command.resources.PushBack(allocation);
+                    if (command.resources.Size() != expected)
+                    {
+                        static_cast<void>(common.Release(allocation));
+                        return false;
+                    }
+                }
+            }
+            for (const ResourceRef tracked : command.residencyResources)
+                if (tracked == allocation)
+                    return true;
+            const u32 expected = command.residencyResources.Size() + 1u;
+            command.residencyResources.PushBack(allocation);
+            return command.residencyResources.Size() == expected;
         }
 
         [[nodiscard]] bool PopulatePipelineBindings(CommonBackend& common, PipelinePayload& pipeline,
@@ -770,6 +958,9 @@ namespace vanguard::rhi::backend
             nvrhi::GraphicsState state;
             state.pipeline = pipeline->graphics;
             state.framebuffer = command.framebuffer;
+            state.blendConstantColor = nvrhi::Color(command.blendFactor.red, command.blendFactor.green,
+                                                    command.blendFactor.blue, command.blendFactor.alpha);
+            state.dynamicStencilRefValue = command.stencilReference;
             state.viewport.addViewport(nvrhi::Viewport(command.viewport.x, command.viewport.x + command.viewport.width, command.viewport.y,
                                                        command.viewport.y + command.viewport.height, command.viewport.minimumDepth,
                                                        command.viewport.maximumDepth));
@@ -875,13 +1066,21 @@ namespace vanguard::rhi::backend
 
     bool CommonBackend::Initialize(nvrhi::DeviceHandle&& device, const FenceCompleteCallback fenceComplete,
                                    const SignalFenceCallback signalFence, const WaitFenceCallback waitFence,
-                                   const AliasingBarrierCallback aliasingBarrier, void* const fenceContext) noexcept
+                                   const AliasingBarrierCallback aliasingBarrier,
+                                   const RectColorClearCallback rectColorClear,
+                                   const RectDepthStencilClearCallback rectDepthStencilClear,
+                                   const DiscardResourceCallback discardResource,
+                                   const PrepareResidencyCallback prepareResidency,
+                                   const CommitResidencyCallback commitResidency,
+                                   const ReleaseResidencyCallback releaseResidency, void* const fenceContext) noexcept
     {
         if (IsInitialized() || !device || fenceComplete == nullptr || signalFence == nullptr || waitFence == nullptr ||
-            aliasingBarrier == nullptr)
+            aliasingBarrier == nullptr || rectColorClear == nullptr || rectDepthStencilClear == nullptr ||
+            discardResource == nullptr || prepareResidency == nullptr || commitResidency == nullptr ||
+            releaseResidency == nullptr)
             return false;
         m_device = static_cast<nvrhi::DeviceHandle&&>(device);
-        if (!m_lifetime.Initialize({}, fenceComplete, fenceContext))
+        if (!m_lifetime.Initialize({}, fenceComplete, fenceContext, releaseResidency, fenceContext))
         {
             m_device = nullptr;
             return false;
@@ -896,6 +1095,11 @@ namespace vanguard::rhi::backend
         m_signalFence = signalFence;
         m_waitFence = waitFence;
         m_aliasingBarrier = aliasingBarrier;
+        m_rectColorClear = rectColorClear;
+        m_rectDepthStencilClear = rectDepthStencilClear;
+        m_discardResource = discardResource;
+        m_prepareResidency = prepareResidency;
+        m_commitResidency = commitResidency;
         m_fenceContext = fenceContext;
         return true;
     }
@@ -933,6 +1137,11 @@ namespace vanguard::rhi::backend
         m_signalFence = nullptr;
         m_waitFence = nullptr;
         m_aliasingBarrier = nullptr;
+        m_rectColorClear = nullptr;
+        m_rectDepthStencilClear = nullptr;
+        m_discardResource = nullptr;
+        m_prepareResidency = nullptr;
+        m_commitResidency = nullptr;
         m_fenceContext = nullptr;
         return true;
     }
@@ -954,6 +1163,11 @@ namespace vanguard::rhi::backend
         m_signalFence = nullptr;
         m_waitFence = nullptr;
         m_aliasingBarrier = nullptr;
+        m_rectColorClear = nullptr;
+        m_rectDepthStencilClear = nullptr;
+        m_discardResource = nullptr;
+        m_prepareResidency = nullptr;
+        m_commitResidency = nullptr;
         m_fenceContext = nullptr;
     }
 
@@ -1048,7 +1262,10 @@ namespace vanguard::rhi::backend
                                : desc.sampleCount > 1
                                    ? (desc.arraySize > 1 ? nvrhi::TextureDimension::Texture2DMSArray : nvrhi::TextureDimension::Texture2DMS)
                                    : (desc.arraySize > 1 ? nvrhi::TextureDimension::Texture2DArray : nvrhi::TextureDimension::Texture2D);
-        nativeDesc.isShaderResource = HasFlag(desc.usage, TextureUsage::ShaderResource);
+        // Non-depth textures without a public SRV still need an ordinary native resource. NVRHI maps false to
+        // DENY_SHADER_RESOURCE, an optimization reserved here for depth targets that explicitly omit SRV usage.
+        nativeDesc.isShaderResource = HasFlag(desc.usage, TextureUsage::ShaderResource) ||
+                                      !HasFlag(desc.usage, TextureUsage::DepthStencil);
         nativeDesc.isRenderTarget = HasFlag(desc.usage, TextureUsage::RenderTarget) || HasFlag(desc.usage, TextureUsage::DepthStencil);
         nativeDesc.isUAV = HasFlag(desc.usage, TextureUsage::UnorderedAccess);
         nativeDesc.isShadingRateSurface = HasFlag(desc.usage, TextureUsage::ShadingRate);
@@ -1062,7 +1279,19 @@ namespace vanguard::rhi::backend
         TexturePayload* const payload = AllocatePayload<TexturePayload>(TexturePayload{static_cast<nvrhi::TextureHandle&&>(native), desc});
         if (payload == nullptr)
             return {};
-        const ResourceRef resource = m_lifetime.Create(ResourceKind::Texture, payload, &DestroyPayload<TexturePayload>);
+        const ResourceRef resource = m_lifetime.Create(
+            ResourceKind::Texture, payload,
+            [](void* context, ResourceRef, void* address) noexcept
+            {
+                auto& common = *static_cast<CommonBackend*>(context);
+                auto* const texture = static_cast<TexturePayload*>(address);
+                const HeapRef heap = texture->boundHeap;
+                texture->boundHeap = {};
+                texture->native = nullptr;
+                if (heap) static_cast<void>(common.Release(ResourceRef(heap)));
+                DestroyPayload<TexturePayload>(nullptr, {}, texture);
+            },
+            this);
         if (!resource)
         {
             DestroyPayload<TexturePayload>(nullptr, {}, payload);
@@ -1102,6 +1331,39 @@ namespace vanguard::rhi::backend
         return CastResourceRef<TextureRef>(resource);
     }
 
+    TextureRef CommonBackend::AdoptNativeTexture(nvrhi::TextureHandle&& native, const TextureDesc& desc) noexcept
+    {
+        if (!native) return {};
+        TexturePayload* const payload = AllocatePayload<TexturePayload>(TexturePayload{static_cast<nvrhi::TextureHandle&&>(native), desc});
+        if (payload == nullptr) return {};
+        const ResourceRef resource = m_lifetime.Create(
+            ResourceKind::Texture, payload,
+            [](void* context, ResourceRef, void* address) noexcept
+            {
+                auto& common = *static_cast<CommonBackend*>(context);
+                auto* const texture = static_cast<TexturePayload*>(address);
+                const HeapRef heap = texture->boundHeap;
+                texture->boundHeap = {};
+                texture->native = nullptr;
+                if (heap) static_cast<void>(common.Release(ResourceRef(heap)));
+                DestroyPayload<TexturePayload>(nullptr, {}, texture);
+            },
+            this);
+        if (!resource)
+        {
+            DestroyPayload<TexturePayload>(nullptr, {}, payload);
+            return {};
+        }
+        return CastResourceRef<TextureRef>(resource);
+    }
+
+    ResourceRef CommonBackend::CreateBackendResource(const ResourceKind kind, void* const payload,
+                                                      const DestroyResourceCallback destroy,
+                                                      void* const destroyContext) noexcept
+    {
+        return m_lifetime.Create(kind, payload, destroy, destroyContext);
+    }
+
     BufferRef CommonBackend::CreateBuffer(const BufferDesc& desc, const BufferInitData& initialData) noexcept
     {
         nvrhi::BufferDesc nativeDesc{};
@@ -1138,6 +1400,10 @@ namespace vanguard::rhi::backend
                 auto* const buffer = static_cast<BufferPayload*>(address);
                 if (buffer->mapped)
                     common.Device()->unmapBuffer(buffer->native);
+                const HeapRef heap = buffer->boundHeap;
+                buffer->boundHeap = {};
+                buffer->native = nullptr;
+                if (heap) static_cast<void>(common.Release(ResourceRef(heap)));
                 DestroyPayload<BufferPayload>(nullptr, {}, buffer);
             },
             this);
@@ -2078,20 +2344,22 @@ namespace vanguard::rhi::backend
             DestroyPipeline(this, {}, payload);
         return CastResourceRef<PipelineRef>(resource);
     }
-    QueryPoolRef CommonBackend::CreateQueryPool(const QueryPoolDesc&) noexcept
-    {
-        return {};
-    }
-    void CommonBackend::DestroyQueryPool(QueryPoolRef) noexcept {}
     BackendStatus CommonBackend::BindMemory(const TextureRef texture, const HeapRef heap, const u64 offset) noexcept
     {
         auto* const texturePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(texture)));
         auto* const heapPayload = static_cast<HeapPayload*>(m_lifetime.GetPayload(ResourceRef(heap)));
         if (texturePayload == nullptr || heapPayload == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid texture or heap reference");
-        return m_device->bindTextureMemory(texturePayload->native, heapPayload->native, offset)
-                   ? BackendStatus::Success()
-                   : BackendStatus::Failure(FailureCode::BackendFailure, 0, "NVRHI failed to bind texture memory");
+        if (texturePayload->boundHeap)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture memory is already bound");
+        static_cast<void>(m_lifetime.AddRef(ResourceRef(heap)));
+        if (!m_device->bindTextureMemory(texturePayload->native, heapPayload->native, offset))
+        {
+            static_cast<void>(m_lifetime.Release(ResourceRef(heap)));
+            return BackendStatus::Failure(FailureCode::BackendFailure, 0, "NVRHI failed to bind texture memory");
+        }
+        texturePayload->boundHeap = heap;
+        return BackendStatus::Success();
     }
     BackendStatus CommonBackend::BindMemory(const BufferRef buffer, const HeapRef heap, const u64 offset) noexcept
     {
@@ -2099,9 +2367,16 @@ namespace vanguard::rhi::backend
         auto* const heapPayload = static_cast<HeapPayload*>(m_lifetime.GetPayload(ResourceRef(heap)));
         if (bufferPayload == nullptr || heapPayload == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid buffer or heap reference");
-        return m_device->bindBufferMemory(bufferPayload->native, heapPayload->native, offset)
-                   ? BackendStatus::Success()
-                   : BackendStatus::Failure(FailureCode::BackendFailure, 0, "NVRHI failed to bind buffer memory");
+        if (bufferPayload->boundHeap)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "buffer memory is already bound");
+        static_cast<void>(m_lifetime.AddRef(ResourceRef(heap)));
+        if (!m_device->bindBufferMemory(bufferPayload->native, heapPayload->native, offset))
+        {
+            static_cast<void>(m_lifetime.Release(ResourceRef(heap)));
+            return BackendStatus::Failure(FailureCode::BackendFailure, 0, "NVRHI failed to bind buffer memory");
+        }
+        bufferPayload->boundHeap = heap;
+        return BackendStatus::Success();
     }
     MemoryRequirements CommonBackend::GetMemoryRequirements(const TextureRef texture) const noexcept
     {
@@ -2123,13 +2398,25 @@ namespace vanguard::rhi::backend
     {
         return m_lifetime.IsValid(resource);
     }
+    void* CommonBackend::GetResourcePayload(const ResourceRef resource) noexcept
+    {
+        return m_lifetime.GetPayload(resource);
+    }
     const void* CommonBackend::GetResourcePayload(const ResourceRef resource) const noexcept
     {
         return m_lifetime.GetPayload(resource);
     }
+    i32 CommonBackend::GetResourceReferenceCount(const ResourceRef resource) const noexcept
+    {
+        return m_lifetime.GetRefCount(resource);
+    }
     void CommonBackend::AddRef(const ResourceRef resource) noexcept
     {
         static_cast<void>(m_lifetime.AddRef(resource));
+    }
+    bool CommonBackend::TryAddRef(const ResourceRef resource) noexcept
+    {
+        return m_lifetime.AddRef(resource);
     }
     i32 CommonBackend::Release(const ResourceRef resource) noexcept
     {
@@ -2138,6 +2425,13 @@ namespace vanguard::rhi::backend
     ResourceLifetimeStats CommonBackend::GetResourceLifetimeStats() const noexcept
     {
         return m_lifetime.GetStats();
+    }
+    void CommonBackend::DrainRetiredResourcesAfterGpuIdle() noexcept
+    {
+        RetireResources();
+        m_lifetime.WaitForReclamation();
+        RetireResources();
+        m_lifetime.WaitForReclamation();
     }
     CommandListRef CommonBackend::CreateCommandList(const CommandListType type, const u64) noexcept
     {
@@ -2158,6 +2452,8 @@ namespace vanguard::rhi::backend
             {
                 auto& common = *static_cast<CommonBackend*>(context);
                 auto* const command = static_cast<CommandListPayload*>(address);
+                for (const CommandListPayload::SubmissionCallback& notification : command->submissionCallbacks)
+                    notification.callback(notification.context, {}, notification.value);
                 for (const ResourceRef used : command->resources)
                     static_cast<void>(common.Release(used));
                 DestroyPayload<CommandListPayload>(nullptr, {}, command);
@@ -2183,6 +2479,12 @@ namespace vanguard::rhi::backend
             payload->native->close();
             payload->open = false;
         }
+        for (const CommandListPayload::SubmissionCallback& notification : payload->submissionCallbacks)
+            notification.callback(notification.context, {}, notification.value);
+        payload->submissionCallbacks.Clear();
+        for (const ResourceRef used : payload->resources)
+            static_cast<void>(m_lifetime.Release(used));
+        payload->resources.Clear();
         static_cast<void>(m_lifetime.Release(resource));
     }
     BackendStatus CommonBackend::CloseAndSubmitCommandLists(const char*, const containers::ArraySpan<const CommandListRef> commandLists,
@@ -2201,6 +2503,9 @@ namespace vanguard::rhi::backend
             auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(resource));
             if (payload == nullptr || !payload->open)
                 return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "submission contains a stale or closed command list");
+            if (payload->markerDepth != 0)
+                return BackendStatus::Failure(FailureCode::InvalidCommandList, 0,
+                                              "submission contains a command list with unterminated GPU events");
             const u32 queue = QueueIndex(GetQueueType(payload->type));
             nativeLists[queue][queueCounts[queue]++] = payload->native;
             payloads[index] = payload;
@@ -2219,9 +2524,31 @@ namespace vanguard::rhi::backend
 
         for (u32 index = 0; index < commandLists.Size(); ++index)
         {
-            payloads[index]->native->commitBarriers();
-            payloads[index]->native->close();
-            payloads[index]->open = false;
+            CommandListPayload* const payload = payloads[index];
+            if (payload == nullptr)
+                return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "submission lost a validated command list");
+            const containers::DynamicArray<ResourceRef>& workingSet = payload->residencyResources;
+            for (u32 first = 0; first < workingSet.Size(); first += MaximumResidencyBatchSize)
+            {
+                const u32 count = workingSet.Size() - first < MaximumResidencyBatchSize
+                                      ? workingSet.Size() - first
+                                      : MaximumResidencyBatchSize;
+                const BackendStatus status = m_prepareResidency(
+                    m_fenceContext, {workingSet.TypedData() + first, count});
+                if (!status)
+                    return status;
+            }
+        }
+
+        for (u32 index = 0; index < commandLists.Size(); ++index)
+        {
+            CommandListPayload* const payload = payloads[index];
+            VG_ASSERT_MSG(payload != nullptr, "a command-list payload must remain valid until submission");
+            if (payload == nullptr)
+                return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "submission lost a validated command list");
+            payload->native->commitBarriers();
+            payload->native->close();
+            payload->open = false;
         }
 
         const auto executeQueue = [&](const QueueType queue) noexcept
@@ -2274,25 +2601,47 @@ namespace vanguard::rhi::backend
 
         for (u32 index = 0; index < commandLists.Size(); ++index)
         {
-            CommandListPayload& payload = *payloads[index];
+            CommandListPayload* const submittedPayload = payloads[index];
+            VG_ASSERT_MSG(submittedPayload != nullptr, "a submitted command list must retain its validated payload");
+            if (submittedPayload == nullptr) continue;
+            CommandListPayload& payload = *submittedPayload;
             const QueueType queue = GetQueueType(payload.type);
             const GpuFence fence = queueFences[QueueIndex(queue)];
+            m_commitResidency(m_fenceContext,
+                              {payload.residencyResources.TypedData(), payload.residencyResources.Size()}, fence);
+            for (const CommandListPayload::SubmissionCallback& notification : payload.submissionCallbacks)
+                notification.callback(notification.context, fence, notification.value);
+            payload.submissionCallbacks.Clear();
             for (const ResourceRef resource : payload.resources)
             {
                 static_cast<void>(m_lifetime.RecordUse(resource, queue, fence.value));
                 static_cast<void>(m_lifetime.Release(resource));
             }
             payload.resources.Clear();
+            payload.residencyResources.Clear();
             static_cast<void>(m_lifetime.RecordUse(references[index], queue, fence.value));
             static_cast<void>(m_lifetime.Release(references[index]));
         }
 
-        completion = sync == CommandListSyncType::ForkAsyncCompute   ? queueFences[QueueIndex(QueueType::Compute)]
-                     : sync == CommandListSyncType::JoinAsyncCompute ? queueFences[QueueIndex(QueueType::Graphics)]
-                                                                     : queueFences[queueCounts[0] != 0   ? 0u
-                                                                                   : queueCounts[1] != 0 ? 1u
-                                                                                                         : 2u];
+        if (sync == CommandListSyncType::ForkAsyncCompute)
+            completion = queueFences[QueueIndex(QueueType::Compute)];
+        else if (sync == CommandListSyncType::JoinAsyncCompute)
+            completion = queueFences[QueueIndex(QueueType::Graphics)];
+        else
+        {
+            const u32 completionQueue = queueCounts[0] != 0 ? 0u : queueCounts[1] != 0 ? 1u : 2u;
+            completion = queueFences[completionQueue];
+        }
         return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ExecuteSerializedQueueOperation(const SerializedQueueOperation operation,
+                                                                 void* const context) noexcept
+    {
+        if (operation == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "serialized queue operation is null");
+        concurrency::ScopedLock submissionGuard(m_submissionLock);
+        return operation(context);
     }
     GpuFence CommonBackend::GetGpuFence(CommandListRef) const noexcept
     {
@@ -2462,6 +2811,246 @@ namespace vanguard::rhi::backend
             command->pushConstants[index] = source[index];
         command->pushConstantSize = size;
         return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ClearColorTarget(const CommandListRef commandList, const TextureRef target,
+                                                  const ColorValue& value, const SubresourceRange& requested,
+                                                  const Rect* const rectangle) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(target)));
+        if (command == nullptr || !command->open || command->type != CommandListType::Default)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "color clears require an open graphics command list");
+        if (texture == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "color clear references a stale texture");
+        if (!HasFlag(texture->desc.usage, TextureUsage::RenderTarget) || IsDepthFormat(texture->desc.format))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture is not a color render target");
+        SubresourceRange range;
+        if (!ResolveSubresources(texture->desc, requested, range) ||
+            (rectangle != nullptr && !ValidateClearRectangle(texture->desc, range, *rectangle)))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid color-clear subresource range or rectangle");
+        if (!TrackCommandResource(*this, *command, ResourceRef(target)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a color-clear target");
+        const nvrhi::TextureSubresourceSet nativeRange(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
+        if (rectangle == nullptr)
+        {
+            for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
+                command->native->clearTextureFloat(texture->native,
+                                                   nvrhi::TextureSubresourceSet(mip, 1, range.firstSlice, range.sliceCount),
+                                                   nvrhi::Color(value.red, value.green, value.blue, value.alpha));
+        }
+        else
+        {
+            command->native->setTextureState(texture->native, nativeRange, nvrhi::ResourceStates::RenderTarget);
+            command->native->commitBarriers();
+            if (!m_rectColorClear(m_fenceContext, command->native, texture->native, value, range, *rectangle))
+                return BackendStatus::Failure(FailureCode::BackendFailure, 0, "native rectangular color clear failed");
+        }
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ClearDepthStencilTarget(const CommandListRef commandList, const TextureRef target,
+                                                         const bool clearDepth, const f32 depth, const bool clearStencil,
+                                                         const u8 stencil, const SubresourceRange& requested,
+                                                         const Rect* const rectangle) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(target)));
+        if (command == nullptr || !command->open || command->type != CommandListType::Default)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "depth-stencil clears require an open graphics command list");
+        if (texture == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "depth-stencil clear references a stale texture");
+        if (!clearDepth && !clearStencil)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "depth-stencil clear has no selected plane");
+        if (!HasFlag(texture->desc.usage, TextureUsage::DepthStencil) || !IsDepthFormat(texture->desc.format) ||
+            (clearStencil && !HasStencilPlane(texture->desc.format)))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture does not provide the requested depth-stencil planes");
+        SubresourceRange range;
+        if (!ResolveSubresources(texture->desc, requested, range) ||
+            (rectangle != nullptr && !ValidateClearRectangle(texture->desc, range, *rectangle)))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid depth-stencil-clear subresource range or rectangle");
+        if (!TrackCommandResource(*this, *command, ResourceRef(target)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a depth-stencil-clear target");
+        const nvrhi::TextureSubresourceSet nativeRange(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
+        if (rectangle == nullptr)
+        {
+            for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
+                command->native->clearDepthStencilTexture(texture->native,
+                                                          nvrhi::TextureSubresourceSet(mip, 1, range.firstSlice, range.sliceCount),
+                                                          clearDepth, depth, clearStencil, stencil);
+        }
+        else
+        {
+            command->native->setTextureState(texture->native, nativeRange, nvrhi::ResourceStates::DepthWrite);
+            command->native->commitBarriers();
+            if (!m_rectDepthStencilClear(m_fenceContext, command->native, texture->native, clearDepth, depth,
+                                         clearStencil, stencil, range, *rectangle))
+                return BackendStatus::Failure(FailureCode::BackendFailure, 0, "native rectangular depth-stencil clear failed");
+        }
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ClearTextureUav(const CommandListRef commandList, const TextureRef textureRef,
+                                                 const ColorValue& value, const SubresourceRange& requested) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
+        if (command == nullptr || !command->open ||
+            (command->type != CommandListType::Default && command->type != CommandListType::Compute))
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV clears require an open graphics or compute command list");
+        if (texture == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture UAV clear references a stale texture");
+        if (!HasFlag(texture->desc.usage, TextureUsage::UnorderedAccess) || IsDepthFormat(texture->desc.format) ||
+            IsUnsignedIntegerFormat(texture->desc.format) || HasFlag(texture->desc.usage, TextureUsage::RenderTarget))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture does not provide an unambiguous floating-point UAV clear view");
+        SubresourceRange range;
+        if (!ResolveSubresources(texture->desc, requested, range) || range.firstSlice != 0 || range.sliceCount != texture->desc.arraySize)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture UAV clear range");
+        if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV clear target");
+        for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
+            command->native->clearTextureFloat(texture->native,
+                                               nvrhi::TextureSubresourceSet(mip, 1, 0, texture->desc.arraySize),
+                                               nvrhi::Color(value.red, value.green, value.blue, value.alpha));
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ClearTextureUav(const CommandListRef commandList, const TextureRef textureRef,
+                                                 const u32 value, const SubresourceRange& requested) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
+        if (command == nullptr || !command->open ||
+            (command->type != CommandListType::Default && command->type != CommandListType::Compute))
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV clears require an open graphics or compute command list");
+        if (texture == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture UAV clear references a stale texture");
+        if (!HasFlag(texture->desc.usage, TextureUsage::UnorderedAccess) || !IsUnsignedIntegerFormat(texture->desc.format))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture does not provide an unsigned-integer UAV clear view");
+        SubresourceRange range;
+        if (!ResolveSubresources(texture->desc, requested, range) || range.firstSlice != 0 || range.sliceCount != texture->desc.arraySize)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture UAV clear range");
+        if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV clear target");
+        for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
+            command->native->clearTextureUInt(texture->native,
+                                              nvrhi::TextureSubresourceSet(mip, 1, 0, texture->desc.arraySize), value);
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ClearBufferUav(const CommandListRef commandList, const BufferRef bufferRef,
+                                                const u32 value) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(bufferRef)));
+        if (command == nullptr || !command->open ||
+            (command->type != CommandListType::Default && command->type != CommandListType::Compute))
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer UAV clears require an open graphics or compute command list");
+        if (buffer == nullptr || !HasFlag(buffer->desc.usage, BufferUsage::UnorderedAccess))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "buffer does not support unordered access");
+        if (!TrackCommandResource(*this, *command, ResourceRef(bufferRef)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer UAV clear target");
+        command->native->clearBufferUInt(buffer->native, value);
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::DiscardTexture(const CommandListRef commandList, const TextureRef textureRef,
+                                                const SubresourceRange& requested) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
+        if (command == nullptr || !command->open ||
+            (command->type != CommandListType::Default && command->type != CommandListType::Compute))
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture discard requires an open graphics or compute command list");
+        if (texture == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture discard references a stale texture");
+        SubresourceRange range;
+        if (!ResolveSubresources(texture->desc, requested, range))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture discard range");
+        nvrhi::ResourceStates discardState = nvrhi::ResourceStates::Unknown;
+        if (command->type == CommandListType::Default && HasFlag(texture->desc.usage, TextureUsage::RenderTarget))
+            discardState = nvrhi::ResourceStates::RenderTarget;
+        else if (command->type == CommandListType::Default && HasFlag(texture->desc.usage, TextureUsage::DepthStencil))
+            discardState = nvrhi::ResourceStates::DepthWrite;
+        else if (HasFlag(texture->desc.usage, TextureUsage::UnorderedAccess))
+            discardState = nvrhi::ResourceStates::UnorderedAccess;
+        if (discardState == nvrhi::ResourceStates::Unknown)
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture has no discard-compatible usage on this queue");
+        if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a discarded texture");
+        command->native->setTextureState(texture->native,
+                                         nvrhi::TextureSubresourceSet(range.firstMip, range.mipCount,
+                                                                      range.firstSlice, range.sliceCount), discardState);
+        command->native->commitBarriers();
+        return m_discardResource(m_fenceContext, command->native, texture->native, &range)
+                   ? BackendStatus::Success()
+                   : BackendStatus::Failure(FailureCode::BackendFailure, 0, "native texture discard failed");
+    }
+
+    BackendStatus CommonBackend::DiscardBuffer(const CommandListRef commandList, const BufferRef bufferRef) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(bufferRef)));
+        if (command == nullptr || !command->open ||
+            (command->type != CommandListType::Default && command->type != CommandListType::Compute))
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer discard requires an open graphics or compute command list");
+        if (buffer == nullptr || !HasFlag(buffer->desc.usage, BufferUsage::UnorderedAccess))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "buffer discard requires an unordered-access buffer");
+        if (!TrackCommandResource(*this, *command, ResourceRef(bufferRef)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a discarded buffer");
+        command->native->setBufferState(buffer->native, nvrhi::ResourceStates::UnorderedAccess);
+        command->native->commitBarriers();
+        return m_discardResource(m_fenceContext, command->native, buffer->native, nullptr)
+                   ? BackendStatus::Success()
+                   : BackendStatus::Failure(FailureCode::BackendFailure, 0, "native buffer discard failed");
+    }
+
+    BackendStatus CommonBackend::SetStencilRefValue(const CommandListRef commandList, const u8 value) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        if (command == nullptr || !command->open || command->type != CommandListType::Default)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "stencil reference requires an open graphics command list");
+        command->stencilReference = value;
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::SetBlendFactor(const CommandListRef commandList, const ColorValue& value) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        if (command == nullptr || !command->open || command->type != CommandListType::Default)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "blend factor requires an open graphics command list");
+        command->blendFactor = value;
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::BeginGpuEvent(const CommandListRef commandList, const char* const name) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        if (command == nullptr || !command->open)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "GPU event requires an open command list");
+        if (name == nullptr || name[0] == '\0')
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "GPU event name is empty");
+        command->native->beginMarker(name);
+        ++command->markerDepth;
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::EndGpuEvent(const CommandListRef commandList) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        if (command == nullptr || !command->open)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "GPU event requires an open command list");
+        if (command->markerDepth == 0)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "GPU event stack is empty");
+        command->native->endMarker();
+        --command->markerDepth;
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::SetGpuMarker(const CommandListRef commandList, const char* const name) noexcept
+    {
+        const BackendStatus begin = BeginGpuEvent(commandList, name);
+        return begin ? EndGpuEvent(commandList) : begin;
     }
 
     BackendStatus CommonBackend::DrawPrimitive(const CommandListRef commandList, const DrawArguments& arguments) noexcept
@@ -2645,6 +3234,300 @@ namespace vanguard::rhi::backend
         return BackendStatus::Success();
     }
 
+    BackendStatus CommonBackend::CopyTexture(const CommandListRef commandList, const TextureRef destination,
+                                             const TextureRef source, const TextureCopyRegion& requested) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const destinationPayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(destination)));
+        auto* const sourcePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(source)));
+        if (command == nullptr || !command->open)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture copy requires an open command list");
+        if (destinationPayload == nullptr || sourcePayload == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture copy references a stale texture");
+        const TextureDesc& destinationDesc = destinationPayload->desc;
+        const TextureDesc& sourceDesc = sourcePayload->desc;
+        if (!HasFlag(destinationDesc.usage, TextureUsage::CopyDestination) || !HasFlag(sourceDesc.usage, TextureUsage::CopySource))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                          "texture copy requires copy-source and copy-destination usage");
+        if (destinationDesc.format != sourceDesc.format || destinationDesc.dimension != sourceDesc.dimension ||
+            destinationDesc.sampleCount != sourceDesc.sampleCount || IsDepthFormat(sourceDesc.format))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                          "texture copy resources have incompatible formats, dimensions or sample counts");
+        if (requested.source.mipLevel >= sourceDesc.mipCount || requested.source.arraySlice >= sourceDesc.arraySize ||
+            requested.destination.mipLevel >= destinationDesc.mipCount ||
+            requested.destination.arraySlice >= destinationDesc.arraySize)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture copy selects an invalid subresource");
+
+        const Extent3D sourceExtent = GetMipExtent(sourceDesc, requested.source.mipLevel);
+        const Extent3D destinationExtent = GetMipExtent(destinationDesc, requested.destination.mipLevel);
+        TextureCopyRegion region = requested;
+        const bool implicitExtent = region.extent.width == 0 && region.extent.height == 0 && region.extent.depth == 0;
+        if (implicitExtent)
+        {
+            if (region.sourceX != 0 || region.sourceY != 0 || region.sourceZ != 0)
+                return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                              "an implicit texture-copy extent requires a zero source origin");
+            region.extent = sourceExtent;
+        }
+        else if (region.extent.width == 0 || region.extent.height == 0 || region.extent.depth == 0)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture copy contains a partially zero extent");
+
+        if (region.sourceX > sourceExtent.width || region.extent.width > sourceExtent.width - region.sourceX ||
+            region.sourceY > sourceExtent.height || region.extent.height > sourceExtent.height - region.sourceY ||
+            region.sourceZ > sourceExtent.depth || region.extent.depth > sourceExtent.depth - region.sourceZ ||
+            region.destinationX > destinationExtent.width || region.extent.width > destinationExtent.width - region.destinationX ||
+            region.destinationY > destinationExtent.height || region.extent.height > destinationExtent.height - region.destinationY ||
+            region.destinationZ > destinationExtent.depth || region.extent.depth > destinationExtent.depth - region.destinationZ)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture copy region exceeds a selected subresource");
+        if (IsBlockCompressed(sourceDesc.format) &&
+            (!IsBlockRegionValid(region.sourceX, region.extent.width, sourceExtent.width) ||
+             !IsBlockRegionValid(region.sourceY, region.extent.height, sourceExtent.height) ||
+             !IsBlockRegionValid(region.destinationX, region.extent.width, destinationExtent.width) ||
+             !IsBlockRegionValid(region.destinationY, region.extent.height, destinationExtent.height)))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                          "compressed texture-copy regions must follow 4x4 block boundaries");
+        if (sourceDesc.sampleCount > 1 &&
+            (region.sourceX != 0 || region.sourceY != 0 || region.sourceZ != 0 || region.destinationX != 0 ||
+             region.destinationY != 0 || region.destinationZ != 0 || region.extent.width != sourceExtent.width ||
+             region.extent.height != sourceExtent.height || region.extent.depth != sourceExtent.depth ||
+             region.extent.width != destinationExtent.width || region.extent.height != destinationExtent.height ||
+             region.extent.depth != destinationExtent.depth))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                          "multisampled texture copies must cover complete matching subresources");
+        if (destination == source && requested.destination.mipLevel == requested.source.mipLevel &&
+            requested.destination.arraySlice == requested.source.arraySlice &&
+            RegionsOverlap(region.sourceX, region.extent.width, region.destinationX, region.extent.width) &&
+            RegionsOverlap(region.sourceY, region.extent.height, region.destinationY, region.extent.height) &&
+            RegionsOverlap(region.sourceZ, region.extent.depth, region.destinationZ, region.extent.depth))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture copy source and destination regions overlap");
+
+        if (command->native->getTextureSubresourceState(sourcePayload->native, requested.source.arraySlice,
+                                                        requested.source.mipLevel) != nvrhi::ResourceStates::CopySource ||
+            command->native->getTextureSubresourceState(destinationPayload->native, requested.destination.arraySlice,
+                                                        requested.destination.mipLevel) != nvrhi::ResourceStates::CopyDest)
+            return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                          "texture copy resources are not in their declared copy states");
+        if (!TrackCommandResource(*this, *command, ResourceRef(source)) ||
+            !TrackCommandResource(*this, *command, ResourceRef(destination)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture copy resource");
+
+        nvrhi::TextureSlice sourceSlice;
+        sourceSlice.setOrigin(region.sourceX, region.sourceY, region.sourceZ)
+            .setSize(region.extent.width, region.extent.height, region.extent.depth)
+            .setMipLevel(region.source.mipLevel)
+            .setArraySlice(region.source.arraySlice);
+        nvrhi::TextureSlice destinationSlice;
+        destinationSlice.setOrigin(region.destinationX, region.destinationY, region.destinationZ)
+            .setSize(region.extent.width, region.extent.height, region.extent.depth)
+            .setMipLevel(region.destination.mipLevel)
+            .setArraySlice(region.destination.arraySlice);
+        command->native->commitBarriers();
+        command->native->copyTexture(destinationPayload->native, destinationSlice, sourcePayload->native, sourceSlice);
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ResolveTexture(const CommandListRef commandList, const TextureRef destination,
+                                                const TextureRef source, const TextureResolveRegion& region) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const destinationPayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(destination)));
+        auto* const sourcePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(source)));
+        if (command == nullptr || !command->open || command->type != CommandListType::Default)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture resolve requires an open graphics command list");
+        if (destinationPayload == nullptr || sourcePayload == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture resolve references a stale texture");
+        const TextureDesc& destinationDesc = destinationPayload->desc;
+        const TextureDesc& sourceDesc = sourcePayload->desc;
+        if (!HasFlag(destinationDesc.usage, TextureUsage::ResolveDestination) ||
+            !HasFlag(sourceDesc.usage, TextureUsage::ResolveSource))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                          "texture resolve requires resolve-source and resolve-destination usage");
+        if (destinationDesc.format != sourceDesc.format || destinationDesc.dimension != sourceDesc.dimension ||
+            sourceDesc.sampleCount <= 1 || destinationDesc.sampleCount != 1 || IsDepthFormat(sourceDesc.format))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                          "texture resolve resources have incompatible formats, dimensions or sample counts");
+        const Extent3D sourceExtent = region.source.mipLevel < sourceDesc.mipCount
+                                          ? GetMipExtent(sourceDesc, region.source.mipLevel) : Extent3D{};
+        const Extent3D destinationExtent = region.destination.mipLevel < destinationDesc.mipCount
+                                               ? GetMipExtent(destinationDesc, region.destination.mipLevel) : Extent3D{};
+        if (region.source.mipLevel >= sourceDesc.mipCount || region.source.arraySlice >= sourceDesc.arraySize ||
+            region.destination.mipLevel >= destinationDesc.mipCount || region.destination.arraySlice >= destinationDesc.arraySize ||
+            sourceExtent.width != destinationExtent.width || sourceExtent.height != destinationExtent.height ||
+            sourceExtent.depth != destinationExtent.depth)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                          "texture resolve selects invalid or differently sized subresources");
+        if (command->native->getTextureSubresourceState(sourcePayload->native, region.source.arraySlice,
+                                                        region.source.mipLevel) != nvrhi::ResourceStates::ResolveSource ||
+            command->native->getTextureSubresourceState(destinationPayload->native, region.destination.arraySlice,
+                                                        region.destination.mipLevel) != nvrhi::ResourceStates::ResolveDest)
+            return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                          "texture resolve resources are not in their declared resolve states");
+        if (!TrackCommandResource(*this, *command, ResourceRef(source)) ||
+            !TrackCommandResource(*this, *command, ResourceRef(destination)))
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture resolve resource");
+
+        const nvrhi::TextureSubresourceSet sourceSubresource(region.source.mipLevel, 1, region.source.arraySlice, 1);
+        const nvrhi::TextureSubresourceSet destinationSubresource(region.destination.mipLevel, 1,
+                                                                  region.destination.arraySlice, 1);
+        command->native->commitBarriers();
+        command->native->resolveTexture(destinationPayload->native, destinationSubresource,
+                                        sourcePayload->native, sourceSubresource);
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::RequestTextureReadback(const CommandListRef commandList, const TextureRef source,
+                                                        const TextureReadbackRegion& requested,
+                                                        TextureReadbackRef& readback) noexcept
+    {
+        readback = {};
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const sourcePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(source)));
+        if (command == nullptr || !command->open)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture readback requires an open command list");
+        if (sourcePayload == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture readback references a stale texture");
+        const TextureDesc& desc = sourcePayload->desc;
+        if (!HasFlag(desc.usage, TextureUsage::CopySource))
+            return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture readback requires copy-source usage");
+        if (desc.sampleCount != 1)
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "multisampled textures must be resolved before readback");
+        if (IsDepthFormat(desc.format))
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "depth-stencil readback requires an explicit plane contract");
+        if (desc.dimension == TextureDimension::Texture3D)
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "3D texture readback is not supported by the portable backend contract");
+        if (requested.source.mipLevel >= desc.mipCount || requested.source.arraySlice >= desc.arraySize)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture readback selects an invalid subresource");
+
+        const Extent3D sourceExtent = GetMipExtent(desc, requested.source.mipLevel);
+        TextureReadbackRegion region = requested;
+        const bool implicitExtent = region.extent.width == 0 && region.extent.height == 0 && region.extent.depth == 0;
+        if (implicitExtent)
+        {
+            if (region.sourceX != 0 || region.sourceY != 0 || region.sourceZ != 0)
+                return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                              "an implicit texture-readback extent requires a zero source origin");
+            region.extent = sourceExtent;
+        }
+        else if (region.extent.width == 0 || region.extent.height == 0 || region.extent.depth == 0)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture readback contains a partially zero extent");
+        if (region.sourceX > sourceExtent.width || region.extent.width > sourceExtent.width - region.sourceX ||
+            region.sourceY > sourceExtent.height || region.extent.height > sourceExtent.height - region.sourceY ||
+            region.sourceZ > sourceExtent.depth || region.extent.depth > sourceExtent.depth - region.sourceZ)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture readback region exceeds the selected subresource");
+        if (region.extent.depth != 1 || region.sourceZ != 0)
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "portable texture readback currently supports one 2D image plane");
+        if (IsBlockCompressed(desc.format) &&
+            (!IsBlockRegionValid(region.sourceX, region.extent.width, sourceExtent.width) ||
+             !IsBlockRegionValid(region.sourceY, region.extent.height, sourceExtent.height)))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                          "compressed texture-readback regions must follow 4x4 block boundaries");
+        if (command->native->getTextureSubresourceState(sourcePayload->native, region.source.arraySlice,
+                                                         region.source.mipLevel) != nvrhi::ResourceStates::CopySource)
+            return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                          "texture readback source is not in copy-source state");
+
+        nvrhi::TextureDesc stagingDesc{};
+        stagingDesc.width = region.extent.width;
+        stagingDesc.height = region.extent.height;
+        stagingDesc.depth = 1;
+        stagingDesc.arraySize = 1;
+        stagingDesc.mipLevels = 1;
+        stagingDesc.sampleCount = 1;
+        stagingDesc.format = ToNativeFormat(desc.format);
+        stagingDesc.dimension = desc.dimension == TextureDimension::Texture1D ? nvrhi::TextureDimension::Texture1D
+                                                                              : nvrhi::TextureDimension::Texture2D;
+        nvrhi::StagingTextureHandle native = m_device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
+        if (!native)
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to create texture readback staging storage");
+        TextureReadbackPayload* const payload = AllocatePayload<TextureReadbackPayload>();
+        if (payload == nullptr)
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to allocate texture readback state");
+        payload->native = static_cast<nvrhi::StagingTextureHandle&&>(native);
+        payload->format = desc.format;
+        payload->extent = region.extent;
+        const ResourceRef resource = m_lifetime.Create(ResourceKind::TextureReadback, payload, &DestroyTextureReadback, this);
+        if (!resource)
+        {
+            DestroyTextureReadback(this, {}, payload);
+            return BackendStatus::Failure(FailureCode::CapacityExceeded, 0, "texture readback capacity is exhausted");
+        }
+        readback = CastResourceRef<TextureReadbackRef>(resource);
+        if (!TrackCommandResource(*this, *command, ResourceRef(source)) ||
+            !TrackCommandResource(*this, *command, resource) ||
+            !RegisterCommandSubmissionCallback(commandList, &CompleteTextureReadbackSubmission, this, resource.value))
+        {
+            static_cast<void>(m_lifetime.Release(resource));
+            readback = {};
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain texture readback submission state");
+        }
+
+        nvrhi::TextureSlice sourceSlice;
+        sourceSlice.setOrigin(region.sourceX, region.sourceY, region.sourceZ)
+            .setSize(region.extent.width, region.extent.height, region.extent.depth)
+            .setMipLevel(region.source.mipLevel)
+            .setArraySlice(region.source.arraySlice);
+        nvrhi::TextureSlice destinationSlice;
+        destinationSlice.setOrigin(0, 0, 0).setSize(region.extent.width, region.extent.height, 1).setMipLevel(0).setArraySlice(0);
+        command->native->commitBarriers();
+        command->native->copyTexture(payload->native, destinationSlice, sourcePayload->native, sourceSlice);
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::GetTextureReadbackInfo(const TextureReadbackRef readback, TextureReadbackInfo& info) noexcept
+    {
+        auto* const payload = static_cast<TextureReadbackPayload*>(m_lifetime.GetPayload(ResourceRef(readback)));
+        if (payload == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture readback reference is stale");
+        concurrency::ScopedLock guard(payload->lock);
+        if (payload->state == TextureReadbackState::PendingGpu && IsGpuFenceComplete(payload->completion))
+            payload->state = TextureReadbackState::Ready;
+        info = {payload->format, payload->extent, payload->state, payload->completion};
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::MapTextureReadback(const TextureReadbackRef readback, TextureReadbackMapping& mapping) noexcept
+    {
+        mapping = {};
+        auto* const payload = static_cast<TextureReadbackPayload*>(m_lifetime.GetPayload(ResourceRef(readback)));
+        if (payload == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture readback reference is stale");
+        concurrency::ScopedLock guard(payload->lock);
+        if (payload->state == TextureReadbackState::PendingGpu && IsGpuFenceComplete(payload->completion))
+            payload->state = TextureReadbackState::Ready;
+        if (payload->state == TextureReadbackState::Mapped || payload->mapped)
+            return BackendStatus::Failure(FailureCode::Busy, 0, "texture readback is already mapped");
+        if (payload->state == TextureReadbackState::Failed)
+            return BackendStatus::Failure(FailureCode::BackendFailure, 0, "texture readback command list was discarded before submission");
+        if (payload->state != TextureReadbackState::Ready)
+            return BackendStatus::Failure(FailureCode::Busy, 0, "texture readback has not completed on the GPU");
+        usize rowPitch = 0;
+        const void* const data = m_device->mapStagingTexture(payload->native, {}, nvrhi::CpuAccessMode::Read, &rowPitch);
+        if (data == nullptr)
+            return BackendStatus::Failure(FailureCode::BackendFailure, 0, "failed to map texture readback staging storage");
+        const nvrhi::FormatInfo& format = nvrhi::getFormatInfo(ToNativeFormat(payload->format));
+        const u64 blockRows = (payload->extent.height + format.blockSize - 1u) / format.blockSize;
+        const u64 depthPitch = static_cast<u64>(rowPitch) * blockRows;
+        mapping = {data, static_cast<u64>(rowPitch), depthPitch, depthPitch * payload->extent.depth,
+                   payload->format, payload->extent};
+        payload->mapped = true;
+        payload->state = TextureReadbackState::Mapped;
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::UnmapTextureReadback(const TextureReadbackRef readback) noexcept
+    {
+        auto* const payload = static_cast<TextureReadbackPayload*>(m_lifetime.GetPayload(ResourceRef(readback)));
+        if (payload == nullptr)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture readback reference is stale");
+        concurrency::ScopedLock guard(payload->lock);
+        if (!payload->mapped || payload->state != TextureReadbackState::Mapped)
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture readback is not mapped");
+        m_device->unmapStagingTexture(payload->native);
+        payload->mapped = false;
+        payload->state = TextureReadbackState::Ready;
+        return BackendStatus::Success();
+    }
+
     BackendStatus CommonBackend::LockBuffer(const BufferRef buffer, const u64 offset, const u64 size, void*& data) noexcept
     {
         data = nullptr;
@@ -2676,7 +3559,7 @@ namespace vanguard::rhi::backend
         payload->mapped = false;
     }
 
-    BackendStatus CommonBackend::TransitionTexture(const CommandListRef commandList, const TextureRef texture, const ResourceState,
+    BackendStatus CommonBackend::TransitionTexture(const CommandListRef commandList, const TextureRef texture, const ResourceState before,
                                                    const ResourceState after, const SubresourceRange& range) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
@@ -2685,13 +3568,26 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture transition requires an open command list");
         if (resource == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture transition references a stale texture");
+        SubresourceRange resolved;
+        if (!ResolveSubresources(resource->desc, range, resolved))
+            return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture transition contains an invalid subresource range");
+        if (before != ResourceState::Unknown)
+        {
+            const nvrhi::ResourceStates expected = ToNativeState(before);
+            for (u32 slice = resolved.firstSlice; slice < static_cast<u32>(resolved.firstSlice) + resolved.sliceCount; ++slice)
+                for (u32 mip = resolved.firstMip; mip < static_cast<u32>(resolved.firstMip) + resolved.mipCount; ++mip)
+                    if (command->native->getTextureSubresourceState(resource->native, slice, mip) != expected)
+                        return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                                      "texture transition before-state does not match command-list tracking");
+        }
         if (!TrackCommandResource(*this, *command, ResourceRef(texture)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture transition resource");
-        const nvrhi::TextureSubresourceSet subresources(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
+        const nvrhi::TextureSubresourceSet subresources(resolved.firstMip, resolved.mipCount,
+                                                        resolved.firstSlice, resolved.sliceCount);
         command->native->setTextureState(resource->native, subresources, ToNativeState(after));
         return BackendStatus::Success();
     }
-    BackendStatus CommonBackend::TransitionBuffer(const CommandListRef commandList, const BufferRef buffer, const ResourceState,
+    BackendStatus CommonBackend::TransitionBuffer(const CommandListRef commandList, const BufferRef buffer, const ResourceState before,
                                                   const ResourceState after) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
@@ -2700,6 +3596,15 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer transition requires an open command list");
         if (resource == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "buffer transition references a stale buffer");
+        if (before != ResourceState::Unknown)
+        {
+            nvrhi::ResourceStates tracked = command->native->getBufferState(resource->native);
+            if (tracked == nvrhi::ResourceStates::Unknown)
+                tracked = ToNativeState(resource->desc.initialState);
+            if (tracked != ToNativeState(before))
+                return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                              "buffer transition before-state does not match command-list tracking");
+        }
         if (!TrackCommandResource(*this, *command, ResourceRef(buffer)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer transition resource");
         command->native->setBufferState(resource->native, ToNativeState(after));
@@ -2787,15 +3692,130 @@ namespace vanguard::rhi::backend
     {
         return TransitionBuffer(commandList, buffer, ResourceState::Unknown, ResourceState::Common);
     }
-    void CommonBackend::SetResourceDebugName(TextureRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(BufferRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(HeapRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(SamplerStateRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(ShaderRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(VertexLayoutRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(PipelineRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(QueryPoolRef, const char*) noexcept {}
-    void CommonBackend::SetResourceDebugName(CommandListRef, const char*) noexcept {}
+    bool CommonBackend::RetainCommandResource(const CommandListRef commandList, const ResourceRef resource) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        return command != nullptr && command->open && resource.IsValid() &&
+               TrackCommandResource(*this, *command, resource);
+    }
+    bool CommonBackend::RegisterCommandSubmissionCallback(const CommandListRef commandList,
+                                                          const CommandSubmissionCallback callback,
+                                                          void* const context, const u64 value, bool* const added) noexcept
+    {
+        if (added != nullptr) *added = false;
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        if (command == nullptr || !command->open || callback == nullptr) return false;
+        for (const CommandListPayload::SubmissionCallback& existing : command->submissionCallbacks)
+            if (existing.callback == callback && existing.context == context && existing.value == value)
+                return true;
+        const u32 expected = command->submissionCallbacks.Size() + 1u;
+        command->submissionCallbacks.PushBack({callback, context, value});
+        const bool succeeded = command->submissionCallbacks.Size() == expected;
+        if (succeeded && added != nullptr) *added = true;
+        return succeeded;
+    }
+
+    nvrhi::ICommandList* CommonBackend::GetNativeCommandList(const CommandListRef commandList) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        return command != nullptr && command->open ? command->native.Get() : nullptr;
+    }
+
+    nvrhi::IHeap* CommonBackend::GetNativeHeap(const HeapRef heap) noexcept
+    {
+        auto* const payload = static_cast<HeapPayload*>(m_lifetime.GetPayload(ResourceRef(heap)));
+        return payload != nullptr ? payload->native.Get() : nullptr;
+    }
+
+    ResourceRef CommonBackend::GetResidencyAllocation(const ResourceRef resource) noexcept
+    {
+        if (resource.Kind() == ResourceKind::Heap)
+            return m_lifetime.GetPayload(resource) != nullptr ? resource : ResourceRef{};
+        if (resource.Kind() == ResourceKind::Texture)
+        {
+            const auto* const payload = static_cast<const TexturePayload*>(m_lifetime.GetPayload(resource));
+            return payload != nullptr ? (payload->boundHeap ? ResourceRef(payload->boundHeap) : resource) : ResourceRef{};
+        }
+        if (resource.Kind() == ResourceKind::Buffer)
+        {
+            const auto* const payload = static_cast<const BufferPayload*>(m_lifetime.GetPayload(resource));
+            return payload != nullptr ? (payload->boundHeap ? ResourceRef(payload->boundHeap) : resource) : ResourceRef{};
+        }
+        return {};
+    }
+
+    FenceSet CommonBackend::GetResourceLastUse(const ResourceRef resource) const noexcept
+    {
+        return m_lifetime.GetLastUse(resource);
+    }
+
+    nvrhi::Object CommonBackend::GetNativeObject(const ResourceRef resource, const nvrhi::ObjectType objectType) noexcept
+    {
+        void* const address = m_lifetime.GetPayload(resource);
+        if (address == nullptr) return nullptr;
+        switch (resource.Kind())
+        {
+        case ResourceKind::Texture: return static_cast<TexturePayload*>(address)->native->getNativeObject(objectType);
+        case ResourceKind::Buffer: return static_cast<BufferPayload*>(address)->native->getNativeObject(objectType);
+        case ResourceKind::Heap: return static_cast<HeapPayload*>(address)->native->getNativeObject(objectType);
+        case ResourceKind::SamplerState: return static_cast<SamplerPayload*>(address)->native->getNativeObject(objectType);
+        case ResourceKind::Shader: return static_cast<ShaderPayload*>(address)->native->getNativeObject(objectType);
+        case ResourceKind::Pipeline:
+        {
+            auto* const pipeline = static_cast<PipelinePayload*>(address);
+            if (pipeline->kind == PipelineKind::Graphics) return pipeline->graphics->getNativeObject(objectType);
+            if (pipeline->kind == PipelineKind::Compute) return pipeline->compute->getNativeObject(objectType);
+            return pipeline->rayTracing->getNativeObject(objectType);
+        }
+        case ResourceKind::CommandList: return static_cast<CommandListPayload*>(address)->native->getNativeObject(objectType);
+        default: return nullptr;
+        }
+    }
+    void CommonBackend::SetResourceDebugName(const TextureRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const TextureReadbackRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<TextureReadbackPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const BufferRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<BufferPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const HeapRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<HeapPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const SamplerStateRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<SamplerPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const ShaderRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<ShaderPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const VertexLayoutRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<VertexLayoutPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const PipelineRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<PipelinePayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
+    void CommonBackend::SetResourceDebugName(const CommandListRef resource, const char* const name) noexcept
+    {
+        auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        if (payload != nullptr) CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
+    }
 
     void CommonBackend::message(const nvrhi::MessageSeverity severity, const char* const text)
     {

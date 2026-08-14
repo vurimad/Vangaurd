@@ -35,6 +35,8 @@ namespace vanguard::window::sdl
         [[nodiscard]] BackendStatus ApplyWindowState(BackendWindowId window, const BackendWindowRequest& request,
                                                      BackendWindowState& state) noexcept override;
         [[nodiscard]] BackendStatus SetWindowTitle(BackendWindowId window, const char* title) noexcept override;
+        [[nodiscard]] BackendStatus ResolvePresentationSurface(BackendWindowId window,
+                                                               NativePresentationSurface& surface) noexcept override;
         [[nodiscard]] BackendStatus DestroyWindow(BackendWindowId window) noexcept override;
 
     private:

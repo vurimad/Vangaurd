@@ -331,6 +331,8 @@ namespace vanguard::window
             snapshot.requiredSurfaceRevision = window->snapshot.surfaceRevision;
             snapshot.acknowledgedPixelExtentRevision = presentation.acknowledgedPixelExtentRevision;
             snapshot.acknowledgedSurfaceRevision = presentation.acknowledgedSurfaceRevision;
+            snapshot.sdrWhiteLevel = window->snapshot.nativeState.sdrWhiteLevel;
+            snapshot.hdrHeadroom = window->snapshot.nativeState.hdrHeadroom;
             snapshot.visible = window->snapshot.nativeState.placement.visible;
             snapshot.minimized = window->snapshot.nativeState.minimized;
             snapshot.occluded = window->snapshot.nativeState.occluded;
@@ -422,6 +424,8 @@ namespace vanguard::window
             destination.pixelExtent = source.pixelExtent;
             destination.safeArea = source.safeArea;
             destination.contentScale = source.contentScale;
+            destination.sdrWhiteLevel = source.sdrWhiteLevel;
+            destination.hdrHeadroom = source.hdrHeadroom;
             destination.focused = source.focused;
             destination.mouseFocus = source.mouseFocus;
             destination.minimized = source.minimized;
@@ -436,7 +440,8 @@ namespace vanguard::window
         {
             const WindowNativeState& current = record.snapshot.nativeState;
             if (!(previous.placement.display == current.placement.display) ||
-                previous.placement.mode != current.placement.mode || previous.hdrCapable != current.hdrCapable)
+                previous.placement.mode != current.placement.mode || previous.hdrCapable != current.hdrCapable ||
+                previous.sdrWhiteLevel != current.sdrWhiteLevel || previous.hdrHeadroom != current.hdrHeadroom)
                 ++record.snapshot.surfaceRevision;
             if (!(previous.placement.position == current.placement.position))
                 PublishWindowEvent(WindowEventType::Moved, record, timestampNanoseconds);
@@ -1347,6 +1352,61 @@ namespace vanguard::window
             presentation->acknowledgedPixelExtentRevision = acknowledgement.pixelExtentRevision;
         if (acknowledgement.surfaceRevision != 0)
             presentation->acknowledgedSurfaceRevision = acknowledgement.surfaceRevision;
+        m_impl->lock.Release();
+        return true;
+    }
+
+    bool WindowManager::ResolvePresentationSurface(const PresentationAttachmentHandle attachment,
+                                                   NativePresentationSurface& surface,
+                                                   Failure* const failure) noexcept
+    {
+        surface = {};
+        if (failure != nullptr) *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
+                                                "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread,
+                           "presentation-surface resolution requires the owner thread");
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry,
+                           "window backend commands must not re-enter presentation-surface resolution");
+            return false;
+        }
+
+        m_impl->lock.Acquire();
+        const Impl::PresentationRecord* const presentation = m_impl->FindPresentation(attachment);
+        const Impl::WindowRecord* const windowRecord = presentation != nullptr
+                                                          ? m_impl->FindWindow(presentation->window)
+                                                          : nullptr;
+        if (presentation == nullptr || windowRecord == nullptr)
+        {
+            m_impl->Reject(failure, FailureCode::InvalidHandle,
+                           "presentation attachment handle is stale or invalid");
+            m_impl->lock.Release();
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->ResolvePresentationSurface(windowRecord->backend, surface);
+        }
+        if (!status || !surface.IsValid())
+        {
+            surface = {};
+            m_impl->Reject(failure, FailureCode::PresentationUnavailable,
+                           status.message != nullptr ? status.message : "native presentation surface is unavailable",
+                           presentation->window, {}, status.code);
+            m_impl->lock.Release();
+            return false;
+        }
         m_impl->lock.Release();
         return true;
     }

@@ -1,5 +1,8 @@
 # RED Vanguard
 
+Repository ownership and module placement rules are documented in
+[`docs/REPOSITORY_LAYOUT.md`](docs/REPOSITORY_LAYOUT.md).
+
 RED Vanguard is a high-performance, data-oriented open-world game engine and
 editor. It is a new engine with its own contracts, formats, terminology, and
 architecture.

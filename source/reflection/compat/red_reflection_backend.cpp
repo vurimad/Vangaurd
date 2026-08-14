@@ -1,4 +1,4 @@
-#include "../src/reflection_backend.hpp"
+#include <vanguard/reflection/reflection_backend.hpp>
 
 #include <vanguard/memory/memory.hpp>
 

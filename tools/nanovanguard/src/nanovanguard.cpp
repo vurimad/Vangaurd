@@ -1,5 +1,5 @@
-#include "command_line.hpp"
-#include "project_commands.hpp"
+#include <vanguard/nanovanguard/command_line.hpp>
+#include <vanguard/nanovanguard/project_commands.hpp>
 
 namespace
 {

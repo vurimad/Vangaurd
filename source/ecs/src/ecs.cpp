@@ -140,11 +140,23 @@ namespace vanguard::ecs
               pendingActions(memory::pools::Gameplay::GetInstance()),
               pendingComponentActions(memory::pools::Gameplay::GetInstance()),
               batches(memory::pools::Gameplay::GetInstance()),
-              pendingIdentities(memory::pools::Gameplay::GetInstance())
+              pendingIdentities(memory::pools::Gameplay::GetInstance()),
+              committedChanges(value.committedChangeCapacity, memory::pools::Gameplay::GetInstance())
         {
             identities.Reserve(value.initialEntityCapacity);
             pendingActions.Reserve(value.initialActionCapacity);
             pendingComponentActions.Reserve(value.initialActionCapacity);
+        }
+
+        void PublishCommittedChange(const EntityId entity, const ComponentId component,
+                                    const CommandBatchId batch, const CommittedChangeKind kind) noexcept
+        {
+            if (committedChanges.Size() == config.committedChangeCapacity)
+            {
+                committedChanges.PopFront();
+                ++overwrittenCommittedChanges;
+            }
+            committedChanges.PushBack({nextCommittedChangeSequence++, entity, component, batch, kind});
         }
 
         [[nodiscard]] bool IsOpenBatch(const CommandBatch batch) const noexcept
@@ -228,6 +240,7 @@ namespace vanguard::ecs
         containers::DynamicArray<ComponentAction> pendingComponentActions;
         containers::HashMap<CommandBatchId, BatchRecord> batches;
         containers::HashMap<EntityId, CommandBatchId> pendingIdentities;
+        containers::CircularBuffer<CommittedChange> committedChanges;
         concurrency::Mutex queueLock;
         CommandBatchId nextBatch = 1;
         u64 createdEntities = 0;
@@ -239,6 +252,8 @@ namespace vanguard::ecs
         u64 enabledComponents = 0;
         u64 disabledComponents = 0;
         u64 rejectedComponentActions = 0;
+        u64 nextCommittedChangeSequence = 1;
+        u64 overwrittenCommittedChanges = 0;
         bool progressing = false;
     };
 
@@ -257,7 +272,8 @@ namespace vanguard::ecs
     bool World::Initialize(const WorldConfig& config) noexcept
     {
         if (m_impl != nullptr) return false;
-        if (config.initialEntityCapacity == 0 || config.initialActionCapacity == 0 || !ConfigureFlecs()) return false;
+        if (config.initialEntityCapacity == 0 || config.initialActionCapacity == 0 ||
+            config.committedChangeCapacity == 0 || !ConfigureFlecs()) return false;
         Impl* const impl = AllocateEcsObject<Impl>(config);
         if (impl == nullptr) return false;
         impl->world = ecs_init();
@@ -461,6 +477,8 @@ namespace vanguard::ecs
                     {
                         ++report.created;
                         ++m_impl->createdEntities;
+                        m_impl->PublishCommittedChange(action.identity, InvalidComponentId, action.batch,
+                                                       CommittedChangeKind::EntityCreated);
                     }
                 }
                 {
@@ -483,6 +501,8 @@ namespace vanguard::ecs
                     ecs_delete(m_impl->world, existing);
                     ++report.destroyed;
                     ++m_impl->destroyedEntities;
+                    m_impl->PublishCommittedChange(action.identity, InvalidComponentId, action.batch,
+                                                   CommittedChangeKind::EntityDestroyed);
                 }
                 {
                     VG_SCOPE_LOCK(m_impl->queueLock);
@@ -536,7 +556,12 @@ namespace vanguard::ecs
                 else
                 {
                     ecs_add_id(m_impl->world, entity, action.component);
-                    if (ecs_has_id(m_impl->world, entity, action.component)) ++report.added;
+                    if (ecs_has_id(m_impl->world, entity, action.component))
+                    {
+                        ++report.added;
+                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                                                       CommittedChangeKind::ComponentAdded);
+                    }
                     else { ++report.rejected; rejected = true; }
                 }
             }
@@ -553,6 +578,8 @@ namespace vanguard::ecs
                 {
                     ecs_set_id(m_impl->world, entity, action.component, action.valueSize, action.value.address);
                     ++report.set;
+                    m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                                                   CommittedChangeKind::ComponentSet);
                 }
             }
             else if (action.type == ComponentActionType::Remove)
@@ -565,7 +592,12 @@ namespace vanguard::ecs
                 else
                 {
                     ecs_remove_id(m_impl->world, entity, action.component);
-                    if (!ecs_has_id(m_impl->world, entity, action.component)) ++report.removed;
+                    if (!ecs_has_id(m_impl->world, entity, action.component))
+                    {
+                        ++report.removed;
+                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                                                       CommittedChangeKind::ComponentRemoved);
+                    }
                     else { ++report.rejected; rejected = true; }
                 }
             }
@@ -575,8 +607,18 @@ namespace vanguard::ecs
                 ecs_enable_id(m_impl->world, entity, action.component, enable);
                 if (ecs_is_enabled_id(m_impl->world, entity, action.component) == enable)
                 {
-                    if (enable) ++report.enabled;
-                    else ++report.disabled;
+                    if (enable)
+                    {
+                        ++report.enabled;
+                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                                                       CommittedChangeKind::ComponentEnabled);
+                    }
+                    else
+                    {
+                        ++report.disabled;
+                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                                                       CommittedChangeKind::ComponentDisabled);
+                    }
                 }
                 else
                 {
@@ -595,6 +637,57 @@ namespace vanguard::ecs
         m_impl->rejectedComponentActions += report.rejected;
         if (output != nullptr) *output = report;
         return true;
+    }
+
+    bool World::ReadCommittedChanges(CommittedChangeCursor& cursor,
+                                     containers::DynamicArray<CommittedChange>& changes,
+                                     const u32 maximumRecords,
+                                     CommittedChangeReadResult* const output) const noexcept
+    {
+        if (output != nullptr) *output = {};
+        if (m_impl == nullptr || m_impl->progressing || maximumRecords == 0) return false;
+        CommittedChangeReadResult result;
+        const u64 oldest = m_impl->committedChanges.Empty()
+                               ? m_impl->nextCommittedChangeSequence
+                               : m_impl->committedChanges.Front().sequence;
+        u64 requested = cursor.nextSequence == 0 ? oldest : cursor.nextSequence;
+        if (requested < oldest)
+        {
+            const u64 lost = oldest - requested;
+            result.lostRecords = lost > ~u32{0} ? ~u32{0} : static_cast<u32>(lost);
+            requested = oldest;
+        }
+        if (requested > m_impl->nextCommittedChangeSequence) return false;
+        result.firstSequence = requested;
+        for (u32 index = 0; index < m_impl->committedChanges.Size() && result.records < maximumRecords; ++index)
+        {
+            const CommittedChange& change = m_impl->committedChanges[index];
+            if (change.sequence < requested) continue;
+            changes.PushBack(change);
+            ++result.records;
+        }
+        cursor.nextSequence = requested + result.records;
+        result.nextSequence = cursor.nextSequence;
+        if (output != nullptr) *output = result;
+        return true;
+    }
+
+    bool World::CaptureNativeComponentChange(const EntityId entity, const ComponentId component,
+                                             const CommittedChangeKind kind) noexcept
+    {
+        if (m_impl == nullptr || entity == InvalidEntityId || component == InvalidComponentId ||
+            kind == CommittedChangeKind::EntityCreated || kind == CommittedChangeKind::EntityDestroyed)
+            return false;
+        ecs_entity_t runtimeEntity = 0;
+        if (!m_impl->identities.Find(entity, runtimeEntity) || !ecs_is_alive(m_impl->world, runtimeEntity) ||
+            !ecs_is_alive(m_impl->world, component)) return false;
+        m_impl->PublishCommittedChange(entity, component, InvalidCommandBatchId, kind);
+        return true;
+    }
+
+    u64 World::NextCommittedChangeSequence() const noexcept
+    {
+        return m_impl != nullptr ? m_impl->nextCommittedChangeSequence : 0;
     }
 
     bool World::Progress(const f32 deltaSeconds) noexcept
@@ -646,6 +739,8 @@ namespace vanguard::ecs
         stats.enabledComponents = m_impl->enabledComponents;
         stats.disabledComponents = m_impl->disabledComponents;
         stats.rejectedComponentActions = m_impl->rejectedComponentActions;
+        stats.committedChanges = m_impl->nextCommittedChangeSequence - 1u;
+        stats.overwrittenCommittedChanges = m_impl->overwrittenCommittedChanges;
         stats.progressing = m_impl->progressing;
         return stats;
     }

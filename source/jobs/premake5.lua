@@ -148,7 +148,7 @@ project "jobsCompat"
     files { "compat/**.cpp" }
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include",
         redJobsRoot,
@@ -189,13 +189,16 @@ project "jobs"
 
     files {
         "include/**.hpp",
-        "src/**.hpp",
-        "src/**.cpp"
+        "private/**.hpp",
+        "src/**.cpp",
+        "README.md",
+        "UPSTREAM.md",
+        "docs/**.md"
     }
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include",
         "../concurrency/include"
@@ -210,7 +213,9 @@ project "jobs"
 
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
-        ["Source/*"] = { "src/**.hpp", "src/**.cpp" }
+        ["Private API/*"] = { "private/**.hpp" },
+        ["Source/*"] = { "src/**.cpp" },
+        ["Documentation"] = { "README.md", "UPSTREAM.md", "docs/**.md" }
     }
 
 group "Tests/Jobs"

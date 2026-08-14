@@ -9,13 +9,14 @@ project "nanovanguard"
     targetdir(tools_output_root)
     objdir(object_root)
     debugdir(tools_output_root)
-    files { "src/**.hpp", "src/**.cpp", "platform/windows/**.cpp", "README.md" }
-    includedirs { "src", "../../source/projects/include", "../../source/filesystem/include", "../../source/io/include",
+    files { "private/**.hpp", "src/**.cpp", "platform/windows/**.cpp", "README.md" }
+    includedirs { "private", "../../source/projects/include", "../../source/filesystem/include", "../../source/io/include",
                   "../../source/containers/include", "../../source/memory/include", "../../source/system/include" }
     links { "projects", "filesystem", "io", "containers", "memory", "redSystemCompat", "Bcrypt", "Shell32", "Advapi32",
             "Dbghelp", "Psapi", "Shlwapi", "Version", "system" }
     vpaths {
-        ["CLI/*"] = { "src/**.hpp", "src/**.cpp" },
+        ["CLI/Private API/*"] = { "private/**.hpp" },
+        ["CLI/Source/*"] = { "src/**.cpp" },
         ["Platform/Windows/*"] = { "platform/windows/**.cpp" },
         ["Documentation"] = { "README.md" }
     }
@@ -30,8 +31,11 @@ project "nanovanguardTests"
     fatalwarnings "All"
     targetdir(output_root)
     objdir(object_root)
-    files { "src/**.hpp", "src/**.cpp", "platform/windows/project_platform_windows.cpp", "tests/**.cpp" }
-    includedirs { "src", "../../source/projects/include", "../../source/filesystem/include", "../../source/io/include",
+    files { "private/**.hpp", "src/**.cpp", "platform/windows/project_platform_windows.cpp", "tests/**.cpp" }
+    includedirs { "private", "../../source/projects/include", "../../source/filesystem/include", "../../source/io/include",
                   "../../source/containers/include", "../../source/memory/include", "../../source/system/include" }
     links { "projects", "filesystem", "io", "containers", "memory", "Bcrypt", "system" }
-    vpaths { ["CLI/*"] = { "src/**.hpp", "src/**.cpp" }, ["Tests/*"] = { "tests/**.cpp" } }
+    vpaths {
+        ["CLI/Private API/*"] = { "private/**.hpp" }, ["CLI/Source/*"] = { "src/**.cpp" },
+        ["Tests/*"] = { "tests/**.cpp" }
+    }

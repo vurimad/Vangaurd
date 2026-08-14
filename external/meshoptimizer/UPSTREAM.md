@@ -5,7 +5,7 @@
 - Git tag: `v1.2`
 - Tag commit: `9d9890c73011d75920af614485296d1e03e95448`
 - License: MIT (`LICENSE.md`)
-- Imported from the user-provided checkout at `D:\vendors\meshoptimizer`
+- Repository copy: `external/meshoptimizer/upstream`
 - Imported content: upstream `src/`, `LICENSE.md`, and `README.md`
 - Local source patches: none
 - Supported Vanguard platforms: Windows x86-64 initially; upstream supports major desktop and console-class C++ targets

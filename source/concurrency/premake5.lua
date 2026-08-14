@@ -16,7 +16,7 @@ project "concurrencyCompat"
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../imported/common/redSystem/include",
         "../imported/common/redSystem/src"
@@ -62,13 +62,13 @@ project "concurrency"
 
     files {
         "include/**.hpp",
-        "src/**.hpp",
+        "private/**.hpp",
         "src/**.cpp"
     }
 
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include"
     }
 
@@ -79,7 +79,8 @@ project "concurrency"
 
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
-        ["Source/*"] = { "src/**.hpp", "src/**.cpp" }
+        ["Private API/*"] = { "private/**.hpp" },
+        ["Source/*"] = { "src/**.cpp" }
     }
 
 group "Tests/Concurrency"

@@ -2,7 +2,7 @@
 
 `meshTools` is Vanguard's importer-neutral offline geometry cooker. It applies deterministic vertex deduplication, direct-from-LOD0 attribute-aware simplification, post-transform cache optimization, overdraw optimization, and vertex-fetch remapping before emitting conventional indexed geometry in the runtime-native `vmesh` format.
 
-Source/import geometry, backend processing policy, and the self-describing runtime layout are separate contracts. meshoptimizer is a private implementation dependency pinned from `D:\vendors`; no meshoptimizer type appears in the public API and the runtime `meshes` module does not link it.
+Source/import geometry, backend processing policy, and the self-describing runtime layout are separate contracts. meshoptimizer is a private implementation dependency pinned under `external/meshoptimizer`; no meshoptimizer type appears in the public API and the runtime `meshes` module does not link it.
 
 LOD0 is always the fully cooked source geometry. Every additional level is simplified directly from LOD0 using its own triangle ratio and normalized quadric-error limit, preserving stable submesh/material identity and rebuilding every source stream into a dense per-LOD vertex range. Supported float, half, and normalized packed attributes are decoded into temporary simplification data; a weighted format that cannot be decoded is rejected instead of being silently ignored.
 

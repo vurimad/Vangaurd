@@ -1,6 +1,8 @@
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/entities/entities.hpp>
+#include <vanguard/entities/world_render_bridge.hpp>
+#include <vanguard/ecs/native.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/jobs/jobs.hpp>
@@ -44,6 +46,66 @@ namespace
     {
         vanguard::f32 intensity = 1.0f;
     };
+
+    struct BridgeLight
+    {
+        vanguard::f32 intensity = 1.0f;
+    };
+
+    struct BridgeTransform
+    {
+        vanguard::f32 x = 0.0f;
+    };
+
+    struct BridgeComponentContext
+    {
+        vanguard::ecs::ComponentType<BridgeLight> light;
+        vanguard::ecs::ComponentType<BridgeTransform> transform;
+    };
+
+    bool BuildBridgeLight(const vanguard::ecs::World& world, const vanguard::ecs::EntityId entityId,
+                          entities::WorldRenderContributorBuild& build, void* const userData) noexcept
+    {
+        const auto* const context = static_cast<const BridgeComponentContext*>(userData);
+        const vanguard::ecs::Entity entity = world.Resolve(entityId);
+        const auto* const light = context != nullptr && entity
+                                      ? static_cast<const BridgeLight*>(ecs_get_id(
+                                            world.Native(), entity.value, context->light.id))
+                                      : nullptr;
+        if (light == nullptr) return false;
+        build.light.proxy.bounds.minimum[0] = -1.0f;
+        build.light.proxy.bounds.minimum[1] = -1.0f;
+        build.light.proxy.bounds.minimum[2] = -1.0f;
+        build.light.proxy.bounds.maximum[0] = 1.0f;
+        build.light.proxy.bounds.maximum[1] = 1.0f;
+        build.light.proxy.bounds.maximum[2] = 1.0f;
+        build.light.proxy.debugName = "bridgeLight";
+        build.light.intensity = light->intensity;
+        build.light.range = 10.0f;
+        return true;
+    }
+
+    bool ReadBridgeTransform(const vanguard::ecs::World& world, const vanguard::ecs::EntityId entityId,
+                             const vanguard::ecs::CommittedChangeKind, entities::WorldRenderState& state,
+                             void* const userData) noexcept
+    {
+        const auto* const context = static_cast<const BridgeComponentContext*>(userData);
+        const vanguard::ecs::Entity entity = world.Resolve(entityId);
+        const auto* const transform = context != nullptr && entity
+                                          ? static_cast<const BridgeTransform*>(ecs_get_id(
+                                                world.Native(), entity.value, context->transform.id))
+                                          : nullptr;
+        if (transform == nullptr) return false;
+        state.fields = entities::WorldRenderStateFields::TransformAndBounds;
+        state.transform.row0[3] = transform->x;
+        state.bounds.minimum[0] = transform->x - 1.0f;
+        state.bounds.minimum[1] = -1.0f;
+        state.bounds.minimum[2] = -1.0f;
+        state.bounds.maximum[0] = transform->x + 1.0f;
+        state.bounds.maximum[1] = 1.0f;
+        state.bounds.maximum[2] = 1.0f;
+        return true;
+    }
 
     constexpr reflection::SchemaTypeId TransformType = reflection::HashSchemaName("vanguard.test.transform");
     constexpr reflection::SchemaTypeId RenderType = reflection::HashSchemaName("vanguard.test.render");
@@ -654,6 +716,95 @@ int main()
           "shutdown a fully drained entity-streaming world");
     Check(vanguard::jobs::Shutdown(), "shutdown Jobs after entity streaming drains");
     streamedWorld.Close();
+
+    {
+        vanguard::ecs::World bridgeWorld;
+        Check(bridgeWorld.Initialize(), "initialize world-render bridge ECS world");
+        BridgeComponentContext bridgeComponents;
+        bridgeComponents.light = vanguard::ecs::RegisterComponent<BridgeLight>(bridgeWorld, true);
+        bridgeComponents.transform = vanguard::ecs::RegisterComponent<BridgeTransform>(bridgeWorld, true);
+        Check(bridgeComponents.light && bridgeComponents.transform,
+              "register project-defined world-render bridge components");
+
+        vanguard::rendering::RenderSceneManager scenes;
+        vanguard::rendering::RenderSceneFailure sceneFailure;
+        vanguard::rendering::RenderSceneHandle scene;
+        vanguard::rendering::RenderSceneDesc sceneDesc;
+        sceneDesc.name = "entityBridgeTest";
+        sceneDesc.maximumProxies = 64;
+        sceneDesc.maximumPendingProxyMutations = 2;
+        Check(scenes.Initialize({}, &sceneFailure) && scenes.CreateScene(sceneDesc, scene, &sceneFailure),
+              "create the world-render bridge target scene");
+
+        entities::WorldRenderBridge bridge;
+        entities::WorldRenderBridgeFailure bridgeFailure;
+        Check(bridge.Initialize(bridgeWorld, scenes, scene, 7, {}, &bridgeFailure) &&
+                  bridge.RegisterContributor({bridgeComponents.light.id, bridgeComponents.light.world,
+                                              entities::WorldRenderContributorKind::Light,
+                                              &BuildBridgeLight, &bridgeComponents}, &bridgeFailure) &&
+                  bridge.RegisterState({bridgeComponents.transform.id, bridgeComponents.transform.world,
+                                        entities::WorldRenderStateFields::TransformAndBounds,
+                                        &ReadBridgeTransform, &bridgeComponents}, &bridgeFailure),
+              "initialize component-neutral world-render translation descriptors");
+
+        const vanguard::ecs::CommandBatch activation = bridgeWorld.BeginCommandBatch();
+        Check(activation && bridgeWorld.QueueCreate(activation, 9001) &&
+                  bridgeWorld.QueueAddComponent(activation, 9001, bridgeComponents.light) &&
+                  bridgeWorld.QueueSetComponent(activation, 9001, bridgeComponents.light, BridgeLight{4.0f}) &&
+                  bridgeWorld.QueueAddComponent(activation, 9001, bridgeComponents.transform) &&
+                  bridgeWorld.QueueSetComponent(activation, 9001, bridgeComponents.transform, BridgeTransform{2.0f}) &&
+                  bridgeWorld.QueueSetComponent(activation, 9001, bridgeComponents.transform, BridgeTransform{3.0f}) &&
+                  bridgeWorld.SealCommandBatch(activation) && bridgeWorld.FlushActions() &&
+                  bridgeWorld.FlushComponentActions(),
+              "commit one activation-group component transaction");
+        entities::WorldRenderBridgeFlushResult bridgeFlush;
+        vanguard::rendering::RenderProxyHandle bridgeProxy;
+        Check(bridge.Flush(bridgeFlush, &bridgeFailure) && bridgeFlush.sceneCommitAllowed &&
+                  bridgeFlush.createdProxies == 1 && bridgeFlush.updatedProxies == 1 &&
+                  bridge.FindProxy(9001, bridgeComponents.light.id, bridgeProxy),
+              "coalesce repeated component writes and admit one matching proxy transaction");
+        vanguard::rendering::RenderProxySnapshot proxySnapshot;
+        Check(scenes.SnapshotProxy(bridgeProxy, proxySnapshot) && proxySnapshot.transform.row0[3] == 3.0f &&
+                  proxySnapshot.producerId == 9001 && proxySnapshot.producerGeneration == 7,
+              "publish stable entity identity, bridge generation and the final transform value");
+        entities::WorldRenderBridgeValidationReport bridgeValidation;
+        Check(bridge.ValidateFullRebuild(bridgeValidation, &bridgeFailure) && bridgeValidation.valid &&
+                  bridgeValidation.scannedWorldContributors == 1 && bridgeValidation.trackedContributors == 1,
+              "validate the dirty-stream result against a cold full-world contributor scan");
+
+        vanguard::rendering::RenderSceneFramePrepareResult prepare;
+        vanguard::rendering::RenderSceneCommitResult firstCommit;
+        Check(scenes.PrepareSceneFrame(scene, prepare, &sceneFailure) &&
+                  scenes.CommitScene(scene, firstCommit, &sceneFailure),
+              "publish the activated proxy scene version");
+        vanguard::rendering::SceneReadLease retainedLease;
+        Check(scenes.AcquireLatestReadLease(scene, retainedLease, &sceneFailure),
+              "retain the proxy-bearing scene version across cell release");
+
+        Check(bridgeWorld.RetireCommandBatch(activation),
+              "retire the completed activation transaction before release");
+        Check(bridgeWorld.QueueDestroy(9001) && bridgeWorld.FlushActions() &&
+                  bridgeWorld.FlushComponentActions() && bridge.Flush(bridgeFlush, &bridgeFailure) &&
+                  bridgeFlush.destroyedProxies == 1 && !bridge.FindProxy(9001, bridgeComponents.light.id, bridgeProxy),
+              "translate exact entity destruction into proxy detachment without a table scan");
+        vanguard::rendering::RenderSceneCommitResult emptyCommit;
+        Check(scenes.PrepareSceneFrame(scene, prepare, &sceneFailure) &&
+                  scenes.CommitScene(scene, emptyCommit, &sceneFailure),
+              "publish the scene version with the released entity removed");
+        vanguard::containers::DynamicArray<entities::WorldRenderDetachedProxy> detached(
+            vanguard::memory::pools::Rendering::GetInstance());
+        Check(bridge.RetireDetachedProxies(detached, &bridgeFailure) && detached.Empty(),
+              "withhold downstream release while a reader retains the proxy-bearing version");
+        vanguard::rendering::RenderSceneVersionRetirementResult retirement;
+        Check(scenes.ReleaseReadLease(retainedLease, &sceneFailure) &&
+                  scenes.RetirePublishedVersions(retirement, &sceneFailure) &&
+                  bridge.RetireDetachedProxies(detached, &bridgeFailure) && detached.Size() == 1 &&
+                  detached[0].entity == 9001 && detached[0].bridgeGeneration == 7,
+              "acknowledge proxy release only after published-version retirement");
+        Check(bridge.Shutdown(&bridgeFailure) && scenes.DestroyScene(scene, &sceneFailure) &&
+                  scenes.Shutdown(&sceneFailure) && bridgeWorld.Shutdown(),
+              "shutdown the drained world-render bridge path");
+    }
 
     Check(materializer.Shutdown(), "shutdown empty materializer");
     Check(referenceRegistry.Shutdown(), "shutdown empty entity reference registry");
