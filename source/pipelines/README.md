@@ -14,3 +14,6 @@ The architecture follows RED's separation between shader identity, full pipeline
 
 `ValidateShaderCompatibility` is the backend-independent gate between `vshader` reflection and a pipeline instance. `CalculateConcretePipelineKey` produces the stable key used by the future runtime cache.
 
+Vertex attributes retain an explicit portable GPU format and the native semantic string in addition to their normalized reflection identity. This prevents runtime inference from losing signed, normalized, packed, or integer format information and allows native input-layout creation without hardcoded semantic dictionaries.
+
+`rendering::RequestRenderPipeline` resolves the exact shader generations referenced by a validated pipeline, rejects stale fingerprints and duplicate stages, translates portable state into RHI descriptions, specializes deferred attachment formats, and submits immutable creation data to the asynchronous pipeline cache. Bindless descriptor domains and any exceptional fixed layouts are supplied as pipeline-interface resources; material resources do not choose the binding model. The factory creates no command list and performs no rendering work.

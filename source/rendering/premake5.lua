@@ -12,7 +12,7 @@ project "rendering"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
-    files { "include/**.hpp", "private/**.hpp", "src/**.cpp", "README.md", "docs/**.md" }
+    files { "include/**.hpp", "private/**.hpp", "src/**.cpp", "shaders/**.hlsli", "README.md", "docs/**.md" }
     includedirs {
         "include", "private", "../rhi/include", "../pipelineCache/include", "../pipelines/include", "../shaders/include",
         "../crypto/include", "../serialization/include", "../resources/include", "../filesystem/include", "../io/include",
@@ -23,7 +23,8 @@ project "rendering"
             "jobs", "window", "containers", "concurrency", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" }, ["Private API/*"] = { "private/**.hpp" },
-        ["Source/*"] = { "src/**.cpp" }, ["Documentation"] = { "README.md", "docs/**.md" }
+        ["Source/*"] = { "src/**.cpp" }, ["Shaders/*"] = { "shaders/**.hlsli" },
+        ["Documentation"] = { "README.md", "docs/**.md" }
     }
 
 group "Tests/Rendering"

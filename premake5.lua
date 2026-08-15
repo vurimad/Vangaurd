@@ -74,6 +74,8 @@ nvrhi_root = path.join(external_root, "nvrhi/upstream")
 directx_headers_root = path.join(external_root, "directXHeaders/upstream")
 flecs_root = path.join(external_root, "flecs/upstream")
 sdl_root = path.join(external_root, "sdl3/upstream")
+slang_root = path.join(external_root, "slang/upstream")
+dxc_root = path.join(external_root, "dxc/upstream")
 
 function deployVanguardRuntimeDependencies(includeSdl)
     if includeSdl then
@@ -158,6 +160,7 @@ include "source/gameInputTools"
 include "source/rhi"
 include "source/rhi/nvrhi"
 include "source/shaders"
+include "source/shaderTools"
 include "source/rendering"
 include "source/textures"
 include "source/textureTools"

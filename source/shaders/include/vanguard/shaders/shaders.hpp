@@ -9,6 +9,7 @@ namespace vanguard::shaders
 {
     inline constexpr u32 ShaderMagic = serialization::MakeFourCC('V', 'S', 'H', 'D');
     inline constexpr resources::ResourceTypeId ShaderResourceType = serialization::MakeFourCC('V', 'S', 'H', 'D');
+    inline constexpr u32 MaximumEntryPointLength = 128;
 
     enum class Result : u8
     {
@@ -158,6 +159,7 @@ namespace vanguard::shaders
         ShaderStage stage = ShaderStage::Count;
         NativeFormat format = NativeFormat::Dxil;
         u64 entryPoint = 0;
+        char entryPointName[MaximumEntryPointLength]{};
         u64 bytecodeOffset = 0;
         u64 bytecodeSize = 0;
         crypto::Digest256 bytecodeDigest;
@@ -170,6 +172,7 @@ namespace vanguard::shaders
         u64 entryPoint = 0;
         const void* bytecode = nullptr;
         usize bytecodeSize = 0;
+        const char* entryPointName = nullptr;
     };
 
     struct DescriptorBinding

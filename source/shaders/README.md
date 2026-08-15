@@ -21,3 +21,7 @@ No source HLSL/Slang, editor graph, fixed-function PSO state, or backend object 
 Descriptor reflection preserves the native CBV, SRV, UAV and sampler namespaces, so equal numeric registers such as `b0`, `t0` and `s0` may coexist in one register space. Fixed arrays carry a bounded descriptor count. Unbounded arrays carry `BindingFlags::Bindless` together with `UnboundedDescriptorCount`; runtime device capacity is selected by the renderer and is intentionally not cooked into shader identity.
 
 `ValidatePipeline` provides the backend-independent compatibility gate. It checks program kind, primitive class, vertex inputs, render-target count and numeric classes, depth-output requirements, dual-source blending, and optional binding/pipeline fingerprints. GPU-specific PSO creation remains a renderer responsibility.
+
+Every native stage stores both its stable entry-point identity and the original entry-point string. The identity participates in deterministic resource fingerprints; the string is retained because native shader creation requires it and must never depend on a runtime hash-to-name table.
+
+`rendering::RenderShader` is the runtime owner of the RHI shader handles created from a validated document. It selects only bytecode compatible with the active backend, creates every stage transactionally, rolls back partial creation, exposes immutable shader identities to pipeline resolution, and deliberately contains no binding, command recording, draw, or dispatch methods.

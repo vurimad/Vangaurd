@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 namespace
@@ -52,8 +53,8 @@ namespace
         ShaderFixture()
         {
             stages = {
-                {{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size()},
-                 {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size()}}};
+                {{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size(), "mainPS"},
+                 {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size(), "mainVS"}}};
             inputs = {{{0x10002, 0, 1, shaders::NumericClass::FloatingPoint, 2, 32},
                        {0x10001, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
             outputs = {{{0x20001, 0, 0, shaders::NumericClass::FloatingPoint, 0x0f}}};
@@ -83,8 +84,10 @@ namespace
             shader = {
                 {{0x70001, shaderFile.Permutation(), shaderFile.BindingLayoutFingerprint(), shaderFile.PipelineInterfaceFingerprint()}}};
             streams = {{{1, 8, pipelines::InputRate::PerVertex, 1}, {0, 12, pipelines::InputRate::PerVertex, 1}}};
-            attributes = {{{0x10002, 0, 1, 1, 0, shaders::NumericClass::FloatingPoint, 2, 32},
-                           {0x10001, 0, 0, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
+            attributes = {{{0x10002, 0, 1, 1, 0, shaders::NumericClass::FloatingPoint, 2, 32,
+                            pipelines::Format::R32G32Float, "TEXCOORD"},
+                           {0x10001, 0, 0, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32,
+                            pipelines::Format::R32G32B32Float, "POSITION"}}};
             description.kind = pipelines::PipelineKind::Graphics;
             description.name = 0x90001;
             description.dynamicStates = pipelines::DynamicState::Viewport | pipelines::DynamicState::Scissor |
@@ -103,12 +106,12 @@ namespace
         }
     };
 
-    pipelines::AttachmentSignature MakeAttachments(const pipelines::FormatId colorFormat)
+    pipelines::AttachmentSignature MakeAttachments(const pipelines::Format colorFormat)
     {
         pipelines::AttachmentSignature attachments;
         attachments.colorCount = 1;
         attachments.colors[0] = {colorFormat, shaders::NumericClass::FloatingPoint};
-        attachments.depthStencilFormat = 2001;
+        attachments.depthStencilFormat = pipelines::Format::D24UNormS8UInt;
         attachments.depthStencilClass = pipelines::DepthStencilClass::DepthStencil;
         attachments.sampleCount = 1;
         return attachments;
@@ -169,6 +172,11 @@ int main()
           "graphics fixed function state round trip");
     Check(pipeline.VertexStreams().Size() == 2 && pipeline.VertexStreams()[0].binding == 0 && pipeline.VertexAttributes()[0].location == 0,
           "vertex layout is canonical");
+    Check(pipeline.VertexAttributes()[0].format == pipelines::Format::R32G32B32Float &&
+              std::strcmp(pipeline.VertexAttributes()[0].semanticName, "POSITION") == 0 &&
+              pipeline.VertexAttributes()[1].format == pipelines::Format::R32G32Float &&
+              std::strcmp(pipeline.VertexAttributes()[1].semanticName, "TEXCOORD") == 0,
+          "native vertex formats and semantic names round trip");
     Check(pipeline.Shaders().Size() == 1 && pipeline.Shaders()[0].permutation == shaderFile.Permutation() &&
               pipeline.Shaders()[0].bindingLayout == shaderFile.BindingLayoutFingerprint() &&
               pipeline.Shaders()[0].pipelineInterface == shaderFile.PipelineInterfaceFingerprint(),
@@ -185,8 +193,8 @@ int main()
               pipeline.Graphics().depthStencil.minimumDepthBounds == 0.0f && pipeline.Graphics().depthStencil.maximumDepthBounds == 1.0f,
           "dynamic values are excluded from the static pipeline template");
 
-    const pipelines::AttachmentSignature attachments = MakeAttachments(1001);
-    pipelines::AttachmentSignature alternateAttachments = MakeAttachments(1002);
+    const pipelines::AttachmentSignature attachments = MakeAttachments(pipelines::Format::R8G8B8A8UNorm);
+    pipelines::AttachmentSignature alternateAttachments = MakeAttachments(pipelines::Format::R16G16B16A16Float);
     Check(shaderFile.Interface().primitiveClass == shaders::PrimitiveClass::Triangle &&
               shaderFile.Interface().renderTargetCount == attachments.colorCount && shaderFile.FragmentOutputs().Size() == 1 &&
               shaderFile.FragmentOutputs()[0].numericClass == attachments.colors[0].numericClass,
@@ -240,7 +248,7 @@ int main()
         filesystem::MemoryFileReader reader(bytes, 0);
         pipelines::PipelineFile exactPipeline;
         Check(exactPipeline.Open(reader) == pipelines::Result::Success, "open exact-attachment pipeline");
-        const pipelines::AttachmentSignature mismatch = MakeAttachments(1003);
+        const pipelines::AttachmentSignature mismatch = MakeAttachments(pipelines::Format::R11G11B10Float);
         Check(pipelines::CalculateConcretePipelineKey(exactPipeline, &mismatch, alternateKey) == pipelines::Result::AttachmentMismatch,
               "exact attachment mismatch is rejected");
     }

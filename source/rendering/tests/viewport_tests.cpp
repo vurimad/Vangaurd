@@ -1,6 +1,11 @@
 #include <vanguard/rendering/render_scene.hpp>
 #include <vanguard/rendering/render_scene_collector.hpp>
 #include <vanguard/rendering/render_scene_feedback.hpp>
+#include <vanguard/rendering/gpu_scene_types.hpp>
+#include <vanguard/rendering/gpu_scene_tables.hpp>
+#include <vanguard/rendering/gpu_scene_lifetime.hpp>
+#include <vanguard/rendering/render_phase.hpp>
+#include <vanguard/rendering/render_view.hpp>
 #include <vanguard/rendering/viewport.hpp>
 
 #include <vanguard/concurrency/atomic.hpp>
@@ -142,6 +147,128 @@ int main()
     jobs::Config jobsConfig = jobs::ToolConfig();
     jobsConfig.maxWorkers = 2;
     Check(jobs::Initialize(jobsConfig), "Jobs initialization");
+
+    {
+        rendering::RenderPhaseRegistry phases;
+        rendering::RenderPhaseFailure phaseFailure;
+        Check(phases.Initialize({}, &phaseFailure), "render phase registry initialization");
+        Check(rendering::RegisterStandardRenderPhases(phases, &phaseFailure),
+              "standard render phase registration");
+        const rendering::RenderPhaseId opaque = phases.Find(rendering::standardRenderPhases::Opaque);
+        const rendering::RenderPhaseId transparent = phases.Find("vanguard.render.transparent");
+        Check(opaque.IsValid() && transparent.IsValid() && opaque != transparent,
+              "stable render phase keys resolve to compact identities");
+
+        rendering::RenderPhaseId duplicateOpaque;
+        Check(phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::FrontToBack},
+                              duplicateOpaque, &phaseFailure) && duplicateOpaque == opaque,
+              "identical render phase registration is idempotent");
+        Check(!phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::BackToFront},
+                               duplicateOpaque, &phaseFailure) &&
+                  phaseFailure.code == rendering::RenderPhaseFailureCode::IncompatibleDefinition,
+              "incompatible render phase redefinition is rejected");
+        Check(phases.Seal(&phaseFailure) && phases.IsSealed(), "render phase registry sealing");
+        rendering::RenderPhaseId forbiddenPhase;
+        Check(!phases.Register({"vanguard.render.late", 0, rendering::RenderPhaseSortMode::State},
+                               forbiddenPhase, &phaseFailure) &&
+                  phaseFailure.code == rendering::RenderPhaseFailureCode::RegistrySealed,
+              "sealed render phase registry rejects late registration");
+
+        rendering::RenderPhaseSet mainPhases;
+        Check(mainPhases.Add(phases.Find(rendering::standardRenderPhases::DepthPrepass)) &&
+                  mainPhases.Add(opaque) && mainPhases.Add(transparent) &&
+                  mainPhases.Contains(opaque),
+              "render phase set stores compact phase membership");
+
+        rendering::RenderView views[2];
+        views[0].id = {0, 1};
+        views[0].family = {0, 1};
+        views[0].purpose = rendering::RenderViewPurpose::Main;
+        views[0].flags = rendering::RenderViewFlags::Primary |
+                         rendering::RenderViewFlags::TemporalHistory |
+                         rendering::RenderViewFlags::OcclusionCulling;
+        views[0].phases = mainPhases;
+        views[0].rect = {0, 0, 1920, 1080};
+        views[0].frustum.planeCount = 1;
+        views[0].frustum.planes[0].normal[2] = 1.0f;
+        views[0].temporalIdentity = 1001;
+        views[0].frameSerial = 17;
+        views[0].name[0] = 'M';
+        views[0].name[1] = 'a';
+        views[0].name[2] = 'i';
+        views[0].name[3] = 'n';
+
+        views[1] = views[0];
+        views[1].id = {1, 1};
+        views[1].purpose = rendering::RenderViewPurpose::Shadow;
+        views[1].flags = rendering::RenderViewFlags::ReverseDepth;
+        views[1].phases.Clear();
+        Check(views[1].phases.Add(phases.Find(rendering::standardRenderPhases::ShadowDepth)),
+              "shadow view phase selection");
+        views[1].temporalIdentity = 0;
+        views[1].name[0] = 'S';
+        views[1].name[1] = 'h';
+        views[1].name[2] = 'a';
+        views[1].name[3] = 'd';
+        views[1].name[4] = 'o';
+        views[1].name[5] = 'w';
+        views[1].name[6] = '\0';
+
+        rendering::RenderViewFamily family;
+        family.id = {0, 1};
+        family.views = views;
+        family.viewCount = 2;
+        family.frameSerial = 17;
+        family.sceneIdentity = 9;
+        family.sceneVersion = 4;
+        rendering::RenderViewFailure viewFailure;
+        Check(rendering::ValidateRenderViewFamily(family, phases, &viewFailure),
+              "main and shadow views form one valid view family");
+
+        views[0].origin.worldCell[0] = -12;
+        views[0].origin.localPosition[1] = 34.5f;
+        views[0].layerMask = 0x1122334455667788ull;
+        views[0].temporalIdentity = 0xaabbccddeeff0011ull;
+        views[0].matrices.worldToClip[15] = 1.0f;
+        rendering::GpuView gpuView;
+        Check(rendering::BuildGpuView(views[0], gpuView) && gpuView.worldCell[0] == -12 &&
+                  gpuView.localPosition[1] == 34.5f && gpuView.worldToClip[15] == 1.0f &&
+                  gpuView.layerMaskLow == 0x55667788u && gpuView.layerMaskHigh == 0x11223344u &&
+                  gpuView.temporalIdentityLow == 0xeeff0011u && gpuView.temporalIdentityHigh == 0xaabbccddu &&
+                  gpuView.phaseMaskLow == static_cast<u32>(mainPhases.Bits()) &&
+                  gpuView.phaseMaskHigh == static_cast<u32>(mainPhases.Bits() >> 32u),
+              "validated render view encodes into the exact GPU scene ABI");
+        rendering::GpuInstanceHandle gpuInstance{7, 3};
+        Check(gpuInstance.IsValid() && !rendering::GpuInstanceHandle{}.IsValid() &&
+                  sizeof(rendering::GpuInstance) == 96 && sizeof(rendering::GpuView) == 544,
+              "GPU scene handles and structured-buffer strides are stable");
+        constexpr rendering::GpuSceneLinearAddress firstInstancePageTwo =
+            rendering::DecodeGpuSceneIndex<rendering::GpuInstance>(
+                rendering::GpuSceneElementsPerPage<rendering::GpuInstance>() * 2u + 7u);
+        Check(firstInstancePageTwo.page == 2 && firstInstancePageTwo.element == 7 &&
+                  rendering::GpuSceneElementsPerPage<rendering::GpuMaterialIndex>() == 262'144 &&
+                  sizeof(rendering::GpuSceneTableDirectory) == 32 &&
+                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16,
+              "GPU Scene paged addressing is stable and shader-compatible");
+        constexpr rendering::GpuSceneAllocation allocation{
+            rendering::GpuSceneTableKind::Instance, 19, 1, 7};
+        Check(allocation.IsValid() && allocation.AsSlotHandle<rendering::GpuInstanceHandle>() ==
+                  rendering::GpuInstanceHandle{19, 7},
+              "GPU Scene allocation converts single identities to typed generational handles");
+
+        views[1].id = views[0].id;
+        Check(!rendering::ValidateRenderViewFamily(family, phases, &viewFailure) &&
+                  viewFailure.code == rendering::RenderViewFailureCode::DuplicateView,
+              "view family rejects duplicate view identities");
+        views[1].id = {1, 1};
+
+        rendering::RenderView invalidPhaseView = views[0];
+        invalidPhaseView.phases = rendering::RenderPhaseSet(1ull << 63u);
+        Check(!rendering::ValidateRenderView(invalidPhaseView, phases, &viewFailure) &&
+                  viewFailure.code == rendering::RenderViewFailureCode::UnknownPhase,
+              "render view rejects phase bits outside the sealed registry");
+        Check(phases.Shutdown(&phaseFailure), "render phase registry shutdown");
+    }
 
     ResourceHarness resourceHarness;
     resources::ResourceRegistry resourceRegistry;

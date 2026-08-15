@@ -430,7 +430,7 @@ RED_INLINE void HashSet< TElement, THashPolicy >::Clear()
 		for ( Uint32 i = 0; i < m_capacity; ++i )
 		{
 			m_buckets[ i ].SetUnused();
-			m_buckets[ i ].m_nextId = INVALID_INDEX;
+			m_buckets[ i ].m_nextId = static_cast< Uint32 >( INVALID_INDEX );
 		}
 
 #if defined( RED_MEMORY_FORCE_DEBUG_ALLOCATOR )

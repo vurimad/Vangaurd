@@ -8,14 +8,40 @@ namespace
     namespace shader = vanguard::shaders;
     namespace serialization = vanguard::serialization;
 
-    constexpr serialization::Version FileVersion{1, 0};
+    constexpr serialization::Version FileVersion{1, 1};
     constexpr u32 MetadataSection = serialization::MakeFourCC('M', 'E', 'T', 'A');
     constexpr u32 BytecodeSection = serialization::MakeFourCC('C', 'O', 'D', 'E');
-    constexpr u32 MetadataWireVersion = 1;
+    constexpr u32 MetadataWireVersion = 2;
     constexpr u64 MaximumMetadataBytes = 64ull * 1024ull * 1024ull;
     constexpr u32 InvalidIndex = 0xffffffffu;
 
     using ByteArray = containers::DynamicArray<u8>;
+
+    [[nodiscard]] u32 StringLength(const char* const value, const u32 capacity) noexcept
+    {
+        if (value == nullptr)
+            return capacity;
+        u32 length = 0;
+        while (length < capacity && value[length] != '\0')
+            ++length;
+        return length;
+    }
+
+    [[nodiscard]] bool WriteName(serialization::BinaryWriter& writer, const char* const value) noexcept
+    {
+        const u32 length = StringLength(value, shader::MaximumEntryPointLength);
+        return length != 0 && length < shader::MaximumEntryPointLength && writer.WriteU16(static_cast<u16>(length)) &&
+               writer.WriteBytes(value, length);
+    }
+
+    [[nodiscard]] bool ReadName(serialization::BinaryReader& reader, char (&value)[shader::MaximumEntryPointLength]) noexcept
+    {
+        u16 length = 0;
+        if (!reader.ReadU16(length) || length == 0 || length >= shader::MaximumEntryPointLength || !reader.ReadBytes(value, length))
+            return false;
+        value[length] = '\0';
+        return true;
+    }
 
     struct CanonicalData
     {
@@ -133,8 +159,9 @@ namespace
         shader::StageMask mask = 0;
         for (const shader::StageBuildRecord& stage : data.stages)
         {
-            if (!IsValidStage(stage.stage) || !IsValidFormat(stage.format) || stage.entryPoint == 0 || stage.bytecode == nullptr ||
-                stage.bytecodeSize == 0)
+            if (!IsValidStage(stage.stage) || !IsValidFormat(stage.format) || stage.entryPoint == 0 ||
+                StringLength(stage.entryPointName, shader::MaximumEntryPointLength) >= shader::MaximumEntryPointLength ||
+                StringLength(stage.entryPointName, shader::MaximumEntryPointLength) == 0 || stage.bytecode == nullptr || stage.bytecodeSize == 0)
             {
                 return shader::Result::InvalidBytecode;
             }
@@ -705,7 +732,8 @@ namespace
         {
             const crypto::Digest256 digest = crypto::Sha256(stage.bytecode, stage.bytecodeSize);
             if (!writer.WriteU8(static_cast<u8>(stage.stage)) || !writer.WriteU8(static_cast<u8>(stage.format)) || !writer.WriteU16(0) ||
-                !writer.WriteU64(stage.entryPoint) || !writer.WriteU64(bytecodeOffset) || !writer.WriteU64(stage.bytecodeSize) ||
+                !writer.WriteU64(stage.entryPoint) || !WriteName(writer, stage.entryPointName) || !writer.WriteU64(bytecodeOffset) ||
+                !writer.WriteU64(stage.bytecodeSize) ||
                 !WriteDigest(writer, digest))
             {
                 return WriterResult(writer);
@@ -900,7 +928,7 @@ namespace vanguard::shaders
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 2;
         const serialization::Result headerResult =
-            serialization::ReadDocumentHeader(reader, ShaderMagic, {1, 0, 0}, documentLimits, header);
+            serialization::ReadDocumentHeader(reader, ShaderMagic, {1, 1, 1}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
         {
             return ConvertSerializationResult(headerResult);
@@ -971,7 +999,8 @@ namespace vanguard::shaders
             u8 format = 0;
             u16 reserved = 0;
             if (!metadataReader.ReadU8(stageValue) || !metadataReader.ReadU8(format) || !metadataReader.ReadU16(reserved) ||
-                !metadataReader.ReadU64(stage.entryPoint) || !metadataReader.ReadU64(stage.bytecodeOffset) ||
+                !metadataReader.ReadU64(stage.entryPoint) || !ReadName(metadataReader, stage.entryPointName) ||
+                !metadataReader.ReadU64(stage.bytecodeOffset) ||
                 !metadataReader.ReadU64(stage.bytecodeSize) || !ReadDigest(metadataReader, stage.bytecodeDigest))
             {
                 Close();
@@ -1085,7 +1114,7 @@ namespace vanguard::shaders
         for (const StageRecord& stage : m_stages)
         {
             stageBuild.PushBack({stage.stage, stage.format, stage.entryPoint, m_bytecode.TypedData() + stage.bytecodeOffset,
-                                 static_cast<usize>(stage.bytecodeSize)});
+                                 static_cast<usize>(stage.bytecodeSize), stage.entryPointName});
         }
         validation.stages = stageBuild;
         validation.bindings = m_bindings;

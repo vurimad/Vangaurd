@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vanguard/rendering/render_view.hpp>
+
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/resources/resources.hpp>
 
@@ -374,20 +376,6 @@ namespace vanguard::rendering
         Light,
         Decal,
         None
-    };
-
-    inline constexpr u32 MaximumVisibilityFrustumPlanes = 8;
-
-    struct VisibilityPlane
-    {
-        f32 normal[3]{};
-        f32 distance = 0.0f;
-    };
-
-    struct VisibilityFrustum
-    {
-        VisibilityPlane planes[MaximumVisibilityFrustumPlanes];
-        u32 planeCount = 0;
     };
 
     struct VisibilityQueryRequest

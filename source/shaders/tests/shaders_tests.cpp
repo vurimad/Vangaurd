@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 namespace
@@ -39,8 +40,8 @@ namespace
         Fixture()
         {
             stages = {
-                {{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size()},
-                 {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size()}}};
+                {{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size(), "mainPS"},
+                 {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size(), "mainVS"}}};
             bindings = {{{0x9002, 1, 3, 1, shaders::BindingKind::SampledTexture, shaders::BindingAccess::Read,
                           shaders::StageBit(shaders::ShaderStage::Fragment)},
                          {0x9001, 0, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read,
@@ -134,8 +135,10 @@ int main()
     Check(shader.IsOpen() && shader.Kind() == shaders::ProgramKind::Graphics && shader.Program() == fixture.description.program,
           "program metadata round trip");
     Check(shader.Stages().Size() == 2 && shader.Stages()[0].stage == shaders::ShaderStage::Vertex &&
-              shader.Stages()[1].stage == shaders::ShaderStage::Fragment,
-          "stage records are canonical");
+              shader.Stages()[1].stage == shaders::ShaderStage::Fragment &&
+              std::strcmp(shader.Stages()[0].entryPointName, "mainVS") == 0 &&
+              std::strcmp(shader.Stages()[1].entryPointName, "mainPS") == 0,
+          "stage records and native entry points are canonical");
     Check(shader.Bindings().Size() == 2 && shader.Bindings()[0].space == 0 && shader.Bindings()[1].space == 1,
           "binding records are canonical");
     Check(shader.ConstantMembers().Size() == 2 && shader.ConstantMembers()[0].byteOffset == 0 &&

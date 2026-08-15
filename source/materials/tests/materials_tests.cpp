@@ -47,8 +47,8 @@ namespace
 
         ShaderFixture() noexcept
         {
-            stages = {{{shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, vertexBytes.data(), vertexBytes.size()},
-                       {shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x1002, fragmentBytes.data(), fragmentBytes.size()}}};
+            stages = {{{shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, vertexBytes.data(), vertexBytes.size(), "mainVS"},
+                       {shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x1002, fragmentBytes.data(), fragmentBytes.size(), "mainPS"}}};
             bindings = {{{0x1000, 2, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read,
                           shaders::StageBit(shaders::ShaderStage::Fragment)},
                          {0x2000, 2, 1, 2, shaders::BindingKind::SampledTexture, shaders::BindingAccess::Read,

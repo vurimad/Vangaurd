@@ -7,7 +7,12 @@
 #include <vanguard/rhi/gpu_counters.hpp>
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/rendering/pipeline_cache.hpp>
+#include <vanguard/rendering/render_pipeline_factory.hpp>
+#include <vanguard/rendering/render_shader.hpp>
 #include <vanguard/rendering/presentation_service.hpp>
+#include <vanguard/rendering/gpu_scene_definitions.hpp>
+#include <vanguard/rendering/gpu_scene_lifetime.hpp>
+#include <vanguard/rendering/gpu_scene_upload.hpp>
 #include <vanguard/window/window_manager.hpp>
 
 #include <cstdio>
@@ -610,9 +615,102 @@ namespace
             std::printf("[rhiNvrhiTests] cached graphics pipeline creation failed: %s\n", cacheFailure.message);
             return false;
         }
+
+        const vanguard::shaders::StageBuildRecord cookedStages[] = {
+            {vanguard::shaders::ShaderStage::Vertex, vanguard::shaders::NativeFormat::Dxil, 0x1001,
+             vertexBytecode.bytecode->GetBufferPointer(), vertexBytecode.bytecode->GetBufferSize(), "main"},
+            {vanguard::shaders::ShaderStage::Fragment, vanguard::shaders::NativeFormat::Dxil, 0x1002,
+             pixelBytecode.bytecode->GetBufferPointer(), pixelBytecode.bytecode->GetBufferSize(), "main"}};
+        const vanguard::shaders::VertexInput cookedInput[] = {
+            {0x2001, 0, 0, vanguard::shaders::NumericClass::FloatingPoint, 3, 32}};
+        const vanguard::shaders::FragmentOutput cookedOutput[] = {
+            {0x3001, 0, 0, vanguard::shaders::NumericClass::FloatingPoint, 0x0f}};
+        vanguard::shaders::BuildDescription cookedShaderDescription;
+        cookedShaderDescription.kind = vanguard::shaders::ProgramKind::Graphics;
+        cookedShaderDescription.program = 0x4001;
+        cookedShaderDescription.permutation = vanguard::crypto::Sha256("runtime shader permutation", 26);
+        cookedShaderDescription.compilerFingerprint = vanguard::crypto::Sha256("d3dcompiler test", 16);
+        cookedShaderDescription.pipelineInterface.stages = vanguard::shaders::StageBit(vanguard::shaders::ShaderStage::Vertex) |
+                                                           vanguard::shaders::StageBit(vanguard::shaders::ShaderStage::Fragment);
+        cookedShaderDescription.pipelineInterface.primitiveClass = vanguard::shaders::PrimitiveClass::Triangle;
+        cookedShaderDescription.pipelineInterface.renderTargetCount = 1;
+        cookedShaderDescription.stages = cookedStages;
+        cookedShaderDescription.vertexInputs = cookedInput;
+        cookedShaderDescription.fragmentOutputs = cookedOutput;
+        vanguard::containers::DynamicArray<vanguard::u8> cookedShaderBytes(vanguard::memory::pools::Rendering::GetInstance());
+        vanguard::filesystem::MemoryFileWriter cookedShaderWriter(cookedShaderBytes);
+        vanguard::shaders::ShaderFile cookedShader;
+        const vanguard::shaders::Result cookedShaderWrite = vanguard::shaders::WriteShader(cookedShaderWriter, cookedShaderDescription);
+        vanguard::filesystem::MemoryFileReader cookedShaderReader(cookedShaderBytes, 0);
+        const vanguard::shaders::Result cookedShaderOpen = cookedShaderWrite == vanguard::shaders::Result::Success
+                                                               ? cookedShader.Open(cookedShaderReader)
+                                                               : cookedShaderWrite;
+        if (cookedShaderWrite != vanguard::shaders::Result::Success || cookedShaderOpen != vanguard::shaders::Result::Success)
+        {
+            std::printf("[rhiNvrhiTests] cooked runtime shader document failed: write=%s open=%s\n",
+                        vanguard::shaders::ToString(cookedShaderWrite), vanguard::shaders::ToString(cookedShaderOpen));
+            return false;
+        }
+        rendering::RenderShader runtimeShader;
+        if (runtimeShader.Load(cookedShader, &failure) != rendering::RenderShaderResult::Success)
+        {
+            std::printf("[rhiNvrhiTests] runtime shader materialization failed: %s\n", failure.message);
+            return false;
+        }
+
+        const vanguard::pipelines::ShaderReference cookedShaderReference{
+            0x7001, cookedShader.Permutation(), cookedShader.BindingLayoutFingerprint(), cookedShader.PipelineInterfaceFingerprint()};
+        const vanguard::pipelines::VertexStream cookedStream{0, 12, vanguard::pipelines::InputRate::PerVertex, 1};
+        const vanguard::pipelines::VertexAttribute cookedAttribute{
+            0x2001, 0, 0, 0, 0, vanguard::shaders::NumericClass::FloatingPoint, 3, 32,
+            vanguard::pipelines::Format::R32G32B32Float, "POSITION"};
+        vanguard::pipelines::BuildDescription cookedPipelineDescription;
+        cookedPipelineDescription.kind = vanguard::pipelines::PipelineKind::Graphics;
+        cookedPipelineDescription.name = 0x8001;
+        cookedPipelineDescription.shaders = {&cookedShaderReference, 1};
+        cookedPipelineDescription.vertexStreams = {&cookedStream, 1};
+        cookedPipelineDescription.vertexAttributes = {&cookedAttribute, 1};
+        cookedPipelineDescription.graphics.blend.attachmentCount = 1;
+        vanguard::containers::DynamicArray<vanguard::u8> cookedPipelineBytes(vanguard::memory::pools::Rendering::GetInstance());
+        vanguard::filesystem::MemoryFileWriter cookedPipelineWriter(cookedPipelineBytes);
+        vanguard::pipelines::PipelineFile cookedPipeline;
+        const vanguard::pipelines::Result cookedPipelineWrite =
+            vanguard::pipelines::WritePipeline(cookedPipelineWriter, cookedPipelineDescription);
+        vanguard::filesystem::MemoryFileReader cookedPipelineReader(cookedPipelineBytes, 0);
+        if (cookedPipelineWrite != vanguard::pipelines::Result::Success ||
+            cookedPipeline.Open(cookedPipelineReader) != vanguard::pipelines::Result::Success)
+        {
+            std::printf("[rhiNvrhiTests] cooked runtime pipeline document failed\n");
+            return false;
+        }
+        vanguard::pipelines::AttachmentSignature cookedAttachments;
+        cookedAttachments.colorCount = 1;
+        cookedAttachments.colors[0] = {vanguard::pipelines::Format::R8G8B8A8UNorm,
+                                       vanguard::shaders::NumericClass::FloatingPoint};
+        const rendering::ResolvedRenderShader resolvedShader{cookedShaderReference.resource, &runtimeShader};
+        rendering::RenderPipelineRequest materialization;
+        materialization.pipeline = &cookedPipeline;
+        materialization.shaders = {&resolvedShader, 1};
+        materialization.attachments = &cookedAttachments;
+        rendering::PipelineRequest materializedPipeline;
+        const rendering::RenderPipelineResult materializationResult =
+            rendering::RequestRenderPipeline(materialization, pipelineCache, materializedPipeline);
+        if (materializationResult != rendering::RenderPipelineResult::Success)
+        {
+            std::printf("[rhiNvrhiTests] runtime pipeline materialization failed: %s\n", rendering::ToString(materializationResult));
+            return false;
+        }
+        materializedPipeline.Wait();
+        if (!materializedPipeline.HasSucceeded())
+        {
+            std::printf("[rhiNvrhiTests] runtime pipeline cache creation failed: %s\n", materializedPipeline.Error().message);
+            return false;
+        }
+        materializedPipeline.Reset();
+        runtimeShader.Unload();
         firstPipelineRequest.Reset();
         duplicatePipelineRequest.Reset();
-        if (pipelineCache.InvalidateAll() != 1 || !pipelineCache.Shutdown())
+        if (pipelineCache.InvalidateAll() != 2 || !pipelineCache.Shutdown())
         {
             std::printf("[rhiNvrhiTests] rendering pipeline cache shutdown failed\n");
             return false;
@@ -1441,6 +1539,554 @@ namespace
         swapChain.Reset();
         return gpu::WaitIdle(&failure) && gpu::RetireResources(&failure);
     }
+
+    [[nodiscard]] bool TestGpuSceneLifetime(gpu::Failure& failure) noexcept
+    {
+        namespace rendering = vanguard::rendering;
+        const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Pixel) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Compute);
+        gpu::DescriptorDomain descriptors(
+            gpu::AdoptReference,
+            gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 128, 0, visibility}, &failure));
+        if (!descriptors) return false;
+
+        rendering::GpuSceneTables tables;
+        rendering::GpuSceneTablesFailure tableFailure;
+        if (!tables.Initialize({descriptors, 2}, &tableFailure) || !tables.DirectoryBinding().IsValid())
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] GPU Scene tables failed: %s\n", tableFailure.message);
+            return false;
+        }
+        rendering::GpuSceneTableDirectory primitiveDirectory;
+        if (!tables.GetTableDirectory(rendering::GpuSceneTableKind::Primitive, primitiveDirectory) ||
+            primitiveDirectory.pageShift != 15 || primitiveDirectory.pageMask != 32'767 ||
+            primitiveDirectory.elementsPerPage != 32'768 ||
+            primitiveDirectory.elementStride != sizeof(rendering::GpuPrimitive))
+            return false;
+        rendering::GpuSceneLifetime lifetime;
+        rendering::GpuSceneLifetimeFailure lifetimeFailure;
+        rendering::GpuSceneLifetimeConfig lifetimeConfig;
+        lifetimeConfig.retirementEpochCount = 4;
+        if (!lifetime.Initialize(tables, lifetimeConfig, &lifetimeFailure))
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] GPU Scene lifetime failed: %s\n", lifetimeFailure.message);
+            return false;
+        }
+
+        const auto SubmitRetirementFences = [&failure](const vanguard::u64 name,
+                                                        gpu::ResidencyFenceSet& submitted) noexcept
+        {
+            submitted = {};
+            const gpu::CommandListType types[] = {gpu::CommandListType::Default,
+                                                   gpu::CommandListType::Compute,
+                                                   gpu::CommandListType::CopyAsync};
+            for (vanguard::u32 index = 0; index < 3; ++index)
+            {
+                gpu::CommandListRef list = gpu::CreateCommandList(types[index], name + index, &failure);
+                if (!list || !gpu::BindCommandList(list, &failure)) return false;
+                gpu::UnbindCommandList();
+                const gpu::CommandListRef lists[] = {list};
+                gpu::GpuFence completion;
+                if (!gpu::CloseAndSubmitCommandLists("GPU Scene retirement queue coverage", {lists, 1},
+                                                     gpu::CommandListSyncType::None, completion, &failure))
+                    return false;
+                submitted.Include(completion);
+            }
+            return true;
+        };
+        const auto WaitRetirementFences = [&failure](const gpu::ResidencyFenceSet& fences) noexcept
+        {
+            return gpu::WaitForGpuFence({gpu::QueueType::Graphics, fences.graphics}, 5'000'000'000ull, &failure) &&
+                   gpu::WaitForGpuFence({gpu::QueueType::Compute, fences.compute}, 5'000'000'000ull, &failure) &&
+                   gpu::WaitForGpuFence({gpu::QueueType::Copy, fences.copy}, 5'000'000'000ull, &failure);
+        };
+
+        rendering::GpuSceneUploader uploader;
+        rendering::GpuSceneUploadFailure uploadFailure;
+        rendering::GpuSceneUploadConfig uploadConfig;
+        uploadConfig.bytesPerSegment = 2u * 1024u * 1024u;
+        uploadConfig.maximumUpdatesPerBatch = 64;
+        uploadConfig.maximumCopiesPerBatch = 128;
+        if (!uploader.Initialize(tables, lifetime, uploadConfig, &uploadFailure))
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] GPU Scene uploader failed: %s\n", uploadFailure.message);
+            return false;
+        }
+
+        rendering::GpuSceneAllocation uploadedInstances[2];
+        if (!lifetime.Allocate<rendering::GpuInstance>(1, uploadedInstances[0], &lifetimeFailure) ||
+            !lifetime.Allocate<rendering::GpuInstance>(1, uploadedInstances[1], &lifetimeFailure))
+            return false;
+        const rendering::GpuSceneUploadRequest uploadRequests[] = {
+            {uploadedInstances[1], 0, 1}, {uploadedInstances[0], 0, 1}, {uploadedInstances[0], 0, 1}};
+        rendering::GpuSceneUploadReservation uploadReservations[3];
+        if (!uploader.Begin({uploadRequests, 3}, {uploadReservations, 3}, &uploadFailure) ||
+            uploadReservations[0].destination == nullptr || uploadReservations[1].IsValid() ||
+            uploadReservations[2].destination == nullptr)
+            return false;
+
+        auto* const secondInstance = static_cast<rendering::GpuInstance*>(uploadReservations[0].destination);
+        auto* const firstInstance = static_cast<rendering::GpuInstance*>(uploadReservations[2].destination);
+        *firstInstance = {};
+        *secondInstance = {};
+        firstInstance->boundsRadius = 11.0f;
+        firstInstance->userData = 0x11111111u;
+        secondInstance->boundsRadius = 22.0f;
+        secondInstance->userData = 0x22222222u;
+        rendering::GpuSceneUploadResult uploadResult;
+        if (uploader.Submit(uploadResult, &uploadFailure) ||
+            uploadFailure.code != rendering::GpuSceneUploadFailureCode::BatchNotReady ||
+            !uploader.Complete(uploadReservations[0], &uploadFailure) ||
+            !uploader.Complete(uploadReservations[2], &uploadFailure) ||
+            !uploader.Submit(uploadResult, &uploadFailure) || !uploadResult.completion.IsValid() ||
+            uploadResult.requestedUpdates != 3 || uploadResult.uniqueUpdates != 2 ||
+            uploadResult.copyCount != 1 || uploadResult.affectedPages != 1 ||
+            uploadResult.uploadedBytes != sizeof(rendering::GpuInstance) * 2 ||
+            uploadResult.supersededBytes != sizeof(rendering::GpuInstance) ||
+            lifetime.State(uploadedInstances[0]) != rendering::GpuSceneAllocationState::Active ||
+            lifetime.State(uploadedInstances[1]) != rendering::GpuSceneAllocationState::Active)
+            return false;
+
+        const rendering::GpuSceneUploadRequest activeUpdateRequest{uploadedInstances[1], 0, 1};
+        rendering::GpuSceneUploadReservation activeUpdateReservation;
+        if (!uploader.Begin({&activeUpdateRequest, 1}, {&activeUpdateReservation, 1}, &uploadFailure) ||
+            !activeUpdateReservation.IsValid())
+            return false;
+        vanguard::concurrency::Atomic<bool> producerCompleted{false};
+        std::thread producer([&uploader, &activeUpdateReservation, &secondInstance, &producerCompleted]() noexcept
+        {
+            auto* const updatedInstance = static_cast<rendering::GpuInstance*>(activeUpdateReservation.destination);
+            *updatedInstance = *secondInstance;
+            updatedInstance->boundsRadius = 33.0f;
+            updatedInstance->userData = 0x33333333u;
+            rendering::GpuSceneUploadFailure producerFailure;
+            producerCompleted.SetValue(uploader.Complete(activeUpdateReservation, &producerFailure));
+        });
+        producer.join();
+        rendering::GpuSceneUploadResult activeUpdateResult;
+        if (!producerCompleted.GetValue() || !uploader.Submit(activeUpdateResult, &uploadFailure) ||
+            activeUpdateResult.copyCount != 1 ||
+            activeUpdateResult.uploadedBytes != sizeof(rendering::GpuInstance) ||
+            !gpu::WaitForGpuFence(activeUpdateResult.completion, 5'000'000'000ull, &failure))
+            return false;
+
+        rendering::GpuSceneTablePage uploadedInstancePage;
+        gpu::BufferDesc uploadReadbackDesc;
+        uploadReadbackDesc.size = sizeof(rendering::GpuInstance) * 2;
+        uploadReadbackDesc.usage = gpu::BufferUsage::CopyDestination;
+        uploadReadbackDesc.initialState = gpu::ResourceState::CopyDestination;
+        uploadReadbackDesc.memoryType = gpu::MemoryType::Readback;
+        gpu::BufferRef uploadReadback = gpu::CreateBuffer(uploadReadbackDesc, {}, &failure);
+        gpu::CommandListRef uploadReadbackCommands =
+            gpu::CreateCommandList(gpu::CommandListType::CopySync, 0x4750555343524541ull, &failure);
+        const gpu::ResourceState shaderRead =
+            gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
+        if (!tables.GetPage<rendering::GpuInstance>(0, uploadedInstancePage) || !uploadReadback ||
+            !uploadReadbackCommands || !gpu::BindCommandList(uploadReadbackCommands, &failure) ||
+            !gpu::TransitionBuffer(uploadedInstancePage.buffer, gpu::ResourceState::Unknown,
+                                   gpu::ResourceState::CopySource, &failure) ||
+            !gpu::CopyBuffer(uploadReadback, 0, uploadedInstancePage.buffer, 0,
+                             sizeof(rendering::GpuInstance) * 2, &failure) ||
+            !gpu::TransitionBuffer(uploadedInstancePage.buffer, gpu::ResourceState::Unknown,
+                                   shaderRead, &failure))
+            return false;
+        gpu::UnbindCommandList();
+        gpu::GpuFence uploadReadbackCompletion;
+        const gpu::CommandListRef uploadReadbackSubmission[] = {uploadReadbackCommands};
+        if (!gpu::CloseAndSubmitCommandLists("GPU Scene sparse upload readback", {uploadReadbackSubmission, 1},
+                                             gpu::CommandListSyncType::None, uploadReadbackCompletion, &failure) ||
+            !gpu::WaitForGpuFence(uploadReadbackCompletion, 5'000'000'000ull, &failure))
+            return false;
+        const auto* const uploadedData = static_cast<const rendering::GpuInstance*>(
+            gpu::LockBuffer(uploadReadback, 0, sizeof(rendering::GpuInstance) * 2, &failure));
+        if (uploadedData == nullptr || uploadedData[uploadedInstances[0].first].boundsRadius != 11.0f ||
+            uploadedData[uploadedInstances[0].first].userData != 0x11111111u ||
+            uploadedData[uploadedInstances[1].first].boundsRadius != 33.0f ||
+            uploadedData[uploadedInstances[1].first].userData != 0x33333333u)
+            return false;
+        gpu::UnlockBuffer(uploadReadback);
+        static_cast<void>(gpu::SafeRelease(uploadReadback));
+
+        gpu::ResidencyFenceSet uploadedRetirementFences;
+        if (!lifetime.RetireBatch({uploadedInstances, 2}, &lifetimeFailure) ||
+            !SubmitRetirementFences(0x4750555343555052ull, uploadedRetirementFences) ||
+            !lifetime.SealRetirements(uploadedRetirementFences, &lifetimeFailure) ||
+            !WaitRetirementFences(uploadedRetirementFences) || lifetime.Collect(&lifetimeFailure) != 2)
+            return false;
+
+        rendering::GpuSceneAllocation instance;
+        rendering::GpuSceneAllocation primitives;
+        if (!lifetime.Allocate<rendering::GpuInstance>(1, instance, &lifetimeFailure) ||
+            !lifetime.Allocate<rendering::GpuPrimitive>(37, primitives, &lifetimeFailure) ||
+            !lifetime.CommitInitialPublication(instance, &lifetimeFailure) ||
+            !lifetime.CommitInitialPublication(primitives, &lifetimeFailure) ||
+            instance.count != 1 || primitives.count != 37 ||
+            lifetime.State(instance) != rendering::GpuSceneAllocationState::Active ||
+            lifetime.State(primitives) != rendering::GpuSceneAllocationState::Active)
+            return false;
+
+        rendering::GpuSceneTablePage instancePage;
+        rendering::GpuSceneElementAddress primitiveAddress;
+        if (!tables.GetPage<rendering::GpuInstance>(0, instancePage) ||
+            !tables.Resolve<rendering::GpuPrimitive>(primitives.first + 36, primitiveAddress) ||
+            !instancePage.IsMaterialized() || primitiveAddress.element != primitives.first + 36)
+            return false;
+
+        if (!lifetime.Retire(instance, &lifetimeFailure) || !lifetime.Retire(primitives, &lifetimeFailure) ||
+            lifetime.Collect(&lifetimeFailure) != 0 || lifetime.GetStats().pendingRetirements != 2 ||
+            lifetime.SealRetirements({}, &lifetimeFailure) ||
+            lifetimeFailure.code != rendering::GpuSceneLifetimeFailureCode::MissingRetirementFence)
+            return false;
+
+        gpu::ResidencyFenceSet partialCoverage;
+        partialCoverage.graphics = 1;
+        if (lifetime.SealRetirements(partialCoverage, &lifetimeFailure) ||
+            lifetimeFailure.code != rendering::GpuSceneLifetimeFailureCode::MissingRetirementFence)
+            return false;
+
+        gpu::ResidencyFenceSet safeAfter;
+        if (!SubmitRetirementFences(0x4750555343454e45ull, safeAfter)) return false;
+        if (!lifetime.SealRetirements(safeAfter, &lifetimeFailure) ||
+            !WaitRetirementFences(safeAfter) ||
+            lifetime.Collect(&lifetimeFailure) != 2 ||
+            lifetime.IsValid(instance) || lifetime.IsValid(primitives))
+            return false;
+
+        rendering::GpuSceneAllocation reusedInstance;
+        rendering::GpuSceneAllocation reusedPrimitives;
+        if (!lifetime.Allocate<rendering::GpuInstance>(1, reusedInstance, &lifetimeFailure) ||
+            !lifetime.Allocate<rendering::GpuPrimitive>(37, reusedPrimitives, &lifetimeFailure) ||
+            reusedInstance.first != instance.first || reusedInstance.generation == instance.generation ||
+            reusedPrimitives.first != primitives.first || reusedPrimitives.generation == primitives.generation ||
+            !lifetime.Cancel(reusedInstance, &lifetimeFailure) || !lifetime.Cancel(reusedPrimitives, &lifetimeFailure) ||
+            lifetime.CommitInitialPublication(instance, &lifetimeFailure) ||
+            lifetimeFailure.code != rendering::GpuSceneLifetimeFailureCode::InvalidState)
+            return false;
+
+        const vanguard::u32 primitivePageSize = rendering::GpuSceneElementsPerPage<rendering::GpuPrimitive>();
+        rendering::GpuSceneAllocation crossPagePrimitives;
+        if (!lifetime.ReserveCapacity(rendering::GpuSceneTableKind::Primitive, primitivePageSize + 37,
+                                      &lifetimeFailure) ||
+            !lifetime.Allocate<rendering::GpuPrimitive>(primitivePageSize + 37, crossPagePrimitives,
+                                                        &lifetimeFailure) ||
+            !tables.Resolve<rendering::GpuPrimitive>(crossPagePrimitives.first + primitivePageSize + 36,
+                                                     primitiveAddress) ||
+            primitiveAddress.page != 1 || primitiveAddress.element != 36)
+            return false;
+
+        const rendering::GpuSceneUploadRequest crossPageRequest{crossPagePrimitives, 0,
+                                                                 crossPagePrimitives.count};
+        rendering::GpuSceneUploadReservation crossPageReservation;
+        if (!uploader.Begin({&crossPageRequest, 1}, {&crossPageReservation, 1}, &uploadFailure) ||
+            !crossPageReservation.IsValid())
+            return false;
+        auto* const crossPageData = static_cast<rendering::GpuPrimitive*>(crossPageReservation.destination);
+        for (vanguard::u32 index = 0; index < crossPagePrimitives.count; ++index)
+        {
+            crossPageData[index] = {};
+            crossPageData[index].geometry = index;
+        }
+        rendering::GpuSceneUploadResult crossPageResult;
+        if (!uploader.Complete(crossPageReservation, &uploadFailure) ||
+            !uploader.Submit(crossPageResult, &uploadFailure) || crossPageResult.copyCount != 2 ||
+            crossPageResult.affectedPages != 2 ||
+            !gpu::WaitForGpuFence(crossPageResult.completion, 5'000'000'000ull, &failure))
+            return false;
+        const rendering::GpuSceneUploadRequest overlappingRequests[] = {
+            {crossPagePrimitives, 0, 2}, {crossPagePrimitives, 1, 2}};
+        rendering::GpuSceneUploadReservation overlappingReservations[2];
+        if (uploader.Begin({overlappingRequests, 2}, {overlappingReservations, 2}, &uploadFailure) ||
+            uploadFailure.code != rendering::GpuSceneUploadFailureCode::OverlappingUpdates ||
+            !lifetime.Retire(crossPagePrimitives, &lifetimeFailure))
+            return false;
+        gpu::ResidencyFenceSet crossPageRetirementFences;
+        if (!SubmitRetirementFences(0x4750555343585047ull, crossPageRetirementFences) ||
+            !lifetime.SealRetirements(crossPageRetirementFences, &lifetimeFailure) ||
+            !WaitRetirementFences(crossPageRetirementFences) || lifetime.Collect(&lifetimeFailure) != 1)
+            return false;
+
+        constexpr vanguard::u32 batchSize = 64;
+        rendering::GpuSceneAllocationRequest batchRequests[batchSize];
+        rendering::GpuSceneAllocation batchAllocations[batchSize];
+        for (rendering::GpuSceneAllocationRequest& request : batchRequests)
+            request = {rendering::GpuSceneTableKind::Instance, 1};
+
+        gpu::ResidencyFenceSet lastSealedFences;
+        gpu::ResidencyFenceSet stalledEpochSafeAfter;
+        for (vanguard::u32 epochIndex = 0; epochIndex < 4; ++epochIndex)
+        {
+            if (!lifetime.AllocateBatch({batchRequests, batchSize}, {batchAllocations, batchSize}, &lifetimeFailure))
+                return false;
+            if (epochIndex == 0)
+            {
+                const rendering::GpuSceneAllocation duplicateAllocations[] = {batchAllocations[0],
+                                                                               batchAllocations[0]};
+                if (lifetime.CommitInitialPublications({duplicateAllocations, 2}, &lifetimeFailure) ||
+                    lifetimeFailure.code != rendering::GpuSceneLifetimeFailureCode::DuplicateAllocation ||
+                    lifetime.State(batchAllocations[0]) != rendering::GpuSceneAllocationState::Allocated)
+                    return false;
+            }
+            if (!lifetime.CommitInitialPublications({batchAllocations, batchSize}, &lifetimeFailure) ||
+                !lifetime.RetireBatch({batchAllocations, batchSize}, &lifetimeFailure))
+                return false;
+
+            gpu::ResidencyFenceSet epochSafeAfter;
+            if (!SubmitRetirementFences(0x4750555343451000ull + epochIndex * 4u, epochSafeAfter)) return false;
+            if (epochIndex < 3)
+            {
+                if (!lifetime.SealRetirements(epochSafeAfter, &lifetimeFailure)) return false;
+                lastSealedFences = epochSafeAfter;
+            }
+            else
+            {
+                stalledEpochSafeAfter = epochSafeAfter;
+                if (lifetime.SealRetirements(epochSafeAfter, &lifetimeFailure) ||
+                    lifetimeFailure.code != rendering::GpuSceneLifetimeFailureCode::RetirementEpochsExhausted)
+                    return false;
+            }
+        }
+
+        if (!WaitRetirementFences(lastSealedFences) ||
+            lifetime.Collect(&lifetimeFailure) != batchSize * 3 ||
+            !lifetime.SealRetirements(stalledEpochSafeAfter, &lifetimeFailure) ||
+            !WaitRetirementFences(stalledEpochSafeAfter) ||
+            lifetime.Collect(&lifetimeFailure) != batchSize)
+            return false;
+
+        const rendering::GpuSceneLifetimeStats lifetimeStats = lifetime.GetStats();
+        const rendering::GpuSceneTablesStats tableStats = tables.GetStats();
+        const rendering::GpuSceneUploadStats uploadStats = uploader.GetStats();
+        if (lifetimeStats.allocated != 0 || lifetimeStats.active != 0 || lifetimeStats.retiring != 0 ||
+            lifetimeStats.pendingRetirements != 0 || lifetimeStats.sealedRetirements != 0 ||
+            lifetimeStats.sealedEpochs != 0 || lifetimeStats.retirements != batchSize * 4 + 5 ||
+            lifetimeStats.reclaimed != batchSize * 4 + 5 || lifetimeStats.epochsSealed != 7 ||
+            lifetimeStats.epochCapacityStalls != 1 || lifetimeStats.epochFencePolls < 5 ||
+            uploadStats.batchesSubmitted != 3 || uploadStats.requestedUpdates != 5 ||
+            uploadStats.uniqueUpdates != 4 || uploadStats.copiesRecorded != 4 ||
+            uploadStats.bytesSuperseded != sizeof(rendering::GpuInstance) ||
+            tableStats.materializedPages != 3 || tableStats.allocatedBytes == 0 ||
+            !uploader.Shutdown(&uploadFailure) || !lifetime.Shutdown(&lifetimeFailure) ||
+            !tables.Shutdown({}, &tableFailure))
+            return false;
+
+        descriptors.Reset();
+        return gpu::WaitIdle(&failure) && gpu::RetireResources(&failure);
+    }
+    [[nodiscard]] bool TestGpuSceneDefinitions(gpu::Failure& failure) noexcept
+    {
+        const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Pixel) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Compute);
+        gpu::DescriptorDomain descriptors(
+            gpu::AdoptReference,
+            gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 128, 0, visibility}, &failure));
+        if (!descriptors) return false;
+
+        rendering::GpuSceneTables tables;
+        rendering::GpuSceneTablesFailure tableFailure;
+        rendering::GpuSceneLifetime lifetime;
+        rendering::GpuSceneLifetimeFailure lifetimeFailure;
+        rendering::GpuSceneUploader uploader;
+        rendering::GpuSceneUploadFailure uploadFailure;
+        rendering::GpuSceneDefinitions definitions;
+        rendering::GpuSceneDefinitionFailure definitionFailure;
+        rendering::GpuSceneUploadConfig uploadConfig;
+        uploadConfig.bytesPerSegment = 2u * 1024u * 1024u;
+        uploadConfig.maximumUpdatesPerBatch = 64;
+        uploadConfig.maximumCopiesPerBatch = 128;
+        rendering::GpuSceneDefinitionsConfig definitionConfig;
+        definitionConfig.maximumGeometries = 16;
+        definitionConfig.maximumMaterials = 16;
+        definitionConfig.maximumRenderables = 16;
+        definitionConfig.maximumDefinitionsPerBatch = 16;
+        definitionConfig.maximumAllocationsPerBatch = 64;
+        if (!tables.Initialize({descriptors, 2}, &tableFailure) ||
+            !lifetime.Initialize(tables, {}, &lifetimeFailure) ||
+            !uploader.Initialize(tables, lifetime, uploadConfig, &uploadFailure) ||
+            !definitions.Initialize(lifetime, uploader, definitionConfig, &definitionFailure))
+            return false;
+
+        rendering::GpuVertexStream vertexStream;
+        vertexStream.arena = 3;
+        vertexStream.byteOffset = 256;
+        vertexStream.stride = 16;
+        vertexStream.formatLayout = 9;
+        rendering::GpuPositionDecode positionDecode;
+        positionDecode.scale[0] = 10.0f;
+        positionDecode.scale[1] = 20.0f;
+        positionDecode.scale[2] = 30.0f;
+        rendering::GpuGeometryDefinition geometry;
+        geometry.key = {{1, 2, 3, 4}};
+        geometry.geometry.indexArena = 5;
+        geometry.geometry.indexByteOffset = 512;
+        geometry.geometry.indexCount = 36;
+        geometry.geometry.vertexCount = 24;
+        geometry.geometry.indexFormat = rendering::GpuIndexFormat::UInt16;
+        geometry.geometry.flags = static_cast<rendering::GpuGeometryFlags>(
+            static_cast<vanguard::u32>(rendering::GpuGeometryFlags::Resident) |
+            static_cast<vanguard::u32>(rendering::GpuGeometryFlags::Indexed));
+        geometry.vertexStreams = {&vertexStream, 1};
+        geometry.positionDecode = &positionDecode;
+        const rendering::GpuGeometryDefinition geometryBatch[] = {geometry, geometry};
+        rendering::GpuGeometryHandle geometryHandles[2];
+        rendering::GpuSceneDefinitionPublication geometryPublication;
+        if (!definitions.AcquireGeometries({geometryBatch, 2}, {geometryHandles, 2}, geometryPublication,
+                                           &definitionFailure) ||
+            geometryHandles[0] != geometryHandles[1] || geometryPublication.createdDefinitions != 1 ||
+            geometryPublication.reusedDefinitions != 1 ||
+            !gpu::WaitForGpuFence(geometryPublication.completion, 5'000'000'000ull, &failure))
+            return false;
+
+        rendering::GpuMaterialResource materialResource;
+        materialResource.descriptor = 17;
+        materialResource.samplerDescriptor = 3;
+        materialResource.type = 2;
+        rendering::GpuMaterialDefinition material;
+        material.key = {{5, 6, 7, 8}};
+        material.material.parameterByteOffset = 1024;
+        material.material.parameterByteSize = 64;
+        material.material.materialInterface = 11;
+        material.material.flags = rendering::GpuMaterialFlags::Resident;
+        material.resources = {&materialResource, 1};
+        const rendering::GpuMaterialDefinition materialBatch[] = {material, material};
+        rendering::GpuMaterialHandle materialHandles[2];
+        rendering::GpuSceneDefinitionPublication materialPublication;
+        if (!definitions.AcquireMaterials({materialBatch, 2}, {materialHandles, 2}, materialPublication,
+                                          &definitionFailure) ||
+            materialHandles[0] != materialHandles[1] || materialPublication.createdDefinitions != 1 ||
+            materialPublication.reusedDefinitions != 1 ||
+            !gpu::WaitForGpuFence(materialPublication.completion, 5'000'000'000ull, &failure))
+            return false;
+
+        rendering::GpuPhaseParticipation phase;
+        phase.phase = 2;
+        phase.pipelineBucket = 7;
+        phase.flags = rendering::GpuPhaseParticipationFlags::DepthWrite;
+        rendering::GpuPrimitiveDefinition primitive;
+        primitive.geometry = geometryHandles[0];
+        primitive.material = materialHandles[0];
+        primitive.phaseParticipationCount = 1;
+        primitive.stableSubmesh = 13;
+        primitive.flags = rendering::GpuPrimitiveFlags::Indexed;
+        rendering::GpuLod lod;
+        lod.primitiveCount = 1;
+        lod.minimumScreenCoverage = 0.25f;
+        rendering::GpuRenderableDefinition renderable;
+        renderable.key = {{9, 10, 11, 12}};
+        renderable.flags = rendering::GpuRenderableFlags::Resident;
+        renderable.lods = {&lod, 1};
+        renderable.primitives = {&primitive, 1};
+        renderable.phaseParticipations = {&phase, 1};
+        const rendering::GpuRenderableDefinition renderableBatch[] = {renderable, renderable};
+        rendering::GpuRenderableHandle renderableHandles[2];
+        rendering::GpuSceneDefinitionPublication renderablePublication;
+        if (!definitions.AcquireRenderables({renderableBatch, 2}, {renderableHandles, 2}, renderablePublication,
+                                            &definitionFailure) ||
+            renderableHandles[0] != renderableHandles[1] || renderablePublication.createdDefinitions != 1 ||
+            renderablePublication.reusedDefinitions != 1 ||
+            !gpu::WaitForGpuFence(renderablePublication.completion, 5'000'000'000ull, &failure))
+            return false;
+
+        const auto ReadElement = [&]<typename T>(const vanguard::u32 index, T& output) noexcept
+        {
+            rendering::GpuSceneElementAddress address;
+            if (!tables.Resolve<T>(index, address)) return false;
+            gpu::BufferDesc desc;
+            desc.size = sizeof(T);
+            desc.usage = gpu::BufferUsage::CopyDestination;
+            desc.initialState = gpu::ResourceState::CopyDestination;
+            desc.memoryType = gpu::MemoryType::Readback;
+            gpu::BufferRef readback = gpu::CreateBuffer(desc, {}, &failure);
+            gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::CopySync,
+                                                                   0x4750555343444546ull, &failure);
+            const gpu::ResourceState shaderRead =
+                gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
+            if (!readback || !commands || !gpu::BindCommandList(commands, &failure) ||
+                !gpu::TransitionBuffer(address.buffer, gpu::ResourceState::Unknown,
+                                       gpu::ResourceState::CopySource, &failure) ||
+                !gpu::CopyBuffer(readback, 0, address.buffer, address.byteOffset, sizeof(T), &failure) ||
+                !gpu::TransitionBuffer(address.buffer, gpu::ResourceState::Unknown, shaderRead, &failure))
+                return false;
+            gpu::UnbindCommandList();
+            const gpu::CommandListRef submissions[] = {commands};
+            gpu::GpuFence completion;
+            if (!gpu::CloseAndSubmitCommandLists("GPU Scene definition readback", {submissions, 1},
+                                                 gpu::CommandListSyncType::None, completion, &failure) ||
+                !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
+                return false;
+            const T* const mapped = static_cast<const T*>(gpu::LockBuffer(readback, 0, sizeof(T), &failure));
+            if (mapped == nullptr) return false;
+            output = *mapped;
+            gpu::UnlockBuffer(readback);
+            static_cast<void>(gpu::SafeRelease(readback));
+            return true;
+        };
+
+        rendering::GpuRenderable uploadedRenderable;
+        rendering::GpuLod uploadedLod;
+        rendering::GpuPrimitive uploadedPrimitive;
+        rendering::GpuGeometryRange uploadedGeometry;
+        rendering::GpuMaterial uploadedMaterial;
+        if (!ReadElement(renderableHandles[0].index, uploadedRenderable) ||
+            !ReadElement(uploadedRenderable.firstLod, uploadedLod) ||
+            !ReadElement(uploadedLod.firstPrimitive, uploadedPrimitive) ||
+            !ReadElement(geometryHandles[0].index, uploadedGeometry) ||
+            !ReadElement(materialHandles[0].index, uploadedMaterial) ||
+            uploadedRenderable.lodCount != 1 || uploadedRenderable.phaseMaskLow != (1u << 2u) ||
+            uploadedPrimitive.geometry != geometryHandles[0].index ||
+            uploadedPrimitive.material != materialHandles[0].index || uploadedPrimitive.stableSubmesh != 13 ||
+            uploadedGeometry.firstVertexStream == rendering::InvalidGpuSceneIndex ||
+            uploadedGeometry.positionDecode == rendering::InvalidGpuSceneIndex ||
+            uploadedMaterial.resourceCount != 1)
+            return false;
+
+        const rendering::GpuSceneDefinitionsStats activeStats = definitions.GetStats();
+        if (activeStats.geometries != 1 || activeStats.materials != 1 || activeStats.renderables != 1 ||
+            activeStats.references != 8 || activeStats.acquisitions != 6 || activeStats.reuses != 3 ||
+            !definitions.Release(geometryHandles[0], &definitionFailure) ||
+            !definitions.Release(geometryHandles[1], &definitionFailure) ||
+            !definitions.Release(materialHandles[0], &definitionFailure) ||
+            !definitions.Release(materialHandles[1], &definitionFailure) ||
+            !definitions.Release(renderableHandles[0], &definitionFailure) ||
+            !definitions.Release(renderableHandles[1], &definitionFailure) ||
+            definitions.IsValid(geometryHandles[0]) || definitions.IsValid(materialHandles[0]) ||
+            definitions.IsValid(renderableHandles[0]))
+            return false;
+
+        gpu::ResidencyFenceSet safeAfter;
+        const gpu::CommandListType queueTypes[] = {gpu::CommandListType::Default,
+                                                   gpu::CommandListType::Compute,
+                                                   gpu::CommandListType::CopyAsync};
+        for (vanguard::u32 queue = 0; queue < 3; ++queue)
+        {
+            gpu::CommandListRef commands = gpu::CreateCommandList(queueTypes[queue],
+                                                                   0x4750555343445200ull + queue, &failure);
+            if (!commands || !gpu::BindCommandList(commands, &failure)) return false;
+            gpu::UnbindCommandList();
+            const gpu::CommandListRef submissions[] = {commands};
+            gpu::GpuFence completion;
+            if (!gpu::CloseAndSubmitCommandLists("GPU Scene definition retirement", {submissions, 1},
+                                                 gpu::CommandListSyncType::None, completion, &failure))
+                return false;
+            safeAfter.Include(completion);
+        }
+        if (!lifetime.SealRetirements(safeAfter, &lifetimeFailure) ||
+            !gpu::WaitForGpuFence({gpu::QueueType::Graphics, safeAfter.graphics}, 5'000'000'000ull, &failure) ||
+            !gpu::WaitForGpuFence({gpu::QueueType::Compute, safeAfter.compute}, 5'000'000'000ull, &failure) ||
+            !gpu::WaitForGpuFence({gpu::QueueType::Copy, safeAfter.copy}, 5'000'000'000ull, &failure) ||
+            lifetime.Collect(&lifetimeFailure) != 9)
+            return false;
+
+        const rendering::GpuSceneDefinitionsStats releasedStats = definitions.GetStats();
+        if (releasedStats.geometries != 0 || releasedStats.materials != 0 || releasedStats.renderables != 0 ||
+            releasedStats.references != 0 || releasedStats.releases != 6 || releasedStats.retirements != 3 ||
+            !definitions.Shutdown(&definitionFailure) || !uploader.Shutdown(&uploadFailure) ||
+            !lifetime.Shutdown(&lifetimeFailure) || !tables.Shutdown({}, &tableFailure))
+            return false;
+        descriptors.Reset();
+        return gpu::WaitIdle(&failure) && gpu::RetireResources(&failure);
+    }
 } // namespace
 
 int main()
@@ -1492,6 +2138,15 @@ int main()
         capabilities.rayTracingPipeline || capabilities.meshShaders || capabilities.variableRateShading)
     {
         std::printf("[rhiNvrhiTests] invalid device capability contract\n");
+        static_cast<void>(vanguard::jobs::Shutdown());
+        return 1;
+    }
+    if (!TestGpuSceneLifetime(failure) || !TestGpuSceneDefinitions(failure))
+    {
+        std::fprintf(stderr, "[rhiNvrhiTests] GPU Scene lifetime integration test failed: %s\n", failure.message);
+        static_cast<void>(vanguard::rhi::WaitIdle());
+        static_cast<void>(vanguard::rhi::RetireResources());
+        static_cast<void>(vanguard::rhi::Shutdown());
         static_cast<void>(vanguard::jobs::Shutdown());
         return 1;
     }
