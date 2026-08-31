@@ -5,3 +5,9 @@ This module privately maps Vanguard's GpuApi-shaped RHI contract to NVRHI's D3D1
 The D3D12 backend uses one narrow private adapter to obtain the underlying `ID3D12Heap` from the pinned NVRHI D3D12 implementation. This is required because placed resources are resident and evicted at heap granularity. Textures and buffers continue through NVRHI's standard `D3D12_Resource` native-object path, and no native object enters Vanguard's public contract.
 
 The common backend owns API-independent resource construction, upload and transfer command generation, texture copy/resolve/readback validation, fence-stamped staging ownership and mapping, command-list recording, state transitions, clear/discard validation, dynamic output state, GPU event ranges, multi-queue submission and resource retirement. The D3D12 layer owns adapter/device/queue creation, device-loss reporting, query heaps, raw clock calibration, rectangular clear and discard callbacks not exposed by NVRHI, native debug names, presentation and the native queue fences used by the common timeline. This separation is the contract future Vulkan support must follow.
+
+Vanguard command-list references are one-shot generational recording handles.
+After a successful submission is GPU-retired, the common backend may recycle
+the underlying NVRHI command-list wrapper through a bounded type/role pool; this
+is what preserves NVRHI's internal native-list and upload-chunk reuse across
+submissions. Discarded or never-submitted wrappers never enter that pool.

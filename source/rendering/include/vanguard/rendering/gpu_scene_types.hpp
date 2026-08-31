@@ -7,12 +7,11 @@
 
 namespace vanguard::rendering
 {
-    inline constexpr u32 GpuSceneLayoutVersion = 2;
+    inline constexpr u32 GpuSceneLayoutVersion = 6;
     inline constexpr u32 InvalidGpuSceneIndex = 0xffffffffu;
     inline constexpr u32 InvalidGpuDescriptorIndex = 0xffffffffu;
 
-    template<typename Tag>
-    struct GpuTableHandle
+    template <typename Tag> struct GpuTableHandle
     {
         u32 index = InvalidGpuSceneIndex;
         u32 generation = 0;
@@ -32,6 +31,7 @@ namespace vanguard::rendering
     struct GpuMaterialSetTag;
     struct GpuLightTag;
     struct GpuDecalTag;
+    struct GpuTextureResidencyTag;
 
     using GpuInstanceHandle = GpuTableHandle<GpuInstanceTag>;
     using GpuRenderableHandle = GpuTableHandle<GpuRenderableTag>;
@@ -41,6 +41,7 @@ namespace vanguard::rendering
     using GpuMaterialSetHandle = GpuTableHandle<GpuMaterialSetTag>;
     using GpuLightHandle = GpuTableHandle<GpuLightTag>;
     using GpuDecalHandle = GpuTableHandle<GpuDecalTag>;
+    using GpuTextureResidencyHandle = GpuTableHandle<GpuTextureResidencyTag>;
 
     /// Candidate, visible, and final draw-instance lists contain this index only. Generation validation
     /// happens when a CPU mutation is admitted; a slot is not reused until its GPU retirement fence completes.
@@ -60,7 +61,6 @@ namespace vanguard::rendering
     enum class GpuRenderableFlags : u32
     {
         None = 0,
-        Resident = 1u << 0u,
         Skinned = 1u << 1u,
         Deformable = 1u << 2u
     };
@@ -117,12 +117,19 @@ namespace vanguard::rendering
         u32 materialSet = InvalidGpuSceneIndex;
         u32 generation = 0;
         u32 visibilityMask = ~0u;
+        u32 layerMaskLow = ~0u;
+
+        u32 layerMaskHigh = ~0u;
         u32 motion = InvalidGpuSceneIndex;
+        /// Optional per-instance deformation state. Static instances retain InvalidGpuSceneIndex.
+        /// The referenced table is owned by the future deformation system rather than GPU Scene visibility.
+        u32 deformation = InvalidGpuSceneIndex;
+        u32 reserved = 0;
 
         f32 rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
 
         f32 scale[3]{1.0f, 1.0f, 1.0f};
-        u32 userData = InvalidGpuSceneIndex;
+        u32 reservedTransform = 0;
     };
 
     /// Previous transform data exists only for instances that require motion history.
@@ -153,6 +160,21 @@ namespace vanguard::rendering
         u32 reserved1 = 0;
     };
 
+    struct alignas(16) GpuRenderableResidency
+    {
+        u32 generation = 0;
+        u32 placementRevision = 0;
+        u32 residentLodMaskLow = 0;
+        u32 residentLodMaskHigh = 0;
+
+        /// Complete resident LOD guaranteed for this renderable. It can also be the currently desired LOD;
+        /// "anchor" describes its residency role, not a fallback-selection event.
+        u32 anchorLod = InvalidGpuSceneIndex;
+        u32 flags = 0;
+        u32 reserved0 = 0;
+        u32 reserved1 = 0;
+    };
+
     struct alignas(16) GpuLod
     {
         u32 firstPrimitive = 0;
@@ -163,25 +185,50 @@ namespace vanguard::rendering
 
     struct alignas(16) GpuPrimitive
     {
-        u32 geometry = InvalidGpuSceneIndex;
         u32 material = InvalidGpuSceneIndex;
         u32 firstPhaseParticipation = 0;
         u32 phaseParticipationCount = 0;
-
         u32 stableSubmesh = 0;
+
         GpuPrimitiveFlags flags = GpuPrimitiveFlags::None;
         u32 reserved0 = 0;
         u32 reserved1 = 0;
+        u32 reserved2 = 0;
     };
 
-    /// A primitive may participate in several phases without duplicating its geometry or material.
-    /// pipelineBucket is a renderer-registered stable ordinal used directly by GPU batching.
+    struct alignas(16) GpuPrimitivePlacement
+    {
+        u32 geometry = InvalidGpuSceneIndex;
+        u32 geometryGeneration = 0;
+        u32 placementRevision = 0;
+        u32 flags = 0;
+    };
+
+    /// A primitive may participate in several phases without duplicating its material.
     struct alignas(16) GpuPhaseParticipation
     {
         u32 phase = InvalidRenderPhaseIndex;
-        u32 pipelineBucket = InvalidGpuSceneIndex;
         GpuPhaseParticipationFlags flags = GpuPhaseParticipationFlags::None;
         i32 sortBias = 0;
+        u32 reserved = 0;
+    };
+
+    struct alignas(16) GpuPhasePlacement
+    {
+        u32 normalShell = InvalidGpuSceneIndex;
+        u32 normalShellGeneration = 0;
+        u32 normalBin = InvalidGpuSceneIndex;
+        u32 normalBinGeneration = 0;
+
+        u32 mirroredShell = InvalidGpuSceneIndex;
+        u32 mirroredShellGeneration = 0;
+        u32 mirroredBin = InvalidGpuSceneIndex;
+        u32 mirroredBinGeneration = 0;
+
+        u32 placementRevision = 0;
+        u32 flags = 0;
+        u32 reserved0 = 0;
+        u32 reserved1 = 0;
     };
 
     /// A geometry entry describes ranges in large GPU arenas. Vertex and index bytes remain in those
@@ -190,28 +237,33 @@ namespace vanguard::rendering
     {
         u32 firstVertexStream = 0;
         u32 vertexStreamCount = 0;
-        u32 indexArena = InvalidGpuSceneIndex;
-        u32 indexByteOffset = 0;
+        u32 vertexArenaSet = InvalidGpuSceneIndex;
+        u32 vertexArenaGeneration = 0;
 
+        u32 indexArena = InvalidGpuSceneIndex;
+        u32 indexArenaGeneration = 0;
+        u32 firstIndex = 0;
         u32 indexCount = 0;
+
         i32 baseVertex = 0;
         u32 vertexCount = 0;
         GpuIndexFormat indexFormat = GpuIndexFormat::UInt16;
-
         u32 positionDecode = InvalidGpuSceneIndex;
+
         GpuGeometryFlags flags = GpuGeometryFlags::None;
         u32 generation = 0;
-        u32 reserved = 0;
+        u32 reserved0 = 0;
+        u32 reserved1 = 0;
     };
 
     /// One entry per packed vertex binding. formatLayout identifies shader-reflected decoding metadata;
     /// the GPU address is resolved from arena and byteOffset without assuming a fixed mesh layout.
     struct alignas(16) GpuVertexStream
     {
-        u32 arena = InvalidGpuSceneIndex;
-        u32 byteOffset = 0;
+        u32 binding = 0;
         u32 stride = 0;
         u32 formatLayout = InvalidGpuSceneIndex;
+        u32 reserved = 0;
     };
 
     struct alignas(16) GpuPositionDecode
@@ -238,12 +290,48 @@ namespace vanguard::rendering
         u32 reserved = 0;
     };
 
+    enum class GpuMaterialResourceType : u32
+    {
+        Texture,
+        Buffer,
+        Sampler,
+        AccelerationStructure
+    };
+
     struct alignas(16) GpuMaterialResource
     {
-        u32 descriptor = InvalidGpuDescriptorIndex;
+        /// Texture resources store a stable GpuTextureResidency index. Other resource kinds may store
+        /// a direct immutable descriptor index; type selects the interpretation.
+        u32 resource = InvalidGpuSceneIndex;
         u32 samplerDescriptor = InvalidGpuDescriptorIndex;
-        u32 type = 0;
+        GpuMaterialResourceType type = GpuMaterialResourceType::Texture;
         u32 flags = 0;
+    };
+
+    enum class GpuTextureResidencyFlags : u32
+    {
+        None = 0,
+        BindlessReady = 1u << 0u
+    };
+
+    inline constexpr u32 GpuTextureResidencyGenerationMask = 0x00ffffffu;
+    inline constexpr u32 GpuTextureResidencyFlagsShift = 24u;
+
+    [[nodiscard]] constexpr u32 PackGpuTextureResidencyGenerationAndFlags(const u32 generation,
+                                                                           const GpuTextureResidencyFlags flags) noexcept
+    {
+        return (generation & GpuTextureResidencyGenerationMask) |
+               (static_cast<u32>(flags) << GpuTextureResidencyFlagsShift);
+    }
+
+    /// Stable logical texture identity. descriptor names one immutable physical installation and changes
+    /// only through a GPU Scene publication after that installation is complete.
+    struct alignas(16) GpuTextureResidency
+    {
+        u32 descriptor = InvalidGpuDescriptorIndex;
+        u32 firstResidentMip = 0;
+        u32 residentMipCount = 0;
+        u32 generationAndFlags = 0;
     };
 
     /// Invalid on an instance means that every primitive uses its default material. A valid set is a
@@ -357,29 +445,49 @@ namespace vanguard::rendering
     [[nodiscard]] bool BuildGpuView(const RenderView& source, GpuView& output) noexcept;
 
     static_assert(sizeof(GpuTableHandle<GpuInstanceTag>) == 8);
-    static_assert(sizeof(GpuInstance) == 96 && offsetof(GpuInstance, rotation) == 64);
+    static_assert(sizeof(GpuInstance) == 112 && offsetof(GpuInstance, rotation) == 80);
     static_assert(sizeof(GpuMotion) == 64);
     static_assert(sizeof(GpuRenderable) == 32);
+    static_assert(sizeof(GpuRenderableResidency) == 32);
     static_assert(sizeof(GpuLod) == 16);
     static_assert(sizeof(GpuPrimitive) == 32);
+    static_assert(sizeof(GpuPrimitivePlacement) == 16);
     static_assert(sizeof(GpuPhaseParticipation) == 16);
-    static_assert(sizeof(GpuGeometryRange) == 48);
+    static_assert(sizeof(GpuPhasePlacement) == 48);
+    static_assert(sizeof(GpuGeometryRange) == 64);
     static_assert(sizeof(GpuVertexStream) == 16);
     static_assert(sizeof(GpuPositionDecode) == 32);
     static_assert(sizeof(GpuMaterial) == 32);
     static_assert(sizeof(GpuMaterialResource) == 16);
+    static_assert(static_cast<u32>(GpuMaterialResourceType::Texture) == 0 &&
+                  static_cast<u32>(GpuMaterialResourceType::AccelerationStructure) == 3);
+    static_assert(sizeof(GpuTextureResidency) == 16);
     static_assert(sizeof(GpuMaterialSet) == 16);
     static_assert(sizeof(GpuMaterialIndex) == 4);
     static_assert(sizeof(GpuLight) == 96);
     static_assert(sizeof(GpuDecal) == 80);
     static_assert(sizeof(GpuVisibilityPlane) == 16);
     static_assert(sizeof(GpuView) == 544);
+    static_assert(offsetof(GpuRenderableResidency, residentLodMaskLow) == 8);
+    static_assert(offsetof(GpuRenderableResidency, anchorLod) == 16);
+    static_assert(offsetof(GpuPrimitive, stableSubmesh) == 12);
+    static_assert(offsetof(GpuPrimitivePlacement, placementRevision) == 8);
+    static_assert(offsetof(GpuPhasePlacement, mirroredShell) == 16);
+    static_assert(offsetof(GpuPhasePlacement, placementRevision) == 32);
+    static_assert(offsetof(GpuGeometryRange, vertexArenaSet) == 8);
+    static_assert(offsetof(GpuGeometryRange, indexArena) == 16);
+    static_assert(offsetof(GpuGeometryRange, baseVertex) == 32);
+    static_assert(offsetof(GpuGeometryRange, flags) == 48);
     static_assert(offsetof(GpuView, frustum) == 256);
     static_assert(offsetof(GpuView, worldCell) == 384);
     static_assert(offsetof(GpuView, rect) == 448);
 
     static_assert(std::is_standard_layout_v<GpuInstance> && std::is_trivially_copyable_v<GpuInstance>);
+    static_assert(std::is_standard_layout_v<GpuRenderableResidency> && std::is_trivially_copyable_v<GpuRenderableResidency>);
+    static_assert(std::is_standard_layout_v<GpuPrimitivePlacement> && std::is_trivially_copyable_v<GpuPrimitivePlacement>);
+    static_assert(std::is_standard_layout_v<GpuPhasePlacement> && std::is_trivially_copyable_v<GpuPhasePlacement>);
     static_assert(std::is_standard_layout_v<GpuGeometryRange> && std::is_trivially_copyable_v<GpuGeometryRange>);
     static_assert(std::is_standard_layout_v<GpuMaterial> && std::is_trivially_copyable_v<GpuMaterial>);
+    static_assert(std::is_standard_layout_v<GpuTextureResidency> && std::is_trivially_copyable_v<GpuTextureResidency>);
     static_assert(std::is_standard_layout_v<GpuView> && std::is_trivially_copyable_v<GpuView>);
 } // namespace vanguard::rendering

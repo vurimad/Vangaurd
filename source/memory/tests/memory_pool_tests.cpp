@@ -86,8 +86,7 @@ int main()
     Check(memory::IsInitialized(), "memory initialized state");
 
     VANGUARD_INITIALIZE_MEMORY_POOL(PoolObjectTests, memory::pools::Engine, memory::AcquireDefaultAllocator(), 16ull * 1024ull * 1024ull);
-    VANGUARD_INITIALIZE_MEMORY_POOL(PoolPolymorphicTests, memory::pools::Engine, memory::AcquireDefaultAllocator(),
-                                    16ull * 1024ull * 1024ull);
+    VANGUARD_INITIALIZE_MEMORY_POOL(PoolPolymorphicTests, memory::pools::Engine, memory::AcquireDefaultAllocator(), 16ull * 1024ull * 1024ull);
 
     PooledObject::destructionCount = 0;
     PooledObject* const pooledObject = VANGUARD_NEW(PooledObject)(42);
@@ -120,11 +119,11 @@ int main()
     Check(!memory::IsAllocatablePool(memory::PoolId::Cpu), "CPU pool is a hierarchy node");
     Check(memory::IsAllocatablePool(memory::PoolId::Jobs), "Jobs pool is allocatable");
 
-    Check(memory::ParentPool(memory::PoolId::Runtime) == memory::PoolId::Engine, "Runtime pool hierarchy");
-    Check(memory::ParentPool(memory::PoolId::Rendering) == memory::PoolId::Runtime, "Rendering pool hierarchy");
-    Check(memory::ParentPool(memory::PoolId::Window) == memory::PoolId::Runtime, "Window pool hierarchy");
-    Check(memory::ParentPool(memory::PoolId::Assets) == memory::PoolId::Tools, "Assets pool hierarchy");
-    Check(std::strcmp(memory::PoolName(memory::PoolId::Jobs), "Jobs") == 0, "pool name");
+    Check(memory::GetParentPool(memory::PoolId::Runtime) == memory::PoolId::Engine, "Runtime pool hierarchy");
+    Check(memory::GetParentPool(memory::PoolId::Rendering) == memory::PoolId::Runtime, "Rendering pool hierarchy");
+    Check(memory::GetParentPool(memory::PoolId::Window) == memory::PoolId::Runtime, "Window pool hierarchy");
+    Check(memory::GetParentPool(memory::PoolId::Assets) == memory::PoolId::Tools, "Assets pool hierarchy");
+    Check(std::strcmp(memory::GetPoolName(memory::PoolId::Jobs), "Jobs") == 0, "pool name");
 
     VisitState visitState;
     memory::VisitPools(&CapturePool, &visitState);
@@ -151,8 +150,7 @@ int main()
     Check(memory::GetPoolMetrics(memory::PoolId::Jobs, jobsDuring), "Jobs metrics during allocation");
     Check(memory::GetPoolMetrics(memory::PoolId::Engine, engineDuring), "Engine metrics during allocation");
     Check(jobsDuring.allocatedBytes >= jobsBefore.allocatedBytes + jobsBlock.size, "exclusive pool allocation metrics");
-    Check(engineDuring.allocatedBytesIncludingChildren >= engineBefore.allocatedBytesIncludingChildren + jobsBlock.size,
-          "inclusive parent metrics");
+    Check(engineDuring.allocatedBytesIncludingChildren >= engineBefore.allocatedBytesIncludingChildren + jobsBlock.size, "inclusive parent metrics");
 
     std::memset(jobsBlock.address, 0x6D, 256);
     Check(memory::Reallocate(jobsBlock, 2048, 64), "pool-preserving reallocation");
@@ -207,8 +205,7 @@ int main()
         threads[threadIndex] = std::thread(
             [threadIndex, &threadFailure]()
             {
-                constexpr memory::PoolId pools[] = {memory::PoolId::Containers, memory::PoolId::Jobs, memory::PoolId::Streaming,
-                                                    memory::PoolId::Rendering};
+                constexpr memory::PoolId pools[] = {memory::PoolId::Containers, memory::PoolId::Jobs, memory::PoolId::Streaming, memory::PoolId::Rendering};
 
                 for (vanguard::u32 iteration = 0; iteration < iterations; ++iteration)
                 {
@@ -232,8 +229,7 @@ int main()
 
     memory::PoolSnapshot jobsSnapshot;
     Check(memory::GetPoolSnapshot(memory::PoolId::Jobs, jobsSnapshot), "pool snapshot");
-    Check(jobsSnapshot.id == memory::PoolId::Jobs && jobsSnapshot.parent == memory::PoolId::Engine && jobsSnapshot.allocatable,
-          "pool snapshot identity");
+    Check(jobsSnapshot.id == memory::PoolId::Jobs && jobsSnapshot.parent == memory::PoolId::Engine && jobsSnapshot.allocatable, "pool snapshot identity");
 
     if (failures == 0)
     {

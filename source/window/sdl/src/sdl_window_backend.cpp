@@ -22,7 +22,8 @@ namespace
     {
         constexpr u64 prime = 1099511628211ull;
         const auto* const bytes = static_cast<const u8*>(data);
-        for (u32 index = 0; index < size; ++index) hash = (hash ^ bytes[index]) * prime;
+        for (u32 index = 0; index < size; ++index)
+            hash = (hash ^ bytes[index]) * prime;
         return hash;
     }
 
@@ -32,7 +33,8 @@ namespace
         hash = HashBytes(hash, &display, sizeof(display));
         const char* const name = SDL_GetDisplayName(display);
         if (name != nullptr)
-            for (const char* cursor = name; *cursor != '\0'; ++cursor) hash = (hash ^ static_cast<u8>(*cursor)) * 1099511628211ull;
+            for (const char* cursor = name; *cursor != '\0'; ++cursor)
+                hash = (hash ^ static_cast<u8>(*cursor)) * 1099511628211ull;
         return hash != 0 ? hash : 1;
     }
 
@@ -50,29 +52,68 @@ namespace
     {
         switch (source)
         {
-        case SDL_EVENT_WINDOW_SHOWN: destination = win::BackendEventType::Shown; return true;
-        case SDL_EVENT_WINDOW_HIDDEN: destination = win::BackendEventType::Hidden; return true;
-        case SDL_EVENT_WINDOW_EXPOSED: destination = win::BackendEventType::Exposed; return true;
-        case SDL_EVENT_WINDOW_MOVED: destination = win::BackendEventType::Moved; return true;
-        case SDL_EVENT_WINDOW_RESIZED: destination = win::BackendEventType::Resized; return true;
-        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: destination = win::BackendEventType::PixelExtentChanged; return true;
-        case SDL_EVENT_WINDOW_MINIMIZED: destination = win::BackendEventType::Minimized; return true;
-        case SDL_EVENT_WINDOW_MAXIMIZED: destination = win::BackendEventType::Maximized; return true;
-        case SDL_EVENT_WINDOW_RESTORED: destination = win::BackendEventType::Restored; return true;
-        case SDL_EVENT_WINDOW_FOCUS_GAINED: destination = win::BackendEventType::FocusGained; return true;
-        case SDL_EVENT_WINDOW_FOCUS_LOST: destination = win::BackendEventType::FocusLost; return true;
-        case SDL_EVENT_WINDOW_MOUSE_ENTER: destination = win::BackendEventType::MouseEntered; return true;
-        case SDL_EVENT_WINDOW_MOUSE_LEAVE: destination = win::BackendEventType::MouseLeft; return true;
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED: destination = win::BackendEventType::CloseRequested; return true;
-        case SDL_EVENT_WINDOW_DISPLAY_CHANGED: destination = win::BackendEventType::DisplayChanged; return true;
-        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: destination = win::BackendEventType::ContentScaleChanged; return true;
-        case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED: destination = win::BackendEventType::SafeAreaChanged; return true;
-        case SDL_EVENT_WINDOW_OCCLUDED: destination = win::BackendEventType::OcclusionChanged; return true;
-        case SDL_EVENT_WINDOW_HDR_STATE_CHANGED: destination = win::BackendEventType::HdrStateChanged; return true;
-        default: return false;
+        case SDL_EVENT_WINDOW_SHOWN:
+            destination = win::BackendEventType::Shown;
+            return true;
+        case SDL_EVENT_WINDOW_HIDDEN:
+            destination = win::BackendEventType::Hidden;
+            return true;
+        case SDL_EVENT_WINDOW_EXPOSED:
+            destination = win::BackendEventType::Exposed;
+            return true;
+        case SDL_EVENT_WINDOW_MOVED:
+            destination = win::BackendEventType::Moved;
+            return true;
+        case SDL_EVENT_WINDOW_RESIZED:
+            destination = win::BackendEventType::Resized;
+            return true;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            destination = win::BackendEventType::PixelExtentChanged;
+            return true;
+        case SDL_EVENT_WINDOW_MINIMIZED:
+            destination = win::BackendEventType::Minimized;
+            return true;
+        case SDL_EVENT_WINDOW_MAXIMIZED:
+            destination = win::BackendEventType::Maximized;
+            return true;
+        case SDL_EVENT_WINDOW_RESTORED:
+            destination = win::BackendEventType::Restored;
+            return true;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            destination = win::BackendEventType::FocusGained;
+            return true;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            destination = win::BackendEventType::FocusLost;
+            return true;
+        case SDL_EVENT_WINDOW_MOUSE_ENTER:
+            destination = win::BackendEventType::MouseEntered;
+            return true;
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            destination = win::BackendEventType::MouseLeft;
+            return true;
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            destination = win::BackendEventType::CloseRequested;
+            return true;
+        case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+            destination = win::BackendEventType::DisplayChanged;
+            return true;
+        case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+            destination = win::BackendEventType::ContentScaleChanged;
+            return true;
+        case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED:
+            destination = win::BackendEventType::SafeAreaChanged;
+            return true;
+        case SDL_EVENT_WINDOW_OCCLUDED:
+            destination = win::BackendEventType::OcclusionChanged;
+            return true;
+        case SDL_EVENT_WINDOW_HDR_STATE_CHANGED:
+            destination = win::BackendEventType::HdrStateChanged;
+            return true;
+        default:
+            return false;
         }
     }
-}
+} // namespace
 
 namespace vanguard::window::sdl
 {
@@ -90,9 +131,11 @@ namespace vanguard::window::sdl
 
         [[nodiscard]] Record* Find(const BackendWindowId id) noexcept
         {
-            if (!id.IsValid()) return nullptr;
+            if (!id.IsValid())
+                return nullptr;
             for (Record& record : records)
-                if (record.native != nullptr && record.id == id) return &record;
+                if (record.native != nullptr && record.id == id)
+                    return &record;
             return nullptr;
         }
 
@@ -104,7 +147,8 @@ namespace vanguard::window::sdl
         [[nodiscard]] Record* AllocateRecord() noexcept
         {
             for (Record& record : records)
-                if (record.native == nullptr) return &record;
+                if (record.native == nullptr)
+                    return &record;
             return nullptr;
         }
 
@@ -118,12 +162,12 @@ namespace vanguard::window::sdl
             int pixelHeight = 0;
             SDL_Rect safe{};
             if (!SDL_GetWindowPosition(record.native, &x, &y) || !SDL_GetWindowSize(record.native, &width, &height) ||
-                !SDL_GetWindowSizeInPixels(record.native, &pixelWidth, &pixelHeight) ||
-                !SDL_GetWindowSafeArea(record.native, &safe))
+                !SDL_GetWindowSizeInPixels(record.native, &pixelWidth, &pixelHeight) || !SDL_GetWindowSafeArea(record.native, &safe))
                 return SdlFailure("failed to query SDL window state");
 
             const SDL_DisplayID display = SDL_GetDisplayForWindow(record.native);
-            if (display == 0) return SdlFailure("SDL could not identify the window display");
+            if (display == 0)
+                return SdlFailure("SDL could not identify the window display");
             const SDL_WindowFlags flags = SDL_GetWindowFlags(record.native);
             state = {};
             state.placement.position = {x, y};
@@ -142,8 +186,7 @@ namespace vanguard::window::sdl
             const SDL_PropertiesID properties = SDL_GetWindowProperties(record.native);
             state.sdrWhiteLevel = SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 1.0f);
             state.hdrHeadroom = SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 1.0f);
-            state.hdrCapable = SDL_GetBooleanProperty(properties,
-                                                       SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false);
+            state.hdrCapable = SDL_GetBooleanProperty(properties, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false);
             return BackendStatus::Success();
         }
 
@@ -151,24 +194,28 @@ namespace vanguard::window::sdl
         {
             if (placement.mode == WindowMode::Windowed)
             {
-                if (!SDL_SetWindowFullscreen(record.native, false)) return SdlFailure("failed to leave SDL fullscreen");
-                if (!SDL_SetWindowFullscreenMode(record.native, nullptr)) return SdlFailure("failed to clear SDL fullscreen mode");
+                if (!SDL_SetWindowFullscreen(record.native, false))
+                    return SdlFailure("failed to leave SDL fullscreen");
+                if (!SDL_SetWindowFullscreenMode(record.native, nullptr))
+                    return SdlFailure("failed to clear SDL fullscreen mode");
             }
             else if (placement.mode == WindowMode::BorderlessFullscreen)
             {
-                if (!SDL_SetWindowFullscreenMode(record.native, nullptr)) return SdlFailure("failed to select desktop fullscreen mode");
-                if (!SDL_SetWindowFullscreen(record.native, true)) return SdlFailure("failed to enter SDL borderless fullscreen");
+                if (!SDL_SetWindowFullscreenMode(record.native, nullptr))
+                    return SdlFailure("failed to select desktop fullscreen mode");
+                if (!SDL_SetWindowFullscreen(record.native, true))
+                    return SdlFailure("failed to enter SDL borderless fullscreen");
             }
             else
             {
                 SDL_DisplayMode closest{};
-                if (!SDL_GetClosestFullscreenDisplayMode(static_cast<SDL_DisplayID>(placement.display.value),
-                                                         static_cast<int>(placement.logicalExtent.width),
-                                                         static_cast<int>(placement.logicalExtent.height), 0.0f, true,
-                                                         &closest))
+                if (!SDL_GetClosestFullscreenDisplayMode(static_cast<SDL_DisplayID>(placement.display.value), static_cast<int>(placement.logicalExtent.width),
+                                                         static_cast<int>(placement.logicalExtent.height), 0.0f, true, &closest))
                     return SdlFailure("no matching SDL exclusive fullscreen mode is available");
-                if (!SDL_SetWindowFullscreenMode(record.native, &closest)) return SdlFailure("failed to select SDL exclusive fullscreen mode");
-                if (!SDL_SetWindowFullscreen(record.native, true)) return SdlFailure("failed to enter SDL exclusive fullscreen");
+                if (!SDL_SetWindowFullscreenMode(record.native, &closest))
+                    return SdlFailure("failed to select SDL exclusive fullscreen mode");
+                if (!SDL_SetWindowFullscreen(record.native, true))
+                    return SdlFailure("failed to enter SDL exclusive fullscreen");
             }
             record.mode = placement.mode;
             return BackendStatus::Success();
@@ -178,9 +225,11 @@ namespace vanguard::window::sdl
     SdlWindowBackend::~SdlWindowBackend()
     {
         VG_ASSERT_MSG(m_impl == nullptr, "SdlWindowBackend requires explicit successful Shutdown");
-        if (m_impl == nullptr) return;
+        if (m_impl == nullptr)
+            return;
         for (Impl::Record& record : m_impl->records)
-            if (record.native != nullptr) SDL_DestroyWindow(record.native);
+            if (record.native != nullptr)
+                SDL_DestroyWindow(record.native);
         m_impl->~Impl();
         memory::MemoryBlock block{m_impl, sizeof(Impl), memory::PoolId::Window};
         memory::Free(block);
@@ -190,8 +239,10 @@ namespace vanguard::window::sdl
 
     BackendStatus SdlWindowBackend::Initialize() noexcept
     {
-        if (m_impl != nullptr) return BackendStatus::Failure(-1, "SDL window backend is already initialized");
-        if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) return SdlFailure("failed to initialize SDL video");
+        if (m_impl != nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is already initialized");
+        if (!SDL_InitSubSystem(SDL_INIT_VIDEO))
+            return SdlFailure("failed to initialize SDL video");
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Window, sizeof(Impl), alignof(Impl));
         if (!block)
         {
@@ -204,8 +255,10 @@ namespace vanguard::window::sdl
 
     BackendStatus SdlWindowBackend::Shutdown() noexcept
     {
-        if (m_impl == nullptr) return BackendStatus::Success();
-        if (m_impl->windowCount != 0) return BackendStatus::Failure(-1, "SDL window backend still owns live windows");
+        if (m_impl == nullptr)
+            return BackendStatus::Success();
+        if (m_impl->windowCount != 0)
+            return BackendStatus::Failure(-1, "SDL window backend still owns live windows");
         m_impl->~Impl();
         memory::MemoryBlock block{m_impl, sizeof(Impl), memory::PoolId::Window};
         memory::Free(block);
@@ -214,17 +267,21 @@ namespace vanguard::window::sdl
         return BackendStatus::Success();
     }
 
-    bool SdlWindowBackend::IsInitialized() const noexcept { return m_impl != nullptr; }
+    bool SdlWindowBackend::IsInitialized() const noexcept
+    {
+        return m_impl != nullptr;
+    }
 
-    EventTranslation SdlWindowBackend::ProcessEvent(const SDL_Event& source,
-                                                    BackendWindowEvent& destination) noexcept
+    EventTranslation SdlWindowBackend::ProcessEvent(const SDL_Event& source, BackendWindowEvent& destination) noexcept
     {
         destination = {};
         EventTranslation result;
         result.displayTopologyChanged = IsDisplayTopologyEvent(source.type);
-        if (m_impl == nullptr || !IsWindowEvent(source.type)) return result;
+        if (m_impl == nullptr || !IsWindowEvent(source.type))
+            return result;
         Impl::Record* const record = m_impl->Find(source.window.windowID);
-        if (record == nullptr || !TranslateEventType(source.type, destination.type)) return result;
+        if (record == nullptr || !TranslateEventType(source.type, destination.type))
+            return result;
         destination.window = record->id;
         destination.timestampNanoseconds = source.window.timestamp;
         if (destination.type != BackendEventType::CloseRequested)
@@ -242,19 +299,21 @@ namespace vanguard::window::sdl
 
     BackendWindowId SdlWindowBackend::ResolveNativeWindow(const u32 nativeWindowId) const noexcept
     {
-        if (m_impl == nullptr) return {};
+        if (m_impl == nullptr)
+            return {};
         const Impl::Record* const record = m_impl->Find(static_cast<SDL_WindowID>(nativeWindowId));
         return record != nullptr ? record->id : BackendWindowId{};
     }
 
-    BackendStatus SdlWindowBackend::EnumerateDisplays(BackendDisplaySnapshot* const displays, const u32 capacity,
-                                                      u32& count) noexcept
+    BackendStatus SdlWindowBackend::EnumerateDisplays(BackendDisplaySnapshot* const displays, const u32 capacity, u32& count) noexcept
     {
         count = 0;
-        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
         int nativeCount = 0;
         SDL_DisplayID* const nativeDisplays = SDL_GetDisplays(&nativeCount);
-        if (nativeDisplays == nullptr) return SdlFailure("failed to enumerate SDL displays");
+        if (nativeDisplays == nullptr)
+            return SdlFailure("failed to enumerate SDL displays");
         count = nativeCount > 0 ? static_cast<u32>(nativeCount) : 0;
         if (displays == nullptr || count > capacity)
         {
@@ -280,47 +339,56 @@ namespace vanguard::window::sdl
             snapshot.fingerprint = DisplayFingerprint(id);
             snapshot.bounds = {{bounds.x, bounds.y}, {static_cast<u32>(bounds.w), static_cast<u32>(bounds.h)}};
             snapshot.workArea = {{workArea.x, workArea.y}, {static_cast<u32>(workArea.w), static_cast<u32>(workArea.h)}};
-            snapshot.desktopPixelExtent = {static_cast<u32>(mode->w * mode->pixel_density),
-                                           static_cast<u32>(mode->h * mode->pixel_density)};
+            snapshot.desktopPixelExtent = {static_cast<u32>(mode->w * mode->pixel_density), static_cast<u32>(mode->h * mode->pixel_density)};
             snapshot.desktopRefreshRate = {static_cast<u32>(mode->refresh_rate_numerator),
                                            mode->refresh_rate_denominator > 0 ? static_cast<u32>(mode->refresh_rate_denominator) : 1u};
             snapshot.contentScale = SDL_GetDisplayContentScale(id);
             snapshot.primary = id == primary;
-            snapshot.hdrCapable = SDL_GetBooleanProperty(SDL_GetDisplayProperties(id),
-                                                          SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+            snapshot.hdrCapable = SDL_GetBooleanProperty(SDL_GetDisplayProperties(id), SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
         }
         SDL_free(nativeDisplays);
         return count != 0 ? BackendStatus::Success() : BackendStatus::Failure(-1, "SDL reported no displays");
     }
 
-    BackendStatus SdlWindowBackend::Create(const BackendWindowDescriptor& descriptor, BackendWindowId& window,
-                                           BackendWindowState& state) noexcept
+    BackendStatus SdlWindowBackend::Create(const BackendWindowDescriptor& descriptor, BackendWindowId& window, BackendWindowState& state) noexcept
     {
         window = {};
         state = {};
-        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
         Impl::Record* const record = m_impl->AllocateRecord();
-        if (record == nullptr) return BackendStatus::Failure(-1, "SDL window registry capacity is exhausted");
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window registry capacity is exhausted");
         SDL_WindowFlags flags = SDL_WINDOW_HIDDEN;
-        if (HasFlag(descriptor.flags, WindowFlag::Resizable)) flags |= SDL_WINDOW_RESIZABLE;
-        if (HasFlag(descriptor.flags, WindowFlag::Borderless)) flags |= SDL_WINDOW_BORDERLESS;
-        if (HasFlag(descriptor.flags, WindowFlag::AlwaysOnTop)) flags |= SDL_WINDOW_ALWAYS_ON_TOP;
-        if (HasFlag(descriptor.flags, WindowFlag::Utility) || HasFlag(descriptor.flags, WindowFlag::SkipTaskbar)) flags |= SDL_WINDOW_UTILITY;
-        if (HasFlag(descriptor.flags, WindowFlag::Transparent)) flags |= SDL_WINDOW_TRANSPARENT;
-        if (HasFlag(descriptor.flags, WindowFlag::HighPixelDensity)) flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
-        if (descriptor.surfaceKind == PresentationSurfaceKind::Vulkan) flags |= SDL_WINDOW_VULKAN;
-        SDL_Window* const parent = descriptor.parent.IsValid() && m_impl->Find(descriptor.parent) != nullptr
-                                     ? m_impl->Find(descriptor.parent)->native : nullptr;
-        if (descriptor.parent.IsValid() && parent == nullptr) return BackendStatus::Failure(-1, "SDL parent window is invalid");
+        if (HasFlag(descriptor.flags, WindowFlag::Resizable))
+            flags |= SDL_WINDOW_RESIZABLE;
+        if (HasFlag(descriptor.flags, WindowFlag::Borderless))
+            flags |= SDL_WINDOW_BORDERLESS;
+        if (HasFlag(descriptor.flags, WindowFlag::AlwaysOnTop))
+            flags |= SDL_WINDOW_ALWAYS_ON_TOP;
+        if (HasFlag(descriptor.flags, WindowFlag::Utility) || HasFlag(descriptor.flags, WindowFlag::SkipTaskbar))
+            flags |= SDL_WINDOW_UTILITY;
+        if (HasFlag(descriptor.flags, WindowFlag::Transparent))
+            flags |= SDL_WINDOW_TRANSPARENT;
+        if (HasFlag(descriptor.flags, WindowFlag::HighPixelDensity))
+            flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+        if (descriptor.surfaceKind == PresentationSurfaceKind::Vulkan)
+            flags |= SDL_WINDOW_VULKAN;
+        SDL_Window* const parent =
+            descriptor.parent.IsValid() && m_impl->Find(descriptor.parent) != nullptr ? m_impl->Find(descriptor.parent)->native : nullptr;
+        if (descriptor.parent.IsValid() && parent == nullptr)
+            return BackendStatus::Failure(-1, "SDL parent window is invalid");
 
         SDL_PropertiesID properties = SDL_CreateProperties();
-        if (properties == 0) return SdlFailure("failed to allocate SDL window properties");
+        if (properties == 0)
+            return SdlFailure("failed to allocate SDL window properties");
         Sint64 initialX = descriptor.placement.position.x;
         Sint64 initialY = descriptor.placement.position.y;
         const SDL_DisplayID initialDisplay = static_cast<SDL_DisplayID>(descriptor.placement.display.value);
         switch (descriptor.initialPlacement)
         {
-        case InitialWindowPlacement::Explicit: break;
+        case InitialWindowPlacement::Explicit:
+            break;
         case InitialWindowPlacement::CenteredOnDisplay:
             initialX = SDL_WINDOWPOS_CENTERED_DISPLAY(initialDisplay);
             initialY = SDL_WINDOWPOS_CENTERED_DISPLAY(initialDisplay);
@@ -339,18 +407,18 @@ namespace vanguard::window::sdl
                                SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_X_NUMBER, initialX) &&
                                SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_Y_NUMBER, initialY) &&
                                SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, static_cast<Sint64>(flags));
-        if (parent != nullptr) propertiesValid = propertiesValid && SDL_SetPointerProperty(properties, SDL_PROP_WINDOW_CREATE_PARENT_POINTER, parent);
+        if (parent != nullptr)
+            propertiesValid = propertiesValid && SDL_SetPointerProperty(properties, SDL_PROP_WINDOW_CREATE_PARENT_POINTER, parent);
         SDL_Window* native = propertiesValid ? SDL_CreateWindowWithProperties(properties) : nullptr;
         SDL_DestroyProperties(properties);
-        if (native == nullptr) return SdlFailure("failed to create SDL window");
+        if (native == nullptr)
+            return SdlFailure("failed to create SDL window");
 
         record->native = native;
         record->id = {static_cast<u64>(SDL_GetWindowID(native))};
         record->mode = WindowMode::Windowed;
-        if (!record->id.IsValid() || !SDL_SetWindowMinimumSize(native, descriptor.constraints.minimum.width,
-                                                               descriptor.constraints.minimum.height) ||
-            !SDL_SetWindowMaximumSize(native, descriptor.constraints.maximum.width,
-                                      descriptor.constraints.maximum.height))
+        if (!record->id.IsValid() || !SDL_SetWindowMinimumSize(native, descriptor.constraints.minimum.width, descriptor.constraints.minimum.height) ||
+            !SDL_SetWindowMaximumSize(native, descriptor.constraints.maximum.width, descriptor.constraints.maximum.height))
         {
             SDL_DestroyWindow(native);
             *record = {};
@@ -363,8 +431,10 @@ namespace vanguard::window::sdl
             return SdlFailure("failed to configure SDL modal ownership");
         }
         BackendStatus status = m_impl->SetMode(*record, descriptor.placement);
-        if (status && descriptor.placement.visible && !SDL_ShowWindow(native)) status = SdlFailure("failed to show SDL window");
-        if (status) status = m_impl->QueryState(*record, state);
+        if (status && descriptor.placement.visible && !SDL_ShowWindow(native))
+            status = SdlFailure("failed to show SDL window");
+        if (status)
+            status = m_impl->QueryState(*record, state);
         if (!status)
         {
             SDL_DestroyWindow(native);
@@ -376,18 +446,19 @@ namespace vanguard::window::sdl
         return BackendStatus::Success();
     }
 
-    BackendStatus SdlWindowBackend::ApplyWindowState(const BackendWindowId window,
-                                                     const BackendWindowRequest& request,
-                                                     BackendWindowState& state) noexcept
+    BackendStatus SdlWindowBackend::ApplyWindowState(const BackendWindowId window, const BackendWindowRequest& request, BackendWindowState& state) noexcept
     {
         state = {};
-        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
         Impl::Record* const record = m_impl->Find(window);
-        if (record == nullptr) return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
         if (HasField(request.fields, WindowStateField::Mode))
         {
             const BackendStatus status = m_impl->SetMode(*record, request.placement);
-            if (!status) return status;
+            if (!status)
+                return status;
         }
         if (request.placement.mode == WindowMode::Windowed)
         {
@@ -396,43 +467,44 @@ namespace vanguard::window::sdl
                 return SdlFailure("failed to move SDL window");
             if (HasField(request.fields, WindowStateField::Display) && !HasField(request.fields, WindowStateField::Position) &&
                 !SDL_SetWindowPosition(record->native,
-                                       static_cast<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(
-                                           static_cast<SDL_DisplayID>(request.placement.display.value))),
-                                       static_cast<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(
-                                           static_cast<SDL_DisplayID>(request.placement.display.value)))))
+                                       static_cast<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(static_cast<SDL_DisplayID>(request.placement.display.value))),
+                                       static_cast<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(static_cast<SDL_DisplayID>(request.placement.display.value)))))
                 return SdlFailure("failed to move SDL window to its requested display");
             if (HasField(request.fields, WindowStateField::LogicalExtent) &&
-                !SDL_SetWindowSize(record->native, request.placement.logicalExtent.width,
-                                   request.placement.logicalExtent.height))
+                !SDL_SetWindowSize(record->native, request.placement.logicalExtent.width, request.placement.logicalExtent.height))
                 return SdlFailure("failed to resize SDL window");
         }
         if (HasField(request.fields, WindowStateField::Visibility))
         {
             const bool changed = request.placement.visible ? SDL_ShowWindow(record->native) : SDL_HideWindow(record->native);
-            if (!changed) return SdlFailure("failed to change SDL window visibility");
+            if (!changed)
+                return SdlFailure("failed to change SDL window visibility");
         }
         return m_impl->QueryState(*record, state);
     }
 
     BackendStatus SdlWindowBackend::SetWindowTitle(const BackendWindowId window, const char* const title) noexcept
     {
-        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
         Impl::Record* const record = m_impl->Find(window);
-        if (record == nullptr) return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
         return SDL_SetWindowTitle(record->native, title) ? BackendStatus::Success() : SdlFailure("failed to set SDL window title");
     }
 
-    BackendStatus SdlWindowBackend::ResolvePresentationSurface(const BackendWindowId window,
-                                                               NativePresentationSurface& surface) noexcept
+    BackendStatus SdlWindowBackend::ResolvePresentationSurface(const BackendWindowId window, NativePresentationSurface& surface) noexcept
     {
         surface = {};
-        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
         Impl::Record* const record = m_impl->Find(window);
-        if (record == nullptr) return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
 #if defined(_WIN32)
-        void* const nativeWindow = SDL_GetPointerProperty(SDL_GetWindowProperties(record->native),
-                                                          SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-        if (nativeWindow == nullptr) return SdlFailure("SDL did not expose a Win32 presentation surface");
+        void* const nativeWindow = SDL_GetPointerProperty(SDL_GetWindowProperties(record->native), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+        if (nativeWindow == nullptr)
+            return SdlFailure("SDL did not expose a Win32 presentation surface");
         surface = {NativePresentationSurfaceKind::Win32, nativeWindow, nullptr};
         return BackendStatus::Success();
 #else
@@ -442,9 +514,11 @@ namespace vanguard::window::sdl
 
     BackendStatus SdlWindowBackend::DestroyWindow(const BackendWindowId window) noexcept
     {
-        if (m_impl == nullptr) return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
         Impl::Record* const record = m_impl->Find(window);
-        if (record == nullptr) return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
         SDL_DestroyWindow(record->native);
         *record = {};
         --m_impl->windowCount;

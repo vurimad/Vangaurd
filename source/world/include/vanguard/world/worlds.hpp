@@ -202,16 +202,16 @@ namespace vanguard::world
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] u64 WorldId() const noexcept;
-        [[nodiscard]] const f64* Origin() const noexcept;
+        [[nodiscard]] u64 GetWorldId() const noexcept;
+        [[nodiscard]] const f64* GetOrigin() const noexcept;
         [[nodiscard]] const WorldBounds& Bounds() const noexcept;
-        [[nodiscard]] const crypto::Digest256& SourceFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const WorldCellRecord> Cells() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const DistantProxyRecord> DistantProxies() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ProxyChildRecord> ProxyChildren() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const DependencyRecord> Dependencies() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ProxyChildRecord> ChildrenOf(const DistantProxyRecord& proxy) const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetSourceFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const WorldCellRecord> GetCells() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const DistantProxyRecord> GetDistantProxies() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ProxyChildRecord> GetProxyChildren() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const DependencyRecord> GetDependencies() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ProxyChildRecord> GetChildrenOf(const DistantProxyRecord& proxy) const noexcept;
         [[nodiscard]] const WorldCellRecord* FindCell(u64 cellId) const noexcept;
         [[nodiscard]] const DistantProxyRecord* FindDistantProxy(u64 proxyId) const noexcept;
 
@@ -231,15 +231,14 @@ namespace vanguard::world
     class WorldResource final : public resources::ResourceObject
     {
     public:
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override;
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
         [[nodiscard]] Result Open(const void* data, usize size, const WorldReadLimits& limits = {}) noexcept;
-        [[nodiscard]] const WorldFile& File() const noexcept;
+        [[nodiscard]] const WorldFile& GetFile() const noexcept;
 
     private:
         WorldFile m_file;
     };
 
     [[nodiscard]] Result CookWorld(const WorldBuildDescription& description, filesystem::IFile& output) noexcept;
-    [[nodiscard]] Result CalculateWorldContentFingerprint(const WorldBuildDescription& description,
-                                                          crypto::Digest256& fingerprint) noexcept;
+    [[nodiscard]] Result CalculateWorldContentFingerprint(const WorldBuildDescription& description, crypto::Digest256& fingerprint) noexcept;
 } // namespace vanguard::world

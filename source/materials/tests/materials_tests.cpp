@@ -27,9 +27,11 @@ namespace
 
     bool Equal(const ByteArray& left, const ByteArray& right) noexcept
     {
-        if (left.Size() != right.Size()) return false;
+        if (left.Size() != right.Size())
+            return false;
         for (vanguard::u32 index = 0; index < left.Size(); ++index)
-            if (left[index] != right[index]) return false;
+            if (left[index] != right[index])
+                return false;
         return true;
     }
 
@@ -49,23 +51,19 @@ namespace
         {
             stages = {{{shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, vertexBytes.data(), vertexBytes.size(), "mainVS"},
                        {shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x1002, fragmentBytes.data(), fragmentBytes.size(), "mainPS"}}};
-            bindings = {{{0x1000, 2, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read,
-                          shaders::StageBit(shaders::ShaderStage::Fragment)},
-                         {0x2000, 2, 1, 2, shaders::BindingKind::SampledTexture, shaders::BindingAccess::Read,
-                          shaders::StageBit(shaders::ShaderStage::Fragment)},
-                         {0x3000, 0, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read,
-                          shaders::StageBit(shaders::ShaderStage::Vertex)}}};
+            bindings = {
+                {{0x1000, 2, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read, shaders::StageBit(shaders::ShaderStage::Fragment)},
+                 {0x2000, 2, 1, 2, shaders::BindingKind::SampledTexture, shaders::BindingAccess::Read, shaders::StageBit(shaders::ShaderStage::Fragment)},
+                 {0x3000, 0, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read, shaders::StageBit(shaders::ShaderStage::Vertex)}}};
             buffers = {{{0x1000, 2, 0, 32, 0, 2}}};
-            members = {{{0x1100, 0, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false},
-                        {0x1101, 16, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false}}};
+            members = {{{0x1100, 0, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false}, {0x1101, 16, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false}}};
             inputs = {{{0x4000, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
             outputs = {{{0x5000, 0, 0, shaders::NumericClass::FloatingPoint, 0x0f}}};
             description.kind = shaders::ProgramKind::Graphics;
             description.program = 0xabcdu;
             description.permutation = vanguard::crypto::Sha256("material permutation", 20);
             description.compilerFingerprint = vanguard::crypto::Sha256("test compiler", 13);
-            description.pipelineInterface.stages =
-                shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
+            description.pipelineInterface.stages = shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
             description.pipelineInterface.primitiveClass = shaders::PrimitiveClass::Triangle;
             description.pipelineInterface.renderTargetCount = 1;
             description.stages = {stages.data(), static_cast<vanguard::u32>(stages.size())};
@@ -76,7 +74,7 @@ namespace
             description.fragmentOutputs = {outputs.data(), static_cast<vanguard::u32>(outputs.size())};
         }
     };
-}
+} // namespace
 
 int main()
 {
@@ -102,11 +100,9 @@ int main()
     shaders::ShaderFile shader;
     Check(shader.Open(shaderReader) == shaders::Result::Success, "open shader reflection fixture");
 
-    const resources::ResourceReference shaderReference(resources::ResourcePath::FromString("shaders/standard.vshader"),
-                                                        shaders::ShaderResourceType);
-    const vanguard::pipelines::ShaderReference pipelineShader{
-        shaderReference.Path().Id(), shader.Permutation(), shader.BindingLayoutFingerprint(),
-        shader.PipelineInterfaceFingerprint()};
+    const resources::ResourceReference shaderReference(resources::ResourcePath::FromString("shaders/standard.vshader"), shaders::ShaderResourceType);
+    const vanguard::pipelines::ShaderReference pipelineShader{shaderReference.GetPath().Id(), shader.GetPermutation(), shader.BindingLayoutFingerprint(),
+                                                              shader.GetPipelineInterfaceFingerprint()};
     vanguard::pipelines::BuildDescription pipelineDescription;
     pipelineDescription.kind = vanguard::pipelines::PipelineKind::Graphics;
     pipelineDescription.name = 0x8800;
@@ -119,23 +115,20 @@ int main()
     filesystem::MemoryFileReader pipelineReader(pipelineBytes, 0);
     vanguard::pipelines::PipelineFile pipeline;
     Check(pipeline.Open(pipelineReader) == vanguard::pipelines::Result::Success, "open compatible pipeline fixture");
-    const std::array<materials::TechniqueBuildRecord, 2> techniques{{
-        {0x9001, resources::ResourceReference(resources::ResourcePath::FromString("pipelines/shadow.vpipeline"),
-                                               vanguard::pipelines::PipelineResourceType), &pipeline},
-        {0x9000, resources::ResourceReference(resources::ResourcePath::FromString("pipelines/gbuffer.vpipeline"),
-                                               vanguard::pipelines::PipelineResourceType), &pipeline}}};
+    const std::array<materials::TechniqueBuildRecord, 2> techniques{
+        {{0x9001, resources::ResourceReference(resources::ResourcePath::FromString("pipelines/shadow.vpipeline"), vanguard::pipelines::PipelineResourceType),
+          &pipeline},
+         {0x9000, resources::ResourceReference(resources::ResourcePath::FromString("pipelines/gbuffer.vpipeline"), vanguard::pipelines::PipelineResourceType),
+          &pipeline}}};
     const std::array<vanguard::u64, 1> selectedBuffers{{0x1000}};
-    const std::array<materials::ResourceParameterBuildRecord, 1> selectedResources{{
-        {0x2000, 2, materials::ResourceParameterKind::Texture}}};
+    const std::array<materials::ResourceParameterBuildRecord, 1> selectedResources{{{0x2000, 2, materials::ResourceParameterKind::Texture}}};
     const std::array<float, 4> baseColor{{0.25f, 0.5f, 0.75f, 1.0f}};
     const std::array<float, 4> surface{{0.8f, 0.2f, 0.0f, 0.0f}};
-    const std::array<materials::ConstantValueBuildRecord, 2> constants{{
-        {0x1101, surface.data(), static_cast<vanguard::u32>(sizeof(surface))},
-        {0x1100, baseColor.data(), static_cast<vanguard::u32>(sizeof(baseColor))}}};
+    const std::array<materials::ConstantValueBuildRecord, 2> constants{
+        {{0x1101, surface.data(), static_cast<vanguard::u32>(sizeof(surface))}, {0x1100, baseColor.data(), static_cast<vanguard::u32>(sizeof(baseColor))}}};
     const resources::ResourceReference albedo(resources::ResourcePath::FromString("textures/stone_albedo.vtex"),
-                                               vanguard::serialization::MakeFourCC('V', 'T', 'E', 'X'));
-    const std::array<materials::ResourceValueBuildRecord, 1> resourceValues{{
-        {0x2000, 0, albedo, resources::DependencyKind::Required}}};
+                                              vanguard::serialization::MakeFourCC('V', 'T', 'E', 'X'));
+    const std::array<materials::ResourceValueBuildRecord, 1> resourceValues{{{0x2000, 0, albedo, resources::DependencyKind::Required}}};
 
     materials::BuildDescription description;
     description.name = 0x7777;
@@ -166,17 +159,17 @@ int main()
     filesystem::MemoryFileReader materialReader(first, 0);
     materials::MaterialFile material;
     Check(material.Open(materialReader) == materials::Result::Success && material.IsOpen(), "open vmat");
-    Check(material.Techniques().Size() == 2 && material.Techniques()[0].name == 0x9000 &&
-          material.Techniques()[1].name == 0x9001, "techniques are canonical and pipeline-addressable");
-    Check(material.ConstantBuffers().Size() == 1 && material.Parameters().Size() == 2 &&
-          material.ConstantBufferData(material.ConstantBuffers()[0]).Size() == 32,
+    Check(material.GetTechniques().Size() == 2 && material.GetTechniques()[0].name == 0x9000 && material.GetTechniques()[1].name == 0x9001,
+          "techniques are canonical and pipeline-addressable");
+    Check(material.GetConstantBuffers().Size() == 1 && material.GetParameters().Size() == 2 &&
+              material.GetConstantBufferData(material.GetConstantBuffers()[0]).Size() == 32,
           "material constant data retains the reflected GPU buffer layout");
-    const auto parameterBytes = material.ParameterData();
+    const auto parameterBytes = material.GetParameterData();
     Check(parameterBytes.Size() == 32 && parameterBytes[0] == reinterpret_cast<const vanguard::u8*>(baseColor.data())[0] &&
-          parameterBytes[16] == reinterpret_cast<const vanguard::u8*>(surface.data())[0],
+              parameterBytes[16] == reinterpret_cast<const vanguard::u8*>(surface.data())[0],
           "constant overrides are written directly at reflected byte offsets");
-    Check(material.ResourceParameters().Size() == 2 && material.ResourceParameters()[0].resource == albedo &&
-          !material.ResourceParameters()[1].resource.IsValid() && material.Dependencies().Size() == 4,
+    Check(material.GetResourceParameters().Size() == 2 && material.GetResourceParameters()[0].resource == albedo &&
+              !material.GetResourceParameters()[1].resource.IsValid() && material.GetDependencies().Size() == 4,
           "resource arrays retain logical bound/unbound values and deduplicated dependencies");
 
     {
@@ -190,8 +183,7 @@ int main()
     }
     {
         std::array<float, 3> wrongSize{{1.0f, 2.0f, 3.0f}};
-        const std::array<materials::ConstantValueBuildRecord, 1> wrongConstants{{
-            {0x1100, wrongSize.data(), static_cast<vanguard::u32>(sizeof(wrongSize))}}};
+        const std::array<materials::ConstantValueBuildRecord, 1> wrongConstants{{{0x1100, wrongSize.data(), static_cast<vanguard::u32>(sizeof(wrongSize))}}};
         materials::BuildDescription invalid = description;
         invalid.constants = {wrongConstants.data(), static_cast<vanguard::u32>(wrongConstants.size())};
         ByteArray rejected(memory::pools::Rendering::GetInstance());
@@ -206,15 +198,12 @@ int main()
         stalePipelineDescription.shaders = {&staleShader, 1};
         ByteArray stalePipelineBytes(memory::pools::Rendering::GetInstance());
         filesystem::MemoryFileWriter stalePipelineWriter(stalePipelineBytes);
-        Check(vanguard::pipelines::WritePipeline(stalePipelineWriter, stalePipelineDescription) ==
-                  vanguard::pipelines::Result::Success,
+        Check(vanguard::pipelines::WritePipeline(stalePipelineWriter, stalePipelineDescription) == vanguard::pipelines::Result::Success,
               "write deliberately stale pipeline fixture");
         filesystem::MemoryFileReader stalePipelineReader(stalePipelineBytes, 0);
         vanguard::pipelines::PipelineFile stalePipeline;
-        Check(stalePipeline.Open(stalePipelineReader) == vanguard::pipelines::Result::Success,
-              "open deliberately stale pipeline fixture");
-        const std::array<materials::TechniqueBuildRecord, 1> staleTechnique{{
-            {0x9000, techniques[1].pipeline, &stalePipeline}}};
+        Check(stalePipeline.Open(stalePipelineReader) == vanguard::pipelines::Result::Success, "open deliberately stale pipeline fixture");
+        const std::array<materials::TechniqueBuildRecord, 1> staleTechnique{{{0x9000, techniques[1].pipeline, &stalePipeline}}};
         materials::BuildDescription invalid = description;
         invalid.techniques = {staleTechnique.data(), static_cast<vanguard::u32>(staleTechnique.size())};
         ByteArray rejected(memory::pools::Rendering::GetInstance());
@@ -227,17 +216,15 @@ int main()
         corrupt[64] ^= 0x5au;
         filesystem::MemoryFileReader corruptReader(corrupt, 0);
         materials::MaterialFile rejected;
-        Check(rejected.Open(corruptReader) == materials::Result::IntegrityFailure,
-              "vmat section corruption is rejected before publication");
+        Check(rejected.Open(corruptReader) == materials::Result::IntegrityFailure, "vmat section corruption is rejected before publication");
     }
 
     std::array<packages::Dependency, 8> packageDependencies{};
     vanguard::u32 packageDependencyCount = 0;
-    for (const materials::ResourceDependency& dependency : material.Dependencies())
-        packageDependencies[packageDependencyCount++] =
-            {dependency.resource.Path().Id(), dependency.resource.ExpectedType(), dependency.kind};
+    for (const materials::ResourceDependency& dependency : material.GetDependencies())
+        packageDependencies[packageDependencyCount++] = {dependency.resource.GetPath().Id(), dependency.resource.ExpectedType(), dependency.kind};
     const packages::BuildSegment materialSegment{first.TypedData(), first.Size(), packages::Codec::Lz4, 4,
-                                                  packages::SegmentFlags::Inline | packages::SegmentFlags::MemoryResident};
+                                                 packages::SegmentFlags::Inline | packages::SegmentFlags::MemoryResident};
     packages::BuildResource packagedMaterial;
     packagedMaterial.path = "materials/stone.vmat";
     packagedMaterial.type = materials::MaterialResourceType;
@@ -247,24 +234,22 @@ int main()
     ByteArray packageBytes(memory::pools::Assets::GetInstance());
     filesystem::MemoryFileWriter packageFile(packageBytes);
     packages::PackageWriter packageWriter;
-    Check(packageWriter.Begin(packageFile) == packages::Result::Success &&
-          packageWriter.Add(packagedMaterial) == packages::Result::Success &&
-          packageWriter.Finalize() == packages::Result::Success, "package vmat as an opaque VPAK resource");
+    Check(packageWriter.Begin(packageFile) == packages::Result::Success && packageWriter.Add(packagedMaterial) == packages::Result::Success &&
+              packageWriter.Finalize() == packages::Result::Success,
+          "package vmat as an opaque VPAK resource");
     filesystem::MemoryFileReader packageReaderFile(packageBytes, 0);
     packages::PackageReader packageReader;
     Check(packageReader.Open(packageReaderFile) == packages::Result::Success, "open VPAK containing vmat");
     const packages::Resource* const packagedRecord = packageReader.Find("materials/stone.vmat");
     Check(packagedRecord != nullptr && packagedRecord->type == materials::MaterialResourceType &&
-          packageReader.Dependencies(*packagedRecord).Size() == material.Dependencies().Size(),
+              packageReader.GetDependencies(*packagedRecord).Size() == material.GetDependencies().Size(),
           "VPAK preserves shader, pipeline, and texture dependencies without interpreting vmat");
     if (packagedRecord != nullptr)
     {
         packages::ResourceFileReader packagedView;
-        Check(packagedView.Open(packageReader, *packagedRecord, packageReaderFile) == packages::Result::Success,
-              "open logical vmat directly over VPAK");
+        Check(packagedView.Open(packageReader, *packagedRecord, packageReaderFile) == packages::Result::Success, "open logical vmat directly over VPAK");
         materials::MaterialFile packaged;
-        Check(packaged.Open(packagedView) == materials::Result::Success &&
-              packaged.ContentFingerprint() == material.ContentFingerprint(),
+        Check(packaged.Open(packagedView) == materials::Result::Success && packaged.GetContentFingerprint() == material.GetContentFingerprint(),
               "package-backed vmat opens without format translation");
     }
 
@@ -274,6 +259,7 @@ int main()
     filesystem::Shutdown();
     io::Shutdown();
     diagnostics::Shutdown();
-    if (g_failures == 0) std::puts("[materialsTests] Vanguard vmat conformance checks passed");
+    if (g_failures == 0)
+        std::puts("[materialsTests] Vanguard vmat conformance checks passed");
     return g_failures == 0 ? 0 : 1;
 }

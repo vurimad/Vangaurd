@@ -122,6 +122,17 @@ allocations remain active. `Stats` exposes source counts, live work, staging
 usage and peak, bytes read, integrity failures, cancellations, and budget
 rejections for the editor and diagnostics layer.
 
+`ResourceSource` is the lower-level format-neutral ranged source used by
+pageable assets. It pins one loose file or VPAK resource generation, reports the
+complete stored/decoded cost of a logical range, and supports real asynchronous
+range reads. `ResourceReadRequest` keeps the source alive through completion and
+provides best-effort cancellation without requiring a worker to block on I/O.
+Synchronous `ResourceSourceReader` remains available for tooling and parsers.
+`ResourceStreamer::OpenSource` resolves and pins the same winning source plus its
+non-soft dependency table for specialized pageable loaders. This keeps physical
+source selection generic while format parsing remains in the asset's owning
+module.
+
 ## Deliberate exclusions
 
 This module does not own concrete asset schemas, hot reload, source import,

@@ -8,9 +8,9 @@ namespace vanguard::memory::backend
     [[nodiscard]] bool IsInitialized() noexcept;
     [[nodiscard]] bool IsValidPool(PoolId pool) noexcept;
     [[nodiscard]] bool IsAllocatablePool(PoolId pool) noexcept;
-    [[nodiscard]] PoolId ParentPool(PoolId pool) noexcept;
-    [[nodiscard]] const char* PoolName(PoolId pool) noexcept;
-    [[nodiscard]] u32 PoolHandleValue(PoolId pool) noexcept;
+    [[nodiscard]] PoolId GetParentPool(PoolId pool) noexcept;
+    [[nodiscard]] const char* GetPoolName(PoolId pool) noexcept;
+    [[nodiscard]] u32 GetPoolHandleValue(PoolId pool) noexcept;
     [[nodiscard]] MemoryBlock Allocate(PoolId pool, usize size, usize alignment) noexcept;
     [[nodiscard]] bool Reallocate(MemoryBlock& block, usize newSize, usize alignment) noexcept;
     void Free(MemoryBlock& block) noexcept;

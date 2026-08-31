@@ -11,8 +11,17 @@ namespace vanguard::game_input
 
     enum class MappingResult : u8
     {
-        Success, InvalidArgument, InvalidState, InvalidMagic, UnsupportedVersion, InvalidLayout,
-        IntegrityFailure, LimitExceeded, DuplicateId, MappingFailure, IoFailure
+        Success,
+        InvalidArgument,
+        InvalidState,
+        InvalidMagic,
+        UnsupportedVersion,
+        InvalidLayout,
+        IntegrityFailure,
+        LimitExceeded,
+        DuplicateId,
+        MappingFailure,
+        IoFailure
     };
     [[nodiscard]] const char* ToString(MappingResult result) noexcept;
 
@@ -25,8 +34,16 @@ namespace vanguard::game_input
         containers::ArraySpan<const ContextId> initialContexts;
     };
 
-    struct MappingContextRecord { ContextDescriptor descriptor; char name[MaximumNameBytes]{}; };
-    struct MappingActionRecord { ActionDescriptor descriptor; char name[MaximumNameBytes]{}; };
+    struct MappingContextRecord
+    {
+        ContextDescriptor descriptor;
+        char name[MaximumNameBytes]{};
+    };
+    struct MappingActionRecord
+    {
+        ActionDescriptor descriptor;
+        char name[MaximumNameBytes]{};
+    };
     struct MappingBindingRecord
     {
         BindingDescriptor descriptor;
@@ -53,10 +70,10 @@ namespace vanguard::game_input
         [[nodiscard]] MappingResult Open(filesystem::IFile& reader, const MappingReadLimits& limits = {}) noexcept;
         void Close() noexcept;
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const MappingContextRecord> Contexts() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const MappingActionRecord> Actions() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const MappingContextRecord> GetContexts() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const MappingActionRecord> GetActions() const noexcept;
         [[nodiscard]] containers::ArraySpan<const MappingBindingRecord> Bindings() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ContextId> InitialContexts() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ContextId> GetInitialContexts() const noexcept;
         [[nodiscard]] MappingResult Install(ActionMap& destination, bool compile = true) const noexcept;
 
     private:
@@ -70,14 +87,13 @@ namespace vanguard::game_input
     class MappingResource final : public resources::ResourceObject
     {
     public:
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override;
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
         [[nodiscard]] MappingResult Open(const void* data, usize size, const MappingReadLimits& limits = {}) noexcept;
-        [[nodiscard]] const MappingFile& File() const noexcept;
+        [[nodiscard]] const MappingFile& GetFile() const noexcept;
 
     private:
         MappingFile m_file;
     };
 
-    [[nodiscard]] MappingResult CookMapping(const MappingBuildDescription& description,
-                                            filesystem::IFile& output) noexcept;
-}
+    [[nodiscard]] MappingResult CookMapping(const MappingBuildDescription& description, filesystem::IFile& output) noexcept;
+} // namespace vanguard::game_input

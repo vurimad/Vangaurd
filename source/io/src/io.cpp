@@ -25,9 +25,9 @@ namespace vanguard::io
         return backend::IsInitialized();
     }
 
-    AsyncIO& System() noexcept
+    AsyncIO& GetSystem() noexcept
     {
-        return backend::System();
+        return backend::GetSystem();
     }
 
     const char* GetRequestSourceDebugText(const RequestSource source) noexcept

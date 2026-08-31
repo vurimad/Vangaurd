@@ -9,8 +9,8 @@ namespace vanguard::application
     class ServiceContext final
     {
     public:
-        [[nodiscard]] ApplicationProfile Profile() const noexcept;
-        [[nodiscard]] ServiceId CurrentService() const noexcept;
+        [[nodiscard]] ApplicationProfile GetProfile() const noexcept;
+        [[nodiscard]] ServiceId GetCurrentService() const noexcept;
         [[nodiscard]] Service* Find(ServiceId service) const noexcept;
         [[nodiscard]] Service* FindCapability(CapabilityId capability) const noexcept;
         [[nodiscard]] ServiceHandle Acquire(ServiceId service) const noexcept;
@@ -134,19 +134,18 @@ namespace vanguard::application
         EngineHost& operator=(const EngineHost&) = delete;
 
         [[nodiscard]] bool RegisterModule(const ModuleDescriptor& descriptor, HostFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool RegisterService(ModuleId owner, const ServiceDescriptor& descriptor,
-                                           HostFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RegisterService(ModuleId owner, const ServiceDescriptor& descriptor, HostFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Compile(ApplicationProfile profile, HostFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Start(HostFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(HostFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] HostState State() const noexcept;
-        [[nodiscard]] ApplicationProfile Profile() const noexcept;
+        [[nodiscard]] ApplicationProfile GetProfile() const noexcept;
         [[nodiscard]] Service* Find(ServiceId service) const noexcept;
         [[nodiscard]] Service* FindCapability(CapabilityId capability) const noexcept;
         [[nodiscard]] ServiceHandle Acquire(ServiceId service) const noexcept;
         [[nodiscard]] Service* Resolve(ServiceHandle handle) const noexcept;
-        [[nodiscard]] ServiceState StateOf(ServiceId service) const noexcept;
+        [[nodiscard]] ServiceState GetStateOf(ServiceId service) const noexcept;
 
         void SetLifecycleSink(LifecycleSink sink, void* userData = nullptr) noexcept;
         void VisitLifecycleEvents(LifecycleVisitor visitor, void* userData = nullptr) const noexcept;

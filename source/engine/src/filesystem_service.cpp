@@ -18,8 +18,7 @@ namespace
     class FilesystemService final : public app::Service
     {
     public:
-        explicit FilesystemService(const vanguard::filesystem::Config* const config) noexcept
-            : m_config(config != nullptr ? *config : MakeFilesystemConfig())
+        explicit FilesystemService(const vanguard::filesystem::Config* const config) noexcept : m_config(config != nullptr ? *config : MakeFilesystemConfig())
         {
         }
 
@@ -49,7 +48,8 @@ namespace
 
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
         {
-            if (!m_initialized) return app::LifecycleStatus::Success();
+            if (!m_initialized)
+                return app::LifecycleStatus::Success();
             vanguard::filesystem::Shutdown();
             if (vanguard::filesystem::IsInitialized())
                 return app::LifecycleStatus::Failure("Filesystem shutdown failed");
@@ -64,31 +64,28 @@ namespace
 
     app::Service* CreateFilesystemService(void* const userData) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Filesystem, sizeof(FilesystemService), alignof(FilesystemService));
-        return block ? ::new (block.address) FilesystemService(
-            static_cast<const vanguard::filesystem::Config*>(userData)) : nullptr;
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Filesystem, sizeof(FilesystemService), alignof(FilesystemService));
+        return block ? ::new (block.address) FilesystemService(static_cast<const vanguard::filesystem::Config*>(userData)) : nullptr;
     }
 
     void DestroyFilesystemService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<FilesystemService*>(service)->~FilesystemService();
-        vanguard::memory::MemoryBlock block{
-            service, sizeof(FilesystemService), vanguard::memory::PoolId::Filesystem};
+        vanguard::memory::MemoryBlock block{service, sizeof(FilesystemService), vanguard::memory::PoolId::Filesystem};
         vanguard::memory::Free(block);
     }
-}
+} // namespace
 
 namespace vanguard::engine
 {
     namespace
     {
-        bool RegisterFilesystemServiceInternal(application::EngineHost& host, void* const config,
-                                               application::HostFailure* const failure) noexcept
+        bool RegisterFilesystemServiceInternal(application::EngineHost& host, void* const config, application::HostFailure* const failure) noexcept
         {
-            constexpr application::ServiceDependency dependencies[]{
-                {IoServiceId, application::DependencyKind::Required}};
+            constexpr application::ServiceDependency dependencies[]{{IoServiceId, application::DependencyKind::Required}};
             constexpr application::CapabilityId providedCapabilities[]{FilesystemCapabilityId};
             application::ServiceDescriptor descriptor;
             descriptor.id = FilesystemServiceId;
@@ -103,16 +100,14 @@ namespace vanguard::engine
             descriptor.userData = config;
             return host.RegisterService(EngineModuleId, descriptor, failure);
         }
-    }
+    } // namespace
 
-    bool RegisterFilesystemService(application::EngineHost& host,
-                                   application::HostFailure* const failure) noexcept
+    bool RegisterFilesystemService(application::EngineHost& host, application::HostFailure* const failure) noexcept
     {
         return RegisterFilesystemServiceInternal(host, nullptr, failure);
     }
 
-    bool RegisterFilesystemService(application::EngineHost& host, const filesystem::Config& config,
-                                   application::HostFailure* const failure) noexcept
+    bool RegisterFilesystemService(application::EngineHost& host, const filesystem::Config& config, application::HostFailure* const failure) noexcept
     {
         return RegisterFilesystemServiceInternal(host, const_cast<filesystem::Config*>(&config), failure);
     }

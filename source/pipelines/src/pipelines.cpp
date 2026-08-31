@@ -12,11 +12,11 @@ namespace
     constexpr serialization::Version FileVersion{1, 1};
     constexpr u32 MetadataSection = serialization::MakeFourCC('P', 'I', 'P', 'E');
     constexpr u32 MetadataWireVersion = 2;
-    constexpr u64 KnownDynamicStates =
-        static_cast<u64>(pipeline::DynamicState::Viewport) | static_cast<u64>(pipeline::DynamicState::Scissor) |
-        static_cast<u64>(pipeline::DynamicState::BlendConstants) | static_cast<u64>(pipeline::DynamicState::StencilReference) |
-        static_cast<u64>(pipeline::DynamicState::DepthBias) | static_cast<u64>(pipeline::DynamicState::DepthBounds) |
-        static_cast<u64>(pipeline::DynamicState::PrimitiveTopology) | static_cast<u64>(pipeline::DynamicState::FragmentShadingRate);
+    constexpr u64 KnownDynamicStates = static_cast<u64>(pipeline::DynamicState::Viewport) | static_cast<u64>(pipeline::DynamicState::Scissor) |
+                                       static_cast<u64>(pipeline::DynamicState::BlendConstants) | static_cast<u64>(pipeline::DynamicState::StencilReference) |
+                                       static_cast<u64>(pipeline::DynamicState::DepthBias) | static_cast<u64>(pipeline::DynamicState::DepthBounds) |
+                                       static_cast<u64>(pipeline::DynamicState::PrimitiveTopology) |
+                                       static_cast<u64>(pipeline::DynamicState::FragmentShadingRate);
 
     using ByteArray = containers::DynamicArray<u8>;
 
@@ -31,16 +31,13 @@ namespace
     [[nodiscard]] bool WriteSemanticName(serialization::BinaryWriter& writer, const char* const value) noexcept
     {
         const u32 length = StringLength(value, pipeline::MaximumVertexSemanticNameLength);
-        return length != 0 && length < pipeline::MaximumVertexSemanticNameLength && writer.WriteU8(static_cast<u8>(length)) &&
-               writer.WriteBytes(value, length);
+        return length != 0 && length < pipeline::MaximumVertexSemanticNameLength && writer.WriteU8(static_cast<u8>(length)) && writer.WriteBytes(value, length);
     }
 
-    [[nodiscard]] bool ReadSemanticName(serialization::BinaryReader& reader,
-                                        char (&value)[pipeline::MaximumVertexSemanticNameLength]) noexcept
+    [[nodiscard]] bool ReadSemanticName(serialization::BinaryReader& reader, char (&value)[pipeline::MaximumVertexSemanticNameLength]) noexcept
     {
         u8 length = 0;
-        if (!reader.ReadU8(length) || length == 0 || length >= pipeline::MaximumVertexSemanticNameLength ||
-            !reader.ReadBytes(value, length))
+        if (!reader.ReadU8(length) || length == 0 || length >= pipeline::MaximumVertexSemanticNameLength || !reader.ReadBytes(value, length))
             return false;
         value[length] = '\0';
         return true;
@@ -58,36 +55,66 @@ namespace
     {
         switch (format)
         {
-        case pipeline::Format::R8UNorm: return {1, 1, 8, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R8SNorm: return {1, 1, 8, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R8UInt: return {1, 1, 8, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R8G8UNorm: return {2, 2, 8, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R8G8SNorm: return {2, 2, 8, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R8G8UInt: return {2, 2, 8, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R8G8B8A8UNorm: return {4, 4, 8, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R8G8B8A8SNorm: return {4, 4, 8, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R8G8B8A8UInt: return {4, 4, 8, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R16UNorm: return {2, 1, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16SNorm: return {2, 1, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16UInt: return {2, 1, 16, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R16Float: return {2, 1, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16G16UNorm: return {4, 2, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16G16SNorm: return {4, 2, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16G16UInt: return {4, 2, 16, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R16G16Float: return {4, 2, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16G16B16A16UNorm: return {8, 4, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16G16B16A16SNorm: return {8, 4, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R16G16B16A16UInt: return {8, 4, 16, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R16G16B16A16Float: return {8, 4, 16, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R32UInt: return {4, 1, 32, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R32Float: return {4, 1, 32, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R32G32UInt: return {8, 2, 32, shaders::NumericClass::UnsignedInteger};
-        case pipeline::Format::R32G32Float: return {8, 2, 32, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R32G32B32Float: return {12, 3, 32, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R32G32B32A32Float: return {16, 4, 32, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R10G10B10A2UNorm: return {4, 4, 10, shaders::NumericClass::FloatingPoint};
-        case pipeline::Format::R11G11B10Float: return {4, 3, 11, shaders::NumericClass::FloatingPoint};
-        default: return {};
+        case pipeline::Format::R8UNorm:
+            return {1, 1, 8, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R8SNorm:
+            return {1, 1, 8, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R8UInt:
+            return {1, 1, 8, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R8G8UNorm:
+            return {2, 2, 8, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R8G8SNorm:
+            return {2, 2, 8, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R8G8UInt:
+            return {2, 2, 8, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R8G8B8A8UNorm:
+            return {4, 4, 8, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R8G8B8A8SNorm:
+            return {4, 4, 8, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R8G8B8A8UInt:
+            return {4, 4, 8, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R16UNorm:
+            return {2, 1, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16SNorm:
+            return {2, 1, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16UInt:
+            return {2, 1, 16, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R16Float:
+            return {2, 1, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16G16UNorm:
+            return {4, 2, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16G16SNorm:
+            return {4, 2, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16G16UInt:
+            return {4, 2, 16, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R16G16Float:
+            return {4, 2, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16G16B16A16UNorm:
+            return {8, 4, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16G16B16A16SNorm:
+            return {8, 4, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R16G16B16A16UInt:
+            return {8, 4, 16, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R16G16B16A16Float:
+            return {8, 4, 16, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R32UInt:
+            return {4, 1, 32, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R32Float:
+            return {4, 1, 32, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R32G32UInt:
+            return {8, 2, 32, shaders::NumericClass::UnsignedInteger};
+        case pipeline::Format::R32G32Float:
+            return {8, 2, 32, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R32G32B32Float:
+            return {12, 3, 32, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R32G32B32A32Float:
+            return {16, 4, 32, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R10G10B10A2UNorm:
+            return {4, 4, 10, shaders::NumericClass::FloatingPoint};
+        case pipeline::Format::R11G11B10Float:
+            return {4, 3, 11, shaders::NumericClass::FloatingPoint};
+        default:
+            return {};
         }
     }
 
@@ -138,12 +165,12 @@ namespace
 
     [[nodiscard]] pipeline::Result WriterResult(const serialization::BinaryWriter& writer) noexcept
     {
-        return writer.Good() ? pipeline::Result::Success : ConvertSerializationResult(writer.Status());
+        return writer.IsGood() ? pipeline::Result::Success : ConvertSerializationResult(writer.GetStatus());
     }
 
     [[nodiscard]] pipeline::Result ReaderResult(const serialization::BinaryReader& reader) noexcept
     {
-        return reader.Good() ? pipeline::Result::Success : ConvertSerializationResult(reader.Status());
+        return reader.IsGood() ? pipeline::Result::Success : ConvertSerializationResult(reader.GetStatus());
     }
 
     template <typename Type> void CopySpan(const containers::ArraySpan<const Type> source, containers::DynamicArray<Type>& destination)
@@ -236,8 +263,7 @@ namespace
                 return pipeline::Result::InvalidLayout;
             }
         }
-        if (signature.depthStencilClass > pipeline::DepthStencilClass::DepthStencil ||
-            signature.depthStencilFormat >= pipeline::Format::Count ||
+        if (signature.depthStencilClass > pipeline::DepthStencilClass::DepthStencil || signature.depthStencilFormat >= pipeline::Format::Count ||
             (signature.depthStencilFormat == pipeline::Format::Unknown) != (signature.depthStencilClass == pipeline::DepthStencilClass::None))
         {
             return pipeline::Result::InvalidLayout;
@@ -255,8 +281,7 @@ namespace
         pipeline::GraphicsState& graphics = data.graphics;
         if (graphics.topology > pipeline::PrimitiveTopology::PatchList || graphics.rasterizer.fill > pipeline::FillMode::Wireframe ||
             graphics.rasterizer.cull > pipeline::CullMode::Back || graphics.rasterizer.frontFace > pipeline::FrontFace::Clockwise ||
-            graphics.depthStencil.depthCompare > pipeline::CompareOperation::Always ||
-            graphics.blend.logicOperation > pipeline::LogicOperation::Set ||
+            graphics.depthStencil.depthCompare > pipeline::CompareOperation::Always || graphics.blend.logicOperation > pipeline::LogicOperation::Set ||
             graphics.attachmentPolicy > pipeline::AttachmentPolicy::Exact || !IsSampleCountValid(graphics.multisample.sampleCount) ||
             graphics.blend.attachmentCount > pipeline::MaximumColorAttachments)
         {
@@ -278,8 +303,7 @@ namespace
             !IsFinite(graphics.multisample.minimumSampleShading) || graphics.multisample.minimumSampleShading < 0.0f ||
             graphics.multisample.minimumSampleShading > 1.0f || !IsFinite(graphics.depthStencil.minimumDepthBounds) ||
             !IsFinite(graphics.depthStencil.maximumDepthBounds) || graphics.depthStencil.minimumDepthBounds < 0.0f ||
-            graphics.depthStencil.maximumDepthBounds > 1.0f ||
-            graphics.depthStencil.minimumDepthBounds > graphics.depthStencil.maximumDepthBounds)
+            graphics.depthStencil.maximumDepthBounds > 1.0f || graphics.depthStencil.minimumDepthBounds > graphics.depthStencil.maximumDepthBounds)
         {
             return pipeline::Result::InvalidLayout;
         }
@@ -328,8 +352,8 @@ namespace
             }
             if (!IsBlendFactorValid(attachment.sourceColor) || !IsBlendFactorValid(attachment.destinationColor) ||
                 !IsBlendFactorValid(attachment.sourceAlpha) || !IsBlendFactorValid(attachment.destinationAlpha) ||
-                attachment.colorOperation > pipeline::BlendOperation::Maximum ||
-                attachment.alphaOperation > pipeline::BlendOperation::Maximum || (attachment.writeMask & ~0x0fu) != 0)
+                attachment.colorOperation > pipeline::BlendOperation::Maximum || attachment.alphaOperation > pipeline::BlendOperation::Maximum ||
+                (attachment.writeMask & ~0x0fu) != 0)
             {
                 return pipeline::Result::InvalidLayout;
             }
@@ -372,18 +396,16 @@ namespace
         {
             const pipeline::VertexAttribute& attribute = data.vertexAttributes[index];
             const FormatTraits format = GetVertexFormatTraits(attribute.format);
-            if (attribute.semantic == 0 || attribute.numericClass > shaders::NumericClass::UnsignedInteger ||
-                attribute.componentCount == 0 || attribute.componentCount > 4 ||
-                (attribute.componentBits != 8 && attribute.componentBits != 16 && attribute.componentBits != 32 &&
-                 attribute.componentBits != 64) || format.byteSize == 0 || format.numericClass != attribute.numericClass ||
-                format.componentCount != attribute.componentCount || format.componentBits != attribute.componentBits ||
-                StringLength(attribute.semanticName, pipeline::MaximumVertexSemanticNameLength) == 0 ||
+            if (attribute.semantic == 0 || attribute.numericClass > shaders::NumericClass::UnsignedInteger || attribute.componentCount == 0 ||
+                attribute.componentCount > 4 ||
+                (attribute.componentBits != 8 && attribute.componentBits != 16 && attribute.componentBits != 32 && attribute.componentBits != 64) ||
+                format.byteSize == 0 || format.numericClass != attribute.numericClass || format.componentCount != attribute.componentCount ||
+                format.componentBits != attribute.componentBits || StringLength(attribute.semanticName, pipeline::MaximumVertexSemanticNameLength) == 0 ||
                 StringLength(attribute.semanticName, pipeline::MaximumVertexSemanticNameLength) >= pipeline::MaximumVertexSemanticNameLength ||
                 (index != 0 && data.vertexAttributes[index - 1].location == attribute.location))
             {
-                return index != 0 && data.vertexAttributes[index - 1].location == attribute.location
-                           ? pipeline::Result::DuplicateVertexAttribute
-                           : pipeline::Result::InvalidLayout;
+                return index != 0 && data.vertexAttributes[index - 1].location == attribute.location ? pipeline::Result::DuplicateVertexAttribute
+                                                                                                     : pipeline::Result::InvalidLayout;
             }
             bool foundStream = false;
             for (const pipeline::VertexStream& stream : data.vertexStreams)
@@ -404,16 +426,16 @@ namespace
 
     [[nodiscard]] pipeline::Result ValidateRayTracing(const CanonicalData& data) noexcept
     {
-        if (data.rayTracing.maximumRecursionDepth == 0 || data.rayTracing.maximumRecursionDepth > 31 ||
-            data.rayTracing.maximumPayloadBytes > 4096 || data.rayTracing.maximumAttributeBytes > 4096 || data.rayTracingGroups.Empty())
+        if (data.rayTracing.maximumRecursionDepth == 0 || data.rayTracing.maximumRecursionDepth > 31 || data.rayTracing.maximumPayloadBytes > 4096 ||
+            data.rayTracing.maximumAttributeBytes > 4096 || data.rayTracingGroups.Empty())
         {
             return pipeline::Result::InvalidLayout;
         }
         for (u32 index = 0; index < data.rayTracingGroups.Size(); ++index)
         {
             const pipeline::RayTracingGroup& group = data.rayTracingGroups[index];
-            if (group.name == 0 || group.kind > pipeline::RayTracingGroupKind::ProceduralHitGroup ||
-                group.shaderLibrary >= data.shaders.Size() || (index != 0 && data.rayTracingGroups[index - 1].name == group.name))
+            if (group.name == 0 || group.kind > pipeline::RayTracingGroupKind::ProceduralHitGroup || group.shaderLibrary >= data.shaders.Size() ||
+                (index != 0 && data.rayTracingGroups[index - 1].name == group.name))
             {
                 return index != 0 && data.rayTracingGroups[index - 1].name == group.name ? pipeline::Result::DuplicateRayTracingGroup
                                                                                          : pipeline::Result::InvalidLayout;
@@ -468,8 +490,8 @@ namespace
         {
             shaderOrder.PushBack(index);
         }
-        std::sort(shaderOrder.Begin(), shaderOrder.End(), [&description](const u32 left, const u32 right)
-                  { return ShaderReferenceLess(description.shaders[left], description.shaders[right]); });
+        std::sort(shaderOrder.Begin(), shaderOrder.End(),
+                  [&description](const u32 left, const u32 right) { return ShaderReferenceLess(description.shaders[left], description.shaders[right]); });
         output.shaders.Reserve(description.shaders.Size());
         for (u32 canonicalIndex = 0; canonicalIndex < shaderOrder.Size(); ++canonicalIndex)
         {
@@ -513,8 +535,7 @@ namespace
             }
             return ValidateGraphics(output);
         case pipeline::PipelineKind::Compute:
-            if (output.shaders.Size() != 1 || !output.vertexStreams.Empty() || !output.vertexAttributes.Empty() ||
-                !output.rayTracingGroups.Empty())
+            if (output.shaders.Size() != 1 || !output.vertexStreams.Empty() || !output.vertexAttributes.Empty() || !output.rayTracingGroups.Empty())
             {
                 return pipeline::Result::InvalidLayout;
             }
@@ -577,8 +598,7 @@ namespace
         u16 reserved16 = 0;
         u16 depthStencilFormat = 0;
         if (!reader.ReadU32(value.colorCount) || !reader.ReadU16(depthStencilFormat) || !reader.ReadU16(reserved16) || reserved16 != 0 ||
-            !reader.ReadU8(depthStencilClass) ||
-            !reader.ReadU8(value.sampleCount) || !reader.ReadU16(reserved16) || reserved16 != 0)
+            !reader.ReadU8(depthStencilClass) || !reader.ReadU8(value.sampleCount) || !reader.ReadU16(reserved16) || reserved16 != 0)
         {
             return false;
         }
@@ -601,10 +621,9 @@ namespace
 
     [[nodiscard]] bool WriteRasterizer(serialization::BinaryWriter& writer, const pipeline::RasterizerState& value) noexcept
     {
-        return writer.WriteU8(static_cast<u8>(value.fill)) && writer.WriteU8(static_cast<u8>(value.cull)) &&
-               writer.WriteU8(static_cast<u8>(value.frontFace)) && writer.WriteBool(value.depthClipEnable) &&
-               writer.WriteBool(value.conservativeRasterization) && writer.WriteBool(value.rasterizerDiscard) && writer.WriteU16(0) &&
-               writer.WriteI32(value.depthBias) && writer.WriteF32(value.depthBiasClamp) && writer.WriteF32(value.slopeScaledDepthBias);
+        return writer.WriteU8(static_cast<u8>(value.fill)) && writer.WriteU8(static_cast<u8>(value.cull)) && writer.WriteU8(static_cast<u8>(value.frontFace)) &&
+               writer.WriteBool(value.depthClipEnable) && writer.WriteBool(value.conservativeRasterization) && writer.WriteBool(value.rasterizerDiscard) &&
+               writer.WriteU16(0) && writer.WriteI32(value.depthBias) && writer.WriteF32(value.depthBiasClamp) && writer.WriteF32(value.slopeScaledDepthBias);
     }
 
     [[nodiscard]] bool ReadRasterizer(serialization::BinaryReader& reader, pipeline::RasterizerState& value) noexcept
@@ -615,8 +634,7 @@ namespace
         u16 reserved = 0;
         if (!reader.ReadU8(fill) || !reader.ReadU8(cull) || !reader.ReadU8(frontFace) || !reader.ReadBool(value.depthClipEnable) ||
             !reader.ReadBool(value.conservativeRasterization) || !reader.ReadBool(value.rasterizerDiscard) || !reader.ReadU16(reserved) ||
-            !reader.ReadI32(value.depthBias) || !reader.ReadF32(value.depthBiasClamp) || !reader.ReadF32(value.slopeScaledDepthBias) ||
-            reserved != 0)
+            !reader.ReadI32(value.depthBias) || !reader.ReadF32(value.depthBiasClamp) || !reader.ReadF32(value.slopeScaledDepthBias) || reserved != 0)
         {
             return false;
         }
@@ -628,21 +646,21 @@ namespace
 
     [[nodiscard]] bool WriteMultisample(serialization::BinaryWriter& writer, const pipeline::MultisampleState& value) noexcept
     {
-        return writer.WriteU8(value.sampleCount) && writer.WriteBool(value.alphaToCoverage) && writer.WriteBool(value.sampleShading) &&
-               writer.WriteU8(0) && writer.WriteU32(value.sampleMask) && writer.WriteF32(value.minimumSampleShading);
+        return writer.WriteU8(value.sampleCount) && writer.WriteBool(value.alphaToCoverage) && writer.WriteBool(value.sampleShading) && writer.WriteU8(0) &&
+               writer.WriteU32(value.sampleMask) && writer.WriteF32(value.minimumSampleShading);
     }
 
     [[nodiscard]] bool ReadMultisample(serialization::BinaryReader& reader, pipeline::MultisampleState& value) noexcept
     {
         u8 reserved = 0;
-        return reader.ReadU8(value.sampleCount) && reader.ReadBool(value.alphaToCoverage) && reader.ReadBool(value.sampleShading) &&
-               reader.ReadU8(reserved) && reserved == 0 && reader.ReadU32(value.sampleMask) && reader.ReadF32(value.minimumSampleShading);
+        return reader.ReadU8(value.sampleCount) && reader.ReadBool(value.alphaToCoverage) && reader.ReadBool(value.sampleShading) && reader.ReadU8(reserved) &&
+               reserved == 0 && reader.ReadU32(value.sampleMask) && reader.ReadF32(value.minimumSampleShading);
     }
 
     [[nodiscard]] bool WriteStencilFace(serialization::BinaryWriter& writer, const pipeline::StencilFaceState& value) noexcept
     {
-        return writer.WriteU8(static_cast<u8>(value.fail)) && writer.WriteU8(static_cast<u8>(value.depthFail)) &&
-               writer.WriteU8(static_cast<u8>(value.pass)) && writer.WriteU8(static_cast<u8>(value.compare));
+        return writer.WriteU8(static_cast<u8>(value.fail)) && writer.WriteU8(static_cast<u8>(value.depthFail)) && writer.WriteU8(static_cast<u8>(value.pass)) &&
+               writer.WriteU8(static_cast<u8>(value.compare));
     }
 
     [[nodiscard]] bool ReadStencilFace(serialization::BinaryReader& reader, pipeline::StencilFaceState& value) noexcept
@@ -664,11 +682,10 @@ namespace
 
     [[nodiscard]] bool WriteDepthStencil(serialization::BinaryWriter& writer, const pipeline::DepthStencilState& value) noexcept
     {
-        return writer.WriteBool(value.depthTest) && writer.WriteBool(value.depthWrite) &&
-               writer.WriteU8(static_cast<u8>(value.depthCompare)) && writer.WriteBool(value.depthBoundsTest) &&
-               writer.WriteF32(value.minimumDepthBounds) && writer.WriteF32(value.maximumDepthBounds) &&
-               writer.WriteBool(value.stencilTest) && writer.WriteU8(value.stencilReadMask) && writer.WriteU8(value.stencilWriteMask) &&
-               writer.WriteU8(0) && WriteStencilFace(writer, value.front) && WriteStencilFace(writer, value.back);
+        return writer.WriteBool(value.depthTest) && writer.WriteBool(value.depthWrite) && writer.WriteU8(static_cast<u8>(value.depthCompare)) &&
+               writer.WriteBool(value.depthBoundsTest) && writer.WriteF32(value.minimumDepthBounds) && writer.WriteF32(value.maximumDepthBounds) &&
+               writer.WriteBool(value.stencilTest) && writer.WriteU8(value.stencilReadMask) && writer.WriteU8(value.stencilWriteMask) && writer.WriteU8(0) &&
+               WriteStencilFace(writer, value.front) && WriteStencilFace(writer, value.back);
     }
 
     [[nodiscard]] bool ReadDepthStencil(serialization::BinaryReader& reader, pipeline::DepthStencilState& value) noexcept
@@ -676,10 +693,9 @@ namespace
         u8 depthCompare = 0;
         u8 reserved = 0;
         if (!reader.ReadBool(value.depthTest) || !reader.ReadBool(value.depthWrite) || !reader.ReadU8(depthCompare) ||
-            !reader.ReadBool(value.depthBoundsTest) || !reader.ReadF32(value.minimumDepthBounds) ||
-            !reader.ReadF32(value.maximumDepthBounds) || !reader.ReadBool(value.stencilTest) || !reader.ReadU8(value.stencilReadMask) ||
-            !reader.ReadU8(value.stencilWriteMask) || !reader.ReadU8(reserved) || reserved != 0 || !ReadStencilFace(reader, value.front) ||
-            !ReadStencilFace(reader, value.back))
+            !reader.ReadBool(value.depthBoundsTest) || !reader.ReadF32(value.minimumDepthBounds) || !reader.ReadF32(value.maximumDepthBounds) ||
+            !reader.ReadBool(value.stencilTest) || !reader.ReadU8(value.stencilReadMask) || !reader.ReadU8(value.stencilWriteMask) ||
+            !reader.ReadU8(reserved) || reserved != 0 || !ReadStencilFace(reader, value.front) || !ReadStencilFace(reader, value.back))
         {
             return false;
         }
@@ -703,9 +719,8 @@ namespace
         u8 sourceAlpha = 0;
         u8 destinationAlpha = 0;
         u8 alphaOperation = 0;
-        if (!reader.ReadBool(value.blendEnable) || !reader.ReadU8(sourceColor) || !reader.ReadU8(destinationColor) ||
-            !reader.ReadU8(colorOperation) || !reader.ReadU8(sourceAlpha) || !reader.ReadU8(destinationAlpha) ||
-            !reader.ReadU8(alphaOperation) || !reader.ReadU8(value.writeMask))
+        if (!reader.ReadBool(value.blendEnable) || !reader.ReadU8(sourceColor) || !reader.ReadU8(destinationColor) || !reader.ReadU8(colorOperation) ||
+            !reader.ReadU8(sourceAlpha) || !reader.ReadU8(destinationAlpha) || !reader.ReadU8(alphaOperation) || !reader.ReadU8(value.writeMask))
         {
             return false;
         }
@@ -757,10 +772,9 @@ namespace
 
     [[nodiscard]] bool WriteGraphics(serialization::BinaryWriter& writer, const pipeline::GraphicsState& value) noexcept
     {
-        return writer.WriteU8(static_cast<u8>(value.topology)) && writer.WriteU8(value.patchControlPoints) &&
-               writer.WriteBool(value.primitiveRestart) && writer.WriteU8(static_cast<u8>(value.attachmentPolicy)) &&
-               WriteRasterizer(writer, value.rasterizer) && WriteMultisample(writer, value.multisample) &&
-               WriteDepthStencil(writer, value.depthStencil) && WriteBlend(writer, value.blend) &&
+        return writer.WriteU8(static_cast<u8>(value.topology)) && writer.WriteU8(value.patchControlPoints) && writer.WriteBool(value.primitiveRestart) &&
+               writer.WriteU8(static_cast<u8>(value.attachmentPolicy)) && WriteRasterizer(writer, value.rasterizer) &&
+               WriteMultisample(writer, value.multisample) && WriteDepthStencil(writer, value.depthStencil) && WriteBlend(writer, value.blend) &&
                WriteAttachmentSignature(writer, value.exactAttachments);
     }
 
@@ -770,8 +784,7 @@ namespace
         u8 attachmentPolicy = 0;
         if (!reader.ReadU8(topology) || !reader.ReadU8(value.patchControlPoints) || !reader.ReadBool(value.primitiveRestart) ||
             !reader.ReadU8(attachmentPolicy) || !ReadRasterizer(reader, value.rasterizer) || !ReadMultisample(reader, value.multisample) ||
-            !ReadDepthStencil(reader, value.depthStencil) || !ReadBlend(reader, value.blend) ||
-            !ReadAttachmentSignature(reader, value.exactAttachments))
+            !ReadDepthStencil(reader, value.depthStencil) || !ReadBlend(reader, value.blend) || !ReadAttachmentSignature(reader, value.exactAttachments))
         {
             return false;
         }
@@ -782,8 +795,8 @@ namespace
 
     [[nodiscard]] bool WriteVertexStream(serialization::BinaryWriter& writer, const pipeline::VertexStream& value) noexcept
     {
-        return writer.WriteU32(value.binding) && writer.WriteU32(value.stride) && writer.WriteU8(static_cast<u8>(value.inputRate)) &&
-               writer.WriteU8(0) && writer.WriteU16(0) && writer.WriteU32(value.instanceStepRate);
+        return writer.WriteU32(value.binding) && writer.WriteU32(value.stride) && writer.WriteU8(static_cast<u8>(value.inputRate)) && writer.WriteU8(0) &&
+               writer.WriteU16(0) && writer.WriteU32(value.instanceStepRate);
     }
 
     [[nodiscard]] bool ReadVertexStream(serialization::BinaryReader& reader, pipeline::VertexStream& value) noexcept
@@ -803,10 +816,9 @@ namespace
     [[nodiscard]] bool WriteVertexAttribute(serialization::BinaryWriter& writer, const pipeline::VertexAttribute& value) noexcept
     {
         return writer.WriteU64(value.semantic) && writer.WriteU32(value.semanticIndex) && writer.WriteU32(value.location) &&
-               writer.WriteU32(value.streamBinding) && writer.WriteU32(value.byteOffset) &&
-               writer.WriteU8(static_cast<u8>(value.numericClass)) && writer.WriteU8(value.componentCount) &&
-               writer.WriteU8(value.componentBits) && writer.WriteU8(0) && writer.WriteU16(static_cast<u16>(value.format)) &&
-               WriteSemanticName(writer, value.semanticName);
+               writer.WriteU32(value.streamBinding) && writer.WriteU32(value.byteOffset) && writer.WriteU8(static_cast<u8>(value.numericClass)) &&
+               writer.WriteU8(value.componentCount) && writer.WriteU8(value.componentBits) && writer.WriteU8(0) &&
+               writer.WriteU16(static_cast<u16>(value.format)) && WriteSemanticName(writer, value.semanticName);
     }
 
     [[nodiscard]] bool ReadVertexAttribute(serialization::BinaryReader& reader, pipeline::VertexAttribute& value) noexcept
@@ -815,9 +827,9 @@ namespace
         u8 reserved = 0;
         u16 format = 0;
         if (!reader.ReadU64(value.semantic) || !reader.ReadU32(value.semanticIndex) || !reader.ReadU32(value.location) ||
-            !reader.ReadU32(value.streamBinding) || !reader.ReadU32(value.byteOffset) || !reader.ReadU8(numericClass) ||
-            !reader.ReadU8(value.componentCount) || !reader.ReadU8(value.componentBits) || !reader.ReadU8(reserved) || reserved != 0 ||
-            !reader.ReadU16(format) || !ReadSemanticName(reader, value.semanticName))
+            !reader.ReadU32(value.streamBinding) || !reader.ReadU32(value.byteOffset) || !reader.ReadU8(numericClass) || !reader.ReadU8(value.componentCount) ||
+            !reader.ReadU8(value.componentBits) || !reader.ReadU8(reserved) || reserved != 0 || !reader.ReadU16(format) ||
+            !ReadSemanticName(reader, value.semanticName))
         {
             return false;
         }
@@ -851,9 +863,8 @@ namespace
     [[nodiscard]] pipeline::Result WriteCanonicalBody(serialization::BinaryWriter& writer, const CanonicalData& data) noexcept
     {
         if (!writer.WriteU8(static_cast<u8>(data.kind)) || !writer.WriteU8(0) || !writer.WriteU16(0) || !writer.WriteU64(data.name) ||
-            !writer.WriteU64(static_cast<u64>(data.dynamicStates)) || !writer.WriteU32(data.shaders.Size()) ||
-            !writer.WriteU32(data.vertexStreams.Size()) || !writer.WriteU32(data.vertexAttributes.Size()) ||
-            !writer.WriteU32(data.rayTracingGroups.Size()))
+            !writer.WriteU64(static_cast<u64>(data.dynamicStates)) || !writer.WriteU32(data.shaders.Size()) || !writer.WriteU32(data.vertexStreams.Size()) ||
+            !writer.WriteU32(data.vertexAttributes.Size()) || !writer.WriteU32(data.rayTracingGroups.Size()))
         {
             return WriterResult(writer);
         }
@@ -920,8 +931,7 @@ namespace
         return pipeline::Result::Success;
     }
 
-    [[nodiscard]] pipeline::Result WriteDocument(filesystem::IFile& file, const CanonicalData& data,
-                                                 const crypto::Digest256& fingerprint) noexcept
+    [[nodiscard]] pipeline::Result WriteDocument(filesystem::IFile& file, const CanonicalData& data, const crypto::Digest256& fingerprint) noexcept
     {
         ByteArray metadata{memory::pools::Serialization::GetInstance()};
         filesystem::MemoryFileWriter metadataFile(metadata);
@@ -978,8 +988,7 @@ namespace
         return pipeline::Result::Success;
     }
 
-    template <typename Type>
-    [[nodiscard]] bool ResizeChecked(containers::DynamicArray<Type>& array, const u32 count, const u32 limit) noexcept
+    template <typename Type> [[nodiscard]] bool ResizeChecked(containers::DynamicArray<Type>& array, const u32 count, const u32 limit) noexcept
     {
         if (count > limit)
         {
@@ -990,8 +999,7 @@ namespace
     }
 
     [[nodiscard]] pipeline::Result ReadCanonicalBody(serialization::BinaryReader& reader, const pipeline::ReadLimits& limits,
-                                                     pipeline::BuildDescription& description,
-                                                     containers::DynamicArray<pipeline::ShaderReference>& shaders,
+                                                     pipeline::BuildDescription& description, containers::DynamicArray<pipeline::ShaderReference>& shaders,
                                                      containers::DynamicArray<pipeline::VertexStream>& streams,
                                                      containers::DynamicArray<pipeline::VertexAttribute>& attributes,
                                                      containers::DynamicArray<pipeline::RayTracingGroup>& groups) noexcept
@@ -1005,8 +1013,8 @@ namespace
         u32 attributeCount = 0;
         u32 groupCount = 0;
         if (!reader.ReadU8(kind) || !reader.ReadU8(reserved8) || !reader.ReadU16(reserved16) || !reader.ReadU64(description.name) ||
-            !reader.ReadU64(dynamicStates) || !reader.ReadU32(shaderCount) || !reader.ReadU32(streamCount) ||
-            !reader.ReadU32(attributeCount) || !reader.ReadU32(groupCount))
+            !reader.ReadU64(dynamicStates) || !reader.ReadU32(shaderCount) || !reader.ReadU32(streamCount) || !reader.ReadU32(attributeCount) ||
+            !reader.ReadU32(groupCount))
         {
             return ReaderResult(reader);
         }
@@ -1014,10 +1022,8 @@ namespace
         {
             return pipeline::Result::InvalidLayout;
         }
-        if (!ResizeChecked(shaders, shaderCount, limits.maximumShaders) ||
-            !ResizeChecked(streams, streamCount, limits.maximumVertexStreams) ||
-            !ResizeChecked(attributes, attributeCount, limits.maximumVertexAttributes) ||
-            !ResizeChecked(groups, groupCount, limits.maximumRayTracingGroups))
+        if (!ResizeChecked(shaders, shaderCount, limits.maximumShaders) || !ResizeChecked(streams, streamCount, limits.maximumVertexStreams) ||
+            !ResizeChecked(attributes, attributeCount, limits.maximumVertexAttributes) || !ResizeChecked(groups, groupCount, limits.maximumRayTracingGroups))
         {
             return pipeline::Result::LimitExceeded;
         }
@@ -1055,8 +1061,7 @@ namespace
         case pipeline::PipelineKind::Compute:
             break;
         case pipeline::PipelineKind::RayTracing:
-            if (!reader.ReadU32(description.rayTracing.maximumRecursionDepth) ||
-                !reader.ReadU32(description.rayTracing.maximumPayloadBytes) ||
+            if (!reader.ReadU32(description.rayTracing.maximumRecursionDepth) || !reader.ReadU32(description.rayTracing.maximumPayloadBytes) ||
                 !reader.ReadU32(description.rayTracing.maximumAttributeBytes))
             {
                 return ReaderResult(reader);
@@ -1077,18 +1082,16 @@ namespace
         return pipeline::Result::Success;
     }
 
-    [[nodiscard]] bool AttachmentSignaturesEqual(const pipeline::AttachmentSignature& left,
-                                                 const pipeline::AttachmentSignature& right) noexcept
+    [[nodiscard]] bool AttachmentSignaturesEqual(const pipeline::AttachmentSignature& left, const pipeline::AttachmentSignature& right) noexcept
     {
-        if (left.colorCount != right.colorCount || left.depthStencilFormat != right.depthStencilFormat ||
-            left.depthStencilClass != right.depthStencilClass || left.sampleCount != right.sampleCount)
+        if (left.colorCount != right.colorCount || left.depthStencilFormat != right.depthStencilFormat || left.depthStencilClass != right.depthStencilClass ||
+            left.sampleCount != right.sampleCount)
         {
             return false;
         }
         for (u32 index = 0; index < pipeline::MaximumColorAttachments; ++index)
         {
-            if (left.colors[index].format != right.colors[index].format ||
-                left.colors[index].numericClass != right.colors[index].numericClass)
+            if (left.colors[index].format != right.colors[index].format || left.colors[index].numericClass != right.colors[index].numericClass)
             {
                 return false;
             }
@@ -1153,8 +1156,7 @@ namespace vanguard::pipelines
         serialization::ReadLimits documentLimits;
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 1;
-        const serialization::Result headerResult =
-            serialization::ReadDocumentHeader(reader, PipelineMagic, {1, 1, 1}, documentLimits, header);
+        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, PipelineMagic, {1, 1, 1}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
         {
             return ConvertSerializationResult(headerResult);
@@ -1166,8 +1168,7 @@ namespace vanguard::pipelines
             return ConvertSerializationResult(sectionResult);
         }
         if (sections.Size() != 1 || sections[0].id != MetadataSection || sections[0].version != FileVersion ||
-            sections[0].codec != serialization::Codec::None || sections[0].storedSize != sections[0].logicalSize ||
-            sections[0].storedSize > ~u32{0})
+            sections[0].codec != serialization::Codec::None || sections[0].storedSize != sections[0].logicalSize || sections[0].storedSize > ~u32{0})
         {
             return Result::InvalidLayout;
         }
@@ -1196,8 +1197,7 @@ namespace vanguard::pipelines
         }
 
         BuildDescription description;
-        Result result =
-            ReadCanonicalBody(metadataReader, limits, description, m_shaders, m_vertexStreams, m_vertexAttributes, m_rayTracingGroups);
+        Result result = ReadCanonicalBody(metadataReader, limits, description, m_shaders, m_vertexStreams, m_vertexAttributes, m_rayTracingGroups);
         if (result != Result::Success)
         {
             Close();
@@ -1255,52 +1255,52 @@ namespace vanguard::pipelines
         return m_open;
     }
 
-    PipelineKind PipelineFile::Kind() const noexcept
+    PipelineKind PipelineFile::GetKind() const noexcept
     {
         return m_kind;
     }
 
-    u64 PipelineFile::Name() const noexcept
+    u64 PipelineFile::GetName() const noexcept
     {
         return m_name;
     }
 
-    DynamicState PipelineFile::DynamicStates() const noexcept
+    DynamicState PipelineFile::GetDynamicStates() const noexcept
     {
         return m_dynamicStates;
     }
 
-    const crypto::Digest256& PipelineFile::TemplateFingerprint() const noexcept
+    const crypto::Digest256& PipelineFile::GetTemplateFingerprint() const noexcept
     {
         return m_templateFingerprint;
     }
 
-    containers::ArraySpan<const ShaderReference> PipelineFile::Shaders() const noexcept
+    containers::ArraySpan<const ShaderReference> PipelineFile::GetShaders() const noexcept
     {
         return m_shaders;
     }
 
-    const GraphicsState& PipelineFile::Graphics() const noexcept
+    const GraphicsState& PipelineFile::GetGraphics() const noexcept
     {
         return m_graphics;
     }
 
-    containers::ArraySpan<const VertexStream> PipelineFile::VertexStreams() const noexcept
+    containers::ArraySpan<const VertexStream> PipelineFile::GetVertexStreams() const noexcept
     {
         return m_vertexStreams;
     }
 
-    containers::ArraySpan<const VertexAttribute> PipelineFile::VertexAttributes() const noexcept
+    containers::ArraySpan<const VertexAttribute> PipelineFile::GetVertexAttributes() const noexcept
     {
         return m_vertexAttributes;
     }
 
-    const RayTracingState& PipelineFile::RayTracing() const noexcept
+    const RayTracingState& PipelineFile::GetRayTracing() const noexcept
     {
         return m_rayTracing;
     }
 
-    containers::ArraySpan<const RayTracingGroup> PipelineFile::RayTracingGroups() const noexcept
+    containers::ArraySpan<const RayTracingGroup> PipelineFile::GetRayTracingGroups() const noexcept
     {
         return m_rayTracingGroups;
     }
@@ -1325,8 +1325,7 @@ namespace vanguard::pipelines
         return result == Result::Success ? BuildTemplateFingerprint(canonical, fingerprint) : result;
     }
 
-    Result CalculateConcretePipelineKey(const PipelineFile& pipeline, const AttachmentSignature* const attachments,
-                                        crypto::Digest256& key) noexcept
+    Result CalculateConcretePipelineKey(const PipelineFile& pipeline, const AttachmentSignature* const attachments, crypto::Digest256& key) noexcept
     {
         if (!pipeline.IsOpen())
         {
@@ -1335,20 +1334,20 @@ namespace vanguard::pipelines
         ByteArray bytes{memory::pools::Serialization::GetInstance()};
         filesystem::MemoryFileWriter file(bytes);
         serialization::BinaryWriter writer(file);
-        if (!WriteDigest(writer, pipeline.TemplateFingerprint()))
+        if (!WriteDigest(writer, pipeline.GetTemplateFingerprint()))
         {
             return WriterResult(writer);
         }
-        if (pipeline.Kind() == PipelineKind::Graphics)
+        if (pipeline.GetKind() == PipelineKind::Graphics)
         {
             const AttachmentSignature* selected = attachments;
-            if (pipeline.Graphics().attachmentPolicy == AttachmentPolicy::Exact)
+            if (pipeline.GetGraphics().attachmentPolicy == AttachmentPolicy::Exact)
             {
-                if (attachments != nullptr && !AttachmentSignaturesEqual(*attachments, pipeline.Graphics().exactAttachments))
+                if (attachments != nullptr && !AttachmentSignaturesEqual(*attachments, pipeline.GetGraphics().exactAttachments))
                 {
                     return Result::AttachmentMismatch;
                 }
-                selected = &pipeline.Graphics().exactAttachments;
+                selected = &pipeline.GetGraphics().exactAttachments;
             }
             if (selected == nullptr)
             {
@@ -1359,8 +1358,7 @@ namespace vanguard::pipelines
             {
                 return validation;
             }
-            if (selected->colorCount != pipeline.Graphics().blend.attachmentCount ||
-                selected->sampleCount != pipeline.Graphics().multisample.sampleCount)
+            if (selected->colorCount != pipeline.GetGraphics().blend.attachmentCount || selected->sampleCount != pipeline.GetGraphics().multisample.sampleCount)
             {
                 return Result::AttachmentMismatch;
             }
@@ -1373,24 +1371,23 @@ namespace vanguard::pipelines
         return Result::Success;
     }
 
-    Result ValidateShaderCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader,
-                                       const AttachmentSignature* const attachments) noexcept
+    Result ValidateShaderCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader, const AttachmentSignature* const attachments) noexcept
     {
         if (!pipeline.IsOpen() || !shader.IsOpen())
         {
             return Result::InvalidState;
         }
         const ShaderReference* reference = nullptr;
-        for (const ShaderReference& candidate : pipeline.Shaders())
+        for (const ShaderReference& candidate : pipeline.GetShaders())
         {
-            if (candidate.permutation == shader.Permutation())
+            if (candidate.permutation == shader.GetPermutation())
             {
                 reference = &candidate;
                 break;
             }
         }
         if (reference == nullptr || reference->bindingLayout != shader.BindingLayoutFingerprint() ||
-            reference->pipelineInterface != shader.PipelineInterfaceFingerprint())
+            reference->pipelineInterface != shader.GetPipelineInterfaceFingerprint())
         {
             return Result::ShaderMismatch;
         }
@@ -1399,22 +1396,22 @@ namespace vanguard::pipelines
         compatibility.bindingLayoutFingerprint = reference->bindingLayout;
         compatibility.pipelineInterfaceFingerprint = reference->pipelineInterface;
         containers::DynamicArray<shaders::VertexInput> vertexInputs{memory::pools::Rendering::GetInstance()};
-        switch (pipeline.Kind())
+        switch (pipeline.GetKind())
         {
         case PipelineKind::Graphics:
         {
-            if (shader.Kind() != shaders::ProgramKind::Graphics)
+            if (shader.GetKind() != shaders::ProgramKind::Graphics)
             {
                 return Result::ShaderMismatch;
             }
             const AttachmentSignature* selected = attachments;
-            if (pipeline.Graphics().attachmentPolicy == AttachmentPolicy::Exact)
+            if (pipeline.GetGraphics().attachmentPolicy == AttachmentPolicy::Exact)
             {
-                if (attachments != nullptr && !AttachmentSignaturesEqual(*attachments, pipeline.Graphics().exactAttachments))
+                if (attachments != nullptr && !AttachmentSignaturesEqual(*attachments, pipeline.GetGraphics().exactAttachments))
                 {
                     return Result::AttachmentMismatch;
                 }
-                selected = &pipeline.Graphics().exactAttachments;
+                selected = &pipeline.GetGraphics().exactAttachments;
             }
             if (selected == nullptr)
             {
@@ -1426,14 +1423,14 @@ namespace vanguard::pipelines
                 return attachmentResult;
             }
 
-            vertexInputs.Reserve(pipeline.VertexAttributes().Size());
-            for (const VertexAttribute& attribute : pipeline.VertexAttributes())
+            vertexInputs.Reserve(pipeline.GetVertexAttributes().Size());
+            for (const VertexAttribute& attribute : pipeline.GetVertexAttributes())
             {
-                vertexInputs.PushBack({attribute.semantic, attribute.semanticIndex, attribute.location, attribute.numericClass,
-                                       attribute.componentCount, attribute.componentBits});
+                vertexInputs.PushBack({attribute.semantic, attribute.semanticIndex, attribute.location, attribute.numericClass, attribute.componentCount,
+                                       attribute.componentBits});
             }
             compatibility.kind = shaders::PipelineKind::Graphics;
-            compatibility.primitiveClass = PrimitiveClassOf(pipeline.Graphics().topology);
+            compatibility.primitiveClass = PrimitiveClassOf(pipeline.GetGraphics().topology);
             compatibility.renderTargetCount = selected->colorCount;
             compatibility.sampleCount = selected->sampleCount;
             compatibility.depthStencilFormatPresent = selected->depthStencilFormat != Format::Unknown;
@@ -1441,7 +1438,7 @@ namespace vanguard::pipelines
             for (u32 index = 0; index < selected->colorCount; ++index)
             {
                 compatibility.renderTargetClasses[index] = selected->colors[index].numericClass;
-                const BlendAttachmentState& blend = pipeline.Graphics().blend.attachments[index];
+                const BlendAttachmentState& blend = pipeline.GetGraphics().blend.attachments[index];
                 compatibility.dualSourceBlendEnabled |=
                     blend.sourceColor >= BlendFactor::SourceOneColor || blend.destinationColor >= BlendFactor::SourceOneColor ||
                     blend.sourceAlpha >= BlendFactor::SourceOneColor || blend.destinationAlpha >= BlendFactor::SourceOneColor;
@@ -1450,21 +1447,20 @@ namespace vanguard::pipelines
             break;
         }
         case PipelineKind::Compute:
-            if (shader.Kind() != shaders::ProgramKind::Compute)
+            if (shader.GetKind() != shaders::ProgramKind::Compute)
             {
                 return Result::ShaderMismatch;
             }
             compatibility.kind = shaders::PipelineKind::Compute;
             break;
         case PipelineKind::RayTracing:
-            if (shader.Kind() != shaders::ProgramKind::Library)
+            if (shader.GetKind() != shaders::ProgramKind::Library)
             {
                 return Result::ShaderMismatch;
             }
             compatibility.kind = shaders::PipelineKind::RayTracing;
             break;
         }
-        return shaders::ValidatePipeline(shader, compatibility) == shaders::Result::Success ? Result::Success
-                                                                                            : Result::IncompatiblePipeline;
+        return shaders::ValidatePipeline(shader, compatibility) == shaders::Result::Success ? Result::Success : Result::IncompatiblePipeline;
     }
 } // namespace vanguard::pipelines

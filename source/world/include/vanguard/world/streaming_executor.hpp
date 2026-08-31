@@ -54,8 +54,7 @@ namespace vanguard::world
 
         /// Polls completed requests, evaluates the grid, submits new requests and reports lifecycle events.
         /// This function never waits for I/O or Jobs work.
-        [[nodiscard]] bool Process(const StreamingProcessInput& input,
-                                   containers::DynamicArray<StreamingResourceEvent>& events) noexcept;
+        [[nodiscard]] bool Process(const StreamingProcessInput& input, containers::DynamicArray<StreamingResourceEvent>& events) noexcept;
 
         /// Marks a resident resource as usable by its downstream consumer. Detailed cells should become
         /// ready after ECS activation; render-only proxies should become ready after renderer residency.
@@ -65,8 +64,8 @@ namespace vanguard::world
         [[nodiscard]] bool CompleteRelease(StreamingNodeKey key) noexcept;
         [[nodiscard]] bool FailResident(StreamingNodeKey key, resources::Failure failure) noexcept;
 
-        [[nodiscard]] const resources::ResourceHandle* Resource(StreamingNodeKey key) const noexcept;
-        [[nodiscard]] resources::Failure LastFailure(StreamingNodeKey key) const noexcept;
+        [[nodiscard]] const resources::ResourceHandle* GetResource(StreamingNodeKey key) const noexcept;
+        [[nodiscard]] resources::Failure GetLastFailure(StreamingNodeKey key) const noexcept;
         [[nodiscard]] bool GetFailureTrace(StreamingNodeKey key, resources::FailureTrace& trace) const noexcept;
         [[nodiscard]] StreamingExecutorStats GetStats() const noexcept;
 

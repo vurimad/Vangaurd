@@ -28,7 +28,7 @@ namespace
 
         TestResource(const vanguard::resources::ResourceTypeId type, const vanguard::u32 value) noexcept : m_type(type), m_value(value) {}
 
-        [[nodiscard]] vanguard::resources::ResourceTypeId Type() const noexcept override
+        [[nodiscard]] vanguard::resources::ResourceTypeId GetType() const noexcept override
         {
             return m_type;
         }
@@ -50,8 +50,7 @@ namespace
         vanguard::concurrency::Atomic<vanguard::u32> destructions{0};
     };
 
-    void BeginTestLoad(vanguard::resources::ResourceRegistry& registry, const vanguard::resources::ResourceRequest& request,
-                       void* const userData) noexcept
+    void BeginTestLoad(vanguard::resources::ResourceRegistry& registry, const vanguard::resources::ResourceRequest& request, void* const userData) noexcept
     {
         LoaderHarness& harness = *static_cast<LoaderHarness*>(userData);
         static_cast<void>(harness.starts.Increment());
@@ -76,10 +75,8 @@ int main()
 
     char canonical[128] = {};
     usize written = 0;
-    Check(CanonicalizePath("Worlds\\NightCity\\Block_A.vscene", canonical, sizeof(canonical), written) == Result::Success,
-          "mixed input path canonicalizes");
-    Check(written == std::strlen("worlds/nightcity/block_a.vscene") &&
-              std::memcmp(canonical, "worlds/nightcity/block_a.vscene", written) == 0,
+    Check(CanonicalizePath("Worlds\\NightCity\\Block_A.vscene", canonical, sizeof(canonical), written) == Result::Success, "mixed input path canonicalizes");
+    Check(written == std::strlen("worlds/nightcity/block_a.vscene") && std::memcmp(canonical, "worlds/nightcity/block_a.vscene", written) == 0,
           "canonical bytes use lowercase forward slashes");
 
     const ResourcePath first = ResourcePath::FromString("Worlds\\NightCity\\Block_A.vscene");
@@ -111,11 +108,9 @@ int main()
     Check(untyped.IsValid() && !untyped.IsTyped(), "untyped references work");
     Check(typed.IsValid() && typed.IsTyped() && typed.ExpectedType() == meshType, "typed references preserve expected type identity");
 
-    Check(CanTransition(State::Unloaded, State::Queued) && CanTransition(State::Queued, State::Loading) &&
-              CanTransition(State::Loading, State::Loaded),
+    Check(CanTransition(State::Unloaded, State::Queued) && CanTransition(State::Queued, State::Loading) && CanTransition(State::Loading, State::Loaded),
           "normal loading state sequence is legal");
-    Check(!CanTransition(State::Unloaded, State::Loaded) && !CanTransition(State::Loaded, State::Loading) &&
-              !CanTransition(State::Loading, State::Evicting),
+    Check(!CanTransition(State::Unloaded, State::Loaded) && !CanTransition(State::Loaded, State::Loading) && !CanTransition(State::Loading, State::Evicting),
           "invalid implicit state jumps are rejected");
     Check(IsTerminal(State::Loaded) && IsTerminal(State::Failed) && IsTerminal(State::Cancelled) && !IsTerminal(State::Loading),
           "terminal state classification is explicit");
@@ -161,8 +156,7 @@ int main()
     std::array<std::thread, requestThreadCount> requestThreads;
     for (usize thread = 0; thread < requestThreadCount; ++thread)
     {
-        requestThreads[thread] =
-            std::thread([thread, &registry, &meshReference, &requests]() { requests[thread] = registry.Request(meshReference); });
+        requestThreads[thread] = std::thread([thread, &registry, &meshReference, &requests]() { requests[thread] = registry.Request(meshReference); });
     }
     for (std::thread& thread : requestThreads)
     {
@@ -174,7 +168,7 @@ int main()
     for (usize requestIndex = 0; requestIndex < requestThreadCount; ++requestIndex)
     {
         Check(requests[requestIndex].IsSameOperation(requests[0]), "concurrent requests share one completion token");
-        Check(requests[requestIndex].Status() == State::Loading, "coalesced request observes shared loading state");
+        Check(requests[requestIndex].GetStatus() == State::Loading, "coalesced request observes shared loading state");
     }
 
     TestResource* firstResource = VANGUARD_NEW(TestResource)(meshType, 11);
@@ -182,7 +176,7 @@ int main()
     for (ResourceRequest& request : requests)
     {
         request.Wait();
-        Check(request.HasLoaded() && request.Error() == Failure::None, "all coalesced requests observe successful completion");
+        Check(request.HasLoaded() && request.GetError() == Failure::None, "all coalesced requests observe successful completion");
     }
 
     ResourceHandle strong = requests[0].Acquire();
@@ -192,36 +186,35 @@ int main()
     WeakResourceHandle weak = strong.ToWeak();
     Check(weak.IsValid(), "strong handle creates a live weak handle");
 
-    Check(registry.Evict(meshReference.Path()), "loaded resource accepts explicit eviction");
-    Check(registry.GetState(meshReference.Path()) == State::Evicting, "eviction waits while strong handles exist");
+    Check(registry.Evict(meshReference.GetPath()), "loaded resource accepts explicit eviction");
+    Check(registry.GetState(meshReference.GetPath()) == State::Evicting, "eviction waits while strong handles exist");
     Check(loaderHarness.destructions.GetValue() == 0, "eviction does not destroy a strongly referenced object");
     ResourceRequest revived = registry.Request(meshReference);
     ResourceHandle revivedStrong = revived.Acquire();
-    Check(revived.HasLoaded() && revivedStrong.IsValid() && loaderHarness.starts.GetValue() == 1 &&
-              registry.GetState(meshReference.Path()) == State::Loaded,
+    Check(revived.HasLoaded() && revivedStrong.IsValid() && loaderHarness.starts.GetValue() == 1 && registry.GetState(meshReference.GetPath()) == State::Loaded,
           "retained evicting dependency is reused without reloading");
-    Check(registry.Evict(meshReference.Path()), "reused retained resource accepts deferred eviction");
+    Check(registry.Evict(meshReference.GetPath()), "reused retained resource accepts deferred eviction");
     ResourceHandle weakLock = weak.Lock();
     Check(weakLock.IsValid(), "weak handle locks while deferred eviction keeps object alive");
 
-    const u32 firstGeneration = strong.Generation();
+    const u32 firstGeneration = strong.GetGeneration();
     strongCopy.Reset();
     strong.Reset();
     weakLock.Reset();
     revivedStrong.Reset();
     revived.Reset();
-    Check(registry.GetState(meshReference.Path()) == State::Unloaded, "last strong release finishes deferred eviction");
+    Check(registry.GetState(meshReference.GetPath()) == State::Unloaded, "last strong release finishes deferred eviction");
     Check(loaderHarness.destructions.GetValue() == 1, "resource destruction occurs exactly once");
     Check(weak.IsStale() && !weak.Lock(), "old weak handles cannot cross an eviction generation");
     Check(!requests[0].Acquire(), "old completion tokens cannot acquire a later generation");
 
     ResourceRequest reloaded = registry.Request(meshReference);
-    Check(loaderHarness.starts.GetValue() == 2 && reloaded.Status() == State::Loading, "unloaded resource starts a new explicit operation");
+    Check(loaderHarness.starts.GetValue() == 2 && reloaded.GetStatus() == State::Loading, "unloaded resource starts a new explicit operation");
     TestResource* secondResource = VANGUARD_NEW(TestResource)(meshType, 22);
     Check(registry.Publish(reloaded, secondResource), "new generation publishes successfully");
     ResourceHandle secondStrong = reloaded.Acquire();
-    Check(secondStrong.IsValid() && secondStrong.Generation() != firstGeneration, "reloaded resource receives a new generation");
-    Check(registry.Evict(meshReference.Path()), "reloaded resource can be evicted");
+    Check(secondStrong.IsValid() && secondStrong.GetGeneration() != firstGeneration, "reloaded resource receives a new generation");
+    Check(registry.Evict(meshReference.GetPath()), "reloaded resource can be evicted");
     secondStrong.Reset();
     Check(loaderHarness.destructions.GetValue() == 2, "reloaded object follows the same destruction contract");
 
@@ -229,8 +222,7 @@ int main()
     ResourceRequest cancelled = registry.Request(cancelledReference);
     Check(registry.Cancel(cancelled), "in-flight request accepts explicit cancellation");
     cancelled.Wait();
-    Check(cancelled.Status() == State::Cancelled && cancelled.Error() == Failure::Cancelled,
-          "cancelled request reports cancellation as failure");
+    Check(cancelled.GetStatus() == State::Cancelled && cancelled.GetError() == Failure::Cancelled, "cancelled request reports cancellation as failure");
     TestResource* lateResource = VANGUARD_NEW(TestResource)(meshType, 33);
     Check(!registry.Publish(cancelled, lateResource), "late publication after cancellation is rejected");
     VANGUARD_DELETE(lateResource);
@@ -239,15 +231,14 @@ int main()
     Check(loaderHarness.starts.GetValue() == 4, "retry after cancellation starts a distinct operation");
     Check(registry.Fail(failed, Failure::IoFailure), "loader can explicitly fail an in-flight request");
     failed.Wait();
-    Check(failed.Status() == State::Failed && failed.Error() == Failure::IoFailure, "failure reason is shared by request observers");
+    Check(failed.GetStatus() == State::Failed && failed.GetError() == Failure::IoFailure, "failure reason is shared by request observers");
 
     const ResourceTypeId unknownType = HashTypeName("vanguard.unknown");
     ResourceRequest unknown = registry.Request(ResourceReference(ResourcePath::FromString("unknown/object.vunknown"), unknownType));
-    Check(unknown.HasFailed() && unknown.Error() == Failure::UnknownType, "unregistered resource types fail without invoking a loader");
+    Check(unknown.HasFailed() && unknown.GetError() == Failure::UnknownType, "unregistered resource types fail without invoking a loader");
 
     const RegistryStats registryStats = registry.GetStats();
-    Check(registryStats.registeredLoaders == 1 && registryStats.knownResources == 2,
-          "registry statistics expose loaders and known resources");
+    Check(registryStats.registeredLoaders == 1 && registryStats.knownResources == 2, "registry statistics expose loaders and known resources");
     Check(registryStats.coalescedRequests == requestThreadCount, "registry statistics expose request coalescing");
     Check(registry.UnregisterLoader(meshType), "loader unregisters after live work and objects are gone");
     Check(!registry.HasLoader(meshType), "unregistered loader is no longer discoverable");

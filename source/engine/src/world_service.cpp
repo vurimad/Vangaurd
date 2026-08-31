@@ -16,23 +16,30 @@ namespace
         using Result = vanguard::world::Result;
         switch (result)
         {
-        case Result::Success: return Failure::None;
+        case Result::Success:
+            return Failure::None;
         case Result::InvalidMagic:
-        case Result::IntegrityFailure: return Failure::IntegrityFailure;
-        case Result::UnsupportedVersion: return Failure::UnsupportedVersion;
-        case Result::IoFailure: return Failure::IoFailure;
-        case Result::InvalidReference: return Failure::DependencyFailure;
-        case Result::LimitExceeded: return Failure::OutOfMemory;
-        default: return Failure::DeserializationFailure;
+        case Result::IntegrityFailure:
+            return Failure::IntegrityFailure;
+        case Result::UnsupportedVersion:
+            return Failure::UnsupportedVersion;
+        case Result::IoFailure:
+            return Failure::IoFailure;
+        case Result::InvalidReference:
+            return Failure::DependencyFailure;
+        case Result::LimitExceeded:
+            return Failure::OutOfMemory;
+        default:
+            return Failure::DeserializationFailure;
         }
     }
 
-    [[nodiscard]] vanguard::resources::ResourceObject* DecodeWorld(
-        const vanguard::resources::ResourceReference, const void* const data, const vanguard::usize size,
-        const vanguard::resources::LoadContext&, vanguard::resources::Failure& failure, void*) noexcept
+    [[nodiscard]] vanguard::resources::ResourceObject* DecodeWorld(const vanguard::resources::ResourceReference, const void* const data,
+                                                                   const vanguard::usize size, const vanguard::resources::LoadContext&,
+                                                                   vanguard::resources::Failure& failure, void*) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::World, sizeof(vanguard::world::WorldResource), alignof(vanguard::world::WorldResource));
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::World, sizeof(vanguard::world::WorldResource), alignof(vanguard::world::WorldResource));
         if (!block)
         {
             failure = vanguard::resources::Failure::OutOfMemory;
@@ -41,7 +48,8 @@ namespace
 
         auto* const resource = ::new (block.address) vanguard::world::WorldResource();
         const vanguard::world::Result result = resource->Open(data, size);
-        if (result == vanguard::world::Result::Success) return resource;
+        if (result == vanguard::world::Result::Success)
+            return resource;
 
         resource->~WorldResource();
         vanguard::memory::Free(block);
@@ -51,10 +59,10 @@ namespace
 
     void DestroyWorld(vanguard::resources::ResourceObject* const object, void*) noexcept
     {
-        if (object == nullptr) return;
+        if (object == nullptr)
+            return;
         static_cast<vanguard::world::WorldResource*>(object)->~WorldResource();
-        vanguard::memory::MemoryBlock block{
-            object, sizeof(vanguard::world::WorldResource), vanguard::memory::PoolId::World};
+        vanguard::memory::MemoryBlock block{object, sizeof(vanguard::world::WorldResource), vanguard::memory::PoolId::World};
         vanguard::memory::Free(block);
     }
 
@@ -63,12 +71,13 @@ namespace
     public:
         [[nodiscard]] bool BeginWorld(const vanguard::resources::ResourceReference reference) noexcept override
         {
-            if (m_status != vanguard::engine::WorldResourceStatus::Idle || m_streaming == nullptr ||
-                !reference.IsValid() || reference.ExpectedType() != vanguard::world::WorldResourceType)
+            if (m_status != vanguard::engine::WorldResourceStatus::Idle || m_streaming == nullptr || !reference.IsValid() ||
+                reference.ExpectedType() != vanguard::world::WorldResourceType)
                 return false;
 
-            m_request = m_streaming->Streamer().Request(reference, vanguard::resources::LoadPriority::Critical);
-            if (!m_request.IsValid()) return false;
+            m_request = m_streaming->GetStreamer().Request(reference, vanguard::resources::LoadPriority::Critical);
+            if (!m_request.IsValid())
+                return false;
             m_status = vanguard::engine::WorldResourceStatus::Loading;
             m_failure = vanguard::resources::Failure::None;
             return true;
@@ -76,10 +85,11 @@ namespace
 
         [[nodiscard]] vanguard::engine::WorldResourceStatus PollWorld() noexcept override
         {
-            if (m_status != vanguard::engine::WorldResourceStatus::Loading || !m_request.HasFinished()) return m_status;
+            if (m_status != vanguard::engine::WorldResourceStatus::Loading || !m_request.HasFinished())
+                return m_status;
             if (!m_request.HasLoaded())
             {
-                m_failure = m_request.Error();
+                m_failure = m_request.GetError();
                 m_request.Reset();
                 m_status = vanguard::engine::WorldResourceStatus::Failed;
                 return m_status;
@@ -87,7 +97,7 @@ namespace
 
             m_resource = m_request.Acquire();
             m_request.Reset();
-            if (!m_resource.IsValid() || m_resource.Get()->Type() != vanguard::world::WorldResourceType)
+            if (!m_resource.IsValid() || m_resource.Get()->GetType() != vanguard::world::WorldResourceType)
             {
                 m_resource = {};
                 m_failure = vanguard::resources::Failure::InternalError;
@@ -96,10 +106,12 @@ namespace
             }
 
             const auto* const resource = static_cast<const vanguard::world::WorldResource*>(m_resource.Get());
-            if (!m_grid.Initialize(resource->File()) || !m_executor.Initialize(m_grid, m_resources->Pipeline()))
+            if (!m_grid.Initialize(resource->GetFile()) || !m_executor.Initialize(m_grid, m_resources->GetPipeline()))
             {
-                if (m_executor.IsInitialized()) static_cast<void>(m_executor.Shutdown());
-                if (m_grid.IsInitialized()) static_cast<void>(m_grid.Shutdown());
+                if (m_executor.IsInitialized())
+                    static_cast<void>(m_executor.Shutdown());
+                if (m_grid.IsInitialized())
+                    static_cast<void>(m_grid.Shutdown());
                 m_resource = {};
                 m_failure = vanguard::resources::Failure::OutOfMemory;
                 m_status = vanguard::engine::WorldResourceStatus::Failed;
@@ -112,7 +124,8 @@ namespace
 
         [[nodiscard]] bool CancelWorld() noexcept override
         {
-            if (m_status != vanguard::engine::WorldResourceStatus::Loading) return false;
+            if (m_status != vanguard::engine::WorldResourceStatus::Loading)
+                return false;
             static_cast<void>(m_request.Cancel());
             m_request.Reset();
             m_status = vanguard::engine::WorldResourceStatus::Idle;
@@ -122,28 +135,37 @@ namespace
 
         [[nodiscard]] bool ReleaseWorld() noexcept override
         {
-            if (m_status == vanguard::engine::WorldResourceStatus::Loading) return CancelWorld();
-            if (m_status == vanguard::engine::WorldResourceStatus::Idle) return true;
-            if (m_executor.IsInitialized() && !m_executor.Shutdown()) return false;
-            if (m_grid.IsInitialized() && !m_grid.Shutdown()) return false;
+            if (m_status == vanguard::engine::WorldResourceStatus::Loading)
+                return CancelWorld();
+            if (m_status == vanguard::engine::WorldResourceStatus::Idle)
+                return true;
+            if (m_executor.IsInitialized() && !m_executor.Shutdown())
+                return false;
+            if (m_grid.IsInitialized() && !m_grid.Shutdown())
+                return false;
             m_resource = {};
             m_failure = vanguard::resources::Failure::None;
             m_status = vanguard::engine::WorldResourceStatus::Idle;
             return true;
         }
 
-        [[nodiscard]] vanguard::engine::WorldResourceStatus Status() const noexcept override { return m_status; }
-        [[nodiscard]] vanguard::resources::Failure LastFailure() const noexcept override { return m_failure; }
-        [[nodiscard]] const vanguard::world::WorldResource* Resource() const noexcept override
+        [[nodiscard]] vanguard::engine::WorldResourceStatus GetStatus() const noexcept override
         {
-            return m_status == vanguard::engine::WorldResourceStatus::Ready
-                ? static_cast<const vanguard::world::WorldResource*>(m_resource.Get()) : nullptr;
+            return m_status;
         }
-        [[nodiscard]] vanguard::world::WorldStreamingGrid* Grid() noexcept override
+        [[nodiscard]] vanguard::resources::Failure GetLastFailure() const noexcept override
+        {
+            return m_failure;
+        }
+        [[nodiscard]] const vanguard::world::WorldResource* GetResource() const noexcept override
+        {
+            return m_status == vanguard::engine::WorldResourceStatus::Ready ? static_cast<const vanguard::world::WorldResource*>(m_resource.Get()) : nullptr;
+        }
+        [[nodiscard]] vanguard::world::WorldStreamingGrid* GetGrid() noexcept override
         {
             return m_grid.IsInitialized() ? &m_grid : nullptr;
         }
-        [[nodiscard]] vanguard::world::WorldStreamingExecutor* Executor() noexcept override
+        [[nodiscard]] vanguard::world::WorldStreamingExecutor* GetExecutor() noexcept override
         {
             return m_executor.IsInitialized() ? &m_executor : nullptr;
         }
@@ -155,8 +177,7 @@ namespace
             m_resources = vanguard::engine::FindResourcesService(context);
             if (m_streaming == nullptr || m_resources == nullptr)
                 return app::LifecycleStatus::Failure("World dependencies are not running");
-            if (!m_streaming->Streamer().RegisterDecoder(
-                    {vanguard::world::WorldResourceType, "Vanguard world", &DecodeWorld, &DestroyWorld, nullptr}))
+            if (!m_streaming->GetStreamer().RegisterDecoder({vanguard::world::WorldResourceType, "Vanguard world", &DecodeWorld, &DestroyWorld, nullptr}))
                 return app::LifecycleStatus::Failure("World decoder registration failed");
             m_decoderRegistered = true;
             return app::LifecycleStatus::Success();
@@ -165,15 +186,15 @@ namespace
         app::LifecycleStatus OnQuiesce(app::ServiceContext&) noexcept override
         {
             return m_status == vanguard::engine::WorldResourceStatus::Idle
-                ? app::LifecycleStatus::Success()
-                : app::LifecycleStatus::Failure("Startup world must be explicitly released before World shutdown");
+                       ? app::LifecycleStatus::Success()
+                       : app::LifecycleStatus::Failure("Startup world must be explicitly released before World shutdown");
         }
 
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
         {
             if (m_status != vanguard::engine::WorldResourceStatus::Idle || m_grid.IsInitialized() || m_executor.IsInitialized())
                 return app::LifecycleStatus::Failure("World runtime state remains live during shutdown");
-            if (m_decoderRegistered && !m_streaming->Streamer().UnregisterDecoder(vanguard::world::WorldResourceType))
+            if (m_decoderRegistered && !m_streaming->GetStreamer().UnregisterDecoder(vanguard::world::WorldResourceType))
                 return app::LifecycleStatus::Failure("World decoder unregistration failed");
             m_decoderRegistered = false;
             m_streaming = nullptr;
@@ -195,28 +216,27 @@ namespace
 
     app::Service* CreateWorldService(void*) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::World, sizeof(ManagedWorldService), alignof(ManagedWorldService));
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::World, sizeof(ManagedWorldService), alignof(ManagedWorldService));
         return block ? ::new (block.address) ManagedWorldService() : nullptr;
     }
 
     void DestroyWorldService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<ManagedWorldService*>(service)->~ManagedWorldService();
-        vanguard::memory::MemoryBlock block{
-            service, sizeof(ManagedWorldService), vanguard::memory::PoolId::World};
+        vanguard::memory::MemoryBlock block{service, sizeof(ManagedWorldService), vanguard::memory::PoolId::World};
         vanguard::memory::Free(block);
     }
-}
+} // namespace
 
 namespace vanguard::engine
 {
     bool RegisterWorldService(application::EngineHost& host, application::HostFailure* const failure) noexcept
     {
-        constexpr application::ServiceDependency dependencies[]{
-            {ResourceStreamingServiceId, application::DependencyKind::Required},
-            {ResourcesServiceId, application::DependencyKind::Required}};
+        constexpr application::ServiceDependency dependencies[]{{ResourceStreamingServiceId, application::DependencyKind::Required},
+                                                                {ResourcesServiceId, application::DependencyKind::Required}};
         constexpr application::CapabilityId providedCapabilities[]{WorldCapabilityId};
         application::ServiceDescriptor descriptor;
         descriptor.id = WorldServiceId;

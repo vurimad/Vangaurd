@@ -65,65 +65,49 @@ namespace
     constexpr reflection::SchemaTypeId BlendType = reflection::HashSchemaName("vanguard.test.blend_mode");
 
     const reflection::SchemaField UvFields[] = {
-        reflection::MakeField("scale_v", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(UvTransform, scaleV),
-                              sizeof(UvTransform::scaleV), alignof(decltype(UvTransform::scaleV))),
-        reflection::MakeField("scale_u", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(UvTransform, scaleU),
-                              sizeof(UvTransform::scaleU), alignof(decltype(UvTransform::scaleU)))};
+        reflection::MakeField("scale_v", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(UvTransform, scaleV), sizeof(UvTransform::scaleV),
+                              alignof(decltype(UvTransform::scaleV))),
+        reflection::MakeField("scale_u", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(UvTransform, scaleU), sizeof(UvTransform::scaleU),
+                              alignof(decltype(UvTransform::scaleU)))};
 
     const reflection::Schema UvSchema{UvType,   "vanguard.test.uv_transform",         sizeof(UvTransform), alignof(UvTransform), 1, 1,
                                       UvFields, static_cast<u32>(std::size(UvFields))};
 
     const reflection::SchemaField MaterialFields[] = {
         reflection::MakeField("roughness", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(MaterialData, roughness),
-                              sizeof(MaterialData::roughness), alignof(decltype(MaterialData::roughness)), 1, 0,
-                              reflection::FieldFlags::Required),
-        reflection::MakeField("normal", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                              offsetof(MaterialData, normal), sizeof(MaterialData::normal), alignof(decltype(MaterialData::normal)), 1, 0,
-                              reflection::FieldFlags::OptionalDependency),
+                              sizeof(MaterialData::roughness), alignof(decltype(MaterialData::roughness)), 1, 0, reflection::FieldFlags::Required),
+        reflection::MakeField("normal", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference, offsetof(MaterialData, normal),
+                              sizeof(MaterialData::normal), alignof(decltype(MaterialData::normal)), 1, 0, reflection::FieldFlags::OptionalDependency),
         reflection::MakeField("runtime_cache", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(MaterialData, runtimeCache),
-                              sizeof(MaterialData::runtimeCache), alignof(decltype(MaterialData::runtimeCache)), 1, 0,
-                              reflection::FieldFlags::Transient),
-        reflection::MakeField("base_color", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                              offsetof(MaterialData, baseColor), sizeof(MaterialData::baseColor),
-                              alignof(decltype(MaterialData::baseColor)), 1, 0, reflection::FieldFlags::Required),
-        reflection::MakeField("editor_label", reflection::builtin::String, reflection::ValueKind::String,
-                              offsetof(MaterialData, editorLabel), sizeof(MaterialData::editorLabel),
-                              alignof(decltype(MaterialData::editorLabel)), 2, 0, reflection::FieldFlags::EditorOnly),
+                              sizeof(MaterialData::runtimeCache), alignof(decltype(MaterialData::runtimeCache)), 1, 0, reflection::FieldFlags::Transient),
+        reflection::MakeField("base_color", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference, offsetof(MaterialData, baseColor),
+                              sizeof(MaterialData::baseColor), alignof(decltype(MaterialData::baseColor)), 1, 0, reflection::FieldFlags::Required),
+        reflection::MakeField("editor_label", reflection::builtin::String, reflection::ValueKind::String, offsetof(MaterialData, editorLabel),
+                              sizeof(MaterialData::editorLabel), alignof(decltype(MaterialData::editorLabel)), 2, 0, reflection::FieldFlags::EditorOnly),
         reflection::MakeField("uv", UvType, reflection::ValueKind::Structure, offsetof(MaterialData, uv), sizeof(MaterialData::uv),
                               alignof(decltype(MaterialData::uv))),
         reflection::MakeField("metallic", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(MaterialData, metallic),
                               sizeof(MaterialData::metallic), alignof(decltype(MaterialData::metallic)), 2),
-        reflection::MakeField("shader", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                              offsetof(MaterialData, shader), sizeof(MaterialData::shader), alignof(decltype(MaterialData::shader)), 1, 0,
-                              reflection::FieldFlags::SoftDependency),
-        reflection::MakeField("blend", BlendType, reflection::ValueKind::Enumeration, offsetof(MaterialData, blend),
-                              sizeof(MaterialData::blend), alignof(decltype(MaterialData::blend))),
-        schemas::MakeDynamicArrayField<f32>("layer_weights", reflection::builtin::F32, reflection::ValueKind::F32,
-                                            offsetof(MaterialData, layerWeights)),
-        schemas::MakeDynamicArrayField<resources::ResourceReference>(
-            "detail_textures", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-            offsetof(MaterialData, detailTextures), 1, 0, reflection::FieldFlags::OptionalDependency),
-        schemas::MakeDynamicArrayField<UvTransform>("uv_variants", UvType, reflection::ValueKind::Structure,
-                                                    offsetof(MaterialData, uvVariants))};
+        reflection::MakeField("shader", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference, offsetof(MaterialData, shader),
+                              sizeof(MaterialData::shader), alignof(decltype(MaterialData::shader)), 1, 0, reflection::FieldFlags::SoftDependency),
+        reflection::MakeField("blend", BlendType, reflection::ValueKind::Enumeration, offsetof(MaterialData, blend), sizeof(MaterialData::blend),
+                              alignof(decltype(MaterialData::blend))),
+        schemas::MakeDynamicArrayField<f32>("layer_weights", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(MaterialData, layerWeights)),
+        schemas::MakeDynamicArrayField<resources::ResourceReference>("detail_textures", reflection::builtin::ResourceReference,
+                                                                     reflection::ValueKind::ResourceReference, offsetof(MaterialData, detailTextures), 1, 0,
+                                                                     reflection::FieldFlags::OptionalDependency),
+        schemas::MakeDynamicArrayField<UvTransform>("uv_variants", UvType, reflection::ValueKind::Structure, offsetof(MaterialData, uvVariants))};
 
-    const reflection::Schema MaterialSchema{MaterialType,
-                                            "vanguard.test.material",
-                                            sizeof(MaterialData),
-                                            alignof(MaterialData),
-                                            2,
-                                            1,
-                                            MaterialFields,
-                                            static_cast<u32>(std::size(MaterialFields))};
+    const reflection::Schema MaterialSchema{
+        MaterialType, "vanguard.test.material", sizeof(MaterialData), alignof(MaterialData), 2, 1, MaterialFields, static_cast<u32>(std::size(MaterialFields))};
 
     const reflection::SchemaField LegacyMaterialFields[] = {
         reflection::MakeField("retired_value", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(MaterialData, runtimeCache),
                               sizeof(MaterialData::runtimeCache), alignof(decltype(MaterialData::runtimeCache))),
-        reflection::MakeField("base_color", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                              offsetof(MaterialData, baseColor), sizeof(MaterialData::baseColor),
-                              alignof(decltype(MaterialData::baseColor)), 1, 0, reflection::FieldFlags::Required),
+        reflection::MakeField("base_color", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference, offsetof(MaterialData, baseColor),
+                              sizeof(MaterialData::baseColor), alignof(decltype(MaterialData::baseColor)), 1, 0, reflection::FieldFlags::Required),
         reflection::MakeField("roughness", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(MaterialData, roughness),
-                              sizeof(MaterialData::roughness), alignof(decltype(MaterialData::roughness)), 1, 0,
-                              reflection::FieldFlags::Required)};
+                              sizeof(MaterialData::roughness), alignof(decltype(MaterialData::roughness)), 1, 0, reflection::FieldFlags::Required)};
 
     const reflection::Schema LegacyMaterialSchema{MaterialType,
                                                   "vanguard.test.material",
@@ -141,8 +125,7 @@ namespace
 
     using ByteArray = containers::DynamicArray<u8>;
 
-    schemas::Result WriteToMemory(const reflection::Schema& schema, const MaterialData& material, ByteArray& output,
-                                  const bool editorData = false)
+    schemas::Result WriteToMemory(const reflection::Schema& schema, const MaterialData& material, ByteArray& output, const bool editorData = false)
     {
         output.Clear();
         filesystem::MemoryFileWriter file(output);
@@ -157,8 +140,8 @@ namespace
         return result;
     }
 
-    schemas::Result ReadFromMemory(const reflection::Schema& schema, ByteArray& bytes, MaterialData& material,
-                                   schemas::ReadInfo* const info = nullptr, const schemas::ReadLimits& limits = {})
+    schemas::Result ReadFromMemory(const reflection::Schema& schema, ByteArray& bytes, MaterialData& material, schemas::ReadInfo* const info = nullptr,
+                                   const schemas::ReadLimits& limits = {})
     {
         filesystem::MemoryFileReader file(bytes, 0);
         vanguard::serialization::BinaryReader reader(file);
@@ -231,19 +214,13 @@ int main()
     Check(reflection::RegisterSchema(MaterialSchema), "material schema registration");
     Check(!reflection::RegisterSchema(MaterialSchema), "duplicate schema rejection");
     Check(reflection::FindSchema(MaterialType) == &MaterialSchema && reflection::FindSchema("vanguard.test.material") == &MaterialSchema &&
-              reflection::SchemaCount() == 2,
+              reflection::GetSchemaCount() == 2,
           "schema lookup and inspection");
     {
         reflection::SchemaField invalidField = MaterialFields[0];
         invalidField.offset = 1;
-        const reflection::Schema invalidSchema{reflection::HashSchemaName("vanguard.test.invalid"),
-                                               "vanguard.test.invalid",
-                                               sizeof(MaterialData),
-                                               alignof(MaterialData),
-                                               1,
-                                               1,
-                                               &invalidField,
-                                               1};
+        const reflection::Schema invalidSchema{
+            reflection::HashSchemaName("vanguard.test.invalid"), "vanguard.test.invalid", sizeof(MaterialData), alignof(MaterialData), 1, 1, &invalidField, 1};
         Check(!reflection::RegisterSchema(invalidSchema), "misaligned reflected field rejection");
     }
 
@@ -261,10 +238,8 @@ int main()
     source.runtimeCache = 0xdeadbeefu;
     source.layerWeights.PushBack(0.25f);
     source.layerWeights.PushBack(0.75f);
-    source.detailTextures.PushBack(
-        resources::ResourceReference(resources::ResourcePath::FromString("textures/stone_detail_a.vtex"), textureType));
-    source.detailTextures.PushBack(
-        resources::ResourceReference(resources::ResourcePath::FromString("textures/stone_detail_b.vtex"), textureType));
+    source.detailTextures.PushBack(resources::ResourceReference(resources::ResourcePath::FromString("textures/stone_detail_a.vtex"), textureType));
+    source.detailTextures.PushBack(resources::ResourceReference(resources::ResourcePath::FromString("textures/stone_detail_b.vtex"), textureType));
     source.uvVariants.PushBack({4.0f, 5.0f});
     source.uvVariants.PushBack({6.0f, 7.0f});
 
@@ -278,10 +253,8 @@ int main()
         filesystem::MemoryFileWriter file(prefixed);
         vanguard::serialization::BinaryWriter writer(file);
         constexpr u8 prefix[3]{1, 2, 3};
-        Check(writer.WriteBytes(prefix, sizeof(prefix)) &&
-                  schemas::WriteObject(writer, MaterialSchema, &source) == schemas::Result::Success &&
-                  prefixed.Size() == first.Size() + sizeof(prefix) &&
-                  std::memcmp(prefixed.TypedData() + sizeof(prefix), first.TypedData(), first.Size()) == 0,
+        Check(writer.WriteBytes(prefix, sizeof(prefix)) && schemas::WriteObject(writer, MaterialSchema, &source) == schemas::Result::Success &&
+                  prefixed.Size() == first.Size() + sizeof(prefix) && std::memcmp(prefixed.TypedData() + sizeof(prefix), first.TypedData(), first.Size()) == 0,
               "VOBJ bytes are independent of containing-file offset");
     }
 
@@ -290,12 +263,12 @@ int main()
     loaded.runtimeCache = 77;
     schemas::ReadInfo info;
     Check(ReadFromMemory(MaterialSchema, first, loaded, &info) == schemas::Result::Success, "current material object deserialization");
-    Check(loaded.baseColor == source.baseColor && loaded.normal == source.normal && loaded.shader == source.shader &&
-              loaded.uv.scaleU == source.uv.scaleU && loaded.uv.scaleV == source.uv.scaleV && loaded.roughness == source.roughness &&
-              loaded.metallic == source.metallic && loaded.blend == source.blend && loaded.layerWeights.Size() == 2 &&
-              loaded.layerWeights[0] == 0.25f && loaded.layerWeights[1] == 0.75f && loaded.detailTextures.Size() == 2 &&
-              loaded.detailTextures[0] == source.detailTextures[0] && loaded.detailTextures[1] == source.detailTextures[1] &&
-              loaded.uvVariants.Size() == 2 && loaded.uvVariants[1].scaleU == 6.0f && loaded.uvVariants[1].scaleV == 7.0f,
+    Check(loaded.baseColor == source.baseColor && loaded.normal == source.normal && loaded.shader == source.shader && loaded.uv.scaleU == source.uv.scaleU &&
+              loaded.uv.scaleV == source.uv.scaleV && loaded.roughness == source.roughness && loaded.metallic == source.metallic &&
+              loaded.blend == source.blend && loaded.layerWeights.Size() == 2 && loaded.layerWeights[0] == 0.25f && loaded.layerWeights[1] == 0.75f &&
+              loaded.detailTextures.Size() == 2 && loaded.detailTextures[0] == source.detailTextures[0] &&
+              loaded.detailTextures[1] == source.detailTextures[1] && loaded.uvVariants.Size() == 2 && loaded.uvVariants[1].scaleU == 6.0f &&
+              loaded.uvVariants[1].scaleV == 7.0f,
           "primitive, enum, nested, array, and resource fields round trip");
     Check(loaded.editorLabel == "default label" && loaded.runtimeCache == 77, "excluded editor and transient fields retain defaults");
     Check(info.sourceSchemaVersion == 2 && info.unknownFieldsSkipped == 0, "reader reports source schema metadata");
@@ -303,8 +276,7 @@ int main()
     ByteArray editorBytes(memory::pools::Serialization::GetInstance());
     MaterialData editorLoaded;
     Check(WriteToMemory(MaterialSchema, source, editorBytes, true) == schemas::Result::Success &&
-              ReadFromMemory(MaterialSchema, editorBytes, editorLoaded) == schemas::Result::Success &&
-              editorLoaded.editorLabel == source.editorLabel,
+              ReadFromMemory(MaterialSchema, editorBytes, editorLoaded) == schemas::Result::Success && editorLoaded.editorLabel == source.editorLabel,
           "editor fields use the same schema with an explicit flag");
 
     ByteArray legacy(memory::pools::Serialization::GetInstance());
@@ -321,8 +293,7 @@ int main()
           "missing fields keep defaults and removed fields are skipped");
 
     Dependencies dependencies;
-    Check(schemas::VisitDependencies(MaterialSchema, &source, &CollectDependency, &dependencies) == schemas::Result::Success &&
-              dependencies.count == 5,
+    Check(schemas::VisitDependencies(MaterialSchema, &source, &CollectDependency, &dependencies) == schemas::Result::Success && dependencies.count == 5,
           "reflected resource dependencies are gathered");
     bool hasRequired = false;
     bool hasOptional = false;
@@ -360,8 +331,7 @@ int main()
         ByteArray mismatch(first);
         StoreU64(mismatch, schemas::ObjectHeader::WireSize + 8, reflection::builtin::U64);
         MaterialData output;
-        Check(ReadFromMemory(MaterialSchema, mismatch, output) == schemas::Result::FieldMismatch,
-              "persisted field type mismatch rejection");
+        Check(ReadFromMemory(MaterialSchema, mismatch, output) == schemas::Result::FieldMismatch, "persisted field type mismatch rejection");
     }
     {
         ByteArray padding(first);
@@ -381,8 +351,7 @@ int main()
             }
         }
         MaterialData output;
-        Check(changed && ReadFromMemory(MaterialSchema, padding, output) == schemas::Result::InvalidLayout,
-              "nonzero alignment padding rejection");
+        Check(changed && ReadFromMemory(MaterialSchema, padding, output) == schemas::Result::InvalidLayout, "nonzero alignment padding rejection");
     }
     {
         ByteArray missing(memory::pools::Serialization::GetInstance());
@@ -402,8 +371,7 @@ int main()
         vanguard::serialization::BinaryWriter writer(file);
         schemas::WriteOptions options;
         options.maximumArrayElements = 1;
-        Check(schemas::WriteObject(writer, MaterialSchema, &source, options) == schemas::Result::LimitExceeded,
-              "writer array-element limit");
+        Check(schemas::WriteObject(writer, MaterialSchema, &source, options) == schemas::Result::LimitExceeded, "writer array-element limit");
     }
     {
         ByteArray limited(memory::pools::Serialization::GetInstance());
@@ -418,19 +386,16 @@ int main()
         schemas::ReadLimits limits;
         limits.maximumArrayElements = 1;
         MaterialData output;
-        Check(ReadFromMemory(MaterialSchema, first, output, nullptr, limits) == schemas::Result::LimitExceeded,
-              "reader array-element limit");
+        Check(ReadFromMemory(MaterialSchema, first, output, nullptr, limits) == schemas::Result::LimitExceeded, "reader array-element limit");
     }
     {
         schemas::ReadLimits limits;
         limits.maximumNestingDepth = 0;
         MaterialData output;
-        Check(ReadFromMemory(MaterialSchema, first, output, nullptr, limits) == schemas::Result::LimitExceeded,
-              "reader nesting-depth limit");
+        Check(ReadFromMemory(MaterialSchema, first, output, nullptr, limits) == schemas::Result::LimitExceeded, "reader nesting-depth limit");
     }
 
-    Check(reflection::UnregisterSchema(MaterialType) && reflection::UnregisterSchema(UvType) && reflection::SchemaCount() == 0,
-          "schema registry teardown");
+    Check(reflection::UnregisterSchema(MaterialType) && reflection::UnregisterSchema(UvType) && reflection::GetSchemaCount() == 0, "schema registry teardown");
 
     diagnostics::Shutdown();
     if (g_failures == 0)

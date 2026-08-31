@@ -64,8 +64,8 @@ namespace
             return false;
         for (const char character : name)
         {
-            if (static_cast<u8>(character) < 0x20u || character == '/' || character == '\\' || character == ':' || character == '*' ||
-                character == '?' || character == '"' || character == '<' || character == '>' || character == '|')
+            if (static_cast<u8>(character) < 0x20u || character == '/' || character == '\\' || character == ':' || character == '*' || character == '?' ||
+                character == '"' || character == '<' || character == '>' || character == '|')
                 return false;
         }
         return true;
@@ -188,8 +188,7 @@ namespace
     }
 
     [[nodiscard]] nano::ExitCode ReportProjectFailure(nano::Output& output, const nano::OutputFormat format, const char* const operation,
-                                                      const char* const message,
-                                                      const projects::Diagnostic* const diagnostic = nullptr) noexcept
+                                                      const char* const message, const projects::Diagnostic* const diagnostic = nullptr) noexcept
     {
         containers::String line;
         if (format == nano::OutputFormat::JsonLines)
@@ -224,8 +223,7 @@ namespace
         return output.Write(line.AsChar(), line.Length()) ? nano::ExitCode::InvalidProject : nano::ExitCode::InternalFailure;
     }
 
-    [[nodiscard]] bool LoadProject(const ResolvedProject& resolved, projects::ProjectDescriptor& project,
-                                   projects::Diagnostic& diagnostic) noexcept
+    [[nodiscard]] bool LoadProject(const ResolvedProject& resolved, projects::ProjectDescriptor& project, projects::Diagnostic& diagnostic) noexcept
     {
         containers::String contents;
         if (!platform::ReadFile(resolved.file, contents))
@@ -236,8 +234,7 @@ namespace
         return projects::Parse(contents, project, &diagnostic) == projects::Result::Success;
     }
 
-    [[nodiscard]] bool ValidateLayout(const ResolvedProject& resolved, const projects::ProjectDescriptor& project,
-                                      containers::String& failure) noexcept
+    [[nodiscard]] bool ValidateLayout(const ResolvedProject& resolved, const projects::ProjectDescriptor& project, containers::String& failure) noexcept
     {
         const containers::String* roots[]{&project.assets, &project.derivedData, &project.intermediate, &project.saved,
                                           &project.builds, &project.config,      &project.pluginsRoot};
@@ -292,8 +289,7 @@ namespace
         if (explicitTechnicalName != nullptr)
             project.technicalName = explicitTechnicalName;
         else if (!DeriveTechnicalName(displayName, project.technicalName))
-            return ReportProjectFailure(output, invocation.Format(), "project create",
-                                        "could not derive a technical name; provide --technical-name");
+            return ReportProjectFailure(output, invocation.Format(), "project create", "could not derive a technical name; provide --technical-name");
         project.engine = {0, 1, 0, 0, 1, true, 0};
         if (!GenerateProjectId(project.id))
             return ReportProjectFailure(output, invocation.Format(), "project create", "secure project identity generation failed");
@@ -313,8 +309,7 @@ namespace
             return ReportProjectFailure(output, invocation.Format(), "project create",
                                         "the display name is not a safe default directory name; provide --destination");
         containers::String destination;
-        if (!platform::MakeAbsolutePath(destinationArgument != nullptr ? containers::StringView(destinationArgument) : displayName,
-                                        destination))
+        if (!platform::MakeAbsolutePath(destinationArgument != nullptr ? containers::StringView(destinationArgument) : displayName, destination))
             return ReportProjectFailure(output, invocation.Format(), "project create", "could not resolve destination path");
         if (platform::GetPathKind(destination) != platform::PathKind::Missing)
             return ReportProjectFailure(output, invocation.Format(), "project create", "destination already exists");
@@ -335,8 +330,7 @@ namespace
         if (!stagingCreated)
         {
             containers::String failure = containers::String::Printf(
-                "could not create private staging directory (pathKind=%u, systemError=%u): ", static_cast<u32>(stagingKind),
-                platform::GetLastErrorCode());
+                "could not create private staging directory (pathKind=%u, systemError=%u): ", static_cast<u32>(stagingKind), platform::GetLastErrorCode());
             failure.Append(staging);
             return ReportProjectFailure(output, invocation.Format(), "project create", failure.AsChar());
         }
@@ -366,8 +360,7 @@ namespace
         if (created)
         {
             filesystem::MemoryFileWriter writer(bytes);
-            created = projects::Write(writer, project, &diagnostic) == projects::Result::Success &&
-                      platform::WriteFileDurable(projectFile, bytes);
+            created = projects::Write(writer, project, &diagnostic) == projects::Result::Success && platform::WriteFileDurable(projectFile, bytes);
         }
 
         ResolvedProject staged;
@@ -426,8 +419,7 @@ namespace
             AppendJsonString(line, project.technicalName);
             line.Append(containers::StringView(",\"root\":"));
             AppendJsonString(line, resolved.root);
-            line.Append(
-                containers::String::Printf(",\"targetCount\":%u,\"pluginCount\":%u}\n", project.targets.Size(), project.plugins.Size()));
+            line.Append(containers::String::Printf(",\"targetCount\":%u,\"pluginCount\":%u}\n", project.targets.Size(), project.plugins.Size()));
         }
         else
         {
@@ -454,8 +446,7 @@ namespace
             return ReportProjectFailure(output, invocation.Format(), "project validate", "supported levels are document and layout");
         ResolvedProject resolved;
         if (!ResolveProject(invocation.Positional(0), resolved))
-            return ReportProjectFailure(output, invocation.Format(), "project validate",
-                                        "could not resolve exactly one .vproject document");
+            return ReportProjectFailure(output, invocation.Format(), "project validate", "could not resolve exactly one .vproject document");
         projects::ProjectDescriptor project;
         projects::Diagnostic diagnostic;
         if (!LoadProject(resolved, project, diagnostic))
@@ -499,8 +490,7 @@ namespace vanguard::nanovanguard
     bool RegisterProjectCommands(CommandRegistry& registry) noexcept
     {
         return registry.Register({"create", "project", "Create and atomically publish a Vanguard project.", "<name>", CreateOptions,
-                                  static_cast<u32>(sizeof(CreateOptions) / sizeof(CreateOptions[0])), 1, 1, &CreateProject}) ==
-                   RegistrationResult::Success &&
+                                  static_cast<u32>(sizeof(CreateOptions) / sizeof(CreateOptions[0])), 1, 1, &CreateProject}) == RegistrationResult::Success &&
                registry.Register({"inspect", "project", "Inspect a Vanguard project document.", "<project>", InspectOptions,
                                   static_cast<u32>(sizeof(InspectOptions) / sizeof(InspectOptions[0])), 1, 1, &InspectProject}) ==
                    RegistrationResult::Success &&

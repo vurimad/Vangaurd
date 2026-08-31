@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vanguard/system/cancellation.hpp>
 #include <vanguard/textures/textures.hpp>
 
 namespace vanguard::texture_tools
@@ -16,6 +17,7 @@ namespace vanguard::texture_tools
         InvalidSourceData,
         LimitExceeded,
         OutOfMemory,
+        Cancelled,
         CodecFailure,
         TextureWriteFailure
     };
@@ -69,7 +71,7 @@ namespace vanguard::texture_tools
         inline constexpr TextureCookingProfileId Data = 0x6461746100000001ull;
         inline constexpr TextureCookingProfileId Ui = 0x7569000000000001ull;
         inline constexpr TextureCookingProfileId Hdr = 0x6864720000000001ull;
-    }
+    } // namespace profiles
 
     enum class TextureCookingFlags : u16
     {
@@ -131,6 +133,7 @@ namespace vanguard::texture_tools
         u32 maximumDimension = 131072;
         u32 maximumSubresources = 1048576;
         u64 maximumOutputBytes = 16ull * 1024ull * 1024ull * 1024ull;
+        system::CancellationView cancellation;
     };
 
     struct CookReport
@@ -150,8 +153,16 @@ namespace vanguard::texture_tools
 
     [[nodiscard]] bool Initialize() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
+    struct TextureToolsConfigurationFingerprint
+    {
+        crypto::Digest256 profiles;
+        crypto::Digest256 importers;
+    };
+
+    /// Explicitly freezes profile/importer registration and returns their canonical identities.
+    [[nodiscard]] bool FreezeConfiguration(TextureToolsConfigurationFingerprint& fingerprint) noexcept;
     [[nodiscard]] ProfileRegistrationResult RegisterCookingProfile(const TextureCookingProfile& profile) noexcept;
     [[nodiscard]] const TextureCookingProfile* FindCookingProfile(TextureCookingProfileId id) noexcept;
-    [[nodiscard]] Result CookTexture(const SourceTexture& source, filesystem::IFile& output,
-                                     const CookSettings& settings = {}, CookReport* report = nullptr) noexcept;
+    [[nodiscard]] Result CookTexture(const SourceTexture& source, filesystem::IFile& output, const CookSettings& settings = {},
+                                     CookReport* report = nullptr) noexcept;
 } // namespace vanguard::texture_tools

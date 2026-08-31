@@ -28,8 +28,8 @@ namespace vanguard::serialization
 
     [[nodiscard]] constexpr u32 MakeFourCC(const char a, const char b, const char c, const char d) noexcept
     {
-        return static_cast<u32>(static_cast<u8>(a)) | (static_cast<u32>(static_cast<u8>(b)) << 8u) |
-               (static_cast<u32>(static_cast<u8>(c)) << 16u) | (static_cast<u32>(static_cast<u8>(d)) << 24u);
+        return static_cast<u32>(static_cast<u8>(a)) | (static_cast<u32>(static_cast<u8>(b)) << 8u) | (static_cast<u32>(static_cast<u8>(c)) << 16u) |
+               (static_cast<u32>(static_cast<u8>(d)) << 24u);
     }
 
     struct Version
@@ -57,11 +57,11 @@ namespace vanguard::serialization
     public:
         explicit BinaryReader(filesystem::IFile& file) noexcept;
 
-        [[nodiscard]] Result Status() const noexcept;
-        [[nodiscard]] bool Good() const noexcept;
+        [[nodiscard]] Result GetStatus() const noexcept;
+        [[nodiscard]] bool IsGood() const noexcept;
         [[nodiscard]] u64 Position() const noexcept;
         [[nodiscard]] u64 Size() const noexcept;
-        [[nodiscard]] u64 Remaining() const noexcept;
+        [[nodiscard]] u64 GetRemaining() const noexcept;
 
         [[nodiscard]] bool Seek(u64 position) noexcept;
         [[nodiscard]] bool Skip(u64 size) noexcept;
@@ -94,8 +94,8 @@ namespace vanguard::serialization
     public:
         explicit BinaryWriter(filesystem::IFile& file) noexcept;
 
-        [[nodiscard]] Result Status() const noexcept;
-        [[nodiscard]] bool Good() const noexcept;
+        [[nodiscard]] Result GetStatus() const noexcept;
+        [[nodiscard]] bool IsGood() const noexcept;
         [[nodiscard]] u64 Position() const noexcept;
         [[nodiscard]] u64 Size() const noexcept;
 
@@ -199,13 +199,12 @@ namespace vanguard::serialization
     };
 
     [[nodiscard]] Result WriteDocumentHeader(BinaryWriter& writer, const DocumentHeader& header) noexcept;
-    [[nodiscard]] Result ReadDocumentHeader(BinaryReader& reader, u32 expectedMagic, VersionRange supportedVersions,
-                                            const ReadLimits& limits, DocumentHeader& header) noexcept;
+    [[nodiscard]] Result ReadDocumentHeader(BinaryReader& reader, u32 expectedMagic, VersionRange supportedVersions, const ReadLimits& limits,
+                                            DocumentHeader& header) noexcept;
 
     [[nodiscard]] Result WriteSectionDescriptor(BinaryWriter& writer, const SectionDescriptor& section) noexcept;
     [[nodiscard]] Result ReadSectionTable(BinaryReader& reader, const DocumentHeader& header, const ReadLimits& limits,
                                           containers::DynamicArray<SectionDescriptor>& sections) noexcept;
 
-    [[nodiscard]] Result ValidateSectionChecksum(BinaryReader& reader, const SectionDescriptor& section, void* scratch,
-                                                 usize scratchSize) noexcept;
+    [[nodiscard]] Result ValidateSectionChecksum(BinaryReader& reader, const SectionDescriptor& section, void* scratch, usize scratchSize) noexcept;
 } // namespace vanguard::serialization

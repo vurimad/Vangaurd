@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/assets/asset_index.hpp>
+#include <vanguard/assets/derived_data_artifact_source.hpp>
 #include <vanguard/packages/packages.hpp>
 
 namespace vanguard::assets
@@ -105,8 +106,7 @@ namespace vanguard::assets
 
     [[nodiscard]] PackagingResult WritePackageManifest(filesystem::IFile& file, const PackageManifest& manifest,
                                                        const PackageManifestLimits& limits = {}) noexcept;
-    [[nodiscard]] PackagingResult ReadPackageManifest(filesystem::IFile& file, PackageManifest& manifest,
-                                                      const PackageManifestLimits& limits = {}) noexcept;
+    [[nodiscard]] PackagingResult ReadPackageManifest(filesystem::IFile& file, PackageManifest& manifest, const PackageManifestLimits& limits = {}) noexcept;
 
     struct PackagePlanLimits
     {
@@ -135,7 +135,7 @@ namespace vanguard::assets
 
         resources::ResourceReference resource;
         packages::ResourceFlags flags = packages::ResourceFlags::None;
-        BuildFingerprint contentFingerprint;
+        ArtifactSetKey origin;
         containers::DynamicArray<PlannedPackageSegment> segments;
         containers::DynamicArray<PlannedPackageDependency> dependencies;
     };
@@ -164,14 +164,15 @@ namespace vanguard::assets
 
     using ResolvePackagePathFunction = bool (*)(resources::ResourceReference resource, char* destination, usize capacity, usize& written,
                                                 void* userData) noexcept;
-    using ReadPackageArtifactFunction = bool (*)(const IndexedArtifact& artifact, containers::DynamicArray<u8>& bytes,
+    using ReadPackageArtifactFunction = bool (*)(ArtifactSetKey origin, const IndexedArtifact& artifact, containers::DynamicArray<u8>& bytes,
                                                  void* userData) noexcept;
 
     struct PackageAssemblyCallbacks
     {
         ResolvePackagePathFunction resolvePath = nullptr;
+        void* resolvePathUserData = nullptr;
         ReadPackageArtifactFunction readArtifact = nullptr;
-        void* userData = nullptr;
+        void* readArtifactUserData = nullptr;
     };
 
     struct PackageAssemblyLimits
@@ -183,25 +184,19 @@ namespace vanguard::assets
     class PackageAssembler final
     {
     public:
-        [[nodiscard]] PackagingResult Assemble(const PackageBuildPlan& plan, filesystem::IFile& output,
-                                               const PackageAssemblyCallbacks& callbacks,
+        [[nodiscard]] PackagingResult Assemble(const PackageBuildPlan& plan, filesystem::IFile& output, const PackageAssemblyCallbacks& callbacks,
                                                const PackageAssemblyLimits& limits = {}) const noexcept;
 
-        [[nodiscard]] PackagingResult Assemble(const PackageBuildPlan& plan, filesystem::IFile& output,
-                                               const PackageAssemblyCallbacks& callbacks,
-                                               const packages::PackageSetBuild& packageSet,
-                                               const PackageAssemblyLimits& limits = {}) const noexcept;
+        [[nodiscard]] PackagingResult Assemble(const PackageBuildPlan& plan, filesystem::IFile& output, const PackageAssemblyCallbacks& callbacks,
+                                               const packages::PackageSetBuild& packageSet, const PackageAssemblyLimits& limits = {}) const noexcept;
 
         // The caller supplies an explicit sibling temporary path. Publication
         // validates the completed VPAK before atomically replacing the target.
-        [[nodiscard]] PackagingResult Publish(const PackageBuildPlan& plan, const filesystem::AbsolutePath& target,
-                                              const filesystem::AbsolutePath& temporary, const PackageAssemblyCallbacks& callbacks,
-                                              const PackageAssemblyLimits& limits = {}) const noexcept;
+        [[nodiscard]] PackagingResult Publish(const PackageBuildPlan& plan, const filesystem::AbsolutePath& target, const filesystem::AbsolutePath& temporary,
+                                              const PackageAssemblyCallbacks& callbacks, const PackageAssemblyLimits& limits = {}) const noexcept;
 
     private:
-        [[nodiscard]] PackagingResult AssembleInternal(const PackageBuildPlan& plan, filesystem::IFile& output,
-                                                       const PackageAssemblyCallbacks& callbacks,
-                                                       const packages::PackageSetBuild* packageSet,
-                                                       const PackageAssemblyLimits& limits) const noexcept;
+        [[nodiscard]] PackagingResult AssembleInternal(const PackageBuildPlan& plan, filesystem::IFile& output, const PackageAssemblyCallbacks& callbacks,
+                                                       const packages::PackageSetBuild* packageSet, const PackageAssemblyLimits& limits) const noexcept;
     };
 } // namespace vanguard::assets

@@ -147,16 +147,16 @@ namespace vanguard::materials
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] u64 Name() const noexcept;
-        [[nodiscard]] const resources::ResourceReference& Shader() const noexcept;
-        [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const TechniqueRecord> Techniques() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ConstantBufferRecord> ConstantBuffers() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ParameterRecord> Parameters() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ResourceParameterRecord> ResourceParameters() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ResourceDependency> Dependencies() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const u8> ParameterData() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const u8> ConstantBufferData(const ConstantBufferRecord& buffer) const noexcept;
+        [[nodiscard]] u64 GetName() const noexcept;
+        [[nodiscard]] const resources::ResourceReference& GetShader() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const TechniqueRecord> GetTechniques() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ConstantBufferRecord> GetConstantBuffers() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ParameterRecord> GetParameters() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ResourceParameterRecord> GetResourceParameters() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ResourceDependency> GetDependencies() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const u8> GetParameterData() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const u8> GetConstantBufferData(const ConstantBufferRecord& buffer) const noexcept;
 
     private:
         u64 m_name = 0;
@@ -172,6 +172,5 @@ namespace vanguard::materials
     };
 
     [[nodiscard]] Result WriteMaterial(filesystem::IFile& writer, const BuildDescription& description) noexcept;
-    [[nodiscard]] Result CalculateContentFingerprint(const BuildDescription& description,
-                                                     crypto::Digest256& fingerprint) noexcept;
+    [[nodiscard]] Result CalculateContentFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
 } // namespace vanguard::materials

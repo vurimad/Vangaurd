@@ -39,18 +39,15 @@ namespace
 
         Fixture()
         {
-            stages = {
-                {{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size(), "mainPS"},
-                 {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size(), "mainVS"}}};
-            bindings = {{{0x9002, 1, 3, 1, shaders::BindingKind::SampledTexture, shaders::BindingAccess::Read,
-                          shaders::StageBit(shaders::ShaderStage::Fragment)},
-                         {0x9001, 0, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read,
-                          shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment)}}};
+            stages = {{{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size(), "mainPS"},
+                       {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size(), "mainVS"}}};
+            bindings = {
+                {{0x9002, 1, 3, 1, shaders::BindingKind::SampledTexture, shaders::BindingAccess::Read, shaders::StageBit(shaders::ShaderStage::Fragment)},
+                 {0x9001, 0, 0, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read,
+                  shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment)}}};
             buffers = {{{0x9001, 0, 0, 32, 0, 2}}};
-            members = {{{0xa001, 16, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false},
-                        {0xa000, 0, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false}}};
-            inputs = {
-                {{0xb001, 0, 1, shaders::NumericClass::FloatingPoint, 2, 32}, {0xb000, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
+            members = {{{0xa001, 16, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false}, {0xa000, 0, 16, 0, 0, shaders::ScalarType::F32, 1, 4, false}}};
+            inputs = {{{0xb001, 0, 1, shaders::NumericClass::FloatingPoint, 2, 32}, {0xb000, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
             outputs = {{{0xc000, 0, 0, shaders::NumericClass::FloatingPoint, 0x0f}}};
             constants = {{{0xd000, 7, shaders::ScalarType::U32, 4, shaders::StageBit(shaders::ShaderStage::Fragment)}}};
 
@@ -58,8 +55,7 @@ namespace
             description.program = 0x5aa55aa5;
             description.permutation = vanguard::crypto::Sha256("permutation", 11);
             description.compilerFingerprint = vanguard::crypto::Sha256("dxc-1.8-options", 15);
-            description.pipelineInterface.stages =
-                shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
+            description.pipelineInterface.stages = shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
             description.pipelineInterface.primitiveClass = shaders::PrimitiveClass::Triangle;
             description.pipelineInterface.renderTargetCount = 1;
             description.stages = {stages.data(), static_cast<vanguard::u32>(stages.size())};
@@ -132,21 +128,17 @@ int main()
         std::fprintf(stderr, "[shadersTests] vshader open result: %s\n", shaders::ToString(openResult));
     }
     Check(openResult == shaders::Result::Success, "open vshader");
-    Check(shader.IsOpen() && shader.Kind() == shaders::ProgramKind::Graphics && shader.Program() == fixture.description.program,
-          "program metadata round trip");
-    Check(shader.Stages().Size() == 2 && shader.Stages()[0].stage == shaders::ShaderStage::Vertex &&
-              shader.Stages()[1].stage == shaders::ShaderStage::Fragment &&
-              std::strcmp(shader.Stages()[0].entryPointName, "mainVS") == 0 &&
-              std::strcmp(shader.Stages()[1].entryPointName, "mainPS") == 0,
+    Check(shader.IsOpen() && shader.GetKind() == shaders::ProgramKind::Graphics && shader.GetProgram() == fixture.description.program, "program metadata round trip");
+    Check(shader.GetStages().Size() == 2 && shader.GetStages()[0].stage == shaders::ShaderStage::Vertex &&
+              shader.GetStages()[1].stage == shaders::ShaderStage::Fragment && std::strcmp(shader.GetStages()[0].entryPointName, "mainVS") == 0 &&
+              std::strcmp(shader.GetStages()[1].entryPointName, "mainPS") == 0,
           "stage records and native entry points are canonical");
-    Check(shader.Bindings().Size() == 2 && shader.Bindings()[0].space == 0 && shader.Bindings()[1].space == 1,
-          "binding records are canonical");
-    Check(shader.ConstantMembers().Size() == 2 && shader.ConstantMembers()[0].byteOffset == 0 &&
-              shader.ConstantMembers()[1].byteOffset == 16,
+    Check(shader.Bindings().Size() == 2 && shader.Bindings()[0].space == 0 && shader.Bindings()[1].space == 1, "binding records are canonical");
+    Check(shader.GetConstantMembers().Size() == 2 && shader.GetConstantMembers()[0].byteOffset == 0 && shader.GetConstantMembers()[1].byteOffset == 16,
           "constant layout is canonical");
-    if (shader.Stages().Size() != 0)
+    if (shader.GetStages().Size() != 0)
     {
-        Check(shader.Bytecode(shader.Stages()[0]).Size() == VertexBytecode.size(), "native vertex bytecode is directly addressable");
+        Check(shader.GetBytecode(shader.GetStages()[0]).Size() == VertexBytecode.size(), "native vertex bytecode is directly addressable");
     }
 
     shaders::PipelineCompatibility pipeline;
@@ -154,9 +146,9 @@ int main()
     pipeline.primitiveClass = shaders::PrimitiveClass::Triangle;
     pipeline.renderTargetCount = 1;
     pipeline.renderTargetClasses[0] = shaders::NumericClass::FloatingPoint;
-    pipeline.vertexLayout = shader.VertexInputs();
+    pipeline.vertexLayout = shader.GetVertexInputs();
     pipeline.bindingLayoutFingerprint = shader.BindingLayoutFingerprint();
-    pipeline.pipelineInterfaceFingerprint = shader.PipelineInterfaceFingerprint();
+    pipeline.pipelineInterfaceFingerprint = shader.GetPipelineInterfaceFingerprint();
     Check(shaders::ValidatePipeline(shader, pipeline) == shaders::Result::Success, "compatible graphics PSO");
 
     pipeline.renderTargetClasses[0] = shaders::NumericClass::UnsignedInteger;
@@ -206,8 +198,7 @@ int main()
         }
         filesystem::MemoryFileReader corruptFile(corrupt, 0);
         shaders::ShaderFile rejected;
-        Check(corrupt.Size() > 64 && rejected.Open(corruptFile) == shaders::Result::IntegrityFailure,
-              "checksummed metadata corruption rejection");
+        Check(corrupt.Size() > 64 && rejected.Open(corruptFile) == shaders::Result::IntegrityFailure, "checksummed metadata corruption rejection");
     }
     {
         shaders::ReadLimits limits;

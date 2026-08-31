@@ -20,16 +20,14 @@ namespace
 
     void HashU32(crypto::Sha256Builder& hash, const u32 value) noexcept
     {
-        const u8 bytes[]{static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                         static_cast<u8>(value >> 24u)};
+        const u8 bytes[]{static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
     void HashU64(crypto::Sha256Builder& hash, const u64 value) noexcept
     {
-        const u8 bytes[]{static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                         static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                         static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+        const u8 bytes[]{static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                         static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
@@ -48,7 +46,7 @@ namespace
         return value != 0 ? value : 1;
     }
 
-    [[nodiscard]] u32 TargetPlatformId(const TargetPlatform target) noexcept
+    [[nodiscard]] u32 GetTargetPlatformId(const TargetPlatform target) noexcept
     {
         switch (target)
         {
@@ -64,18 +62,16 @@ namespace
         return 0;
     }
 
-    [[nodiscard]] bool ReferenceLess(const resources::ResourceReference left,
-                                     const resources::ResourceReference right) noexcept
+    [[nodiscard]] bool ReferenceLess(const resources::ResourceReference left, const resources::ResourceReference right) noexcept
     {
-        if (left.Path() != right.Path())
+        if (left.GetPath() != right.GetPath())
         {
-            return left.Path() < right.Path();
+            return left.GetPath() < right.GetPath();
         }
         return left.ExpectedType() < right.ExpectedType();
     }
 
-    [[nodiscard]] i32 FindResourceIndex(const PackageBuildPlan& source,
-                                        const resources::ResourceReference resource) noexcept
+    [[nodiscard]] i32 FindResourceIndex(const PackageBuildPlan& source, const resources::ResourceReference resource) noexcept
     {
         for (u32 index = 0; index < source.resources.Size(); ++index)
         {
@@ -100,9 +96,7 @@ namespace
             {
                 return std::numeric_limits<u64>::max();
             }
-            const u8 effectiveAlignmentLog2 = segment.artifact.alignmentLog2 > packageAlignmentLog2
-                                                  ? segment.artifact.alignmentLog2
-                                                  : packageAlignmentLog2;
+            const u8 effectiveAlignmentLog2 = segment.artifact.alignmentLog2 > packageAlignmentLog2 ? segment.artifact.alignmentLog2 : packageAlignmentLog2;
             const u64 alignmentWaste = (u64{1} << effectiveAlignmentLog2) - 1u;
             if (AddOverflow(bytes, packages::Segment::WireSize) || AddOverflow(bytes + packages::Segment::WireSize, alignmentWaste) ||
                 AddOverflow(bytes + packages::Segment::WireSize + alignmentWaste, segment.artifact.byteCount))
@@ -127,8 +121,7 @@ namespace
         return nullptr;
     }
 
-    [[nodiscard]] const PackagePlacement* FindPlacement(const PackagePlacementState& state,
-                                                        const resources::ResourceReference resource) noexcept
+    [[nodiscard]] const PackagePlacement* FindPlacement(const PackagePlacementState& state, const resources::ResourceReference resource) noexcept
     {
         for (const PackagePlacement& placement : state.placements)
         {
@@ -140,8 +133,7 @@ namespace
         return nullptr;
     }
 
-    [[nodiscard]] PackagingResult AddDataPackage(PackageSetBuildPlan& plan, const u32 packageNumber,
-                                                 PlannedDataPackage*& package) noexcept
+    [[nodiscard]] PackagingResult AddDataPackage(PackageSetBuildPlan& plan, const u32 packageNumber, PlannedDataPackage*& package) noexcept
     {
         if (packageNumber > packages::MaximumPackageNumber || FindDataPackage(plan, packageNumber) != nullptr)
         {
@@ -192,9 +184,9 @@ namespace
         for (const u32 resourceIndex : package.resourceIndices)
         {
             const PlannedPackageResource& resource = source.resources[resourceIndex];
-            HashU64(hash, resource.resource.Path().Id());
+            HashU64(hash, resource.resource.GetPath().Id());
             HashU32(hash, resource.resource.ExpectedType());
-            static_cast<void>(hash.Update(resource.contentFingerprint.bytes, BuildFingerprint::ByteCount));
+            static_cast<void>(hash.Update(resource.origin.content.bytes, BuildFingerprint::ByteCount));
         }
         return DigestId(hash);
     }
@@ -205,9 +197,9 @@ namespace
         HashU64(hash, plan.gameId);
         HashU64(hash, plan.source->buildId);
         HashU32(hash, plan.targetPlatformId);
-        HashU64(hash, plan.startupWorld.Path().Id());
+        HashU64(hash, plan.startupWorld.GetPath().Id());
         HashU32(hash, plan.startupWorld.ExpectedType());
-        HashU64(hash, plan.defaultInput.Path().Id());
+        HashU64(hash, plan.defaultInput.GetPath().Id());
         HashU32(hash, plan.defaultInput.ExpectedType());
         HashU32(hash, plan.packages.Size());
         for (const PlannedDataPackage& package : plan.packages)
@@ -257,8 +249,8 @@ namespace
         packages::PackageSetEntry catalogEntry;
     };
 
-    [[nodiscard]] bool BuildPackagePaths(const filesystem::AbsolutePath& directory, const u32 packageNumber,
-                                         filesystem::AbsolutePath& target, filesystem::AbsolutePath& temporary) noexcept
+    [[nodiscard]] bool BuildPackagePaths(const filesystem::AbsolutePath& directory, const u32 packageNumber, filesystem::AbsolutePath& target,
+                                         filesystem::AbsolutePath& temporary) noexcept
     {
         char fileName[17]{};
         usize fileNameSize = 0;
@@ -276,11 +268,8 @@ namespace
         return !target.Empty() && !temporary.Empty();
     }
 
-    [[nodiscard]] PackagingResult ValidateAndDigestPackage(const filesystem::AbsolutePath& path,
-                                                           const PlannedDataPackage& planned,
-                                                           const u64 expectedBuildId,
-                                                           const PackageSetPublicationLimits& limits,
-                                                           packages::PackageSetEntry& entry) noexcept
+    [[nodiscard]] PackagingResult ValidateAndDigestPackage(const filesystem::AbsolutePath& path, const PlannedDataPackage& planned, const u64 expectedBuildId,
+                                                           const PackageSetPublicationLimits& limits, packages::PackageSetEntry& entry) noexcept
     {
         filesystem::Manager& manager = filesystem::GetManager();
         auto reader = manager.CreateFileReader(path, filesystem::FOF_Buffered);
@@ -290,10 +279,9 @@ namespace
         }
         packages::PackageReader package;
         const packages::Result opened = package.Open(*reader, limits.package.validation);
-        if (opened != packages::Result::Success || package.Header().packageId != planned.packageId ||
-            package.Header().buildId != expectedBuildId || package.Header().resourceCount != planned.resourceIndices.Size() ||
-            package.Header().fileSize > planned.estimatedBytes || package.Header().fileSize > limits.package.validation.maximumFileSize ||
-            package.HasPackageSet() != (planned.packageNumber == 0))
+        if (opened != packages::Result::Success || package.GetHeader().packageId != planned.packageId || package.GetHeader().buildId != expectedBuildId ||
+            package.GetHeader().resourceCount != planned.resourceIndices.Size() || package.GetHeader().fileSize > planned.estimatedBytes ||
+            package.GetHeader().fileSize > limits.package.validation.maximumFileSize || package.HasPackageSet() != (planned.packageNumber == 0))
         {
             return PackagingResult::ValidationFailed;
         }
@@ -301,10 +289,10 @@ namespace
         entry.packageNumber = planned.packageNumber;
         entry.flags = packages::PackageSetEntryFlags::Required;
         entry.mountPriority = 0;
-        entry.packageId = package.Header().packageId;
-        entry.buildId = package.Header().buildId;
-        entry.fileSize = package.Header().fileSize;
-        entry.indexCrc64 = package.Header().indexCrc64;
+        entry.packageId = package.GetHeader().packageId;
+        entry.buildId = package.GetHeader().buildId;
+        entry.fileSize = package.GetHeader().fileSize;
+        entry.indexCrc64 = package.GetHeader().indexCrc64;
         package.Close();
 
         containers::DynamicArray<u8> buffer(memory::pools::Assets::GetInstance());
@@ -376,8 +364,7 @@ namespace vanguard::assets
         for (u32 index = 0; index < placements.Size(); ++index)
         {
             const PackagePlacement& placement = placements[index];
-            if (!placement.resource.IsValid() || !placement.resource.IsTyped() ||
-                placement.packageNumber > packages::MaximumPackageNumber ||
+            if (!placement.resource.IsValid() || !placement.resource.IsTyped() || placement.packageNumber > packages::MaximumPackageNumber ||
                 (index != 0 && !ReferenceLess(placements[index - 1u].resource, placement.resource)))
             {
                 return false;
@@ -386,11 +373,9 @@ namespace vanguard::assets
         return true;
     }
 
-    PackagingResult WritePackagePlacementState(filesystem::IFile& file, const PackagePlacementState& state,
-                                               const PackagePlacementLimits& limits) noexcept
+    PackagingResult WritePackagePlacementState(filesystem::IFile& file, const PackagePlacementState& state, const PackagePlacementLimits& limits) noexcept
     {
-        if (!file.IsWriter() || file.GetOffset() != 0 || file.GetSize() != 0 || !state.IsValid() ||
-            state.placements.Size() > limits.maximumResources)
+        if (!file.IsWriter() || file.GetOffset() != 0 || file.GetSize() != 0 || !state.IsValid() || state.placements.Size() > limits.maximumResources)
         {
             return PackagingResult::InvalidArgument;
         }
@@ -406,8 +391,7 @@ namespace vanguard::assets
         serialization::BinaryWriter payloadWriter(payloadFile);
         for (const PackagePlacement& placement : state.placements)
         {
-            if (!payloadWriter.WriteU64(placement.resource.Path().Id()) ||
-                !payloadWriter.WriteU32(placement.resource.ExpectedType()) ||
+            if (!payloadWriter.WriteU64(placement.resource.GetPath().Id()) || !payloadWriter.WriteU32(placement.resource.ExpectedType()) ||
                 !payloadWriter.WriteU16(static_cast<u16>(placement.packageNumber)) || !payloadWriter.WriteU16(0))
             {
                 return PackagingResult::IoFailure;
@@ -417,15 +401,14 @@ namespace vanguard::assets
         u8 header[PackagePlacementState::HeaderWireSize]{};
         filesystem::MemoryFileWriterExternalBuffer headerFile(header, sizeof(header));
         serialization::BinaryWriter headerWriter(headerFile);
-        const bool encoded =
-            headerWriter.WriteU32(PackagePlacementMagic) && headerWriter.WriteU8(PlacementLittleEndian) &&
-            headerWriter.WriteU8(PlacementEncoding) && headerWriter.WriteU16(PackagePlacementState::HeaderWireSize) &&
-            headerWriter.WriteU16(state.version.major) && headerWriter.WriteU16(state.version.minor) && headerWriter.WriteU32(0) &&
-            headerWriter.WriteU64(state.gameId) && headerWriter.WriteU8(static_cast<u8>(state.target)) &&
-            headerWriter.WriteU8(0) && headerWriter.WriteU16(0) && headerWriter.WriteU32(state.placements.Size()) &&
-            headerWriter.WriteU16(PackagePlacementState::EntryWireSize) && headerWriter.WriteU16(0) &&
-            headerWriter.WriteU64(payloadSize) && headerWriter.WriteU64(serialization::Crc64(payload.Data(), payload.Size())) &&
-            headerWriter.WriteU32(serialization::Crc32(header, 52)) && headerWriter.WriteU64(0);
+        const bool encoded = headerWriter.WriteU32(PackagePlacementMagic) && headerWriter.WriteU8(PlacementLittleEndian) &&
+                             headerWriter.WriteU8(PlacementEncoding) && headerWriter.WriteU16(PackagePlacementState::HeaderWireSize) &&
+                             headerWriter.WriteU16(state.version.major) && headerWriter.WriteU16(state.version.minor) && headerWriter.WriteU32(0) &&
+                             headerWriter.WriteU64(state.gameId) && headerWriter.WriteU8(static_cast<u8>(state.target)) && headerWriter.WriteU8(0) &&
+                             headerWriter.WriteU16(0) && headerWriter.WriteU32(state.placements.Size()) &&
+                             headerWriter.WriteU16(PackagePlacementState::EntryWireSize) && headerWriter.WriteU16(0) && headerWriter.WriteU64(payloadSize) &&
+                             headerWriter.WriteU64(serialization::Crc64(payload.Data(), payload.Size())) &&
+                             headerWriter.WriteU32(serialization::Crc32(header, 52)) && headerWriter.WriteU64(0);
         serialization::BinaryWriter writer(file);
         return encoded && headerWriter.Position() == sizeof(header) && writer.WriteBytes(header, sizeof(header)) &&
                        writer.WriteBytes(payload.Data(), payload.Size()) && writer.Flush()
@@ -433,8 +416,7 @@ namespace vanguard::assets
                    : PackagingResult::IoFailure;
     }
 
-    PackagingResult ReadPackagePlacementState(filesystem::IFile& file, PackagePlacementState& state,
-                                              const PackagePlacementLimits& limits) noexcept
+    PackagingResult ReadPackagePlacementState(filesystem::IFile& file, PackagePlacementState& state, const PackagePlacementLimits& limits) noexcept
     {
         state.Clear();
         if (!file.IsReader() || file.GetSize() < PackagePlacementState::HeaderWireSize || file.GetSize() > limits.maximumBytes)
@@ -447,8 +429,8 @@ namespace vanguard::assets
         {
             return PackagingResult::IoFailure;
         }
-        const u32 expectedHeaderCrc = static_cast<u32>(header[52]) | (static_cast<u32>(header[53]) << 8u) |
-                                      (static_cast<u32>(header[54]) << 16u) | (static_cast<u32>(header[55]) << 24u);
+        const u32 expectedHeaderCrc =
+            static_cast<u32>(header[52]) | (static_cast<u32>(header[53]) << 8u) | (static_cast<u32>(header[54]) << 16u) | (static_cast<u32>(header[55]) << 24u);
         if (serialization::Crc32(header, 52) != expectedHeaderCrc)
         {
             return PackagingResult::CorruptManifest;
@@ -472,11 +454,10 @@ namespace vanguard::assets
         u32 ignoredHeaderCrc = 0;
         u64 reserved64 = 0;
         if (!reader.ReadU32(magic) || !reader.ReadU8(byteOrder) || !reader.ReadU8(encoding) || !reader.ReadU16(headerSize) ||
-            !reader.ReadU16(state.version.major) || !reader.ReadU16(state.version.minor) || !reader.ReadU32(flags) ||
-            !reader.ReadU64(state.gameId) || !reader.ReadU8(target) || !reader.ReadU8(reserved8) ||
-            !reader.ReadU16(reserved16A) || !reader.ReadU32(count) || !reader.ReadU16(entrySize) ||
-            !reader.ReadU16(reserved16B) || !reader.ReadU64(payloadSize) || !reader.ReadU64(payloadCrc64) ||
-            !reader.ReadU32(ignoredHeaderCrc) || !reader.ReadU64(reserved64))
+            !reader.ReadU16(state.version.major) || !reader.ReadU16(state.version.minor) || !reader.ReadU32(flags) || !reader.ReadU64(state.gameId) ||
+            !reader.ReadU8(target) || !reader.ReadU8(reserved8) || !reader.ReadU16(reserved16A) || !reader.ReadU32(count) || !reader.ReadU16(entrySize) ||
+            !reader.ReadU16(reserved16B) || !reader.ReadU64(payloadSize) || !reader.ReadU64(payloadCrc64) || !reader.ReadU32(ignoredHeaderCrc) ||
+            !reader.ReadU64(reserved64))
         {
             state.Clear();
             return PackagingResult::CorruptManifest;
@@ -492,9 +473,8 @@ namespace vanguard::assets
             return PackagingResult::UnsupportedVersion;
         }
         state.target = static_cast<TargetPlatform>(target);
-        if (byteOrder != PlacementLittleEndian || encoding != PlacementEncoding ||
-            headerSize != PackagePlacementState::HeaderWireSize || flags != 0 || reserved8 != 0 || reserved16A != 0 ||
-            reserved16B != 0 || reserved64 != 0 || state.gameId == 0 || state.target >= TargetPlatform::Count ||
+        if (byteOrder != PlacementLittleEndian || encoding != PlacementEncoding || headerSize != PackagePlacementState::HeaderWireSize || flags != 0 ||
+            reserved8 != 0 || reserved16A != 0 || reserved16B != 0 || reserved64 != 0 || state.gameId == 0 || state.target >= TargetPlatform::Count ||
             entrySize != PackagePlacementState::EntryWireSize || count == 0)
         {
             state.Clear();
@@ -528,8 +508,8 @@ namespace vanguard::assets
             resources::ResourceTypeId type = resources::InvalidResourceTypeId;
             u16 packageNumber = 0;
             u16 reserved = 0;
-            if (!payloadReader.ReadU64(id) || !payloadReader.ReadU32(type) || !payloadReader.ReadU16(packageNumber) ||
-                !payloadReader.ReadU16(reserved) || reserved != 0)
+            if (!payloadReader.ReadU64(id) || !payloadReader.ReadU32(type) || !payloadReader.ReadU16(packageNumber) || !payloadReader.ReadU16(reserved) ||
+                reserved != 0)
             {
                 state.Clear();
                 return PackagingResult::CorruptManifest;
@@ -563,9 +543,8 @@ namespace vanguard::assets
 
     bool PackageSetBuildPlan::IsPrepared() const noexcept
     {
-        if (source == nullptr || !source->IsPrepared() || gameId == 0 || buildId == 0 || targetPlatformId == 0 ||
-            !startupWorld.IsValid() || !startupWorld.IsTyped() || !defaultInput.IsValid() || !defaultInput.IsTyped() ||
-            maximumPackageBytes == 0 || packages.Empty() ||
+        if (source == nullptr || !source->IsPrepared() || gameId == 0 || buildId == 0 || targetPlatformId == 0 || !startupWorld.IsValid() ||
+            !startupWorld.IsTyped() || !defaultInput.IsValid() || !defaultInput.IsTyped() || maximumPackageBytes == 0 || packages.Empty() ||
             packages[0].packageNumber != 0)
         {
             return false;
@@ -573,8 +552,7 @@ namespace vanguard::assets
         for (u32 index = 0; index < packages.Size(); ++index)
         {
             const PlannedDataPackage& package = packages[index];
-            if (package.packageId == 0 || package.buildId == 0 || package.resourceIndices.Empty() ||
-                package.estimatedBytes > maximumPackageBytes ||
+            if (package.packageId == 0 || package.buildId == 0 || package.resourceIndices.Empty() || package.estimatedBytes > maximumPackageBytes ||
                 (index != 0 && packages[index - 1u].packageNumber >= package.packageNumber))
             {
                 return false;
@@ -596,16 +574,16 @@ namespace vanguard::assets
     }
 
     PackagingResult PackageSetPlanner::Prepare(const PackageBuildPlan& source, const PackageSetPlanOptions& options,
-                                               const PackagePlacementState* const previousPlacement,
-                                               PackageSetBuildPlan& plan, PackagePlacementState& nextPlacement) const noexcept
+                                               const PackagePlacementState* const previousPlacement, PackageSetBuildPlan& plan,
+                                               PackagePlacementState& nextPlacement) const noexcept
     {
         plan.Clear();
         nextPlacement.Clear();
         if (!source.IsPrepared() || options.gameId == 0 || !options.startupWorld.IsValid() || !options.startupWorld.IsTyped() ||
-            !options.defaultInput.IsValid() || !options.defaultInput.IsTyped() ||
-            options.targetPackageBytes == 0 || options.maximumPackageBytes < options.targetPackageBytes ||
-            options.maximumBootstrapBytes == 0 || options.maximumBootstrapBytes > options.maximumPackageBytes ||
-            options.maximumPackages == 0 || options.maximumPackages > packages::MaximumPackageNumber + 1u)
+            !options.defaultInput.IsValid() || !options.defaultInput.IsTyped() || options.targetPackageBytes == 0 ||
+            options.maximumPackageBytes < options.targetPackageBytes || options.maximumBootstrapBytes == 0 ||
+            options.maximumBootstrapBytes > options.maximumPackageBytes || options.maximumPackages == 0 ||
+            options.maximumPackages > packages::MaximumPackageNumber + 1u)
         {
             return PackagingResult::InvalidArgument;
         }
@@ -672,7 +650,7 @@ namespace vanguard::assets
 
         plan.source = &source;
         plan.gameId = options.gameId;
-        plan.targetPlatformId = TargetPlatformId(source.target);
+        plan.targetPlatformId = GetTargetPlatformId(source.target);
         plan.startupWorld = options.startupWorld;
         plan.defaultInput = options.defaultInput;
         plan.maximumPackageBytes = options.maximumPackageBytes;
@@ -713,9 +691,8 @@ namespace vanguard::assets
             }
 
             PlannedDataPackage* destination = nullptr;
-            const PackagePlacement* previous = previousPlacement != nullptr && !options.rebalance
-                                                     ? FindPlacement(*previousPlacement, resource.resource)
-                                                     : nullptr;
+            const PackagePlacement* previous =
+                previousPlacement != nullptr && !options.rebalance ? FindPlacement(*previousPlacement, resource.resource) : nullptr;
             if (previous != nullptr)
             {
                 if (previous->packageNumber == 0 || previous->packageNumber >= options.maximumPackages)
@@ -782,8 +759,7 @@ namespace vanguard::assets
 
         SortPackages(plan);
         PlannedDataPackage& rootPackage = plan.packages[0];
-        const u64 packageSetBytes = packages::PackageSet::HeaderWireSize +
-                                    static_cast<u64>(plan.packages.Size() - 1u) * packages::PackageSetEntry::WireSize;
+        const u64 packageSetBytes = packages::PackageSet::HeaderWireSize + static_cast<u64>(plan.packages.Size() - 1u) * packages::PackageSetEntry::WireSize;
         if (packageSetBytes > options.maximumBootstrapBytes || packageSetBytes > options.maximumPackageBytes ||
             rootPackage.estimatedBytes > options.maximumBootstrapBytes - packageSetBytes ||
             rootPackage.estimatedBytes > options.maximumPackageBytes - packageSetBytes)
@@ -844,13 +820,11 @@ namespace vanguard::assets
         return PackagingResult::Success;
     }
 
-    PackagingResult PackageSetAssembler::Publish(const PackageSetBuildPlan& plan,
-                                                 const filesystem::AbsolutePath& outputDirectory,
-                                                 const PackageAssemblyCallbacks& callbacks,
-                                                 const PackageSetPublicationLimits& limits) const noexcept
+    PackagingResult PackageSetAssembler::Publish(const PackageSetBuildPlan& plan, const filesystem::AbsolutePath& outputDirectory,
+                                                 const PackageAssemblyCallbacks& callbacks, const PackageSetPublicationLimits& limits) const noexcept
     {
-        if (!plan.IsPrepared() || outputDirectory.Empty() || !outputDirectory.IsDirectoryPath() ||
-            callbacks.resolvePath == nullptr || callbacks.readArtifact == nullptr || limits.hashBufferBytes == 0)
+        if (!plan.IsPrepared() || outputDirectory.Empty() || !outputDirectory.IsDirectoryPath() || callbacks.resolvePath == nullptr ||
+            callbacks.readArtifact == nullptr || limits.hashBufferBytes == 0)
         {
             return PackagingResult::InvalidArgument;
         }
@@ -866,8 +840,7 @@ namespace vanguard::assets
         {
             StagedPackage& stage = staged[index];
             stage.packageNumber = plan.packages[index].packageNumber;
-            if (!BuildPackagePaths(outputDirectory, stage.packageNumber, stage.target, stage.temporary) ||
-                manager.FileExist(stage.target))
+            if (!BuildPackagePaths(outputDirectory, stage.packageNumber, stage.target, stage.temporary) || manager.FileExist(stage.target))
             {
                 CleanupStagedPackages(staged, false);
                 return PackagingResult::PublicationFailed;
@@ -924,9 +897,9 @@ namespace vanguard::assets
         packages::PackageSetBuild packageSet;
         packageSet.gameId = plan.gameId;
         packageSet.targetPlatformId = plan.targetPlatformId;
-        packageSet.startupWorld = plan.startupWorld.Path().Id();
+        packageSet.startupWorld = plan.startupWorld.GetPath().Id();
         packageSet.startupWorldType = plan.startupWorld.ExpectedType();
-        packageSet.defaultInput = plan.defaultInput.Path().Id();
+        packageSet.defaultInput = plan.defaultInput.GetPath().Id();
         packageSet.defaultInputType = plan.defaultInput.ExpectedType();
         packageSet.packages = catalog;
 

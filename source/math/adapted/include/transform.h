@@ -31,10 +31,8 @@ namespace vanguard::math
         RED_INLINE Transform(const Quaternion& q);
         RED_INLINE Transform(const Transform& xform);
 
-        RED_INLINE Vector4 operator*(const Vector4& v)
-            const; //< This will be equivalent to a transform point or vector depending on w component
-        RED_INLINE Vector3 operator*(const Vector3& v)
-            const; //< This will be equivalent to a transform point, forcing the W component to be a 1
+        RED_INLINE Vector4 operator*(const Vector4& v) const; //< This will be equivalent to a transform point or vector depending on w component
+        RED_INLINE Vector3 operator*(const Vector3& v) const; //< This will be equivalent to a transform point, forcing the W component to be a 1
         RED_INLINE Transform operator*(const Transform& xform) const;
 
         RED_INLINE Vector3 TransformPoint(const Vector3& v) const;
@@ -71,10 +69,8 @@ namespace vanguard::math
         RED_INLINE void SetPosition(const Vector4& v);
         RED_INLINE void SetOrientation(const Quaternion& q);
         RED_INLINE void SetOrientation(const EulerAngles& e);
-        RED_INLINE void SetOrientation(
-            const Vector3& direction); //< Set the orientation of this transform from a direction (look at) vector
-        RED_INLINE void SetOrientation(
-            const Vector4& direction); //< Set the orientation of this transform from a direction (look at) vector
+        RED_INLINE void SetOrientation(const Vector3& direction); //< Set the orientation of this transform from a direction (look at) vector
+        RED_INLINE void SetOrientation(const Vector4& direction); //< Set the orientation of this transform from a direction (look at) vector
 
         RED_INLINE void Set(const Vector3& position, const Quaternion& orientation);
         RED_INLINE void Set(const Vector3& position, const EulerAngles& orientation);

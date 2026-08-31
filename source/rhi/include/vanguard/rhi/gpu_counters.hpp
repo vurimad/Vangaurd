@@ -12,14 +12,21 @@ namespace vanguard::rhi
     {
         u64 value = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return value != 0; }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
         [[nodiscard]] friend constexpr bool operator==(const GpuCounterScopeId&, const GpuCounterScopeId&) noexcept = default;
     };
 
     [[nodiscard]] constexpr GpuCounterScopeId MakeGpuCounterScopeId(const char* const name) noexcept
     {
-        if (name == nullptr || name[0] == '\0') return {};
+        if (name == nullptr || name[0] == '\0')
+            return {};
         u64 hash = 1469598103934665603ull;
         for (const char* character = name; *character != '\0'; ++character)
         {
@@ -34,8 +41,14 @@ namespace vanguard::rhi
         u32 index = InvalidGpuCounterIndex;
         u32 generation = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return index != InvalidGpuCounterIndex && generation != 0; }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index != InvalidGpuCounterIndex && generation != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
         [[nodiscard]] friend constexpr bool operator==(const GpuCounterFrameHandle&, const GpuCounterFrameHandle&) noexcept = default;
     };
 
@@ -49,7 +62,10 @@ namespace vanguard::rhi
         {
             return frame.IsValid() && commandList.IsValid() && sampleIndex != InvalidGpuCounterIndex;
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
     };
 
     enum class GpuCounterFrameState : u8
@@ -116,8 +132,7 @@ namespace vanguard::rhi
 
     [[nodiscard]] constexpr u64 GpuCounterTicksToNanoseconds(const u64 ticks, const u64 frequency) noexcept
     {
-        return frequency == 0 ? 0 : (ticks / frequency) * 1'000'000'000ull +
-                                      ((ticks % frequency) * 1'000'000'000ull) / frequency;
+        return frequency == 0 ? 0 : (ticks / frequency) * 1'000'000'000ull + ((ticks % frequency) * 1'000'000'000ull) / frequency;
     }
 
     class GpuCounterSystem final
@@ -136,8 +151,7 @@ namespace vanguard::rhi
         [[nodiscard]] const char* GetScopeName(GpuCounterScopeId scope) const noexcept;
 
         [[nodiscard]] bool BeginFrame(u64 frameNumber, GpuCounterFrameHandle& frame, Failure* failure = nullptr) noexcept;
-        [[nodiscard]] bool BeginScope(GpuCounterFrameHandle frame, GpuCounterScopeId scope, GpuCounterScopeToken& token,
-                                      Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginScope(GpuCounterFrameHandle frame, GpuCounterScopeId scope, GpuCounterScopeToken& token, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool EndScope(GpuCounterScopeToken& token, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool EndFrame(GpuCounterFrameHandle frame, Failure* failure = nullptr) noexcept;
 

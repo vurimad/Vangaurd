@@ -14,8 +14,7 @@ namespace
 
     [[nodiscard]] constexpr bool IsForbiddenPathByte(const u8 byte) noexcept
     {
-        return byte == 0 || byte < 0x20u || byte == ':' || byte == '*' || byte == '?' || byte == '"' || byte == '<' || byte == '>' ||
-               byte == '|';
+        return byte == 0 || byte < 0x20u || byte == ':' || byte == '*' || byte == '?' || byte == '"' || byte == '<' || byte == '>' || byte == '|';
     }
 
     [[nodiscard]] constexpr u8 CanonicalPathByte(const u8 byte) noexcept
@@ -53,8 +52,7 @@ namespace
             if (separator)
             {
                 const u32 segmentLength = index - segmentStart;
-                if ((segmentLength == 1 && path[segmentStart] == '.') ||
-                    (segmentLength == 2 && path[segmentStart] == '.' && path[segmentStart + 1] == '.'))
+                if ((segmentLength == 1 && path[segmentStart] == '.') || (segmentLength == 2 && path[segmentStart] == '.' && path[segmentStart + 1] == '.'))
                 {
                     return Result::InvalidPath;
                 }
@@ -69,8 +67,7 @@ namespace
         }
 
         const u32 finalLength = length - segmentStart;
-        if ((finalLength == 1 && path[segmentStart] == '.') ||
-            (finalLength == 2 && path[segmentStart] == '.' && path[segmentStart + 1] == '.'))
+        if ((finalLength == 1 && path[segmentStart] == '.') || (finalLength == 2 && path[segmentStart] == '.' && path[segmentStart + 1] == '.'))
         {
             return Result::InvalidPath;
         }
@@ -79,8 +76,7 @@ namespace
 
     [[nodiscard]] constexpr bool IsValidTypeByte(const u8 byte) noexcept
     {
-        return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' ||
-               byte == '-';
+        return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' || byte == '-';
     }
 } // namespace
 

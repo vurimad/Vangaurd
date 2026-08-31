@@ -96,8 +96,7 @@ int main()
         const simd::Vector4 sum = simd::Add(left, right);
         alignas(16) float lanes[4]{};
         sum.Store(lanes);
-        Check(Near(lanes[0], 3.0f) && Near(lanes[1], 5.0f) && Near(lanes[2], 7.0f) && Near(lanes[3], 9.0f),
-              "Explicit SIMD vector arithmetic");
+        Check(Near(lanes[0], 3.0f) && Near(lanes[1], 5.0f) && Near(lanes[2], 7.0f) && Near(lanes[3], 9.0f), "Explicit SIMD vector arithmetic");
     }
 
     if (failures == 0)

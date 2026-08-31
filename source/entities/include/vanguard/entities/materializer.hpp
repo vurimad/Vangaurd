@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/entities/component_registry.hpp>
+#include <vanguard/entities/entity_state.hpp>
 #include <vanguard/entities/reference_registry.hpp>
 #include <vanguard/world/cells.hpp>
 
@@ -23,10 +24,6 @@ namespace vanguard::entities
         f64 translation[3]{};
         f32 rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
         f32 scale[3]{1.0f, 1.0f, 1.0f};
-    };
-
-    struct DisabledEntity
-    {
     };
 
     enum class CellState : u8
@@ -58,6 +55,7 @@ namespace vanguard::entities
     {
         u32 maximumEntitiesPerCell = 1u << 20u;
         u32 maximumComponentsPerCell = 1u << 22u;
+        resources::LoadPriority componentIoPriority = resources::LoadPriority::Normal;
         bool includeEditorData = false;
         bool includeInactiveActivationGroups = false;
     };
@@ -98,8 +96,7 @@ namespace vanguard::entities
 
     /// Returns the placement identity for the prefab root and a deterministic hierarchical identity
     /// for every prefab child. The materializer still collision-checks every derived value before queueing.
-    [[nodiscard]] ecs::EntityId DeriveEntityId(ecs::EntityId instanceId, u64 prefabEntityStableId,
-                                               u64 prefabRootStableId) noexcept;
+    [[nodiscard]] ecs::EntityId DeriveEntityId(ecs::EntityId instanceId, u64 prefabEntityStableId, u64 prefabRootStableId) noexcept;
 
     class CellMaterializer final
     {
@@ -112,7 +109,10 @@ namespace vanguard::entities
         CellMaterializer(const CellMaterializer&) = delete;
         CellMaterializer& operator=(const CellMaterializer&) = delete;
 
-        [[nodiscard]] bool Initialize(ComponentRegistry& components, EntityReferenceRegistry& references,
+        [[nodiscard]] bool Initialize(ComponentRegistry& components, ComponentDirectory& componentDirectory, EntityReferenceRegistry& references,
+                                      resources::ResourceRegistry& resources, resources::ResourcePipeline& resourcePipeline,
+                                      const MaterializationConfig& config = {}) noexcept;
+        [[nodiscard]] bool Initialize(ComponentRegistry& components, ComponentDirectory& componentDirectory, EntityReferenceRegistry& references,
                                       const MaterializationConfig& config = {}) noexcept;
         [[nodiscard]] bool Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
@@ -123,37 +123,47 @@ namespace vanguard::entities
         ///
         /// Resolves and decodes an entire cell before queueing any live-world mutation. Prefab files
         /// need to remain valid only for this call because every queued value owns its staging copy.
-        [[nodiscard]] Result QueueCell(const world::CellFile& cell, u32 generation, PrefabResolver resolvePrefab,
-                                      void* userData = nullptr, MaterializationReport* report = nullptr) noexcept;
+        [[nodiscard]] Result QueueCell(const world::CellFile& cell, u32 generation, PrefabResolver resolvePrefab, void* userData = nullptr,
+                                       MaterializationReport* report = nullptr) noexcept;
 
-        /// Called after the owning GameWorld commits its structural queues. Readiness is published
-        /// only when every planned entity and component can be observed in the expected generation.
-        [[nodiscard]] Result CompleteActivation(u64 cellId, u32 generation) noexcept;
+        /// Completes committed ECS state and component attachment without publishing stable identities.
+        [[nodiscard]] Result PrepareActivation(u64 cellId, u32 generation) noexcept;
+
+        /// Attach epilogue. Publishes identities only after the coordinator has prepared every cell in
+        /// the current batch, then reports readiness once required references resolve.
+        [[nodiscard]] Result PublishActivation(u64 cellId, u32 generation) noexcept;
         [[nodiscard]] Result QueueRelease(u64 cellId, u32 generation) noexcept;
         [[nodiscard]] Result CompleteRelease(u64 cellId, u32 generation) noexcept;
         [[nodiscard]] Result Cancel(u64 cellId, u32 generation) noexcept;
 
         /// Acquires one authored activation group for an explicit owner. Required-local references pull their
         /// target groups into the same retained dependency closure. Overlapping owners share one live instance.
-        [[nodiscard]] Result AcquireActivationGroup(const world::CellFile& cell, u32 generation, u64 groupId,
-                                                    ActivationOwnerId ownerId, PrefabResolver resolvePrefab,
-                                                    void* userData = nullptr) noexcept;
+        [[nodiscard]] Result AcquireActivationGroup(const world::CellFile& cell, u32 generation, u64 groupId, ActivationOwnerId ownerId,
+                                                    PrefabResolver resolvePrefab, void* userData = nullptr) noexcept;
 
         /// Releases the exact ownership lease created by AcquireActivationGroup. Entities are removed only when
         /// the final direct or dependency owner releases the group.
-        [[nodiscard]] Result ReleaseActivationGroup(u64 cellId, u32 generation, u64 groupId,
-                                                    ActivationOwnerId ownerId) noexcept;
+        [[nodiscard]] Result ReleaseActivationGroup(u64 cellId, u32 generation, u64 groupId, ActivationOwnerId ownerId) noexcept;
 
-        /// Completes committed group batches and reference publication after the owning GameWorld flush.
-        [[nodiscard]] Result SynchronizeActivationGroups(u64 cellId, u32 generation) noexcept;
-        [[nodiscard]] ActivationGroupState ActivationState(u64 cellId, u64 groupId) const noexcept;
-        [[nodiscard]] u32 ActivationOwnerCount(u64 cellId, u64 groupId) const noexcept;
+        /// Completes committed group batches and attachment without publishing stable identities.
+        [[nodiscard]] Result PrepareActivationGroups(u64 cellId, u32 generation) noexcept;
 
-        [[nodiscard]] CellState State(u64 cellId) const noexcept;
-        [[nodiscard]] u32 Generation(u64 cellId) const noexcept;
+        /// Group attach epilogue. Publishes all prepared group partitions after the coordinator-wide
+        /// attachment pass, then updates required-reference readiness.
+        [[nodiscard]] Result PublishActivationGroups(u64 cellId, u32 generation) noexcept;
+        [[nodiscard]] ActivationGroupState GetActivationState(u64 cellId, u64 groupId) const noexcept;
+        [[nodiscard]] u32 GetActivationOwnerCount(u64 cellId, u64 groupId) const noexcept;
+
+        [[nodiscard]] CellState GetState(u64 cellId) const noexcept;
+        [[nodiscard]] u32 GetGeneration(u64 cellId) const noexcept;
         [[nodiscard]] MaterializerStats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] bool InitializeInternal(ComponentRegistry& components, ComponentDirectory& componentDirectory,
+                                              EntityReferenceRegistry& references, resources::ResourceRegistry* resources,
+                                              resources::ResourcePipeline* resourcePipeline,
+                                              const MaterializationConfig& config) noexcept;
+
         Impl* m_impl = nullptr;
     };
 } // namespace vanguard::entities

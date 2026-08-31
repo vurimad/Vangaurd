@@ -31,8 +31,7 @@ namespace vanguard::rendering
         {
             return index < MaximumRenderViewFamilies && generation != 0;
         }
-        [[nodiscard]] friend constexpr bool operator==(const RenderViewFamilyId&,
-                                                       const RenderViewFamilyId&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const RenderViewFamilyId&, const RenderViewFamilyId&) noexcept = default;
     };
 
     struct VisibilityPlane
@@ -71,14 +70,12 @@ namespace vanguard::rendering
         InfiniteFarPlane = 1u << 6u
     };
 
-    [[nodiscard]] constexpr RenderViewFlags operator|(const RenderViewFlags left,
-                                                      const RenderViewFlags right) noexcept
+    [[nodiscard]] constexpr RenderViewFlags operator|(const RenderViewFlags left, const RenderViewFlags right) noexcept
     {
         return static_cast<RenderViewFlags>(static_cast<u32>(left) | static_cast<u32>(right));
     }
 
-    [[nodiscard]] constexpr RenderViewFlags operator&(const RenderViewFlags left,
-                                                      const RenderViewFlags right) noexcept
+    [[nodiscard]] constexpr RenderViewFlags operator&(const RenderViewFlags left, const RenderViewFlags right) noexcept
     {
         return static_cast<RenderViewFlags>(static_cast<u32>(left) & static_cast<u32>(right));
     }
@@ -96,7 +93,10 @@ namespace vanguard::rendering
         u32 width = 0;
         u32 height = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return width != 0 && height != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return width != 0 && height != 0;
+        }
     };
 
     /// Matrices use the renderer's shader convention and are stored explicitly to avoid deriving or
@@ -176,9 +176,7 @@ namespace vanguard::rendering
         const char* message = nullptr;
     };
 
-    [[nodiscard]] bool ValidateRenderView(const RenderView& view, const RenderPhaseRegistry& phases,
-                                          RenderViewFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ValidateRenderViewFamily(const RenderViewFamily& family,
-                                                const RenderPhaseRegistry& phases,
+    [[nodiscard]] bool ValidateRenderView(const RenderView& view, const RenderPhaseRegistry& phases, RenderViewFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ValidateRenderViewFamily(const RenderViewFamily& family, const RenderPhaseRegistry& phases,
                                                 RenderViewFailure* failure = nullptr) noexcept;
 } // namespace vanguard::rendering

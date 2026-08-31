@@ -7,8 +7,7 @@ namespace vanguard::math
     {
         const Float A = direction.Dot3(direction);
         const Float B = 2.0f * (origin.Dot3(direction) - direction.Dot3(CenterRadius));
-        const Float C =
-            origin.Dot3(origin) + CenterRadius.Dot3(CenterRadius) - 2.0f * origin.Dot3(CenterRadius) - CenterRadius.W * CenterRadius.W;
+        const Float C = origin.Dot3(origin) + CenterRadius.Dot3(CenterRadius) - 2.0f * origin.Dot3(CenterRadius) - CenterRadius.W * CenterRadius.W;
 
         const Float D = B * B - 4.0f * A * C;
 

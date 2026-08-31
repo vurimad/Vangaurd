@@ -20,11 +20,10 @@ namespace
     constexpr u8 PackageSetEncodingVersion = 1;
     constexpr u8 LittleEndian = 1;
     constexpr u16 DependencyWireSize = Dependency::WireSize;
-    constexpr u32 KnownPackageFlags = static_cast<u32>(PackageFlags::Deterministic) | static_cast<u32>(PackageFlags::HasDebugPaths) |
-                                      static_cast<u32>(PackageFlags::HasPackageSet);
-    constexpr u32 KnownPackageSetEntryFlags = static_cast<u32>(PackageSetEntryFlags::Required) |
-                                              static_cast<u32>(PackageSetEntryFlags::Optional) |
-                                              static_cast<u32>(PackageSetEntryFlags::Override);
+    constexpr u32 KnownPackageFlags =
+        static_cast<u32>(PackageFlags::Deterministic) | static_cast<u32>(PackageFlags::HasDebugPaths) | static_cast<u32>(PackageFlags::HasPackageSet);
+    constexpr u32 KnownPackageSetEntryFlags =
+        static_cast<u32>(PackageSetEntryFlags::Required) | static_cast<u32>(PackageSetEntryFlags::Optional) | static_cast<u32>(PackageSetEntryFlags::Override);
     constexpr u32 KnownResourceFlags = static_cast<u32>(ResourceFlags::Startup) | static_cast<u32>(ResourceFlags::Optional) |
                                        static_cast<u32>(ResourceFlags::Streamable) | static_cast<u32>(ResourceFlags::EditorOnly);
     constexpr u8 KnownSegmentFlags =
@@ -61,8 +60,8 @@ namespace
 
     [[nodiscard]] Result WriteHeader(vgser::BinaryWriter& writer, const PackageHeader& header) noexcept
     {
-        if (header.fileSize < PackageHeader::WireSize || header.indexOffset < PackageHeader::WireSize ||
-            AddOverflow(header.indexOffset, header.indexSize) || header.indexOffset + header.indexSize != header.fileSize)
+        if (header.fileSize < PackageHeader::WireSize || header.indexOffset < PackageHeader::WireSize || AddOverflow(header.indexOffset, header.indexSize) ||
+            header.indexOffset + header.indexSize != header.fileSize)
         {
             return Result::InvalidArgument;
         }
@@ -70,15 +69,14 @@ namespace
         u8 bytes[PackageHeader::WireSize] = {};
         filesystem::MemoryFileWriterExternalBuffer memoryWriter(bytes, static_cast<u32>(sizeof(bytes)));
         vgser::BinaryWriter encoded(memoryWriter);
-        const bool written =
-            encoded.WriteU32(PackageMagic) && encoded.WriteU8(PackageHeader::LittleEndian) &&
-            encoded.WriteU8(PackageHeader::EncodingVersion) && encoded.WriteU16(PackageHeader::WireSize) &&
-            encoded.WriteU16(header.version.major) && encoded.WriteU16(header.version.minor) &&
-            encoded.WriteU32(static_cast<u32>(header.flags)) && encoded.WriteU64(header.fileSize) && encoded.WriteU64(header.indexOffset) &&
-            encoded.WriteU64(header.indexSize) && encoded.WriteU64(header.packageId) && encoded.WriteU64(header.buildId) &&
-            encoded.WriteU32(header.resourceCount) && encoded.WriteU32(header.segmentCount) && encoded.WriteU32(header.dependencyCount) &&
-            encoded.WriteU32(header.debugPathBytes) && encoded.WriteU64(header.indexCrc64) && encoded.WriteU64(header.packageSetOffset) &&
-            encoded.WriteU32(vgser::Crc32(bytes, 88)) && encoded.WriteU32(0);
+        const bool written = encoded.WriteU32(PackageMagic) && encoded.WriteU8(PackageHeader::LittleEndian) &&
+                             encoded.WriteU8(PackageHeader::EncodingVersion) && encoded.WriteU16(PackageHeader::WireSize) &&
+                             encoded.WriteU16(header.version.major) && encoded.WriteU16(header.version.minor) &&
+                             encoded.WriteU32(static_cast<u32>(header.flags)) && encoded.WriteU64(header.fileSize) && encoded.WriteU64(header.indexOffset) &&
+                             encoded.WriteU64(header.indexSize) && encoded.WriteU64(header.packageId) && encoded.WriteU64(header.buildId) &&
+                             encoded.WriteU32(header.resourceCount) && encoded.WriteU32(header.segmentCount) && encoded.WriteU32(header.dependencyCount) &&
+                             encoded.WriteU32(header.debugPathBytes) && encoded.WriteU64(header.indexCrc64) && encoded.WriteU64(header.packageSetOffset) &&
+                             encoded.WriteU32(vgser::Crc32(bytes, 88)) && encoded.WriteU32(0);
         if (!written || encoded.Position() != sizeof(bytes))
         {
             return Result::IoFailure;
@@ -103,8 +101,8 @@ namespace
         {
             return Result::IoFailure;
         }
-        const u32 expectedCrc = static_cast<u32>(bytes[88]) | (static_cast<u32>(bytes[89]) << 8u) | (static_cast<u32>(bytes[90]) << 16u) |
-                                (static_cast<u32>(bytes[91]) << 24u);
+        const u32 expectedCrc =
+            static_cast<u32>(bytes[88]) | (static_cast<u32>(bytes[89]) << 8u) | (static_cast<u32>(bytes[90]) << 16u) | (static_cast<u32>(bytes[91]) << 24u);
         if (vgser::Crc32(bytes, 88) != expectedCrc)
         {
             return Result::IntegrityFailure;
@@ -120,12 +118,11 @@ namespace
         u32 ignoredCrc = 0;
         u32 reserved32 = 0;
         if (!reader.ReadU32(magic) || !reader.ReadU8(byteOrder) || !reader.ReadU8(encoding) || !reader.ReadU16(headerSize) ||
-            !reader.ReadU16(header.version.major) || !reader.ReadU16(header.version.minor) || !reader.ReadU32(flags) ||
-            !reader.ReadU64(header.fileSize) || !reader.ReadU64(header.indexOffset) || !reader.ReadU64(header.indexSize) ||
-            !reader.ReadU64(header.packageId) || !reader.ReadU64(header.buildId) || !reader.ReadU32(header.resourceCount) ||
-            !reader.ReadU32(header.segmentCount) || !reader.ReadU32(header.dependencyCount) || !reader.ReadU32(header.debugPathBytes) ||
-            !reader.ReadU64(header.indexCrc64) || !reader.ReadU64(header.packageSetOffset) || !reader.ReadU32(ignoredCrc) ||
-            !reader.ReadU32(reserved32))
+            !reader.ReadU16(header.version.major) || !reader.ReadU16(header.version.minor) || !reader.ReadU32(flags) || !reader.ReadU64(header.fileSize) ||
+            !reader.ReadU64(header.indexOffset) || !reader.ReadU64(header.indexSize) || !reader.ReadU64(header.packageId) || !reader.ReadU64(header.buildId) ||
+            !reader.ReadU32(header.resourceCount) || !reader.ReadU32(header.segmentCount) || !reader.ReadU32(header.dependencyCount) ||
+            !reader.ReadU32(header.debugPathBytes) || !reader.ReadU64(header.indexCrc64) || !reader.ReadU64(header.packageSetOffset) ||
+            !reader.ReadU32(ignoredCrc) || !reader.ReadU32(reserved32))
         {
             return Result::InvalidLayout;
         }
@@ -134,8 +131,8 @@ namespace
         {
             return Result::InvalidMagic;
         }
-        if (byteOrder != PackageHeader::LittleEndian || encoding != PackageHeader::EncodingVersion ||
-            headerSize != PackageHeader::WireSize || reserved32 != 0 || (flags & ~KnownPackageFlags) != 0)
+        if (byteOrder != PackageHeader::LittleEndian || encoding != PackageHeader::EncodingVersion || headerSize != PackageHeader::WireSize ||
+            reserved32 != 0 || (flags & ~KnownPackageFlags) != 0)
         {
             return Result::InvalidLayout;
         }
@@ -154,9 +151,9 @@ namespace
         {
             return Result::InvalidLayout;
         }
-        if (header.fileSize > limits.maximumFileSize || header.indexSize > limits.maximumIndexSize ||
-            header.resourceCount > limits.maximumResources || header.segmentCount > limits.maximumSegments ||
-            header.dependencyCount > limits.maximumDependencies || header.debugPathBytes > limits.maximumDebugPathBytes)
+        if (header.fileSize > limits.maximumFileSize || header.indexSize > limits.maximumIndexSize || header.resourceCount > limits.maximumResources ||
+            header.segmentCount > limits.maximumSegments || header.dependencyCount > limits.maximumDependencies ||
+            header.debugPathBytes > limits.maximumDebugPathBytes)
         {
             return Result::LimitExceeded;
         }
@@ -175,10 +172,9 @@ namespace
 
     [[nodiscard]] bool HasExactlyOneAvailabilityFlag(const PackageSetEntryFlags flags) noexcept
     {
-        const u32 availability = static_cast<u32>(flags) &
-                                 (static_cast<u32>(PackageSetEntryFlags::Required) | static_cast<u32>(PackageSetEntryFlags::Optional));
-        return availability == static_cast<u32>(PackageSetEntryFlags::Required) ||
-               availability == static_cast<u32>(PackageSetEntryFlags::Optional);
+        const u32 availability =
+            static_cast<u32>(flags) & (static_cast<u32>(PackageSetEntryFlags::Required) | static_cast<u32>(PackageSetEntryFlags::Optional));
+        return availability == static_cast<u32>(PackageSetEntryFlags::Required) || availability == static_cast<u32>(PackageSetEntryFlags::Optional);
     }
 
     [[nodiscard]] bool ValidatePackageSetEntry(const PackageSetEntry& entry, const u32 previousNumber) noexcept
@@ -189,9 +185,8 @@ namespace
             hasDigest = hasDigest || byte != 0;
         }
         return entry.packageNumber > previousNumber && entry.packageNumber <= MaximumPackageNumber &&
-               (static_cast<u32>(entry.flags) & ~KnownPackageSetEntryFlags) == 0 && HasExactlyOneAvailabilityFlag(entry.flags) &&
-               entry.packageId != 0 && entry.buildId != 0 && entry.fileSize >= PackageHeader::WireSize && entry.indexCrc64 != 0 &&
-               hasDigest;
+               (static_cast<u32>(entry.flags) & ~KnownPackageSetEntryFlags) == 0 && HasExactlyOneAvailabilityFlag(entry.flags) && entry.packageId != 0 &&
+               entry.buildId != 0 && entry.fileSize >= PackageHeader::WireSize && entry.indexCrc64 != 0 && hasDigest;
     }
 
     [[nodiscard]] Result RejectPackageSet(PackageSet& output, const Result result) noexcept
@@ -200,8 +195,8 @@ namespace
         return result;
     }
 
-    [[nodiscard]] Result WritePackageSetRecord(vgser::BinaryWriter& writer, const PackageSetBuild& build, const u64 buildId,
-                                               u64& recordOffset, u64& recordEnd) noexcept
+    [[nodiscard]] Result WritePackageSetRecord(vgser::BinaryWriter& writer, const PackageSetBuild& build, const u64 buildId, u64& recordOffset,
+                                               u64& recordEnd) noexcept
     {
         if (build.gameId == 0 || buildId == 0 || build.targetPlatformId == 0 || build.startupWorld == InvalidResourceId ||
             build.startupWorldType == resources::InvalidResourceTypeId || build.defaultInput == InvalidResourceId ||
@@ -228,8 +223,7 @@ namespace
         {
             if (!entriesWriter.WriteU32(entry.packageNumber) || !entriesWriter.WriteU32(static_cast<u32>(entry.flags)) ||
                 !entriesWriter.WriteI32(entry.mountPriority) || !entriesWriter.WriteU32(0) || !entriesWriter.WriteU64(entry.packageId) ||
-                !entriesWriter.WriteU64(entry.buildId) || !entriesWriter.WriteU64(entry.fileSize) ||
-                !entriesWriter.WriteU64(entry.indexCrc64) ||
+                !entriesWriter.WriteU64(entry.buildId) || !entriesWriter.WriteU64(entry.fileSize) || !entriesWriter.WriteU64(entry.indexCrc64) ||
                 !entriesWriter.WriteBytes(entry.contentDigest, sizeof(entry.contentDigest)))
             {
                 return Result::IoFailure;
@@ -249,14 +243,12 @@ namespace
         const void* const entryBytes = entries.Empty() ? &emptyEntries : entries.Data();
         const u64 entriesCrc64 = vgser::Crc64(entryBytes, entries.Size());
         const bool headerWritten =
-            headerWriter.WriteU32(PackageSetMagic) && headerWriter.WriteU8(LittleEndian) &&
-            headerWriter.WriteU8(PackageSetEncodingVersion) && headerWriter.WriteU16(PackageSetHeaderWireSize) &&
-            headerWriter.WriteU16(1) && headerWriter.WriteU16(1) && headerWriter.WriteU32(0) && headerWriter.WriteU64(recordSize) &&
-            headerWriter.WriteU64(build.gameId) && headerWriter.WriteU64(buildId) && headerWriter.WriteU64(build.startupWorld) &&
-            headerWriter.WriteU32(build.startupWorldType) && headerWriter.WriteU32(build.targetPlatformId) &&
-            headerWriter.WriteU64(build.defaultInput) && headerWriter.WriteU32(build.defaultInputType) &&
-            headerWriter.WriteU32(build.packages.Count()) && headerWriter.WriteU16(PackageSetEntry::WireSize) &&
-            headerWriter.WriteU16(0) && headerWriter.WriteU64(entriesCrc64) && headerWriter.WriteU32(0) &&
+            headerWriter.WriteU32(PackageSetMagic) && headerWriter.WriteU8(LittleEndian) && headerWriter.WriteU8(PackageSetEncodingVersion) &&
+            headerWriter.WriteU16(PackageSetHeaderWireSize) && headerWriter.WriteU16(1) && headerWriter.WriteU16(1) && headerWriter.WriteU32(0) &&
+            headerWriter.WriteU64(recordSize) && headerWriter.WriteU64(build.gameId) && headerWriter.WriteU64(buildId) &&
+            headerWriter.WriteU64(build.startupWorld) && headerWriter.WriteU32(build.startupWorldType) && headerWriter.WriteU32(build.targetPlatformId) &&
+            headerWriter.WriteU64(build.defaultInput) && headerWriter.WriteU32(build.defaultInputType) && headerWriter.WriteU32(build.packages.Count()) &&
+            headerWriter.WriteU16(PackageSetEntry::WireSize) && headerWriter.WriteU16(0) && headerWriter.WriteU64(entriesCrc64) && headerWriter.WriteU32(0) &&
             headerWriter.WriteU32(vgser::Crc32(headerBytes, 88)) && headerWriter.WriteU32(0);
         if (!headerWritten || headerWriter.Position() != sizeof(headerBytes))
         {
@@ -272,8 +264,8 @@ namespace
         return Result::Success;
     }
 
-    [[nodiscard]] Result ReadPackageSetRecord(filesystem::IFile& file, const PackageHeader& packageHeader,
-                                              const PackageSetReadLimits& limits, PackageSet& output) noexcept
+    [[nodiscard]] Result ReadPackageSetRecord(filesystem::IFile& file, const PackageHeader& packageHeader, const PackageSetReadLimits& limits,
+                                              PackageSet& output) noexcept
     {
         output.Reset();
         if (!HasFlag(packageHeader.flags, PackageFlags::HasPackageSet))
@@ -314,13 +306,11 @@ namespace
         u32 ignoredHeaderCrc = 0;
         u32 reserved32 = 0;
         if (!reader.ReadU32(magic) || !reader.ReadU8(byteOrder) || !reader.ReadU8(encoding) || !reader.ReadU16(headerSize) ||
-            !reader.ReadU16(output.version.major) || !reader.ReadU16(output.version.minor) || !reader.ReadU32(flags) ||
-            !reader.ReadU64(recordSize) || !reader.ReadU64(output.gameId) || !reader.ReadU64(output.buildId) ||
-            !reader.ReadU64(output.startupWorld) || !reader.ReadU32(output.startupWorldType) ||
-            !reader.ReadU32(output.targetPlatformId) || !reader.ReadU64(output.defaultInput) ||
-            !reader.ReadU32(output.defaultInputType) || !reader.ReadU32(packageCount) || !reader.ReadU16(entrySize) ||
-            !reader.ReadU16(reserved16) || !reader.ReadU64(entriesCrc64) || !reader.ReadU32(reservedBeforeCrc) ||
-            !reader.ReadU32(ignoredHeaderCrc) || !reader.ReadU32(reserved32))
+            !reader.ReadU16(output.version.major) || !reader.ReadU16(output.version.minor) || !reader.ReadU32(flags) || !reader.ReadU64(recordSize) ||
+            !reader.ReadU64(output.gameId) || !reader.ReadU64(output.buildId) || !reader.ReadU64(output.startupWorld) ||
+            !reader.ReadU32(output.startupWorldType) || !reader.ReadU32(output.targetPlatformId) || !reader.ReadU64(output.defaultInput) ||
+            !reader.ReadU32(output.defaultInputType) || !reader.ReadU32(packageCount) || !reader.ReadU16(entrySize) || !reader.ReadU16(reserved16) ||
+            !reader.ReadU64(entriesCrc64) || !reader.ReadU32(reservedBeforeCrc) || !reader.ReadU32(ignoredHeaderCrc) || !reader.ReadU32(reserved32))
         {
             return RejectPackageSet(output, Result::InvalidLayout);
         }
@@ -332,11 +322,9 @@ namespace
         {
             return RejectPackageSet(output, Result::UnsupportedVersion);
         }
-        if (byteOrder != LittleEndian || encoding != PackageSetEncodingVersion || headerSize != PackageSetHeaderWireSize ||
-            flags != 0 || entrySize != PackageSetEntry::WireSize || reserved16 != 0 || reservedBeforeCrc != 0 ||
-            reserved32 != 0 || output.gameId == 0 ||
-            output.buildId == 0 ||
-            output.buildId != packageHeader.buildId || output.targetPlatformId == 0 || output.startupWorld == InvalidResourceId ||
+        if (byteOrder != LittleEndian || encoding != PackageSetEncodingVersion || headerSize != PackageSetHeaderWireSize || flags != 0 ||
+            entrySize != PackageSetEntry::WireSize || reserved16 != 0 || reservedBeforeCrc != 0 || reserved32 != 0 || output.gameId == 0 ||
+            output.buildId == 0 || output.buildId != packageHeader.buildId || output.targetPlatformId == 0 || output.startupWorld == InvalidResourceId ||
             output.startupWorldType == resources::InvalidResourceTypeId || output.defaultInput == InvalidResourceId ||
             output.defaultInputType == resources::InvalidResourceTypeId)
         {
@@ -347,16 +335,14 @@ namespace
             return RejectPackageSet(output, Result::LimitExceeded);
         }
         if (recordSize != PackageSetRecordSize(packageCount) || AddOverflow(packageHeader.packageSetOffset, recordSize) ||
-            packageHeader.packageSetOffset + recordSize > packageHeader.indexOffset ||
-            recordSize - PackageSetHeaderWireSize > std::numeric_limits<u32>::max())
+            packageHeader.packageSetOffset + recordSize > packageHeader.indexOffset || recordSize - PackageSetHeaderWireSize > std::numeric_limits<u32>::max())
         {
             return RejectPackageSet(output, Result::InvalidLayout);
         }
 
         containers::DynamicArray<u8> entries(memory::pools::Resources::GetInstance());
         entries.Resize(static_cast<u32>(recordSize - PackageSetHeaderWireSize));
-        if (!source.Seek(packageHeader.packageSetOffset + PackageSetHeaderWireSize) ||
-            !source.ReadBytes(entries.Data(), entries.Size()))
+        if (!source.Seek(packageHeader.packageSetOffset + PackageSetHeaderWireSize) || !source.ReadBytes(entries.Data(), entries.Size()))
         {
             return RejectPackageSet(output, Result::IoFailure);
         }
@@ -375,9 +361,8 @@ namespace
         {
             u32 entryFlags = 0;
             u32 entryReserved = 0;
-            if (!entriesReader.ReadU32(entry.packageNumber) || !entriesReader.ReadU32(entryFlags) ||
-                !entriesReader.ReadI32(entry.mountPriority) || !entriesReader.ReadU32(entryReserved) ||
-                !entriesReader.ReadU64(entry.packageId) || !entriesReader.ReadU64(entry.buildId) ||
+            if (!entriesReader.ReadU32(entry.packageNumber) || !entriesReader.ReadU32(entryFlags) || !entriesReader.ReadI32(entry.mountPriority) ||
+                !entriesReader.ReadU32(entryReserved) || !entriesReader.ReadU64(entry.packageId) || !entriesReader.ReadU64(entry.buildId) ||
                 !entriesReader.ReadU64(entry.fileSize) || !entriesReader.ReadU64(entry.indexCrc64) ||
                 !entriesReader.ReadBytes(entry.contentDigest, sizeof(entry.contentDigest)) || entryReserved != 0)
             {
@@ -405,15 +390,14 @@ namespace
     {
         return writer.WriteU64(resource.id) && writer.WriteU32(resource.type) && writer.WriteU32(static_cast<u32>(resource.flags)) &&
                writer.WriteU64(resource.logicalSize) && writer.WriteU32(resource.firstSegment) && writer.WriteU32(resource.segmentCount) &&
-               writer.WriteU32(resource.firstDependency) && writer.WriteU32(resource.dependencyCount) &&
-               writer.WriteU32(resource.debugPathOffset) && writer.WriteU32(resource.debugPathSize) &&
-               writer.WriteU64(resource.contentCrc64) && writer.WriteU64(0);
+               writer.WriteU32(resource.firstDependency) && writer.WriteU32(resource.dependencyCount) && writer.WriteU32(resource.debugPathOffset) &&
+               writer.WriteU32(resource.debugPathSize) && writer.WriteU64(resource.contentCrc64) && writer.WriteU64(0);
     }
 
     [[nodiscard]] bool WriteDependency(vgser::BinaryWriter& writer, const Dependency& dependency) noexcept
     {
-        return writer.WriteU64(dependency.id) && writer.WriteU32(dependency.type) && writer.WriteU8(static_cast<u8>(dependency.kind)) &&
-               writer.WriteU8(0) && writer.WriteU16(0);
+        return writer.WriteU64(dependency.id) && writer.WriteU32(dependency.type) && writer.WriteU8(static_cast<u8>(dependency.kind)) && writer.WriteU8(0) &&
+               writer.WriteU16(0);
     }
 
     [[nodiscard]] bool ReadDependency(vgser::BinaryReader& reader, Dependency& dependency) noexcept
@@ -434,10 +418,9 @@ namespace
     {
         u32 flags = 0;
         u64 reserved = 0;
-        if (!reader.ReadU64(resource.id) || !reader.ReadU32(resource.type) || !reader.ReadU32(flags) ||
-            !reader.ReadU64(resource.logicalSize) || !reader.ReadU32(resource.firstSegment) || !reader.ReadU32(resource.segmentCount) ||
-            !reader.ReadU32(resource.firstDependency) || !reader.ReadU32(resource.dependencyCount) ||
-            !reader.ReadU32(resource.debugPathOffset) || !reader.ReadU32(resource.debugPathSize) ||
+        if (!reader.ReadU64(resource.id) || !reader.ReadU32(resource.type) || !reader.ReadU32(flags) || !reader.ReadU64(resource.logicalSize) ||
+            !reader.ReadU32(resource.firstSegment) || !reader.ReadU32(resource.segmentCount) || !reader.ReadU32(resource.firstDependency) ||
+            !reader.ReadU32(resource.dependencyCount) || !reader.ReadU32(resource.debugPathOffset) || !reader.ReadU32(resource.debugPathSize) ||
             !reader.ReadU64(resource.contentCrc64) || !reader.ReadU64(reserved))
         {
             return false;
@@ -453,9 +436,8 @@ namespace
     [[nodiscard]] bool WriteSegment(vgser::BinaryWriter& writer, const Segment& segment) noexcept
     {
         return writer.WriteU64(segment.offset) && writer.WriteU64(segment.storedSize) && writer.WriteU64(segment.logicalSize) &&
-               writer.WriteU64(segment.storedCrc64) && writer.WriteU8(static_cast<u8>(segment.codec)) &&
-               writer.WriteU8(segment.alignmentLog2) && writer.WriteU8(static_cast<u8>(segment.flags)) && writer.WriteU8(0) &&
-               writer.WriteU32(0);
+               writer.WriteU64(segment.storedCrc64) && writer.WriteU8(static_cast<u8>(segment.codec)) && writer.WriteU8(segment.alignmentLog2) &&
+               writer.WriteU8(static_cast<u8>(segment.flags)) && writer.WriteU8(0) && writer.WriteU32(0);
     }
 
     [[nodiscard]] bool ReadSegment(vgser::BinaryReader& reader, Segment& segment) noexcept
@@ -465,8 +447,8 @@ namespace
         u8 reserved8 = 0;
         u32 reserved32 = 0;
         if (!reader.ReadU64(segment.offset) || !reader.ReadU64(segment.storedSize) || !reader.ReadU64(segment.logicalSize) ||
-            !reader.ReadU64(segment.storedCrc64) || !reader.ReadU8(codec) || !reader.ReadU8(segment.alignmentLog2) ||
-            !reader.ReadU8(flags) || !reader.ReadU8(reserved8) || !reader.ReadU32(reserved32))
+            !reader.ReadU64(segment.storedCrc64) || !reader.ReadU8(codec) || !reader.ReadU8(segment.alignmentLog2) || !reader.ReadU8(flags) ||
+            !reader.ReadU8(reserved8) || !reader.ReadU32(reserved32))
         {
             return false;
         }
@@ -538,8 +520,7 @@ namespace vanguard::packages
         return "Unknown";
     }
 
-    Result CanonicalizeResourcePath(const containers::StringView path, char* const destination, const usize capacity,
-                                    usize& written) noexcept
+    Result CanonicalizeResourcePath(const containers::StringView path, char* const destination, const usize capacity, usize& written) noexcept
     {
         const resources::Result result = resources::CanonicalizePath(path, destination, capacity, written);
         switch (result)
@@ -578,9 +559,8 @@ namespace vanguard::packages
 
     bool PackageSet::IsValid() const noexcept
     {
-        if (version != serialization::Version{1, 1} || gameId == 0 || buildId == 0 || targetPlatformId == 0 ||
-            startupWorld == InvalidResourceId || startupWorldType == resources::InvalidResourceTypeId ||
-            defaultInput == InvalidResourceId || defaultInputType == resources::InvalidResourceTypeId ||
+        if (version != serialization::Version{1, 1} || gameId == 0 || buildId == 0 || targetPlatformId == 0 || startupWorld == InvalidResourceId ||
+            startupWorldType == resources::InvalidResourceTypeId || defaultInput == InvalidResourceId || defaultInputType == resources::InvalidResourceTypeId ||
             packages.Size() > MaximumPackageNumber)
         {
             return false;
@@ -639,12 +619,11 @@ namespace vanguard::packages
         return headerResult == Result::Success ? ReadPackageSetRecord(reader, header, packageSetLimits, packageSet) : headerResult;
     }
 
-    Result OpenCatalogPackage(filesystem::IFile& file, const PackageSetEntry& entry, PackageReader& package,
-                              const CatalogVerification verification, const ReadLimits& limits, const u32 hashBufferBytes) noexcept
+    Result OpenCatalogPackage(filesystem::IFile& file, const PackageSetEntry& entry, PackageReader& package, const CatalogVerification verification,
+                              const ReadLimits& limits, const u32 hashBufferBytes) noexcept
     {
         package.Close();
-        if (!file.IsReader() || !ValidatePackageSetEntry(entry, 0) || verification > CatalogVerification::WholeFileDigest ||
-            hashBufferBytes == 0)
+        if (!file.IsReader() || !ValidatePackageSetEntry(entry, 0) || verification > CatalogVerification::WholeFileDigest || hashBufferBytes == 0)
         {
             return Result::InvalidArgument;
         }
@@ -657,9 +636,9 @@ namespace vanguard::packages
         {
             return opened;
         }
-        const PackageHeader& header = package.Header();
-        if (package.HasPackageSet() || header.packageId != entry.packageId || header.buildId != entry.buildId ||
-            header.fileSize != entry.fileSize || header.indexCrc64 != entry.indexCrc64)
+        const PackageHeader& header = package.GetHeader();
+        if (package.HasPackageSet() || header.packageId != entry.packageId || header.buildId != entry.buildId || header.fileSize != entry.fileSize ||
+            header.indexCrc64 != entry.indexCrc64)
         {
             package.Close();
             return Result::IntegrityFailure;
@@ -811,8 +790,7 @@ namespace vanguard::packages
         {
             return Result::InvalidArgument;
         }
-        if (m_resources.Size() == std::numeric_limits<u32>::max() ||
-            build.segments.Count() > std::numeric_limits<u32>::max() - m_segments.Size() ||
+        if (m_resources.Size() == std::numeric_limits<u32>::max() || build.segments.Count() > std::numeric_limits<u32>::max() - m_segments.Size() ||
             build.dependencies.Count() > std::numeric_limits<u32>::max() - m_dependencies.Size() ||
             canonicalSize > std::numeric_limits<u32>::max() - m_debugPaths.Size())
         {
@@ -850,8 +828,7 @@ namespace vanguard::packages
         vgser::BinaryWriter writer(*m_writer);
         for (const BuildSegment& input : build.segments)
         {
-            const u8 effectiveAlignment =
-                input.alignmentLog2 > m_options.dataAlignmentLog2 ? input.alignmentLog2 : m_options.dataAlignmentLog2;
+            const u8 effectiveAlignment = input.alignmentLog2 > m_options.dataAlignmentLog2 ? input.alignmentLog2 : m_options.dataAlignmentLog2;
             const void* storedData = input.data;
             usize storedSize = input.size;
             Codec storedCodec = input.codec;
@@ -980,16 +957,14 @@ namespace vanguard::packages
         {
             return Result::InvalidArgument;
         }
-        if (HasFlag(m_options.flags, PackageFlags::HasPackageSet) &&
-            (m_packageSetOffset != PackageHeader::WireSize || m_packageSetEnd <= m_packageSetOffset))
+        if (HasFlag(m_options.flags, PackageFlags::HasPackageSet) && (m_packageSetOffset != PackageHeader::WireSize || m_packageSetEnd <= m_packageSetOffset))
         {
             return Result::InvalidState;
         }
 
         if (!HasFlag(m_options.flags, PackageFlags::Deterministic))
         {
-            std::sort(m_resources.Begin(), m_resources.End(),
-                      [](const Resource& left, const Resource& right) { return left.id < right.id; });
+            std::sort(m_resources.Begin(), m_resources.End(), [](const Resource& left, const Resource& right) { return left.id < right.id; });
         }
 
         PackageHeader header;
@@ -1004,21 +979,19 @@ namespace vanguard::packages
         header.packageSetOffset = m_packageSetOffset;
 
         u64 indexSize = IndexHeaderWireSize;
-        if (MultiplyOverflow(header.resourceCount, Resource::WireSize) ||
-            AddOverflow(indexSize, static_cast<u64>(header.resourceCount) * Resource::WireSize))
+        if (MultiplyOverflow(header.resourceCount, Resource::WireSize) || AddOverflow(indexSize, static_cast<u64>(header.resourceCount) * Resource::WireSize))
         {
             return Result::LimitExceeded;
         }
         indexSize += static_cast<u64>(header.resourceCount) * Resource::WireSize;
-        if (MultiplyOverflow(header.segmentCount, Segment::WireSize) ||
-            AddOverflow(indexSize, static_cast<u64>(header.segmentCount) * Segment::WireSize))
+        if (MultiplyOverflow(header.segmentCount, Segment::WireSize) || AddOverflow(indexSize, static_cast<u64>(header.segmentCount) * Segment::WireSize))
         {
             return Result::LimitExceeded;
         }
         indexSize += static_cast<u64>(header.segmentCount) * Segment::WireSize;
         if (MultiplyOverflow(header.dependencyCount, DependencyWireSize) ||
-            AddOverflow(indexSize, static_cast<u64>(header.dependencyCount) * DependencyWireSize) ||
-            AddOverflow(indexSize, header.debugPathBytes) || indexSize + header.debugPathBytes > std::numeric_limits<u32>::max())
+            AddOverflow(indexSize, static_cast<u64>(header.dependencyCount) * DependencyWireSize) || AddOverflow(indexSize, header.debugPathBytes) ||
+            indexSize + header.debugPathBytes > std::numeric_limits<u32>::max())
         {
             return Result::LimitExceeded;
         }
@@ -1117,17 +1090,17 @@ namespace vanguard::packages
         return m_building;
     }
 
-    u32 PackageWriter::ResourceCount() const noexcept
+    u32 PackageWriter::GetResourceCount() const noexcept
     {
         return m_resources.Size();
     }
 
-    u32 PackageWriter::DeduplicatedSegmentCount() const noexcept
+    u32 PackageWriter::GetDeduplicatedSegmentCount() const noexcept
     {
         return m_deduplicatedSegments;
     }
 
-    u64 PackageWriter::StoredPayloadBytes() const noexcept
+    u64 PackageWriter::GetStoredPayloadBytes() const noexcept
     {
         return m_storedPayloadBytes;
     }
@@ -1138,8 +1111,7 @@ namespace vanguard::packages
     {
     }
 
-    Result PackageReader::Open(filesystem::IFile& file, const ReadLimits& limits,
-                               const PackageSetReadLimits& packageSetLimits) noexcept
+    Result PackageReader::Open(filesystem::IFile& file, const ReadLimits& limits, const PackageSetReadLimits& packageSetLimits) noexcept
     {
         if (m_open || !file.IsReader() || limits.maximumAlignmentLog2 > 31)
         {
@@ -1213,11 +1185,10 @@ namespace vanguard::packages
         u32 dependencyCount = 0;
         u32 pathBytes = 0;
         if (!reader.ReadU32(magic) || !reader.ReadU16(version.major) || !reader.ReadU16(version.minor) || !reader.ReadU16(headerSize) ||
-            !reader.ReadU16(resourceSize) || !reader.ReadU16(segmentSize) || !reader.ReadU16(dependencySize) ||
-            !reader.ReadU32(resourceCount) || !reader.ReadU32(segmentCount) || !reader.ReadU32(dependencyCount) ||
-            !reader.ReadU32(pathBytes) || magic != IndexMagic || version != m_header.version || headerSize != IndexHeaderWireSize ||
-            resourceSize != Resource::WireSize || segmentSize != Segment::WireSize || dependencySize != DependencyWireSize ||
-            resourceCount != m_header.resourceCount || segmentCount != m_header.segmentCount ||
+            !reader.ReadU16(resourceSize) || !reader.ReadU16(segmentSize) || !reader.ReadU16(dependencySize) || !reader.ReadU32(resourceCount) ||
+            !reader.ReadU32(segmentCount) || !reader.ReadU32(dependencyCount) || !reader.ReadU32(pathBytes) || magic != IndexMagic ||
+            version != m_header.version || headerSize != IndexHeaderWireSize || resourceSize != Resource::WireSize || segmentSize != Segment::WireSize ||
+            dependencySize != DependencyWireSize || resourceCount != m_header.resourceCount || segmentCount != m_header.segmentCount ||
             dependencyCount != m_header.dependencyCount || pathBytes != m_header.debugPathBytes)
         {
             return Result::InvalidLayout;
@@ -1280,10 +1251,9 @@ namespace vanguard::packages
         for (const Resource& resource : m_resources)
         {
             if (resource.id == InvalidResourceId || (previousId != InvalidResourceId && resource.id <= previousId) || resource.type == 0 ||
-                resource.firstSegment > segmentCount || resource.segmentCount > segmentCount - resource.firstSegment ||
-                resource.segmentCount == 0 || resource.firstDependency > dependencyCount ||
-                resource.dependencyCount > dependencyCount - resource.firstDependency || resource.debugPathOffset > pathBytes ||
-                resource.debugPathSize > pathBytes - resource.debugPathOffset)
+                resource.firstSegment > segmentCount || resource.segmentCount > segmentCount - resource.firstSegment || resource.segmentCount == 0 ||
+                resource.firstDependency > dependencyCount || resource.dependencyCount > dependencyCount - resource.firstDependency ||
+                resource.debugPathOffset > pathBytes || resource.debugPathSize > pathBytes - resource.debugPathOffset)
             {
                 Close();
                 return Result::InvalidLayout;
@@ -1312,8 +1282,7 @@ namespace vanguard::packages
             {
                 const u32 dependencyIndex = resource.firstDependency + localIndex;
                 if (dependencyOwners[dependencyIndex] != 0 || m_dependencies[dependencyIndex].id == InvalidResourceId ||
-                    m_dependencies[dependencyIndex].type == resources::InvalidResourceTypeId ||
-                    m_dependencies[dependencyIndex].id == resource.id)
+                    m_dependencies[dependencyIndex].type == resources::InvalidResourceTypeId || m_dependencies[dependencyIndex].id == resource.id)
                 {
                     Close();
                     return Result::InvalidLayout;
@@ -1326,9 +1295,8 @@ namespace vanguard::packages
                 const containers::StringView path(m_debugPaths.TypedData() + resource.debugPathOffset, resource.debugPathSize);
                 char canonical[MaximumResourcePathBytes];
                 usize canonicalSize = 0;
-                if (CanonicalizeResourcePath(path, canonical, sizeof(canonical), canonicalSize) != Result::Success ||
-                    canonicalSize != path.Size() || std::memcmp(canonical, path.Data(), canonicalSize) != 0 ||
-                    HashResourcePath(path) != resource.id)
+                if (CanonicalizeResourcePath(path, canonical, sizeof(canonical), canonicalSize) != Result::Success || canonicalSize != path.Size() ||
+                    std::memcmp(canonical, path.Data(), canonicalSize) != 0 || HashResourcePath(path) != resource.id)
                 {
                     Close();
                     return Result::InvalidLayout;
@@ -1350,9 +1318,8 @@ namespace vanguard::packages
         {
             if (segment.alignmentLog2 > limits.maximumAlignmentLog2 || segment.storedSize > limits.maximumSegmentStoredSize ||
                 segment.logicalSize > limits.maximumSegmentLogicalSize || AddOverflow(segment.offset, segment.storedSize) ||
-                segment.offset + segment.storedSize > m_header.indexOffset || segment.offset < payloadStart ||
-                !IsPowerOfTwo(u64{1} << segment.alignmentLog2) || (segment.offset & ((u64{1} << segment.alignmentLog2) - 1u)) != 0 ||
-                (segment.codec == Codec::None && segment.storedSize != segment.logicalSize))
+                segment.offset + segment.storedSize > m_header.indexOffset || segment.offset < payloadStart || !IsPowerOfTwo(u64{1} << segment.alignmentLog2) ||
+                (segment.offset & ((u64{1} << segment.alignmentLog2) - 1u)) != 0 || (segment.codec == Codec::None && segment.storedSize != segment.logicalSize))
             {
                 Close();
                 return Result::InvalidLayout;
@@ -1362,8 +1329,8 @@ namespace vanguard::packages
             if (physicalLookup.Find(segment.offset, physicalIndex))
             {
                 const Segment& physical = physicalSegments[physicalIndex];
-                if (physical.storedSize != segment.storedSize || physical.logicalSize != segment.logicalSize ||
-                    physical.storedCrc64 != segment.storedCrc64 || physical.codec != segment.codec)
+                if (physical.storedSize != segment.storedSize || physical.logicalSize != segment.logicalSize || physical.storedCrc64 != segment.storedCrc64 ||
+                    physical.codec != segment.codec)
                 {
                     Close();
                     return Result::InvalidLayout;
@@ -1373,16 +1340,14 @@ namespace vanguard::packages
             {
                 const u32 newPhysicalIndex = physicalSegments.Size();
                 physicalSegments.PushBack(segment);
-                if (physicalSegments.Size() != newPhysicalIndex + 1u ||
-                    !physicalLookup.Insert(segment.offset, newPhysicalIndex).IsSuccessful())
+                if (physicalSegments.Size() != newPhysicalIndex + 1u || !physicalLookup.Insert(segment.offset, newPhysicalIndex).IsSuccessful())
                 {
                     Close();
                     return Result::LimitExceeded;
                 }
             }
         }
-        std::sort(physicalSegments.Begin(), physicalSegments.End(),
-                  [](const Segment& left, const Segment& right) { return left.offset < right.offset; });
+        std::sort(physicalSegments.Begin(), physicalSegments.End(), [](const Segment& left, const Segment& right) { return left.offset < right.offset; });
         u64 previousSegmentEnd = payloadStart;
         for (const Segment& segment : physicalSegments)
         {
@@ -1430,7 +1395,7 @@ namespace vanguard::packages
         return m_open;
     }
 
-    const PackageHeader& PackageReader::Header() const noexcept
+    const PackageHeader& PackageReader::GetHeader() const noexcept
     {
         return m_header;
     }
@@ -1445,12 +1410,12 @@ namespace vanguard::packages
         return HasPackageSet() ? &m_packageSet : nullptr;
     }
 
-    containers::ArraySpan<const Resource> PackageReader::Resources() const noexcept
+    containers::ArraySpan<const Resource> PackageReader::GetResources() const noexcept
     {
         return {m_resources.TypedData(), m_resources.Size()};
     }
 
-    containers::ArraySpan<const Segment> PackageReader::Segments(const Resource& resource) const noexcept
+    containers::ArraySpan<const Segment> PackageReader::GetSegments(const Resource& resource) const noexcept
     {
         if (!m_open || resource.firstSegment + resource.segmentCount > m_segments.Size())
         {
@@ -1459,7 +1424,7 @@ namespace vanguard::packages
         return {m_segments.TypedData() + resource.firstSegment, resource.segmentCount};
     }
 
-    containers::ArraySpan<const Dependency> PackageReader::Dependencies(const Resource& resource) const noexcept
+    containers::ArraySpan<const Dependency> PackageReader::GetDependencies(const Resource& resource) const noexcept
     {
         if (!m_open || resource.firstDependency + resource.dependencyCount > m_dependencies.Size())
         {
@@ -1468,7 +1433,7 @@ namespace vanguard::packages
         return {m_dependencies.TypedData() + resource.firstDependency, resource.dependencyCount};
     }
 
-    containers::StringView PackageReader::DebugPath(const Resource& resource) const noexcept
+    containers::StringView PackageReader::GetDebugPath(const Resource& resource) const noexcept
     {
         if (!m_open || resource.debugPathSize == 0 || resource.debugPathOffset + resource.debugPathSize > m_debugPaths.Size())
         {
@@ -1513,9 +1478,9 @@ namespace vanguard::packages
         const auto segmentAddress = reinterpret_cast<uintptr_t>(&segment);
         const auto segmentBegin = reinterpret_cast<uintptr_t>(m_segments.TypedData());
         const auto segmentEnd = segmentBegin + static_cast<uintptr_t>(m_segments.Size()) * sizeof(Segment);
-        if (!m_open || segmentAddress < segmentBegin || segmentAddress >= segmentEnd ||
-            ((segmentAddress - segmentBegin) % sizeof(Segment)) != 0 || !file.IsReader() || file.GetSize() != m_header.fileSize ||
-            destinationSize < segment.logicalSize || (segment.logicalSize != 0 && destination == nullptr))
+        if (!m_open || segmentAddress < segmentBegin || segmentAddress >= segmentEnd || ((segmentAddress - segmentBegin) % sizeof(Segment)) != 0 ||
+            !file.IsReader() || file.GetSize() != m_header.fileSize || destinationSize < segment.logicalSize ||
+            (segment.logicalSize != 0 && destination == nullptr))
         {
             return destinationSize < segment.logicalSize ? Result::BufferTooSmall : Result::InvalidArgument;
         }
@@ -1537,15 +1502,14 @@ namespace vanguard::packages
         {
             return result;
         }
-        return backend::DecompressLz4(storedScratch, static_cast<usize>(segment.storedSize), destination,
-                                      static_cast<usize>(segment.logicalSize));
+        return backend::DecompressLz4(storedScratch, static_cast<usize>(segment.storedSize), destination, static_cast<usize>(segment.logicalSize));
     }
 
-    Result PackageReader::DecodeSegment(const Segment& segment, const void* const storedData, const usize storedSize,
-                                        void* const destination, const usize destinationSize) const noexcept
+    Result PackageReader::DecodeSegment(const Segment& segment, const void* const storedData, const usize storedSize, void* const destination,
+                                        const usize destinationSize) const noexcept
     {
-        if (!m_open || storedSize != segment.storedSize || destinationSize < segment.logicalSize ||
-            (storedSize != 0 && storedData == nullptr) || (segment.logicalSize != 0 && destination == nullptr))
+        if (!m_open || storedSize != segment.storedSize || destinationSize < segment.logicalSize || (storedSize != 0 && storedData == nullptr) ||
+            (segment.logicalSize != 0 && destination == nullptr))
         {
             return Result::InvalidArgument;
         }
@@ -1572,26 +1536,24 @@ namespace vanguard::packages
         return backend::DecompressLz4(storedData, storedSize, destination, static_cast<usize>(segment.logicalSize));
     }
 
-    Result PackageReader::ReadResource(filesystem::IFile& file, const Resource& resource, void* const destination,
-                                       const usize destinationSize, void* const storedScratch, const usize storedScratchSize) const noexcept
+    Result PackageReader::ReadResource(filesystem::IFile& file, const Resource& resource, void* const destination, const usize destinationSize,
+                                       void* const storedScratch, const usize storedScratchSize) const noexcept
     {
         const auto resourceAddress = reinterpret_cast<uintptr_t>(&resource);
         const auto resourceBegin = reinterpret_cast<uintptr_t>(m_resources.TypedData());
         const auto resourceEnd = resourceBegin + static_cast<uintptr_t>(m_resources.Size()) * sizeof(Resource);
-        if (!m_open || resourceAddress < resourceBegin || resourceAddress >= resourceEnd ||
-            ((resourceAddress - resourceBegin) % sizeof(Resource)) != 0 || destinationSize < resource.logicalSize ||
-            (resource.logicalSize != 0 && destination == nullptr))
+        if (!m_open || resourceAddress < resourceBegin || resourceAddress >= resourceEnd || ((resourceAddress - resourceBegin) % sizeof(Resource)) != 0 ||
+            destinationSize < resource.logicalSize || (resource.logicalSize != 0 && destination == nullptr))
         {
             return destinationSize < resource.logicalSize ? Result::BufferTooSmall : Result::InvalidArgument;
         }
 
         auto* output = static_cast<u8*>(destination);
         usize outputOffset = 0;
-        for (const Segment& segment : Segments(resource))
+        for (const Segment& segment : GetSegments(resource))
         {
             void* const segmentOutput = outputOffset == 0 ? output : output + outputOffset;
-            const Result result =
-                ReadSegment(file, segment, segmentOutput, destinationSize - outputOffset, storedScratch, storedScratchSize);
+            const Result result = ReadSegment(file, segment, segmentOutput, destinationSize - outputOffset, storedScratch, storedScratchSize);
             if (result != Result::Success)
             {
                 return result;
@@ -1607,18 +1569,16 @@ namespace vanguard::packages
     {
     }
 
-    Result ResourceFileReader::Open(const PackageReader& package, const Resource& resource,
-                                    filesystem::IFile& physicalPackageFile) noexcept
+    Result ResourceFileReader::Open(const PackageReader& package, const Resource& resource, filesystem::IFile& physicalPackageFile) noexcept
     {
         Close();
         const auto resourceAddress = reinterpret_cast<uintptr_t>(&resource);
-        const auto resourceBegin = reinterpret_cast<uintptr_t>(package.Resources().Data());
-        const auto resourceEnd = resourceBegin + static_cast<uintptr_t>(package.Resources().Count()) * sizeof(Resource);
-        const containers::ArraySpan<const Segment> segments = package.Segments(resource);
+        const auto resourceBegin = reinterpret_cast<uintptr_t>(package.GetResources().Data());
+        const auto resourceEnd = resourceBegin + static_cast<uintptr_t>(package.GetResources().Count()) * sizeof(Resource);
+        const containers::ArraySpan<const Segment> segments = package.GetSegments(resource);
         if (!package.IsOpen() || resourceAddress < resourceBegin || resourceAddress >= resourceEnd ||
             ((resourceAddress - resourceBegin) % sizeof(Resource)) != 0 || !physicalPackageFile.IsReader() ||
-            physicalPackageFile.GetSize() != package.Header().fileSize || segments.Count() != resource.segmentCount ||
-            segments.Empty())
+            physicalPackageFile.GetSize() != package.GetHeader().fileSize || segments.Count() != resource.segmentCount || segments.Empty())
         {
             return Result::InvalidArgument;
         }
@@ -1679,17 +1639,17 @@ namespace vanguard::packages
         return m_open;
     }
 
-    Result ResourceFileReader::LastResult() const noexcept
+    Result ResourceFileReader::GetLastResult() const noexcept
     {
         return m_lastResult;
     }
 
-    u64 ResourceFileReader::StoredBytesRead() const noexcept
+    u64 ResourceFileReader::GetStoredBytesRead() const noexcept
     {
         return m_storedBytesRead;
     }
 
-    u32 ResourceFileReader::DecodedSegmentCount() const noexcept
+    u32 ResourceFileReader::GetDecodedSegmentCount() const noexcept
     {
         return m_decodedSegmentCount;
     }
@@ -1742,9 +1702,8 @@ namespace vanguard::packages
             return false;
         }
 
-        const Result result = m_package->ReadSegment(
-            *m_physicalFile, segment, m_decodedSegment.TypedData(), m_decodedSegment.Size(),
-            m_storedScratch.TypedData(), m_storedScratch.Size());
+        const Result result = m_package->ReadSegment(*m_physicalFile, segment, m_decodedSegment.TypedData(), m_decodedSegment.Size(),
+                                                     m_storedScratch.TypedData(), m_storedScratch.Size());
         if (result != Result::Success)
         {
             Fail(result);
@@ -1812,9 +1771,7 @@ namespace vanguard::packages
         m_offset = static_cast<u64>(offset);
     }
 
-    void ResourceFileReader::Flush()
-    {
-    }
+    void ResourceFileReader::Flush() {}
 
     const char* ResourceFileReader::GetFileNameForDebug() const
     {

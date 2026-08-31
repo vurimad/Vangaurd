@@ -149,12 +149,12 @@ namespace vanguard::diagnostics
     void Flush(FlushMode mode = FlushMode::Asynchronous) noexcept;
 } // namespace vanguard::diagnostics
 
-#define VG_INTERNAL_LOG(levelValue, categoryValue, ...)                                                                  \
-    do                                                                                                                   \
-    {                                                                                                                    \
-        const ::vanguard::diagnostics::Category vgLogCategory = (categoryValue);                                        \
-        if (::vanguard::diagnostics::CanLog((levelValue), vgLogCategory))                                                \
-            ::vanguard::diagnostics::Logf((levelValue), vgLogCategory, __VA_ARGS__);                                    \
+#define VG_INTERNAL_LOG(levelValue, categoryValue, ...)                                                                                                        \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        const ::vanguard::diagnostics::Category vgLogCategory = (categoryValue);                                                                               \
+        if (::vanguard::diagnostics::CanLog((levelValue), vgLogCategory))                                                                                      \
+            ::vanguard::diagnostics::Logf((levelValue), vgLogCategory, __VA_ARGS__);                                                                           \
     } while (false)
 
 #define VG_LOG_FATAL(category, ...) VG_INTERNAL_LOG(::vanguard::diagnostics::Level::Fatal, category, __VA_ARGS__)

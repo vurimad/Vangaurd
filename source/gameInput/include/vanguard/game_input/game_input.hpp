@@ -29,29 +29,87 @@ namespace vanguard::game_input
     [[nodiscard]] constexpr u64 MakeId(const char* text) noexcept
     {
         u64 hash = 14695981039346656037ull;
-        if (text == nullptr) return 0;
-        while (*text != '\0') { hash ^= static_cast<u8>(*text++); hash *= 1099511628211ull; }
+        if (text == nullptr)
+            return 0;
+        while (*text != '\0')
+        {
+            hash ^= static_cast<u8>(*text++);
+            hash *= 1099511628211ull;
+        }
         return hash != 0 ? hash : 1;
     }
 
-    enum class ContextLayer : u8 { Player, UserInterface, Debug, Count };
-    enum class ActionValueType : u8 { Button, Axis1D, Axis2D };
-    enum class AxisComponent : u8 { Scalar, X, Y };
+    enum class ContextLayer : u8
+    {
+        Player,
+        UserInterface,
+        Debug,
+        Count
+    };
+    enum class ActionValueType : u8
+    {
+        Button,
+        Axis1D,
+        Axis2D
+    };
+    enum class AxisComponent : u8
+    {
+        Scalar,
+        X,
+        Y
+    };
     enum class ControlType : u8
     {
-        Key, MouseButton, MouseDeltaX, MouseDeltaY, MouseWheelX, MouseWheelY, GamepadButton, GamepadAxis
+        Key,
+        MouseButton,
+        MouseDeltaX,
+        MouseDeltaY,
+        MouseWheelX,
+        MouseWheelY,
+        GamepadButton,
+        GamepadAxis
     };
     enum class ActionEventType : u8
     {
-        Pressed, Released, Tap, MultiTapStarted, MultiTapCompleted, HoldProgress, HoldComplete, Repeat,
-        TogglePressed, ToggleReleased, AxisChanged
+        Pressed,
+        Released,
+        Tap,
+        MultiTapStarted,
+        MultiTapCompleted,
+        HoldProgress,
+        HoldComplete,
+        Repeat,
+        TogglePressed,
+        ToggleReleased,
+        AxisChanged
     };
-    enum class ListenerResult : u8 { Continue, ConsumeAction, ConsumeControl };
-    enum class RebindPolicy : u8 { RejectConflicts, AllowShared };
+    enum class ListenerResult : u8
+    {
+        Continue,
+        ConsumeAction,
+        ConsumeControl
+    };
+    enum class RebindPolicy : u8
+    {
+        RejectConflicts,
+        AllowShared
+    };
     enum class Result : u8
     {
-        Success, InvalidArgument, InvalidState, LimitExceeded, DuplicateId, UnknownContext, UnknownAction,
-        UnknownBinding, InvalidControl, InvalidMapping, Conflict, NotCompiled, EventOverflow, ListenerFailure
+        Success,
+        InvalidArgument,
+        InvalidState,
+        LimitExceeded,
+        DuplicateId,
+        UnknownContext,
+        UnknownAction,
+        UnknownBinding,
+        InvalidControl,
+        InvalidMapping,
+        Conflict,
+        NotCompiled,
+        EventOverflow,
+        ListenerFailure
     };
 
     struct Control
@@ -68,13 +126,11 @@ namespace vanguard::game_input
         {
             return {ControlType::MouseButton, static_cast<u16>(button), input::InvalidDeviceId};
         }
-        [[nodiscard]] static constexpr Control Gamepad(const input::GamepadButton button,
-                                                       const input::DeviceId device = input::InvalidDeviceId) noexcept
+        [[nodiscard]] static constexpr Control Gamepad(const input::GamepadButton button, const input::DeviceId device = input::InvalidDeviceId) noexcept
         {
             return {ControlType::GamepadButton, static_cast<u16>(button), device};
         }
-        [[nodiscard]] static constexpr Control Gamepad(const input::GamepadAxis axis,
-                                                       const input::DeviceId device = input::InvalidDeviceId) noexcept
+        [[nodiscard]] static constexpr Control Gamepad(const input::GamepadAxis axis, const input::DeviceId device = input::InvalidDeviceId) noexcept
         {
             return {ControlType::GamepadAxis, static_cast<u16>(axis), device};
         }
@@ -92,7 +148,11 @@ namespace vanguard::game_input
         i16 priority = 0;
     };
 
-    struct ResponseCurvePoint { f32 input = 0.0f; f32 output = 0.0f; };
+    struct ResponseCurvePoint
+    {
+        f32 input = 0.0f;
+        f32 output = 0.0f;
+    };
     struct ResponseCurve
     {
         ResponseCurvePoint points[MaximumResponseCurvePoints]{};
@@ -222,28 +282,25 @@ namespace vanguard::game_input
         [[nodiscard]] Result PopContext(ContextLayer layer, ContextId expected = InvalidContextId) noexcept;
         [[nodiscard]] Result ResetContext(ContextId context) noexcept;
         [[nodiscard]] Result RemoveContext(ContextId context) noexcept;
-        [[nodiscard]] ContextId CurrentContext(ContextLayer layer) const noexcept;
+        [[nodiscard]] ContextId GetCurrentContext(ContextLayer layer) const noexcept;
         [[nodiscard]] bool SetLayerActive(ContextLayer layer, bool active) noexcept;
         [[nodiscard]] bool IsLayerActive(ContextLayer layer) const noexcept;
 
-        [[nodiscard]] Result CheckRebind(BindingId binding, const Control& replacement,
-                                         ConflictReport& conflicts) const noexcept;
-        [[nodiscard]] Result Rebind(BindingId binding, const Control& replacement, RebindPolicy policy,
-                                    ConflictReport* conflicts = nullptr) noexcept;
+        [[nodiscard]] Result CheckRebind(BindingId binding, const Control& replacement, ConflictReport& conflicts) const noexcept;
+        [[nodiscard]] Result Rebind(BindingId binding, const Control& replacement, RebindPolicy policy, ConflictReport* conflicts = nullptr) noexcept;
         [[nodiscard]] Result ResetBinding(BindingId binding) noexcept;
 
         [[nodiscard]] ListenerId RegisterListener(const ListenerDescriptor& descriptor) noexcept;
         [[nodiscard]] bool UnregisterListener(ListenerId listener) noexcept;
 
-        [[nodiscard]] Result Update(const input::FrameSnapshot& snapshot,
-                                    containers::ArraySpan<const input::RawEvent> physicalEvents,
+        [[nodiscard]] Result Update(const input::FrameSnapshot& snapshot, containers::ArraySpan<const input::RawEvent> physicalEvents,
                                     f32 deltaSeconds) noexcept;
         [[nodiscard]] const ActionState* FindAction(ActionId action) const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ActionEvent> Events() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ActionEvent> GetEvents() const noexcept;
         [[nodiscard]] Stats GetStats() const noexcept;
-        [[nodiscard]] Result LastResult() const noexcept;
+        [[nodiscard]] Result GetLastResult() const noexcept;
 
     private:
         Impl* m_impl = nullptr;
     };
-}
+} // namespace vanguard::game_input

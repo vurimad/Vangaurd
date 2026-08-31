@@ -17,11 +17,11 @@
 #define VG_FORCE_INLINE inline __attribute__((always_inline))
 #define VG_NOINLINE __attribute__((noinline))
 #define VG_RESTRICT __restrict__
-#define VG_ASSUME(condition)                                                                                                               \
-    do                                                                                                                                     \
-    {                                                                                                                                      \
-        if (!(condition))                                                                                                                  \
-            __builtin_unreachable();                                                                                                       \
+#define VG_ASSUME(condition)                                                                                                                                   \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (!(condition))                                                                                                                                      \
+            __builtin_unreachable();                                                                                                                           \
     } while (false)
 #endif
 

@@ -49,12 +49,11 @@ Float vanguard::math::PerlinNoise::Get(Float x, Float y, Float z) const
     const Int32 A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z;
     const Int32 B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
 
-    return vanguard::math::Lerp(
-        w,
-        vanguard::math::Lerp(v, vanguard::math::Lerp(u, Grad(p[AA], x, y, z), Grad(p[BA], x - 1, y, z)),
-                             vanguard::math::Lerp(u, Grad(p[AB], x, y - 1, z), Grad(p[BB], x - 1, y - 1, z))),
-        vanguard::math::Lerp(v, vanguard::math::Lerp(u, Grad(p[AA + 1], x, y, z - 1), Grad(p[BA + 1], x - 1, y, z - 1)),
-                             vanguard::math::Lerp(u, Grad(p[AB + 1], x, y - 1, z - 1), Grad(p[BB + 1], x - 1, y - 1, z - 1))));
+    return vanguard::math::Lerp(w,
+                                vanguard::math::Lerp(v, vanguard::math::Lerp(u, Grad(p[AA], x, y, z), Grad(p[BA], x - 1, y, z)),
+                                                     vanguard::math::Lerp(u, Grad(p[AB], x, y - 1, z), Grad(p[BB], x - 1, y - 1, z))),
+                                vanguard::math::Lerp(v, vanguard::math::Lerp(u, Grad(p[AA + 1], x, y, z - 1), Grad(p[BA + 1], x - 1, y, z - 1)),
+                                                     vanguard::math::Lerp(u, Grad(p[AB + 1], x, y - 1, z - 1), Grad(p[BB + 1], x - 1, y - 1, z - 1))));
 }
 
 Float vanguard::math::PerlinNoise::GetOctave(Float x, Int32 octaves) const

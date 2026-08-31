@@ -4,6 +4,7 @@
 #include <vanguard/packages/packages.hpp>
 #include <vanguard/resources/resource_pipeline.hpp>
 #include <vanguard/schemas/schemas.hpp>
+#include <vanguard/streaming/resource_source.hpp>
 
 namespace vanguard::streaming
 {
@@ -12,6 +13,9 @@ namespace vanguard::streaming
         LooseFile,
         Package
     };
+
+    [[nodiscard]] io::AsyncPriority ToIoPriority(resources::LoadPriority priority) noexcept;
+    [[nodiscard]] resources::Failure ToFailure(ResourceSourceResult result) noexcept;
 
     struct Config
     {
@@ -47,8 +51,7 @@ namespace vanguard::streaming
     };
 
     using DecodeResourceFunction = resources::ResourceObject* (*)(resources::ResourceReference reference, const void* data, usize size,
-                                                                  const resources::LoadContext& context, resources::Failure& failure,
-                                                                  void* userData) noexcept;
+                                                                  const resources::LoadContext& context, resources::Failure& failure, void* userData) noexcept;
 
     struct DecoderDescriptor
     {
@@ -60,17 +63,15 @@ namespace vanguard::streaming
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return type != resources::InvalidResourceTypeId && name != nullptr && name[0] != '\0' && decode != nullptr &&
-                   destroy != nullptr;
+            return type != resources::InvalidResourceTypeId && name != nullptr && name[0] != '\0' && decode != nullptr && destroy != nullptr;
         }
     };
 
     using ResolveSchemaFunction = const reflection::Schema* (*)(const resources::LoadContext& context, void* userData) noexcept;
-    using CreateSchemaResourceFunction = resources::ResourceObject* (*)(const reflection::Schema& schema,
-                                                                        const resources::LoadContext& context, void* userData) noexcept;
-    using SchemaObjectFunction = void* (*)(resources::ResourceObject & resource, void* userData) noexcept;
-    using BindSchemaDependenciesFunction = bool (*)(resources::ResourceObject& resource, const resources::LoadContext& context,
-                                                    void* userData) noexcept;
+    using CreateSchemaResourceFunction = resources::ResourceObject* (*)(const reflection::Schema& schema, const resources::LoadContext& context,
+                                                                        void* userData) noexcept;
+    using SchemaObjectFunction = void* (*)(resources::ResourceObject& resource, void* userData) noexcept;
+    using BindSchemaDependenciesFunction = bool (*)(resources::ResourceObject& resource, const resources::LoadContext& context, void* userData) noexcept;
 
     // The descriptor, resolved schema, and callback state must remain alive
     // until the decoder is unregistered. A fixed schema or a dependency-driven
@@ -93,8 +94,8 @@ namespace vanguard::streaming
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return type != resources::InvalidResourceTypeId && name != nullptr && name[0] != '\0' &&
-                   ((schema != nullptr) != (resolveSchema != nullptr)) && create != nullptr && object != nullptr && destroy != nullptr;
+            return type != resources::InvalidResourceTypeId && name != nullptr && name[0] != '\0' && ((schema != nullptr) != (resolveSchema != nullptr)) &&
+                   create != nullptr && object != nullptr && destroy != nullptr;
         }
     };
 
@@ -128,6 +129,26 @@ namespace vanguard::streaming
         }
     };
 
+    class StagingReservation final
+    {
+    public:
+        StagingReservation() noexcept = default;
+        ~StagingReservation();
+        StagingReservation(const StagingReservation&) = delete;
+        StagingReservation& operator=(const StagingReservation&) = delete;
+        StagingReservation(StagingReservation&& other) noexcept;
+        StagingReservation& operator=(StagingReservation&& other) noexcept;
+
+        void Reset() noexcept;
+        [[nodiscard]] u64 GetBytes() const noexcept;
+
+    private:
+        detail::ResourceSourceAccounting* m_accounting = nullptr;
+        u64 m_bytes = 0;
+
+        friend class ResourceStreamer;
+    };
+
     class ResourceStreamer final
     {
     public:
@@ -152,14 +173,21 @@ namespace vanguard::streaming
 
         // Reader and package file must remain valid and unchanged until
         // unmounted. Higher priority wins; later mount wins at equal priority.
-        [[nodiscard]] bool MountPackage(const packages::PackageReader& reader, const filesystem::AbsolutePath& physicalPath,
-                                        i32 priority) noexcept;
+        [[nodiscard]] bool MountPackage(const packages::PackageReader& reader, const filesystem::AbsolutePath& physicalPath, i32 priority) noexcept;
         [[nodiscard]] bool UnmountPackage(const packages::PackageReader& reader) noexcept;
 
         // Batch mutation is all-or-nothing and becomes visible under one streamer lock. It is the required path for package-set startup
         // and shutdown so another thread can never observe only part of a mounted runtime image.
         [[nodiscard]] bool MountPackages(containers::ArraySpan<const PackageMountDescriptor> packages) noexcept;
         [[nodiscard]] bool UnmountPackages(containers::ArraySpan<const PackageMountDescriptor> packages) noexcept;
+
+        // Resolves the same winning loose/package generation used by ordinary
+        // decoders, pins it as an independently owned range source, and copies
+        // its non-soft dependency table. Specialized formats use this instead
+        // of building a second source registry or staging the whole resource.
+        [[nodiscard]] resources::Failure OpenSource(resources::ResourceReference reference, ResourceSource& source,
+                                                    containers::DynamicArray<DependencyDescriptor>& dependencies) noexcept;
+        [[nodiscard]] bool ReserveStaging(u64 bytes, StagingReservation& reservation) noexcept;
 
         [[nodiscard]] resources::PipelineRequest Request(resources::ResourceReference reference,
                                                          resources::LoadPriority priority = resources::LoadPriority::Normal) noexcept;
@@ -232,11 +260,11 @@ namespace vanguard::streaming
         [[nodiscard]] PackageSetMountResult Unmount() noexcept;
         [[nodiscard]] bool IsMounted() const noexcept;
 
-        [[nodiscard]] u64 GameId() const noexcept;
+        [[nodiscard]] u64 GetGameId() const noexcept;
         [[nodiscard]] u64 BuildId() const noexcept;
-        [[nodiscard]] u32 TargetPlatformId() const noexcept;
+        [[nodiscard]] u32 GetTargetPlatformId() const noexcept;
         [[nodiscard]] resources::ResourceReference StartupWorld() const noexcept;
-        [[nodiscard]] resources::ResourceReference DefaultInput() const noexcept;
+        [[nodiscard]] resources::ResourceReference GetDefaultInput() const noexcept;
         [[nodiscard]] u32 PackageCount() const noexcept;
         [[nodiscard]] const MountedPackageInfo* FindPackage(u32 packageNumber) const noexcept;
 

@@ -15,19 +15,14 @@ namespace
     constexpr u64 ContentFingerprintOffset = 60;
     constexpr u8 DataAlignmentLog2 = 6;
     constexpr u64 DataAlignment = 1ull << DataAlignmentLog2;
-    constexpr u16 KnownTextureFlags = static_cast<u16>(texture::TextureFlags::Streamable) |
-                                      static_cast<u16>(texture::TextureFlags::DirectGpuUpload);
-    constexpr u16 KnownSubresourceFlags = static_cast<u16>(texture::SubresourceFlags::MipTail) |
-                                          static_cast<u16>(texture::SubresourceFlags::DirectGpuUpload);
+    constexpr u16 KnownTextureFlags = static_cast<u16>(texture::TextureFlags::Streamable) | static_cast<u16>(texture::TextureFlags::DirectGpuUpload);
+    constexpr u16 KnownSubresourceFlags = static_cast<u16>(texture::SubresourceFlags::MipTail) | static_cast<u16>(texture::SubresourceFlags::DirectGpuUpload);
 
     using ByteArray = containers::DynamicArray<u8>;
 
     struct CanonicalData
     {
-        CanonicalData() noexcept
-            : builds(memory::pools::Rendering::GetInstance()), records(memory::pools::Rendering::GetInstance())
-        {
-        }
+        CanonicalData() noexcept : builds(memory::pools::Rendering::GetInstance()), records(memory::pools::Rendering::GetInstance()) {}
 
         containers::DynamicArray<texture::SubresourceBuildRecord> builds;
         containers::DynamicArray<texture::SubresourceRecord> records;
@@ -62,12 +57,12 @@ namespace
 
     [[nodiscard]] texture::Result WriterResult(const serialization::BinaryWriter& writer) noexcept
     {
-        return writer.Good() ? texture::Result::Success : ConvertSerializationResult(writer.Status());
+        return writer.IsGood() ? texture::Result::Success : ConvertSerializationResult(writer.GetStatus());
     }
 
     [[nodiscard]] texture::Result ReaderResult(const serialization::BinaryReader& reader) noexcept
     {
-        return reader.Good() ? texture::Result::Success : ConvertSerializationResult(reader.Status());
+        return reader.IsGood() ? texture::Result::Success : ConvertSerializationResult(reader.GetStatus());
     }
 
     [[nodiscard]] u64 AlignUp(const u64 value, const u64 alignment) noexcept
@@ -109,8 +104,7 @@ namespace
         return format < texture::PixelFormat::Count && texture::GetFormatInfo(format).bytesPerBlock != 0;
     }
 
-    [[nodiscard]] bool LessSubresource(const texture::SubresourceBuildRecord& left,
-                                       const texture::SubresourceBuildRecord& right) noexcept
+    [[nodiscard]] bool LessSubresource(const texture::SubresourceBuildRecord& left, const texture::SubresourceBuildRecord& right) noexcept
     {
         if (left.mipLevel != right.mipLevel)
         {
@@ -123,8 +117,7 @@ namespace
         return left.face < right.face;
     }
 
-    [[nodiscard]] bool SameSubresource(const texture::SubresourceBuildRecord& left,
-                                       const texture::SubresourceBuildRecord& right) noexcept
+    [[nodiscard]] bool SameSubresource(const texture::SubresourceBuildRecord& left, const texture::SubresourceBuildRecord& right) noexcept
     {
         return left.mipLevel == right.mipLevel && left.arrayLayer == right.arrayLayer && left.face == right.face;
     }
@@ -140,29 +133,25 @@ namespace
         {
             return texture::Result::InvalidFormat;
         }
-        if ((static_cast<u16>(description.flags) & ~KnownTextureFlags) != 0 || description.width == 0 ||
-            description.height == 0 || description.depth == 0 || description.arrayLayers == 0)
+        if ((static_cast<u16>(description.flags) & ~KnownTextureFlags) != 0 || description.width == 0 || description.height == 0 || description.depth == 0 ||
+            description.arrayLayers == 0)
         {
             return texture::Result::InvalidArgument;
         }
-        if ((description.dimension == texture::TextureDimension::Texture1D &&
-             (description.height != 1 || description.depth != 1)) ||
+        if ((description.dimension == texture::TextureDimension::Texture1D && (description.height != 1 || description.depth != 1)) ||
             (description.dimension == texture::TextureDimension::Texture2D && description.depth != 1) ||
             (description.dimension == texture::TextureDimension::Texture3D && description.arrayLayers != 1) ||
-            (description.dimension == texture::TextureDimension::Cube &&
-             (description.width != description.height || description.depth != 1)))
+            (description.dimension == texture::TextureDimension::Cube && (description.width != description.height || description.depth != 1)))
         {
             return texture::Result::InvalidDimension;
         }
         const u32 fullMipCount = texture::CalculateMipCount(description.width, description.height, description.depth);
-        if (description.mipCount == 0 || description.mipCount > fullMipCount ||
-            description.mipTailFirstLevel >= description.mipCount ||
+        if (description.mipCount == 0 || description.mipCount > fullMipCount || description.mipTailFirstLevel >= description.mipCount ||
             (!texture::HasFlag(description.flags, texture::TextureFlags::Streamable) && description.mipTailFirstLevel != 0))
         {
             return texture::Result::InvalidMipChain;
         }
-        const u64 expectedSubresources = static_cast<u64>(description.mipCount) * description.arrayLayers *
-                                         FaceCount(description.dimension);
+        const u64 expectedSubresources = static_cast<u64>(description.mipCount) * description.arrayLayers * FaceCount(description.dimension);
         if (expectedSubresources > ~u32{0} || description.subresources.Size() != expectedSubresources)
         {
             return texture::Result::MissingSubresource;
@@ -170,8 +159,7 @@ namespace
         return texture::Result::Success;
     }
 
-    [[nodiscard]] texture::Result BuildCanonicalData(const texture::BuildDescription& description,
-                                                     CanonicalData& data) noexcept
+    [[nodiscard]] texture::Result BuildCanonicalData(const texture::BuildDescription& description, CanonicalData& data) noexcept
     {
         const texture::Result descriptionResult = ValidateDescription(description);
         if (descriptionResult != texture::Result::Success)
@@ -213,9 +201,8 @@ namespace
             const u32 minimumSlicePitch = texture::CalculateMinimumSlicePitch(description.format, width, height);
             const texture::FormatInfo format = texture::GetFormatInfo(description.format);
             const u32 rowCount = (height + format.blockHeight - 1) / format.blockHeight;
-            if (build.data == nullptr || build.byteSize == 0 || build.rowPitch < minimumRowPitch ||
-                build.slicePitch < minimumSlicePitch || build.slicePitch < static_cast<u64>(build.rowPitch) * rowCount ||
-                build.byteSize != static_cast<u64>(build.slicePitch) * depth)
+            if (build.data == nullptr || build.byteSize == 0 || build.rowPitch < minimumRowPitch || build.slicePitch < minimumSlicePitch ||
+                build.slicePitch < static_cast<u64>(build.rowPitch) * rowCount || build.byteSize != static_cast<u64>(build.slicePitch) * depth)
             {
                 return texture::Result::InvalidSubresource;
             }
@@ -230,8 +217,7 @@ namespace
             record.mipLevel = build.mipLevel;
             record.arrayLayer = build.arrayLayer;
             record.face = build.face;
-            record.flags = build.mipLevel >= description.mipTailFirstLevel ? texture::SubresourceFlags::MipTail :
-                                                                            texture::SubresourceFlags::None;
+            record.flags = build.mipLevel >= description.mipTailFirstLevel ? texture::SubresourceFlags::MipTail : texture::SubresourceFlags::None;
             if (texture::HasFlag(description.flags, texture::TextureFlags::DirectGpuUpload))
             {
                 record.flags = record.flags | texture::SubresourceFlags::DirectGpuUpload;
@@ -251,30 +237,26 @@ namespace
         return texture::Result::Success;
     }
 
-    [[nodiscard]] texture::Result WriteMetadata(ByteArray& metadata, const texture::BuildDescription& description,
-                                                const CanonicalData& data,
+    [[nodiscard]] texture::Result WriteMetadata(ByteArray& metadata, const texture::BuildDescription& description, const CanonicalData& data,
                                                 const crypto::Digest256& contentFingerprint) noexcept
     {
         metadata.Clear();
         filesystem::MemoryFileWriter file(metadata);
         serialization::BinaryWriter writer(file);
         if (!writer.WriteU32(MetadataWireVersion) || !writer.WriteU8(static_cast<u8>(description.dimension)) ||
-            !writer.WriteU8(static_cast<u8>(description.format)) || !writer.WriteU8(static_cast<u8>(description.colorSpace)) ||
-            !writer.WriteU8(0) || !writer.WriteU32(description.width) || !writer.WriteU32(description.height) ||
-            !writer.WriteU32(description.depth) || !writer.WriteU16(description.arrayLayers) ||
-            !writer.WriteU8(description.mipCount) || !writer.WriteU8(description.mipTailFirstLevel) ||
-            !writer.WriteU16(static_cast<u16>(description.flags)) || !writer.WriteU16(0) ||
-            !WriteDigest(writer, description.sourceFingerprint) || !WriteDigest(writer, contentFingerprint) ||
-            !writer.WriteU32(data.records.Size()) || !writer.WriteU32(0))
+            !writer.WriteU8(static_cast<u8>(description.format)) || !writer.WriteU8(static_cast<u8>(description.colorSpace)) || !writer.WriteU8(0) ||
+            !writer.WriteU32(description.width) || !writer.WriteU32(description.height) || !writer.WriteU32(description.depth) ||
+            !writer.WriteU16(description.arrayLayers) || !writer.WriteU8(description.mipCount) || !writer.WriteU8(description.mipTailFirstLevel) ||
+            !writer.WriteU16(static_cast<u16>(description.flags)) || !writer.WriteU16(0) || !WriteDigest(writer, description.sourceFingerprint) ||
+            !WriteDigest(writer, contentFingerprint) || !writer.WriteU32(data.records.Size()) || !writer.WriteU32(0))
         {
             return WriterResult(writer);
         }
         for (const texture::SubresourceRecord& record : data.records)
         {
-            if (!writer.WriteU8(record.mipLevel) || !writer.WriteU8(record.face) ||
-                !writer.WriteU16(static_cast<u16>(record.flags)) || !writer.WriteU16(record.arrayLayer) || !writer.WriteU16(0) ||
-                !writer.WriteU32(record.width) || !writer.WriteU32(record.height) || !writer.WriteU32(record.depth) ||
-                !writer.WriteU32(record.rowPitch) || !writer.WriteU32(record.slicePitch) ||
+            if (!writer.WriteU8(record.mipLevel) || !writer.WriteU8(record.face) || !writer.WriteU16(static_cast<u16>(record.flags)) ||
+                !writer.WriteU16(record.arrayLayer) || !writer.WriteU16(0) || !writer.WriteU32(record.width) || !writer.WriteU32(record.height) ||
+                !writer.WriteU32(record.depth) || !writer.WriteU32(record.rowPitch) || !writer.WriteU32(record.slicePitch) ||
                 !writer.WriteU64(record.dataOffset) || !writer.WriteU64(record.byteSize) || !WriteDigest(writer, record.digest))
             {
                 return WriterResult(writer);
@@ -299,8 +281,7 @@ namespace
         return true;
     }
 
-    [[nodiscard]] texture::Result WriteDocument(filesystem::IFile& file, const ByteArray& metadata,
-                                                const CanonicalData& data) noexcept
+    [[nodiscard]] texture::Result WriteDocument(filesystem::IFile& file, const ByteArray& metadata, const CanonicalData& data) noexcept
     {
         serialization::BinaryWriter writer(file);
         serialization::DocumentHeader header;
@@ -346,8 +327,7 @@ namespace
         for (u32 index = 0; index < data.records.Size(); ++index)
         {
             const texture::SubresourceRecord& record = data.records[index];
-            if (record.dataOffset < dataCursor ||
-                !WriteZeroBytes(writer, record.dataOffset - dataCursor, dataChecksum) ||
+            if (record.dataOffset < dataCursor || !WriteZeroBytes(writer, record.dataOffset - dataCursor, dataChecksum) ||
                 !writer.WriteBytes(data.builds[index].data, data.builds[index].byteSize))
             {
                 return WriterResult(writer);
@@ -373,16 +353,16 @@ namespace
                 return WriterResult(writer);
             }
         }
-        if (!writer.Seek(0) || serialization::WriteDocumentHeader(writer, header) != serialization::Result::Success ||
-            !writer.Seek(header.fileSize) || !writer.Flush())
+        if (!writer.Seek(0) || serialization::WriteDocumentHeader(writer, header) != serialization::Result::Success || !writer.Seek(header.fileSize) ||
+            !writer.Flush())
         {
             return WriterResult(writer);
         }
         return texture::Result::Success;
     }
 
-    [[nodiscard]] const serialization::SectionDescriptor* FindSection(
-        const containers::ArraySpan<const serialization::SectionDescriptor> sections, const u32 id) noexcept
+    [[nodiscard]] const serialization::SectionDescriptor* FindSection(const containers::ArraySpan<const serialization::SectionDescriptor> sections,
+                                                                      const u32 id) noexcept
     {
         for (const serialization::SectionDescriptor& section : sections)
         {
@@ -401,23 +381,42 @@ namespace vanguard::textures
     {
         switch (result)
         {
-        case Result::Success: return "Success";
-        case Result::InvalidArgument: return "InvalidArgument";
-        case Result::InvalidState: return "InvalidState";
-        case Result::InvalidMagic: return "InvalidMagic";
-        case Result::UnsupportedVersion: return "UnsupportedVersion";
-        case Result::InvalidLayout: return "InvalidLayout";
-        case Result::IntegrityFailure: return "IntegrityFailure";
-        case Result::LimitExceeded: return "LimitExceeded";
-        case Result::InvalidDimension: return "InvalidDimension";
-        case Result::InvalidFormat: return "InvalidFormat";
-        case Result::InvalidMipChain: return "InvalidMipChain";
-        case Result::InvalidSubresource: return "InvalidSubresource";
-        case Result::DuplicateSubresource: return "DuplicateSubresource";
-        case Result::MissingSubresource: return "MissingSubresource";
-        case Result::BufferTooSmall: return "BufferTooSmall";
-        case Result::IoFailure: return "IoFailure";
-        default: return "Unknown";
+        case Result::Success:
+            return "Success";
+        case Result::InvalidArgument:
+            return "InvalidArgument";
+        case Result::InvalidState:
+            return "InvalidState";
+        case Result::InvalidMagic:
+            return "InvalidMagic";
+        case Result::UnsupportedVersion:
+            return "UnsupportedVersion";
+        case Result::InvalidLayout:
+            return "InvalidLayout";
+        case Result::IntegrityFailure:
+            return "IntegrityFailure";
+        case Result::LimitExceeded:
+            return "LimitExceeded";
+        case Result::InvalidDimension:
+            return "InvalidDimension";
+        case Result::InvalidFormat:
+            return "InvalidFormat";
+        case Result::InvalidMipChain:
+            return "InvalidMipChain";
+        case Result::InvalidSubresource:
+            return "InvalidSubresource";
+        case Result::DuplicateSubresource:
+            return "DuplicateSubresource";
+        case Result::MissingSubresource:
+            return "MissingSubresource";
+        case Result::BufferTooSmall:
+            return "BufferTooSmall";
+        case Result::Cancelled:
+            return "Cancelled";
+        case Result::IoFailure:
+            return "IoFailure";
+        default:
+            return "Unknown";
         }
     }
 
@@ -425,42 +424,78 @@ namespace vanguard::textures
     {
         switch (format)
         {
-        case PixelFormat::R8UNorm: return {1, 1, 1, false, false};
-        case PixelFormat::R8SNorm: return {1, 1, 1, false, false};
-        case PixelFormat::R8UInt: return {1, 1, 1, false, false};
-        case PixelFormat::R8G8UNorm: return {1, 1, 2, false, false};
-        case PixelFormat::R8G8SNorm: return {1, 1, 2, false, false};
-        case PixelFormat::R8G8UInt: return {1, 1, 2, false, false};
-        case PixelFormat::R8G8B8A8UNorm: return {1, 1, 4, false, true};
-        case PixelFormat::R8G8B8A8SNorm: return {1, 1, 4, false, false};
-        case PixelFormat::R8G8B8A8UInt: return {1, 1, 4, false, false};
-        case PixelFormat::B8G8R8A8UNorm: return {1, 1, 4, false, true};
-        case PixelFormat::R16UNorm: return {1, 1, 2, false, false};
-        case PixelFormat::R16SNorm: return {1, 1, 2, false, false};
-        case PixelFormat::R16Float: return {1, 1, 2, false, false};
-        case PixelFormat::R16G16UNorm: return {1, 1, 4, false, false};
-        case PixelFormat::R16G16SNorm: return {1, 1, 4, false, false};
-        case PixelFormat::R16G16Float: return {1, 1, 4, false, false};
-        case PixelFormat::R16G16B16A16UNorm: return {1, 1, 8, false, false};
-        case PixelFormat::R16G16B16A16SNorm: return {1, 1, 8, false, false};
-        case PixelFormat::R16G16B16A16Float: return {1, 1, 8, false, false};
-        case PixelFormat::R32Float: return {1, 1, 4, false, false};
-        case PixelFormat::R32G32Float: return {1, 1, 8, false, false};
-        case PixelFormat::R32G32B32A32Float: return {1, 1, 16, false, false};
-        case PixelFormat::R10G10B10A2UNorm: return {1, 1, 4, false, false};
-        case PixelFormat::R11G11B10Float: return {1, 1, 4, false, false};
-        case PixelFormat::R9G9B9E5SharedExponent: return {1, 1, 4, false, false};
-        case PixelFormat::BC1UNorm: return {4, 4, 8, true, true};
-        case PixelFormat::BC2UNorm: return {4, 4, 16, true, true};
-        case PixelFormat::BC3UNorm: return {4, 4, 16, true, true};
-        case PixelFormat::BC4UNorm: return {4, 4, 8, true, false};
-        case PixelFormat::BC4SNorm: return {4, 4, 8, true, false};
-        case PixelFormat::BC5UNorm: return {4, 4, 16, true, false};
-        case PixelFormat::BC5SNorm: return {4, 4, 16, true, false};
-        case PixelFormat::BC6HUFloat: return {4, 4, 16, true, false};
-        case PixelFormat::BC6HSFloat: return {4, 4, 16, true, false};
-        case PixelFormat::BC7UNorm: return {4, 4, 16, true, true};
-        default: return {};
+        case PixelFormat::R8UNorm:
+            return {1, 1, 1, false, false};
+        case PixelFormat::R8SNorm:
+            return {1, 1, 1, false, false};
+        case PixelFormat::R8UInt:
+            return {1, 1, 1, false, false};
+        case PixelFormat::R8G8UNorm:
+            return {1, 1, 2, false, false};
+        case PixelFormat::R8G8SNorm:
+            return {1, 1, 2, false, false};
+        case PixelFormat::R8G8UInt:
+            return {1, 1, 2, false, false};
+        case PixelFormat::R8G8B8A8UNorm:
+            return {1, 1, 4, false, true};
+        case PixelFormat::R8G8B8A8SNorm:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R8G8B8A8UInt:
+            return {1, 1, 4, false, false};
+        case PixelFormat::B8G8R8A8UNorm:
+            return {1, 1, 4, false, true};
+        case PixelFormat::R16UNorm:
+            return {1, 1, 2, false, false};
+        case PixelFormat::R16SNorm:
+            return {1, 1, 2, false, false};
+        case PixelFormat::R16Float:
+            return {1, 1, 2, false, false};
+        case PixelFormat::R16G16UNorm:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R16G16SNorm:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R16G16Float:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R16G16B16A16UNorm:
+            return {1, 1, 8, false, false};
+        case PixelFormat::R16G16B16A16SNorm:
+            return {1, 1, 8, false, false};
+        case PixelFormat::R16G16B16A16Float:
+            return {1, 1, 8, false, false};
+        case PixelFormat::R32Float:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R32G32Float:
+            return {1, 1, 8, false, false};
+        case PixelFormat::R32G32B32A32Float:
+            return {1, 1, 16, false, false};
+        case PixelFormat::R10G10B10A2UNorm:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R11G11B10Float:
+            return {1, 1, 4, false, false};
+        case PixelFormat::R9G9B9E5SharedExponent:
+            return {1, 1, 4, false, false};
+        case PixelFormat::BC1UNorm:
+            return {4, 4, 8, true, true};
+        case PixelFormat::BC2UNorm:
+            return {4, 4, 16, true, true};
+        case PixelFormat::BC3UNorm:
+            return {4, 4, 16, true, true};
+        case PixelFormat::BC4UNorm:
+            return {4, 4, 8, true, false};
+        case PixelFormat::BC4SNorm:
+            return {4, 4, 8, true, false};
+        case PixelFormat::BC5UNorm:
+            return {4, 4, 16, true, false};
+        case PixelFormat::BC5SNorm:
+            return {4, 4, 16, true, false};
+        case PixelFormat::BC6HUFloat:
+            return {4, 4, 16, true, false};
+        case PixelFormat::BC6HSFloat:
+            return {4, 4, 16, true, false};
+        case PixelFormat::BC7UNorm:
+            return {4, 4, 16, true, true};
+        default:
+            return {};
         }
     }
 
@@ -511,8 +546,41 @@ namespace vanguard::textures
         return pitch <= ~u32{0} ? static_cast<u32>(pitch) : 0;
     }
 
-    TextureFile::TextureFile() noexcept : m_subresources(memory::pools::Rendering::GetInstance())
+    TextureFile::TextureFile() noexcept : m_subresources(memory::pools::Rendering::GetInstance()) {}
+
+    TextureFile::TextureFile(TextureFile&& other) noexcept : TextureFile()
     {
+        *this = static_cast<TextureFile&&>(other);
+    }
+
+    TextureFile& TextureFile::operator=(TextureFile&& other) noexcept
+    {
+        if (this != &other)
+        {
+            Close();
+            m_open = other.m_open;
+            m_dimension = other.m_dimension;
+            m_format = other.m_format;
+            m_colorSpace = other.m_colorSpace;
+            m_flags = other.m_flags;
+            m_width = other.m_width;
+            m_height = other.m_height;
+            m_depth = other.m_depth;
+            m_arrayLayers = other.m_arrayLayers;
+            m_mipCount = other.m_mipCount;
+            m_mipTailFirstLevel = other.m_mipTailFirstLevel;
+            m_sourceFingerprint = other.m_sourceFingerprint;
+            m_contentFingerprint = other.m_contentFingerprint;
+            m_dataOffset = other.m_dataOffset;
+            m_dataSize = other.m_dataSize;
+            m_subresources = static_cast<containers::DynamicArray<SubresourceRecord>&&>(other.m_subresources);
+            other.m_open = false;
+            other.m_width = other.m_height = other.m_depth = 0;
+            other.m_arrayLayers = 0;
+            other.m_mipCount = other.m_mipTailFirstLevel = 0;
+            other.m_dataOffset = other.m_dataSize = 0;
+        }
+        return *this;
     }
 
     Result TextureFile::Open(filesystem::IFile& reader, const ReadLimits& limits) noexcept
@@ -523,8 +591,7 @@ namespace vanguard::textures
         serialization::ReadLimits documentLimits;
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 2;
-        const serialization::Result headerResult =
-            serialization::ReadDocumentHeader(documentReader, TextureMagic, {1, 0, 0}, documentLimits, header);
+        const serialization::Result headerResult = serialization::ReadDocumentHeader(documentReader, TextureMagic, {1, 0, 0}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
         {
             return ConvertSerializationResult(headerResult);
@@ -571,13 +638,11 @@ namespace vanguard::textures
         u16 reserved16 = 0;
         u32 subresourceCount = 0;
         u32 reserved32 = 0;
-        if (!metadataReader.ReadU32(wireVersion) || !metadataReader.ReadU8(dimension) || !metadataReader.ReadU8(format) ||
-            !metadataReader.ReadU8(colorSpace) || !metadataReader.ReadU8(reserved8) || !metadataReader.ReadU32(m_width) ||
-            !metadataReader.ReadU32(m_height) || !metadataReader.ReadU32(m_depth) || !metadataReader.ReadU16(m_arrayLayers) ||
-            !metadataReader.ReadU8(m_mipCount) || !metadataReader.ReadU8(m_mipTailFirstLevel) ||
-            !metadataReader.ReadU16(flags) || !metadataReader.ReadU16(reserved16) ||
-            !ReadDigest(metadataReader, m_sourceFingerprint) || !ReadDigest(metadataReader, m_contentFingerprint) ||
-            !metadataReader.ReadU32(subresourceCount) || !metadataReader.ReadU32(reserved32))
+        if (!metadataReader.ReadU32(wireVersion) || !metadataReader.ReadU8(dimension) || !metadataReader.ReadU8(format) || !metadataReader.ReadU8(colorSpace) ||
+            !metadataReader.ReadU8(reserved8) || !metadataReader.ReadU32(m_width) || !metadataReader.ReadU32(m_height) || !metadataReader.ReadU32(m_depth) ||
+            !metadataReader.ReadU16(m_arrayLayers) || !metadataReader.ReadU8(m_mipCount) || !metadataReader.ReadU8(m_mipTailFirstLevel) ||
+            !metadataReader.ReadU16(flags) || !metadataReader.ReadU16(reserved16) || !ReadDigest(metadataReader, m_sourceFingerprint) ||
+            !ReadDigest(metadataReader, m_contentFingerprint) || !metadataReader.ReadU32(subresourceCount) || !metadataReader.ReadU32(reserved32))
         {
             return ReaderResult(metadataReader);
         }
@@ -585,22 +650,19 @@ namespace vanguard::textures
         m_format = static_cast<PixelFormat>(format);
         m_colorSpace = static_cast<ColorSpace>(colorSpace);
         m_flags = static_cast<TextureFlags>(flags);
-        if (wireVersion != MetadataWireVersion || reserved8 != 0 || reserved16 != 0 || reserved32 != 0 ||
-            !IsValidDimension(m_dimension) || !IsValidFormat(m_format) || !IsValidColorSpace(m_colorSpace) ||
-            (m_colorSpace == ColorSpace::SRgb && !GetFormatInfo(m_format).supportsSRgb) ||
-            (flags & ~KnownTextureFlags) != 0 || m_width == 0 || m_height == 0 || m_depth == 0 || m_arrayLayers == 0 ||
-            m_width > limits.maximumDimension || m_height > limits.maximumDimension || m_depth > limits.maximumDimension ||
-            m_arrayLayers > limits.maximumArrayLayers || subresourceCount > limits.maximumSubresources)
+        if (wireVersion != MetadataWireVersion || reserved8 != 0 || reserved16 != 0 || reserved32 != 0 || !IsValidDimension(m_dimension) ||
+            !IsValidFormat(m_format) || !IsValidColorSpace(m_colorSpace) || (m_colorSpace == ColorSpace::SRgb && !GetFormatInfo(m_format).supportsSRgb) ||
+            (flags & ~KnownTextureFlags) != 0 || m_width == 0 || m_height == 0 || m_depth == 0 || m_arrayLayers == 0 || m_width > limits.maximumDimension ||
+            m_height > limits.maximumDimension || m_depth > limits.maximumDimension || m_arrayLayers > limits.maximumArrayLayers ||
+            subresourceCount > limits.maximumSubresources)
         {
             return Result::InvalidLayout;
         }
 
         const u64 expectedCount = static_cast<u64>(m_mipCount) * m_arrayLayers * FaceCount(m_dimension);
-        if (m_mipCount == 0 || m_mipCount > CalculateMipCount(m_width, m_height, m_depth) ||
-            m_mipTailFirstLevel >= m_mipCount || (!HasFlag(m_flags, TextureFlags::Streamable) && m_mipTailFirstLevel != 0) ||
-            expectedCount != subresourceCount ||
-            (m_dimension == TextureDimension::Texture1D && (m_height != 1 || m_depth != 1)) ||
-            (m_dimension == TextureDimension::Texture2D && m_depth != 1) ||
+        if (m_mipCount == 0 || m_mipCount > CalculateMipCount(m_width, m_height, m_depth) || m_mipTailFirstLevel >= m_mipCount ||
+            (!HasFlag(m_flags, TextureFlags::Streamable) && m_mipTailFirstLevel != 0) || expectedCount != subresourceCount ||
+            (m_dimension == TextureDimension::Texture1D && (m_height != 1 || m_depth != 1)) || (m_dimension == TextureDimension::Texture2D && m_depth != 1) ||
             (m_dimension == TextureDimension::Texture3D && m_arrayLayers != 1) ||
             (m_dimension == TextureDimension::Cube && (m_width != m_height || m_depth != 1)))
         {
@@ -615,12 +677,10 @@ namespace vanguard::textures
             SubresourceRecord record;
             u16 recordFlags = 0;
             u16 recordReserved = 0;
-            if (!metadataReader.ReadU8(record.mipLevel) || !metadataReader.ReadU8(record.face) ||
-                !metadataReader.ReadU16(recordFlags) || !metadataReader.ReadU16(record.arrayLayer) ||
-                !metadataReader.ReadU16(recordReserved) || !metadataReader.ReadU32(record.width) ||
-                !metadataReader.ReadU32(record.height) || !metadataReader.ReadU32(record.depth) ||
-                !metadataReader.ReadU32(record.rowPitch) || !metadataReader.ReadU32(record.slicePitch) ||
-                !metadataReader.ReadU64(record.dataOffset) || !metadataReader.ReadU64(record.byteSize) ||
+            if (!metadataReader.ReadU8(record.mipLevel) || !metadataReader.ReadU8(record.face) || !metadataReader.ReadU16(recordFlags) ||
+                !metadataReader.ReadU16(record.arrayLayer) || !metadataReader.ReadU16(recordReserved) || !metadataReader.ReadU32(record.width) ||
+                !metadataReader.ReadU32(record.height) || !metadataReader.ReadU32(record.depth) || !metadataReader.ReadU32(record.rowPitch) ||
+                !metadataReader.ReadU32(record.slicePitch) || !metadataReader.ReadU64(record.dataOffset) || !metadataReader.ReadU64(record.byteSize) ||
                 !ReadDigest(metadataReader, record.digest))
             {
                 return ReaderResult(metadataReader);
@@ -634,20 +694,16 @@ namespace vanguard::textures
             const u32 rowCount = (record.height + info.blockHeight - 1) / info.blockHeight;
             const bool expectedMipTail = expectedMip >= m_mipTailFirstLevel;
             const bool expectedDirectUpload = HasFlag(m_flags, TextureFlags::DirectGpuUpload);
-            if (recordReserved != 0 || (recordFlags & ~KnownSubresourceFlags) != 0 || record.mipLevel != expectedMip ||
-                record.arrayLayer != expectedLayer || record.face != expectedFace ||
-                record.width != CalculateMipExtent(m_width, expectedMip) ||
-                record.height != CalculateMipExtent(m_height, expectedMip) ||
-                record.depth != CalculateMipExtent(m_depth, expectedMip) ||
+            if (recordReserved != 0 || (recordFlags & ~KnownSubresourceFlags) != 0 || record.mipLevel != expectedMip || record.arrayLayer != expectedLayer ||
+                record.face != expectedFace || record.width != CalculateMipExtent(m_width, expectedMip) ||
+                record.height != CalculateMipExtent(m_height, expectedMip) || record.depth != CalculateMipExtent(m_depth, expectedMip) ||
                 HasFlag(record.flags, SubresourceFlags::MipTail) != expectedMipTail ||
                 HasFlag(record.flags, SubresourceFlags::DirectGpuUpload) != expectedDirectUpload ||
                 record.rowPitch < CalculateMinimumRowPitch(m_format, record.width) ||
                 record.slicePitch < CalculateMinimumSlicePitch(m_format, record.width, record.height) ||
-                record.slicePitch < static_cast<u64>(record.rowPitch) * rowCount ||
-                record.byteSize != static_cast<u64>(record.slicePitch) * record.depth ||
-                record.byteSize > limits.maximumSubresourceBytes || record.dataOffset < previousEnd ||
-                (record.dataOffset & (DataAlignment - 1)) != 0 || record.dataOffset > dataSection->storedSize ||
-                record.byteSize > dataSection->storedSize - record.dataOffset)
+                record.slicePitch < static_cast<u64>(record.rowPitch) * rowCount || record.byteSize != static_cast<u64>(record.slicePitch) * record.depth ||
+                record.byteSize > limits.maximumSubresourceBytes || record.dataOffset < previousEnd || (record.dataOffset & (DataAlignment - 1)) != 0 ||
+                record.dataOffset > dataSection->storedSize || record.byteSize > dataSection->storedSize - record.dataOffset)
             {
                 return Result::InvalidSubresource;
             }
@@ -691,22 +747,70 @@ namespace vanguard::textures
         m_subresources.Clear();
     }
 
-    bool TextureFile::IsOpen() const noexcept { return m_open; }
-    TextureDimension TextureFile::Dimension() const noexcept { return m_dimension; }
-    PixelFormat TextureFile::Format() const noexcept { return m_format; }
-    ColorSpace TextureFile::Space() const noexcept { return m_colorSpace; }
-    TextureFlags TextureFile::Flags() const noexcept { return m_flags; }
-    u32 TextureFile::Width() const noexcept { return m_width; }
-    u32 TextureFile::Height() const noexcept { return m_height; }
-    u32 TextureFile::Depth() const noexcept { return m_depth; }
-    u16 TextureFile::ArrayLayers() const noexcept { return m_arrayLayers; }
-    u8 TextureFile::MipCount() const noexcept { return m_mipCount; }
-    u8 TextureFile::MipTailFirstLevel() const noexcept { return m_mipTailFirstLevel; }
-    const crypto::Digest256& TextureFile::SourceFingerprint() const noexcept { return m_sourceFingerprint; }
-    const crypto::Digest256& TextureFile::ContentFingerprint() const noexcept { return m_contentFingerprint; }
-    containers::ArraySpan<const SubresourceRecord> TextureFile::Subresources() const noexcept { return m_subresources; }
-    u64 TextureFile::TextureDataOffset() const noexcept { return m_dataOffset; }
-    u64 TextureFile::TextureDataSize() const noexcept { return m_dataSize; }
+    bool TextureFile::IsOpen() const noexcept
+    {
+        return m_open;
+    }
+    TextureDimension TextureFile::GetDimension() const noexcept
+    {
+        return m_dimension;
+    }
+    PixelFormat TextureFile::Format() const noexcept
+    {
+        return m_format;
+    }
+    ColorSpace TextureFile::GetSpace() const noexcept
+    {
+        return m_colorSpace;
+    }
+    TextureFlags TextureFile::GetFlags() const noexcept
+    {
+        return m_flags;
+    }
+    u32 TextureFile::GetWidth() const noexcept
+    {
+        return m_width;
+    }
+    u32 TextureFile::GetHeight() const noexcept
+    {
+        return m_height;
+    }
+    u32 TextureFile::GetDepth() const noexcept
+    {
+        return m_depth;
+    }
+    u16 TextureFile::GetArrayLayers() const noexcept
+    {
+        return m_arrayLayers;
+    }
+    u8 TextureFile::GetMipCount() const noexcept
+    {
+        return m_mipCount;
+    }
+    u8 TextureFile::GetMipTailFirstLevel() const noexcept
+    {
+        return m_mipTailFirstLevel;
+    }
+    const crypto::Digest256& TextureFile::GetSourceFingerprint() const noexcept
+    {
+        return m_sourceFingerprint;
+    }
+    const crypto::Digest256& TextureFile::GetContentFingerprint() const noexcept
+    {
+        return m_contentFingerprint;
+    }
+    containers::ArraySpan<const SubresourceRecord> TextureFile::GetSubresources() const noexcept
+    {
+        return m_subresources;
+    }
+    u64 TextureFile::GetTextureDataOffset() const noexcept
+    {
+        return m_dataOffset;
+    }
+    u64 TextureFile::GetTextureDataSize() const noexcept
+    {
+        return m_dataSize;
+    }
 
     u32 TextureFile::FindSubresource(const u8 mipLevel, const u16 arrayLayer, const u8 face) const noexcept
     {
@@ -717,8 +821,7 @@ namespace vanguard::textures
         return (static_cast<u32>(mipLevel) * m_arrayLayers + arrayLayer) * FaceCount(m_dimension) + face;
     }
 
-    Result TextureFile::ReadSubresource(filesystem::IFile& reader, const u32 index, void* destination,
-                                        const usize capacity) const noexcept
+    Result TextureFile::ReadSubresource(filesystem::IFile& reader, const u32 index, void* destination, const usize capacity) const noexcept
     {
         if (!m_open || index >= m_subresources.Size() || destination == nullptr)
         {
@@ -730,13 +833,11 @@ namespace vanguard::textures
             return Result::BufferTooSmall;
         }
         serialization::BinaryReader binaryReader(reader);
-        if (!binaryReader.Seek(m_dataOffset + record.dataOffset) ||
-            !binaryReader.ReadBytes(destination, static_cast<usize>(record.byteSize)))
+        if (!binaryReader.Seek(m_dataOffset + record.dataOffset) || !binaryReader.ReadBytes(destination, static_cast<usize>(record.byteSize)))
         {
             return ReaderResult(binaryReader);
         }
-        return crypto::Sha256(destination, static_cast<usize>(record.byteSize)) == record.digest ? Result::Success :
-                                                                                                 Result::IntegrityFailure;
+        return crypto::Sha256(destination, static_cast<usize>(record.byteSize)) == record.digest ? Result::Success : Result::IntegrityFailure;
     }
 
     Result WriteTexture(filesystem::IFile& writer, const BuildDescription& description) noexcept
@@ -759,16 +860,16 @@ namespace vanguard::textures
         return metadataResult == Result::Success ? WriteDocument(writer, metadata, data) : metadataResult;
     }
 
-    Result BuildStorageSegments(const TextureFile& texture, const u64 documentSize,
-                                containers::DynamicArray<StorageSegment>& segments, const u32 maximumSegments) noexcept
+    Result BuildStorageSegments(const TextureFile& texture, const u64 documentSize, containers::DynamicArray<StorageSegment>& segments,
+                                const u32 maximumSegments) noexcept
     {
         segments.Clear();
-        if (!texture.IsOpen() || documentSize < texture.TextureDataOffset() + texture.TextureDataSize() ||
-            texture.Subresources().Size() == 0 || texture.Subresources().Size() + 1ull > maximumSegments)
+        if (!texture.IsOpen() || documentSize < texture.GetTextureDataOffset() + texture.GetTextureDataSize() || texture.GetSubresources().Size() == 0 ||
+            texture.GetSubresources().Size() + 1ull > maximumSegments)
         {
             return Result::InvalidArgument;
         }
-        const u64 firstSubresourceOffset = texture.TextureDataOffset() + texture.Subresources()[0].dataOffset;
+        const u64 firstSubresourceOffset = texture.GetTextureDataOffset() + texture.GetSubresources()[0].dataOffset;
         if (firstSubresourceOffset == 0 || firstSubresourceOffset > documentSize)
         {
             return Result::InvalidLayout;
@@ -779,14 +880,13 @@ namespace vanguard::textures
         metadata.alignmentLog2 = 4;
         metadata.flags = StorageSegmentFlags::Metadata;
         segments.PushBack(metadata);
-        for (u32 index = 0; index < texture.Subresources().Size(); ++index)
+        for (u32 index = 0; index < texture.GetSubresources().Size(); ++index)
         {
-            const SubresourceRecord& record = texture.Subresources()[index];
+            const SubresourceRecord& record = texture.GetSubresources()[index];
             StorageSegment segment;
-            segment.offset = texture.TextureDataOffset() + record.dataOffset;
-            const u64 end = index + 1u < texture.Subresources().Size()
-                ? texture.TextureDataOffset() + texture.Subresources()[index + 1u].dataOffset
-                : documentSize;
+            segment.offset = texture.GetTextureDataOffset() + record.dataOffset;
+            const u64 end =
+                index + 1u < texture.GetSubresources().Size() ? texture.GetTextureDataOffset() + texture.GetSubresources()[index + 1u].dataOffset : documentSize;
             if (segment.offset >= end || record.byteSize > end - segment.offset)
             {
                 segments.Clear();

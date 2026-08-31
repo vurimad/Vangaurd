@@ -26,16 +26,14 @@ namespace
 
     void HashU32(crypto::Sha256Builder& hash, const u32 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u)};
+        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
     void HashU64(crypto::Sha256Builder& hash, const u64 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                            static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                            static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
@@ -43,8 +41,7 @@ namespace
     {
         return writer.WriteU64(identity.backend) && writer.WriteU32(identity.backendVersion) && writer.WriteU32(identity.cacheSchema) &&
                writer.WriteU32(identity.vendorId) && writer.WriteU32(identity.deviceId) && writer.WriteU64(identity.adapterId) &&
-               writer.WriteU64(identity.driverVersion) &&
-               writer.WriteBytes(identity.backendCompatibility.bytes, crypto::Digest256::ByteCount) &&
+               writer.WriteU64(identity.driverVersion) && writer.WriteBytes(identity.backendCompatibility.bytes, crypto::Digest256::ByteCount) &&
                writer.WriteBytes(identity.engineBuild.bytes, crypto::Digest256::ByteCount);
     }
 
@@ -52,8 +49,7 @@ namespace
     {
         return reader.ReadU64(identity.backend) && reader.ReadU32(identity.backendVersion) && reader.ReadU32(identity.cacheSchema) &&
                reader.ReadU32(identity.vendorId) && reader.ReadU32(identity.deviceId) && reader.ReadU64(identity.adapterId) &&
-               reader.ReadU64(identity.driverVersion) &&
-               reader.ReadBytes(identity.backendCompatibility.bytes, crypto::Digest256::ByteCount) &&
+               reader.ReadU64(identity.driverVersion) && reader.ReadBytes(identity.backendCompatibility.bytes, crypto::Digest256::ByteCount) &&
                reader.ReadBytes(identity.engineBuild.bytes, crypto::Digest256::ByteCount);
     }
 
@@ -69,18 +65,17 @@ namespace
         const crypto::Digest256 payloadFingerprint = crypto::Sha256(blob.Data(), blob.SizeInBytes());
         const u64 fileSize = HeaderSize + blob.SizeInBytes();
         ::vanguard::serialization::BinaryWriter writer(*file);
-        const bool written =
-            writer.WriteU32(cache::NativeCacheMagic) && writer.WriteU16(MajorVersion) && writer.WriteU16(MinorVersion) &&
-            writer.WriteU32(HeaderSize) && writer.WriteU32(0) && writer.WriteU64(fileSize) && writer.WriteU64(blob.SizeInBytes()) &&
-            writer.WriteBytes(identityFingerprint.bytes, crypto::Digest256::ByteCount) &&
-            writer.WriteBytes(payloadFingerprint.bytes, crypto::Digest256::ByteCount) && WriteIdentity(writer, identity) &&
-            writer.WriteU64(0) && writer.WriteBytes(blob.Data(), blob.SizeInBytes()) && writer.Position() == fileSize && writer.Flush();
+        const bool written = writer.WriteU32(cache::NativeCacheMagic) && writer.WriteU16(MajorVersion) && writer.WriteU16(MinorVersion) &&
+                             writer.WriteU32(HeaderSize) && writer.WriteU32(0) && writer.WriteU64(fileSize) && writer.WriteU64(blob.SizeInBytes()) &&
+                             writer.WriteBytes(identityFingerprint.bytes, crypto::Digest256::ByteCount) &&
+                             writer.WriteBytes(payloadFingerprint.bytes, crypto::Digest256::ByteCount) && WriteIdentity(writer, identity) &&
+                             writer.WriteU64(0) && writer.WriteBytes(blob.Data(), blob.SizeInBytes()) && writer.Position() == fileSize && writer.Flush();
         file.Reset();
         return written;
     }
 
-    [[nodiscard]] ReadResult ReadRecord(const filesystem::AbsolutePath& path, const cache::NativeCacheIdentity& expected,
-                                        const u64 maximumBlobBytes, containers::DynamicArray<u8>& blob) noexcept
+    [[nodiscard]] ReadResult ReadRecord(const filesystem::AbsolutePath& path, const cache::NativeCacheIdentity& expected, const u64 maximumBlobBytes,
+                                        containers::DynamicArray<u8>& blob) noexcept
     {
         filesystem::Manager& manager = filesystem::GetManager();
         if (!manager.FileExist(path))
@@ -104,16 +99,14 @@ namespace
         crypto::Digest256 storedIdentityFingerprint;
         crypto::Digest256 payloadFingerprint;
         cache::NativeCacheIdentity storedIdentity;
-        if (!reader.ReadU32(magic) || !reader.ReadU16(major) || !reader.ReadU16(minor) || !reader.ReadU32(headerSize) ||
-            !reader.ReadU32(flags) || !reader.ReadU64(fileSize) || !reader.ReadU64(payloadSize) ||
-            !reader.ReadBytes(storedIdentityFingerprint.bytes, crypto::Digest256::ByteCount) ||
-            !reader.ReadBytes(payloadFingerprint.bytes, crypto::Digest256::ByteCount) || !ReadIdentity(reader, storedIdentity) ||
-            !reader.ReadU64(reserved))
+        if (!reader.ReadU32(magic) || !reader.ReadU16(major) || !reader.ReadU16(minor) || !reader.ReadU32(headerSize) || !reader.ReadU32(flags) ||
+            !reader.ReadU64(fileSize) || !reader.ReadU64(payloadSize) || !reader.ReadBytes(storedIdentityFingerprint.bytes, crypto::Digest256::ByteCount) ||
+            !reader.ReadBytes(payloadFingerprint.bytes, crypto::Digest256::ByteCount) || !ReadIdentity(reader, storedIdentity) || !reader.ReadU64(reserved))
         {
             return ReadResult::Corrupt;
         }
-        if (magic != cache::NativeCacheMagic || major != MajorVersion || minor > MinorVersion || headerSize != HeaderSize || flags != 0 ||
-            reserved != 0 || fileSize != reader.Size() || fileSize < HeaderSize || payloadSize != fileSize - HeaderSize)
+        if (magic != cache::NativeCacheMagic || major != MajorVersion || minor > MinorVersion || headerSize != HeaderSize || flags != 0 || reserved != 0 ||
+            fileSize != reader.Size() || fileSize < HeaderSize || payloadSize != fileSize - HeaderSize)
         {
             return ReadResult::Corrupt;
         }
@@ -135,8 +128,7 @@ namespace
         {
             return ReadResult::OutOfMemory;
         }
-        if (!reader.ReadBytes(blob.Data(), blob.Size()) || reader.Position() != fileSize ||
-            crypto::Sha256(blob.Data(), blob.Size()) != payloadFingerprint)
+        if (!reader.ReadBytes(blob.Data(), blob.Size()) || reader.Position() != fileSize || crypto::Sha256(blob.Data(), blob.Size()) != payloadFingerprint)
         {
             blob.Clear();
             return ReadResult::Corrupt;
@@ -185,8 +177,7 @@ namespace vanguard::pipeline_cache
     {
         return left.backend == right.backend && left.backendVersion == right.backendVersion && left.cacheSchema == right.cacheSchema &&
                left.vendorId == right.vendorId && left.deviceId == right.deviceId && left.adapterId == right.adapterId &&
-               left.driverVersion == right.driverVersion && left.backendCompatibility == right.backendCompatibility &&
-               left.engineBuild == right.engineBuild;
+               left.driverVersion == right.driverVersion && left.backendCompatibility == right.backendCompatibility && left.engineBuild == right.engineBuild;
     }
 
     crypto::Digest256 CalculateIdentityFingerprint(const NativeCacheIdentity& identity) noexcept
@@ -243,8 +234,8 @@ namespace vanguard::pipeline_cache
 
     bool NativeCacheStore::Initialize(const NativeCacheConfig& config) noexcept
     {
-        if (m_impl != nullptr || !filesystem::IsInitialized() || config.root.Empty() || !config.identity.IsValid() ||
-            config.maximumBlobBytes == 0 || config.maximumBlobBytes > ~u32{0})
+        if (m_impl != nullptr || !filesystem::IsInitialized() || config.root.Empty() || !config.identity.IsValid() || config.maximumBlobBytes == 0 ||
+            config.maximumBlobBytes > ~u32{0})
         {
             return false;
         }
@@ -358,8 +349,7 @@ namespace vanguard::pipeline_cache
         }
         containers::DynamicArray<u8> validation{memory::pools::Rendering::GetInstance()};
         if (ReadRecord(temporary, m_impl->config.identity, m_impl->config.maximumBlobBytes, validation) != ReadResult::Hit ||
-            validation.Size() != blob.Size() ||
-            crypto::Sha256(validation.Data(), validation.Size()) != crypto::Sha256(blob.Data(), blob.SizeInBytes()))
+            validation.Size() != blob.Size() || crypto::Sha256(validation.Data(), validation.Size()) != crypto::Sha256(blob.Data(), blob.SizeInBytes()))
         {
             static_cast<void>(manager.DeleteFile(temporary));
             ++m_impl->stats.ioFailures;
@@ -430,13 +420,13 @@ namespace vanguard::pipeline_cache
         return !filesystem::GetManager().FileExist(m_impl->recordPath) || filesystem::GetManager().DeleteFile(m_impl->recordPath);
     }
 
-    const NativeCacheIdentity& NativeCacheStore::Identity() const noexcept
+    const NativeCacheIdentity& NativeCacheStore::GetIdentity() const noexcept
     {
         static const NativeCacheIdentity invalid;
         return m_impl != nullptr ? m_impl->config.identity : invalid;
     }
 
-    const crypto::Digest256& NativeCacheStore::IdentityFingerprint() const noexcept
+    const crypto::Digest256& NativeCacheStore::GetIdentityFingerprint() const noexcept
     {
         static const crypto::Digest256 invalid;
         return m_impl != nullptr ? m_impl->identityFingerprint : invalid;

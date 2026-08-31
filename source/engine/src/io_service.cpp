@@ -16,23 +16,25 @@ namespace
         {
             if (vanguard::io::IsInitialized())
                 return app::LifecycleStatus::Failure("I/O was initialized outside the managed engine lifecycle");
-            if (!vanguard::io::Initialize()) return app::LifecycleStatus::Failure("I/O initialization failed");
+            if (!vanguard::io::Initialize())
+                return app::LifecycleStatus::Failure("I/O initialization failed");
             m_initialized = true;
             return app::LifecycleStatus::Success();
         }
 
         app::LifecycleStatus OnStart(app::ServiceContext&) noexcept override
         {
-            return m_initialized && vanguard::io::IsInitialized()
-                ? app::LifecycleStatus::Success()
-                : app::LifecycleStatus::Failure("I/O did not enter a running state");
+            return m_initialized && vanguard::io::IsInitialized() ? app::LifecycleStatus::Success()
+                                                                  : app::LifecycleStatus::Failure("I/O did not enter a running state");
         }
 
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
         {
-            if (!m_initialized) return app::LifecycleStatus::Success();
+            if (!m_initialized)
+                return app::LifecycleStatus::Success();
             vanguard::io::Shutdown();
-            if (vanguard::io::IsInitialized()) return app::LifecycleStatus::Failure("I/O shutdown failed");
+            if (vanguard::io::IsInitialized())
+                return app::LifecycleStatus::Failure("I/O shutdown failed");
             m_initialized = false;
             return app::LifecycleStatus::Success();
         }
@@ -43,19 +45,19 @@ namespace
 
     app::Service* CreateIoService(void*) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Io, sizeof(IoService), alignof(IoService));
+        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(vanguard::memory::PoolId::Io, sizeof(IoService), alignof(IoService));
         return block ? ::new (block.address) IoService() : nullptr;
     }
 
     void DestroyIoService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<IoService*>(service)->~IoService();
         vanguard::memory::MemoryBlock block{service, sizeof(IoService), vanguard::memory::PoolId::Io};
         vanguard::memory::Free(block);
     }
-}
+} // namespace
 
 namespace vanguard::engine
 {

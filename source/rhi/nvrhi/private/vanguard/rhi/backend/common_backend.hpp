@@ -10,23 +10,18 @@ namespace vanguard::rhi::backend
 {
     using SerializedQueueOperation = BackendStatus (*)(void* context) noexcept;
     using CommandSubmissionCallback = void (*)(void* context, GpuFence completion, u64 value) noexcept;
-    using PrepareResidencyCallback = BackendStatus (*)(void* context,
-                                                       containers::ArraySpan<const ResourceRef> resources) noexcept;
-    using CommitResidencyCallback = void (*)(void* context,
-                                             containers::ArraySpan<const ResourceRef> resources,
-                                             GpuFence completion) noexcept;
+    using PrepareResidencyCallback = BackendStatus (*)(void* context, containers::ArraySpan<const ResourceRef> resources) noexcept;
+    using CommitResidencyCallback = void (*)(void* context, containers::ArraySpan<const ResourceRef> resources, GpuFence completion) noexcept;
     using ReleaseResidencyCallback = void (*)(void* context, ResourceRef resource) noexcept;
 
     using SignalFenceCallback = bool (*)(void* context, QueueType queue, u64 value) noexcept;
     using WaitFenceCallback = bool (*)(void* context, QueueType queue, u64 value, u64 timeoutNanoseconds) noexcept;
-    using AliasingBarrierCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::IResource* resourceAfter,
-                                             nvrhi::IResource* resourceBefore, bool discardAfter) noexcept;
-    using RectColorClearCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::ITexture* texture,
-                                            const ColorValue& value, const SubresourceRange& range,
-                                            const Rect& rectangle) noexcept;
-    using RectDepthStencilClearCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::ITexture* texture,
-                                                   bool clearDepth, f32 depth, bool clearStencil, u8 stencil,
-                                                   const SubresourceRange& range, const Rect& rectangle) noexcept;
+    using AliasingBarrierCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::IResource* resourceAfter, nvrhi::IResource* resourceBefore,
+                                             bool discardAfter) noexcept;
+    using RectColorClearCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::ITexture* texture, const ColorValue& value,
+                                            const SubresourceRange& range, const Rect& rectangle) noexcept;
+    using RectDepthStencilClearCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::ITexture* texture, bool clearDepth, f32 depth,
+                                                   bool clearStencil, u8 stencil, const SubresourceRange& range, const Rect& rectangle) noexcept;
     using DiscardResourceCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::IResource* resource,
                                              const SubresourceRange* textureRange) noexcept;
 
@@ -43,17 +38,14 @@ namespace vanguard::rhi::backend
         CommonBackend& operator=(const CommonBackend&) = delete;
 
         [[nodiscard]] bool Initialize(nvrhi::DeviceHandle&& device, FenceCompleteCallback fenceComplete, SignalFenceCallback signalFence,
-                                      WaitFenceCallback waitFence, AliasingBarrierCallback aliasingBarrier,
-                                      RectColorClearCallback rectColorClear,
-                                      RectDepthStencilClearCallback rectDepthStencilClear,
-                                      DiscardResourceCallback discardResource,
-                                      PrepareResidencyCallback prepareResidency,
-                                      CommitResidencyCallback commitResidency,
+                                      WaitFenceCallback waitFence, AliasingBarrierCallback aliasingBarrier, RectColorClearCallback rectColorClear,
+                                      RectDepthStencilClearCallback rectDepthStencilClear, DiscardResourceCallback discardResource,
+                                      PrepareResidencyCallback prepareResidency, CommitResidencyCallback commitResidency,
                                       ReleaseResidencyCallback releaseResidency, void* fenceContext) noexcept;
         [[nodiscard]] bool ShutdownAfterGpuIdle() noexcept;
         void ForceShutdownAfterGpuIdle() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
-        [[nodiscard]] nvrhi::IDevice* Device() const noexcept;
+        [[nodiscard]] nvrhi::IDevice* GetDevice() const noexcept;
         void PopulateCapabilities(Capabilities& capabilities) const noexcept;
 
         [[nodiscard]] bool WaitIdle() noexcept;
@@ -61,18 +53,15 @@ namespace vanguard::rhi::backend
 
         [[nodiscard]] TextureRef CreateTexture(const TextureDesc&, const TextureInitData&) noexcept;
         [[nodiscard]] TextureRef AdoptNativeTexture(nvrhi::TextureHandle&& texture, const TextureDesc& desc) noexcept;
-        [[nodiscard]] ResourceRef CreateBackendResource(ResourceKind kind, void* payload,
-                                                        DestroyResourceCallback destroy,
+        [[nodiscard]] ResourceRef CreateBackendResource(ResourceKind kind, void* payload, DestroyResourceCallback destroy,
                                                         void* destroyContext = nullptr) noexcept;
         [[nodiscard]] BufferRef CreateBuffer(const BufferDesc&, const BufferInitData&) noexcept;
         [[nodiscard]] HeapRef CreateHeap(const HeapDesc&) noexcept;
         [[nodiscard]] BindingLayoutRef RequestBindingLayout(const BindingLayoutDesc&) noexcept;
         [[nodiscard]] DescriptorDomainRef CreateDescriptorDomain(const DescriptorDomainDesc&) noexcept;
         [[nodiscard]] DescriptorHandle AllocateDescriptor(DescriptorDomainRef) noexcept;
-        [[nodiscard]] BackendStatus WriteDescriptor(DescriptorDomainRef, DescriptorHandle, TextureRef, BindingType,
-                                                    const TextureViewDesc&) noexcept;
-        [[nodiscard]] BackendStatus WriteDescriptor(DescriptorDomainRef, DescriptorHandle, BufferRef, BindingType,
-                                                    const BufferViewDesc&) noexcept;
+        [[nodiscard]] BackendStatus WriteDescriptor(DescriptorDomainRef, DescriptorHandle, TextureRef, BindingType, const TextureViewDesc&) noexcept;
+        [[nodiscard]] BackendStatus WriteDescriptor(DescriptorDomainRef, DescriptorHandle, BufferRef, BindingType, const BufferViewDesc&) noexcept;
         [[nodiscard]] BackendStatus WriteDescriptor(DescriptorDomainRef, DescriptorHandle, SamplerStateRef) noexcept;
         [[nodiscard]] BackendStatus RetireDescriptor(DescriptorDomainRef, DescriptorHandle, const DescriptorRetirement&) noexcept;
         [[nodiscard]] DescriptorDomainStats GetDescriptorDomainStats(DescriptorDomainRef) const noexcept;
@@ -99,10 +88,9 @@ namespace vanguard::rhi::backend
         [[nodiscard]] CommandListRef CreateCommandList(CommandListType, u64) noexcept;
         void DiscardCommandList(CommandListRef) noexcept;
         [[nodiscard]] CommandListType GetCommandListType(CommandListRef) const noexcept;
-        [[nodiscard]] BackendStatus CloseAndSubmitCommandLists(const char*, containers::ArraySpan<const CommandListRef>,
-                                                               CommandListSyncType, GpuFence&) noexcept;
-        [[nodiscard]] BackendStatus ExecuteSerializedQueueOperation(SerializedQueueOperation operation,
-                                                                    void* context) noexcept;
+        [[nodiscard]] BackendStatus CloseAndSubmitCommandLists(const char*, containers::ArraySpan<const CommandListRef>, CommandListSyncType,
+                                                               GpuFence&) noexcept;
+        [[nodiscard]] BackendStatus ExecuteSerializedQueueOperation(SerializedQueueOperation operation, void* context) noexcept;
         [[nodiscard]] GpuFence GetGpuFence(CommandListRef) const noexcept;
         [[nodiscard]] bool IsGpuFenceComplete(GpuFence) const noexcept;
         [[nodiscard]] BackendStatus WaitForGpuFence(GpuFence, u64) noexcept;
@@ -114,12 +102,9 @@ namespace vanguard::rhi::backend
         [[nodiscard]] BackendStatus BindIndexBuffer(CommandListRef, const IndexBufferBinding&) noexcept;
         [[nodiscard]] BackendStatus BindIndirectArguments(CommandListRef, BufferRef, BufferRef) noexcept;
         [[nodiscard]] BackendStatus SetPushConstants(CommandListRef, const void*, u32) noexcept;
-        [[nodiscard]] BackendStatus ClearColorTarget(CommandListRef, TextureRef, const ColorValue&, const SubresourceRange&,
-                                                     const Rect*) noexcept;
-        [[nodiscard]] BackendStatus ClearDepthStencilTarget(CommandListRef, TextureRef, bool, f32, bool, u8,
-                                                            const SubresourceRange&, const Rect*) noexcept;
-        [[nodiscard]] BackendStatus ClearTextureUav(CommandListRef, TextureRef, const ColorValue&,
-                                                    const SubresourceRange&) noexcept;
+        [[nodiscard]] BackendStatus ClearColorTarget(CommandListRef, TextureRef, const ColorValue&, const SubresourceRange&, const Rect*) noexcept;
+        [[nodiscard]] BackendStatus ClearDepthStencilTarget(CommandListRef, TextureRef, bool, f32, bool, u8, const SubresourceRange&, const Rect*) noexcept;
+        [[nodiscard]] BackendStatus ClearTextureUav(CommandListRef, TextureRef, const ColorValue&, const SubresourceRange&) noexcept;
         [[nodiscard]] BackendStatus ClearTextureUav(CommandListRef, TextureRef, u32, const SubresourceRange&) noexcept;
         [[nodiscard]] BackendStatus ClearBufferUav(CommandListRef, BufferRef, u32) noexcept;
         [[nodiscard]] BackendStatus DiscardTexture(CommandListRef, TextureRef, const SubresourceRange&) noexcept;
@@ -141,16 +126,14 @@ namespace vanguard::rhi::backend
         [[nodiscard]] BackendStatus CopyBuffer(CommandListRef, BufferRef, u64, BufferRef, u64, u64) noexcept;
         [[nodiscard]] BackendStatus CopyTexture(CommandListRef, TextureRef, TextureRef, const TextureCopyRegion&) noexcept;
         [[nodiscard]] BackendStatus ResolveTexture(CommandListRef, TextureRef, TextureRef, const TextureResolveRegion&) noexcept;
-        [[nodiscard]] BackendStatus RequestTextureReadback(CommandListRef, TextureRef, const TextureReadbackRegion&,
-                                                           TextureReadbackRef&) noexcept;
+        [[nodiscard]] BackendStatus RequestTextureReadback(CommandListRef, TextureRef, const TextureReadbackRegion&, TextureReadbackRef&) noexcept;
         [[nodiscard]] BackendStatus GetTextureReadbackInfo(TextureReadbackRef, TextureReadbackInfo&) noexcept;
         [[nodiscard]] BackendStatus MapTextureReadback(TextureReadbackRef, TextureReadbackMapping&) noexcept;
         [[nodiscard]] BackendStatus UnmapTextureReadback(TextureReadbackRef) noexcept;
         [[nodiscard]] BackendStatus LockBuffer(BufferRef, u64, u64, void*&) noexcept;
         void UnlockBuffer(BufferRef) noexcept;
 
-        [[nodiscard]] BackendStatus TransitionTexture(CommandListRef, TextureRef, ResourceState, ResourceState,
-                                                      const SubresourceRange&) noexcept;
+        [[nodiscard]] BackendStatus TransitionTexture(CommandListRef, TextureRef, ResourceState, ResourceState, const SubresourceRange&) noexcept;
         [[nodiscard]] BackendStatus TransitionBuffer(CommandListRef, BufferRef, ResourceState, ResourceState) noexcept;
         [[nodiscard]] BackendStatus BarrierTextureUav(CommandListRef, TextureRef) noexcept;
         [[nodiscard]] BackendStatus BarrierBufferUav(CommandListRef, BufferRef) noexcept;
@@ -160,9 +143,8 @@ namespace vanguard::rhi::backend
         [[nodiscard]] BackendStatus MakeStateSafeToRetire(CommandListRef, TextureRef) noexcept;
         [[nodiscard]] BackendStatus MakeStateSafeToRetire(CommandListRef, BufferRef) noexcept;
         [[nodiscard]] bool RetainCommandResource(CommandListRef commandList, ResourceRef resource) noexcept;
-        [[nodiscard]] bool RegisterCommandSubmissionCallback(CommandListRef commandList,
-                                                             CommandSubmissionCallback callback,
-                                                             void* context, u64 value, bool* added = nullptr) noexcept;
+        [[nodiscard]] bool RegisterCommandSubmissionCallback(CommandListRef commandList, CommandSubmissionCallback callback, void* context, u64 value,
+                                                             bool* added = nullptr) noexcept;
         [[nodiscard]] nvrhi::ICommandList* GetNativeCommandList(CommandListRef) noexcept;
         [[nodiscard]] nvrhi::IHeap* GetNativeHeap(HeapRef) noexcept;
         [[nodiscard]] ResourceRef GetResidencyAllocation(ResourceRef) noexcept;
@@ -194,6 +176,21 @@ namespace vanguard::rhi::backend
             u32 next = InvalidReferenceIndex;
         };
 
+        struct RecycledCommandList
+        {
+            nvrhi::CommandListHandle native;
+            u64 role = 0;
+            u64 stamp = 0;
+            CommandListType type = CommandListType::None;
+        };
+
+        static constexpr u32 MaximumRecycledCommandLists = 16;
+        static constexpr u32 MaximumRecycledCommandListsPerRole = 2;
+
+        [[nodiscard]] nvrhi::CommandListHandle AcquireNativeCommandList(CommandListType type, u64 role) noexcept;
+        void RecycleNativeCommandList(nvrhi::CommandListHandle&& native, CommandListType type, u64 role) noexcept;
+        void ClearRecycledCommandLists() noexcept;
+
         void message(nvrhi::MessageSeverity severity, const char* text) override;
 
         nvrhi::DeviceHandle m_device;
@@ -219,6 +216,10 @@ namespace vanguard::rhi::backend
         u32 m_vertexLayoutBuckets[4096]{};
         concurrency::SpinLock m_descriptorDomainListLock;
         containers::DynamicArray<DescriptorDomainRef> m_descriptorDomains;
+        concurrency::SpinLock m_commandListPoolLock;
+        RecycledCommandList m_recycledCommandLists[MaximumRecycledCommandLists];
+        u32 m_recycledCommandListCount = 0;
+        u64 m_commandListRecycleStamp = 0;
     };
 #if defined(_MSC_VER)
 #pragma warning(pop)

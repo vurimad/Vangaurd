@@ -66,8 +66,7 @@ namespace vanguard::math
 
     constexpr Rect Rect::GetTrimmed(const Rect& trimmerRect) const
     {
-        return {Max(m_left, trimmerRect.m_left), Min(m_right, trimmerRect.m_right), Max(m_top, trimmerRect.m_top),
-                Min(m_bottom, trimmerRect.m_bottom)};
+        return {Max(m_left, trimmerRect.m_left), Min(m_right, trimmerRect.m_right), Max(m_top, trimmerRect.m_top), Min(m_bottom, trimmerRect.m_bottom)};
     }
 
     RED_FORCE_INLINE void Rect::Grow(Int32 sx, Int32 sy)
@@ -183,8 +182,7 @@ namespace vanguard::math
 
     constexpr Rect Rect::EMPTY()
     {
-        return {std::numeric_limits<Int32>::max(), std::numeric_limits<Int32>::min(), std::numeric_limits<Int32>::max(),
-                std::numeric_limits<Int32>::min()};
+        return {std::numeric_limits<Int32>::max(), std::numeric_limits<Int32>::min(), std::numeric_limits<Int32>::max(), std::numeric_limits<Int32>::min()};
     }
 
     RED_INLINE Bool Rect::operator==(const Rect& other) const

@@ -125,8 +125,7 @@ namespace vanguard::reflection
 
         [[nodiscard]] explicit constexpr operator bool() const noexcept
         {
-            return elementSize != 0 && elementAlignment != 0 && size != nullptr && constElement != nullptr && resize != nullptr &&
-                   element != nullptr;
+            return elementSize != 0 && elementAlignment != 0 && size != nullptr && constElement != nullptr && resize != nullptr && element != nullptr;
         }
     };
 
@@ -168,12 +167,11 @@ namespace vanguard::reflection
         }
     };
 
-    [[nodiscard]] constexpr SchemaField MakeField(const char* const name, const SchemaTypeId valueType, const ValueKind kind,
-                                                  const u32 offset, const u32 size, const u32 alignment, const u16 introducedVersion = 1,
-                                                  const u16 removedVersion = 0, const FieldFlags flags = FieldFlags::None) noexcept
+    [[nodiscard]] constexpr SchemaField MakeField(const char* const name, const SchemaTypeId valueType, const ValueKind kind, const u32 offset, const u32 size,
+                                                  const u32 alignment, const u16 introducedVersion = 1, const u16 removedVersion = 0,
+                                                  const FieldFlags flags = FieldFlags::None) noexcept
     {
-        return {HashFieldName(name), valueType,       name,   kind, flags, offset, size, alignment, introducedVersion,
-                removedVersion,      ValueKind::Blob, nullptr};
+        return {HashFieldName(name), valueType, name, kind, flags, offset, size, alignment, introducedVersion, removedVersion, ValueKind::Blob, nullptr};
     }
 
     enum class TypeKind : u8
@@ -226,5 +224,5 @@ namespace vanguard::reflection
     [[nodiscard]] bool UnregisterSchema(SchemaTypeId type) noexcept;
     [[nodiscard]] const Schema* FindSchema(SchemaTypeId type) noexcept;
     [[nodiscard]] const Schema* FindSchema(const char* name) noexcept;
-    [[nodiscard]] u32 SchemaCount() noexcept;
+    [[nodiscard]] u32 GetSchemaCount() noexcept;
 } // namespace vanguard::reflection

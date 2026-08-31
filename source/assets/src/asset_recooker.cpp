@@ -11,8 +11,7 @@ namespace
     struct OwnedBuildRequest
     {
         OwnedBuildRequest() noexcept
-            : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()),
-              settings(memory::pools::Assets::GetInstance())
+            : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()), settings(memory::pools::Assets::GetInstance())
         {
         }
 
@@ -60,8 +59,7 @@ namespace
         containers::DynamicArray<u8> settings;
     };
 
-    [[nodiscard]] bool Contains(const containers::DynamicArray<resources::ResourceReference>& values,
-                                const resources::ResourceReference value) noexcept
+    [[nodiscard]] bool Contains(const containers::DynamicArray<resources::ResourceReference>& values, const resources::ResourceReference value) noexcept
     {
         for (const resources::ResourceReference existing : values)
         {
@@ -150,13 +148,12 @@ namespace vanguard::assets
                                                OwnedBuildRequest& owned) noexcept
         {
             BuildRequest request;
-            return impl.resolver(output, request, impl.resolverUserData) && request.IsValid() && request.output == output &&
-                   owned.CopyFrom(request);
+            return impl.resolver(output, request, impl.resolverUserData) && request.IsValid() && request.output == output && owned.CopyFrom(request);
         }
 
         [[nodiscard]] bool MaterializeStoredGeneratedDependencies(DependencyIndex& index, BuildPlan& plan) noexcept
         {
-            for (const BuildDependency& dependency : plan.Dependencies())
+            for (const BuildDependency& dependency : plan.GetDependencies())
             {
                 if (dependency.role != DependencyRole::Generated)
                 {
@@ -172,8 +169,7 @@ namespace vanguard::assets
                 {
                     continue;
                 }
-                if (found != IndexResult::Success ||
-                    plan.SetGeneratedDependencyContent(dependency.identity, record.contentFingerprint) != Result::Success)
+                if (found != IndexResult::Success || plan.SetGeneratedDependencyContent(dependency.identity, record.contentFingerprint) != Result::Success)
                 {
                     return false;
                 }
@@ -182,10 +178,7 @@ namespace vanguard::assets
         }
     } // namespace
 
-    RecookBatch::RecookBatch(IncrementalRecooker* const owner, RecookOperation* const operation) noexcept
-        : m_owner(owner), m_operation(operation)
-    {
-    }
+    RecookBatch::RecookBatch(IncrementalRecooker* const owner, RecookOperation* const operation) noexcept : m_owner(owner), m_operation(operation) {}
 
     RecookBatch::RecookBatch(RecookBatch&& other) noexcept : m_owner(other.m_owner), m_operation(other.m_operation)
     {
@@ -221,19 +214,19 @@ namespace vanguard::assets
         return IsValid();
     }
 
-    RecookState RecookBatch::Status() const noexcept
+    RecookState RecookBatch::GetStatus() const noexcept
     {
         return m_operation != nullptr ? static_cast<RecookState>(m_operation->state.GetValue()) : RecookState::Failed;
     }
 
-    RecookFailure RecookBatch::Error() const noexcept
+    RecookFailure RecookBatch::GetError() const noexcept
     {
         return m_operation != nullptr ? static_cast<RecookFailure>(m_operation->failure.GetValue()) : RecookFailure::InvalidChange;
     }
 
     bool RecookBatch::HasFinished() const noexcept
     {
-        return IsTerminal(Status());
+        return IsTerminal(GetStatus());
     }
 
     bool RecookBatch::Poll() noexcept
@@ -279,17 +272,15 @@ namespace vanguard::assets
         static_cast<void>(Shutdown());
     }
 
-    bool IncrementalRecooker::Initialize(BuildSystem& buildSystem, BuildGraph& graph, DependencyIndex& index,
-                                         const ResolveIndexedBuildRequestFunction resolver, void* const resolverUserData,
-                                         const RecookConfig& config) noexcept
+    bool IncrementalRecooker::Initialize(BuildSystem& buildSystem, BuildGraph& graph, DependencyIndex& index, const ResolveIndexedBuildRequestFunction resolver,
+                                         void* const resolverUserData, const RecookConfig& config) noexcept
     {
         if (m_impl != nullptr)
         {
             return true;
         }
-        if (!buildSystem.IsInitialized() || !graph.IsInitialized() || !index.IsInitialized() || !graph.IsBoundTo(buildSystem, index) ||
-            resolver == nullptr || config.maximumChangesPerBatch == 0 || config.maximumAffectedOutputsPerBatch == 0 ||
-            config.maximumRootRequestsPerBatch == 0)
+        if (!buildSystem.IsInitialized() || !graph.IsInitialized() || !index.IsInitialized() || !graph.IsBoundTo(buildSystem, index) || resolver == nullptr ||
+            config.maximumChangesPerBatch == 0 || config.maximumAffectedOutputsPerBatch == 0 || config.maximumRootRequestsPerBatch == 0)
         {
             return false;
         }
@@ -406,8 +397,7 @@ namespace vanguard::assets
                 }
                 const BuildRequest request = owned.View();
                 BuildPlan plan;
-                if (m_impl->buildSystem->Prepare(request, plan) != Result::Success ||
-                    !MaterializeStoredGeneratedDependencies(*m_impl->index, plan))
+                if (m_impl->buildSystem->Prepare(request, plan) != Result::Success || !MaterializeStoredGeneratedDependencies(*m_impl->index, plan))
                 {
                     return fail(RecookFailure::DependencyPreparationFailed);
                 }
@@ -564,15 +554,15 @@ namespace vanguard::assets
         bool failed = false;
         for (const GraphRequest& request : operation.requests)
         {
-            if (request.Status() == BuildState::Succeeded)
+            if (request.GetStatus() == BuildState::Succeeded)
             {
                 ++operation.stats.succeededRoots;
             }
             else
             {
                 ++operation.stats.failedRoots;
-                cancelled = cancelled || request.Status() == BuildState::Cancelled;
-                failed = failed || request.Status() == BuildState::Failed;
+                cancelled = cancelled || request.GetStatus() == BuildState::Cancelled;
+                failed = failed || request.GetStatus() == BuildState::Failed;
             }
         }
         if (cancelled)

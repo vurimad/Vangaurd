@@ -59,8 +59,7 @@ namespace vanguard::assets
 
     // Resolves a cooked output identity to its current source bytes, metadata,
     // settings, and target. The request is copied before the callback returns.
-    using ResolveIndexedBuildRequestFunction = bool (*)(resources::ResourceReference output, BuildRequest& request,
-                                                        void* userData) noexcept;
+    using ResolveIndexedBuildRequestFunction = bool (*)(resources::ResourceReference output, BuildRequest& request, void* userData) noexcept;
 
     class RecookBatch final
     {
@@ -75,8 +74,8 @@ namespace vanguard::assets
 
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] explicit operator bool() const noexcept;
-        [[nodiscard]] RecookState Status() const noexcept;
-        [[nodiscard]] RecookFailure Error() const noexcept;
+        [[nodiscard]] RecookState GetStatus() const noexcept;
+        [[nodiscard]] RecookFailure GetError() const noexcept;
         [[nodiscard]] bool HasFinished() const noexcept;
         [[nodiscard]] bool Poll() noexcept;
         void Wait() noexcept;
@@ -104,14 +103,12 @@ namespace vanguard::assets
         IncrementalRecooker(const IncrementalRecooker&) = delete;
         IncrementalRecooker& operator=(const IncrementalRecooker&) = delete;
 
-        [[nodiscard]] bool Initialize(BuildSystem& buildSystem, BuildGraph& graph, DependencyIndex& index,
-                                      ResolveIndexedBuildRequestFunction resolver, void* resolverUserData = nullptr,
-                                      const RecookConfig& config = {}) noexcept;
+        [[nodiscard]] bool Initialize(BuildSystem& buildSystem, BuildGraph& graph, DependencyIndex& index, ResolveIndexedBuildRequestFunction resolver,
+                                      void* resolverUserData = nullptr, const RecookConfig& config = {}) noexcept;
         [[nodiscard]] bool Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] RecookBatch Request(containers::ArraySpan<const AssetChange> changes,
-                                          BuildPriority priority = BuildPriority::Normal) noexcept;
+        [[nodiscard]] RecookBatch Request(containers::ArraySpan<const AssetChange> changes, BuildPriority priority = BuildPriority::Normal) noexcept;
         [[nodiscard]] RecookStats GetStats() const noexcept;
 
     private:

@@ -17,7 +17,8 @@ namespace vanguard::rhi
 
     void ResidencyFenceSet::Include(const GpuFence fence) noexcept
     {
-        if (!fence.IsValid()) return;
+        if (!fence.IsValid())
+            return;
         if (fence.queue == QueueType::Graphics && graphics < fence.value)
             graphics = fence.value;
         else if (fence.queue == QueueType::Compute && compute < fence.value)
@@ -90,8 +91,7 @@ namespace vanguard::rhi
         {
             if (!RequireBackend(failure))
                 return false;
-            return g_boundCommandList.IsValid() ||
-                   Reject(failure, FailureCode::NoBoundCommandList, "RHI command recording requires a bound command list");
+            return g_boundCommandList.IsValid() || Reject(failure, FailureCode::NoBoundCommandList, "RHI command recording requires a bound command list");
         }
 
         bool IsPowerOfTwo(const u64 value) noexcept
@@ -109,25 +109,20 @@ namespace vanguard::rhi
             return (static_cast<u32>(value) & ~static_cast<u32>(knownFlags)) == 0;
         }
 
-        inline constexpr TextureUsage AllTextureUsage =
-            TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::RenderTarget |
-            TextureUsage::DepthStencil | TextureUsage::CopySource | TextureUsage::CopyDestination |
-            TextureUsage::ResolveSource | TextureUsage::ResolveDestination | TextureUsage::Present |
-            TextureUsage::ShadingRate | TextureUsage::RayTracing;
-        inline constexpr BufferUsage AllBufferUsage =
-            BufferUsage::Vertex | BufferUsage::Index | BufferUsage::Constant | BufferUsage::Structured |
-            BufferUsage::Raw | BufferUsage::IndirectArguments | BufferUsage::ShaderResource |
-            BufferUsage::UnorderedAccess | BufferUsage::CopySource | BufferUsage::CopyDestination |
-            BufferUsage::AccelerationStructure | BufferUsage::ShaderBindingTable;
+        inline constexpr TextureUsage AllTextureUsage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess | TextureUsage::RenderTarget |
+                                                        TextureUsage::DepthStencil | TextureUsage::CopySource | TextureUsage::CopyDestination |
+                                                        TextureUsage::ResolveSource | TextureUsage::ResolveDestination | TextureUsage::Present |
+                                                        TextureUsage::ShadingRate | TextureUsage::RayTracing;
+        inline constexpr BufferUsage AllBufferUsage = BufferUsage::Vertex | BufferUsage::Index | BufferUsage::Constant | BufferUsage::Structured |
+                                                      BufferUsage::Raw | BufferUsage::IndirectArguments | BufferUsage::ShaderResource |
+                                                      BufferUsage::UnorderedAccess | BufferUsage::CopySource | BufferUsage::CopyDestination |
+                                                      BufferUsage::AccelerationStructure | BufferUsage::ShaderBindingTable;
         inline constexpr ResourceState AllResourceStates =
-            ResourceState::Common | ResourceState::CopySource | ResourceState::CopyDestination |
-            ResourceState::ShaderResourceGraphics | ResourceState::ShaderResourceCompute |
-            ResourceState::UnorderedAccess | ResourceState::RenderTarget | ResourceState::DepthWrite |
-            ResourceState::DepthRead | ResourceState::VertexBuffer | ResourceState::IndexBuffer |
-            ResourceState::ConstantBuffer | ResourceState::IndirectArgument |
-            ResourceState::AccelerationStructureRead | ResourceState::AccelerationStructureWrite |
-            ResourceState::Present | ResourceState::ResolveSource | ResourceState::ResolveDestination |
-            ResourceState::ShadingRate;
+            ResourceState::Common | ResourceState::CopySource | ResourceState::CopyDestination | ResourceState::ShaderResourceGraphics |
+            ResourceState::ShaderResourceCompute | ResourceState::UnorderedAccess | ResourceState::RenderTarget | ResourceState::DepthWrite |
+            ResourceState::DepthRead | ResourceState::VertexBuffer | ResourceState::IndexBuffer | ResourceState::ConstantBuffer |
+            ResourceState::IndirectArgument | ResourceState::AccelerationStructureRead | ResourceState::AccelerationStructureWrite | ResourceState::Present |
+            ResourceState::ResolveSource | ResourceState::ResolveDestination | ResourceState::ShadingRate;
 
         [[nodiscard]] bool IsValidBindingType(const BindingType type) noexcept
         {
@@ -234,7 +229,8 @@ namespace vanguard::rhi
         [[nodiscard]] constexpr u32 MaximumMipCount(const Extent3D extent) noexcept
         {
             u32 largest = extent.width > extent.height ? extent.width : extent.height;
-            if (extent.depth > largest) largest = extent.depth;
+            if (extent.depth > largest)
+                largest = extent.depth;
             u32 count = 0;
             while (largest != 0)
             {
@@ -304,8 +300,7 @@ namespace vanguard::rhi
 
         if (params.residencyPolicy.pressureThresholdPercent > 100 ||
             params.residencyPolicy.recoveryThresholdPercent >= params.residencyPolicy.pressureThresholdPercent ||
-            params.residencyPolicy.maximumEvictionsPerMaintenance == 0 ||
-            params.residencyPolicy.maximumEvictionsPerMaintenance > MaximumResidencyBatchSize)
+            params.residencyPolicy.maximumEvictionsPerMaintenance == 0 || params.residencyPolicy.maximumEvictionsPerMaintenance > MaximumResidencyBatchSize)
             return Reject(failure, FailureCode::InvalidArgument, "invalid GPU residency-policy configuration");
 
         Capabilities capabilities{};
@@ -313,18 +308,15 @@ namespace vanguard::rhi
         if (!Accept(status, failure))
             return false;
         if (capabilities.backend == BackendKind::Unknown || !IsPowerOfTwo(capabilities.uploadBufferAlignment) ||
-            !IsPowerOfTwo(capabilities.constantBufferAlignment) ||
-            capabilities.maximumTextureDimension2D == 0 || capabilities.maximumTextureArrayLayers == 0 ||
+            !IsPowerOfTwo(capabilities.constantBufferAlignment) || capabilities.maximumTextureDimension2D == 0 || capabilities.maximumTextureDimension3D == 0 ||
+            capabilities.maximumTextureArrayLayers == 0 ||
             capabilities.bindlessResources != (capabilities.descriptorIndexing && capabilities.maximumBindlessResources != 0) ||
             capabilities.bindlessSamplers != (capabilities.bindlessResources && capabilities.maximumBindlessSamplers != 0) ||
-            capabilities.variableRateShading !=
-                (capabilities.variableRateShadingDetails.tier != VariableRateShadingTier::None) ||
+            capabilities.variableRateShading != (capabilities.variableRateShadingDetails.tier != VariableRateShadingTier::None) ||
             (capabilities.variableRateShading &&
              (capabilities.variableRateShadingDetails.tier > VariableRateShadingTier::ShadingRateImage ||
-              (capabilities.variableRateShadingDetails.supportedRates &
-               ~((1u << static_cast<u32>(ShadingRate::Count)) - 1u)) != 0 ||
-              (capabilities.variableRateShadingDetails.supportedCombiners &
-               ~((1u << static_cast<u32>(ShadingRateCombiner::Count)) - 1u)) != 0 ||
+              (capabilities.variableRateShadingDetails.supportedRates & ~((1u << static_cast<u32>(ShadingRate::Count)) - 1u)) != 0 ||
+              (capabilities.variableRateShadingDetails.supportedCombiners & ~((1u << static_cast<u32>(ShadingRateCombiner::Count)) - 1u)) != 0 ||
               !capabilities.variableRateShadingDetails.Supports(ShadingRate::Rate1x1) ||
               !capabilities.variableRateShadingDetails.Supports(ShadingRateCombiner::Passthrough) ||
               (capabilities.variableRateShadingDetails.shadingRateImageTileWidth == 0) !=
@@ -385,7 +377,8 @@ namespace vanguard::rhi
 
     bool FlushRetiredResources(Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         return Accept(g_backend->FlushRetiredResources(), failure);
     }
 
@@ -393,7 +386,8 @@ namespace vanguard::rhi
     {
         budget = {};
         budget.segment = segment;
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (segment > MemorySegment::NonLocal)
             return Reject(failure, FailureCode::InvalidArgument, "invalid GPU memory segment");
         return Accept(g_backend->QueryMemoryBudget(segment, budget), failure);
@@ -401,7 +395,8 @@ namespace vanguard::rhi
 
     bool SetResidencyPriority(const ResourceRef resource, const ResidencyPriority priority, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (!resource.IsValid() || priority > ResidencyPriority::Maximum)
             return Reject(failure, FailureCode::InvalidArgument, "invalid GPU residency resource or priority");
         return Accept(g_backend->SetResidencyPriority(resource, priority), failure);
@@ -418,7 +413,8 @@ namespace vanguard::rhi
 
     bool MakeResident(const containers::ArraySpan<const ResourceRef> resources, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (resources.Data() == nullptr || resources.Size() == 0 || resources.Size() > MaximumResidencyBatchSize)
             return Reject(failure, FailureCode::InvalidArgument, "invalid GPU residency set");
         for (const ResourceRef resource : resources)
@@ -427,10 +423,10 @@ namespace vanguard::rhi
         return Accept(g_backend->MakeResident(resources), failure);
     }
 
-    bool Evict(const containers::ArraySpan<const ResourceRef> resources, const ResidencyFenceSet& safeAfter,
-               Failure* const failure) noexcept
+    bool Evict(const containers::ArraySpan<const ResourceRef> resources, const ResidencyFenceSet& safeAfter, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (resources.Data() == nullptr || resources.Size() == 0 || resources.Size() > MaximumResidencyBatchSize)
             return Reject(failure, FailureCode::InvalidArgument, "invalid GPU eviction set");
         for (const ResourceRef resource : resources)
@@ -439,7 +435,10 @@ namespace vanguard::rhi
         return Accept(g_backend->Evict(resources, safeAfter), failure);
     }
 
-    ResidencyStats GetResidencyStats() noexcept { return g_backend != nullptr ? g_backend->GetResidencyStats() : ResidencyStats{}; }
+    ResidencyStats GetResidencyStats() noexcept
+    {
+        return g_backend != nullptr ? g_backend->GetResidencyStats() : ResidencyStats{};
+    }
 
     TextureRef CreateTexture(const TextureDesc& desc, const TextureInitData& initialData, Failure* const failure) noexcept
     {
@@ -452,12 +451,11 @@ namespace vanguard::rhi
             return {};
         }
         if (desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth == 0 || !IsKnownFormat(desc.format) ||
-            desc.dimension > TextureDimension::TextureCube || !HasOnlyFlags(desc.usage, AllTextureUsage) ||
-            !IsKnownResourceState(desc.initialState) || desc.mipCount == 0 || desc.mipCount > MaximumMipCount(desc.extent) ||
-            desc.arraySize == 0 || desc.sampleCount == 0 ||
+            desc.dimension > TextureDimension::TextureCube || !HasOnlyFlags(desc.usage, AllTextureUsage) || !IsKnownResourceState(desc.initialState) ||
+            desc.mipCount == 0 || desc.mipCount > MaximumMipCount(desc.extent) || desc.arraySize == 0 || desc.sampleCount == 0 ||
             (initialData.subresources == nullptr) != (initialData.subresourceCount == 0) ||
-            initialData.subresourceCount > MaximumTextureSubresourcesPerUpload ||
-            (desc.virtualResource && initialData.subresourceCount != 0) || (desc.sampleCount > 1 && initialData.subresourceCount != 0))
+            initialData.subresourceCount > MaximumTextureSubresourcesPerUpload || (desc.virtualResource && initialData.subresourceCount != 0) ||
+            (desc.sampleCount > 1 && initialData.subresourceCount != 0))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid texture descriptor or initial data");
             return {};
@@ -465,19 +463,20 @@ namespace vanguard::rhi
         const bool dimensionValid = (desc.dimension == TextureDimension::Texture1D && desc.extent.height == 1 && desc.extent.depth == 1) ||
                                     (desc.dimension == TextureDimension::Texture2D && desc.extent.depth == 1) ||
                                     (desc.dimension == TextureDimension::Texture3D && desc.arraySize == 1) ||
-                                    (desc.dimension == TextureDimension::TextureCube && desc.extent.width == desc.extent.height &&
-                                     desc.extent.depth == 1 && desc.arraySize >= 6 && desc.arraySize % 6 == 0);
+                                    (desc.dimension == TextureDimension::TextureCube && desc.extent.width == desc.extent.height && desc.extent.depth == 1 &&
+                                     desc.arraySize >= 6 && desc.arraySize % 6 == 0);
         const bool samplesValid = desc.sampleCount == 1 || desc.sampleCount == 2 || desc.sampleCount == 4 || desc.sampleCount == 8;
-        const bool limitsValid =
-            (desc.dimension == TextureDimension::Texture3D ||
-             (desc.extent.width <= g_capabilities.maximumTextureDimension2D &&
-              desc.extent.height <= g_capabilities.maximumTextureDimension2D)) &&
-            (desc.dimension == TextureDimension::Texture3D || desc.arraySize <= g_capabilities.maximumTextureArrayLayers);
-        const bool shadingRateValid = !HasFlag(desc.usage, TextureUsage::ShadingRate) ||
-                                      (desc.dimension == TextureDimension::Texture2D && desc.format == Format::R8UInt &&
-                                       desc.extent.depth == 1 && desc.mipCount == 1 && desc.arraySize == 1 && desc.sampleCount == 1);
-        if (!dimensionValid || !samplesValid || !limitsValid ||
-            !shadingRateValid || (desc.sampleCount > 1 && (desc.dimension != TextureDimension::Texture2D || desc.mipCount != 1)))
+        const bool limitsValid = (desc.dimension != TextureDimension::Texture3D ||
+                                  (desc.extent.width <= g_capabilities.maximumTextureDimension3D && desc.extent.height <= g_capabilities.maximumTextureDimension3D &&
+                                   desc.extent.depth <= g_capabilities.maximumTextureDimension3D)) &&
+                                 (desc.dimension == TextureDimension::Texture3D || (desc.extent.width <= g_capabilities.maximumTextureDimension2D &&
+                                                                                    desc.extent.height <= g_capabilities.maximumTextureDimension2D)) &&
+                                 (desc.dimension == TextureDimension::Texture3D || desc.arraySize <= g_capabilities.maximumTextureArrayLayers);
+        const bool shadingRateValid =
+            !HasFlag(desc.usage, TextureUsage::ShadingRate) || (desc.dimension == TextureDimension::Texture2D && desc.format == Format::R8UInt &&
+                                                                desc.extent.depth == 1 && desc.mipCount == 1 && desc.arraySize == 1 && desc.sampleCount == 1);
+        if (!dimensionValid || !samplesValid || !limitsValid || !shadingRateValid ||
+            (desc.sampleCount > 1 && (desc.dimension != TextureDimension::Texture2D || desc.mipCount != 1)))
         {
             Reject(failure, FailureCode::InvalidArgument, "texture dimensions, array slices or sample count are inconsistent");
             return {};
@@ -512,11 +511,10 @@ namespace vanguard::rhi
         if (!RequireBackend(failure))
             return {};
         const bool structured = HasFlag(desc.usage, BufferUsage::Structured);
-        if (desc.size == 0 || !HasOnlyFlags(desc.usage, AllBufferUsage) || !IsKnownResourceState(desc.initialState) ||
-            desc.memoryType > MemoryType::Readback || (desc.format != Format::Unknown && !IsKnownFormat(desc.format)) ||
-            (structured && (desc.structureStride == 0 || desc.size % desc.structureStride != 0)) ||
-            (initialData.data == nullptr) != (initialData.size == 0) || initialData.size > desc.size ||
-            (desc.virtualResource && (initialData.data != nullptr || desc.memoryType != MemoryType::DeviceLocal)))
+        if (desc.size == 0 || !HasOnlyFlags(desc.usage, AllBufferUsage) || !IsKnownResourceState(desc.initialState) || desc.memoryType > MemoryType::Readback ||
+            (desc.format != Format::Unknown && !IsKnownFormat(desc.format)) ||
+            (structured && (desc.structureStride == 0 || desc.size % desc.structureStride != 0)) || (initialData.data == nullptr) != (initialData.size == 0) ||
+            initialData.size > desc.size || (desc.virtualResource && (initialData.data != nullptr || desc.memoryType != MemoryType::DeviceLocal)))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid buffer descriptor or initial data");
             return {};
@@ -571,8 +569,7 @@ namespace vanguard::rhi
                 const BindingLayoutEntry& previous = desc.entries[previousIndex];
                 if (BindingNamespace(previous.type) != BindingNamespace(entry.type))
                     continue;
-                const u64 previousEnd =
-                    static_cast<u64>(previous.slot) + (previous.type == BindingType::PushConstants ? 1u : previous.arrayCount);
+                const u64 previousEnd = static_cast<u64>(previous.slot) + (previous.type == BindingType::PushConstants ? 1u : previous.arrayCount);
                 const u64 entryEnd = static_cast<u64>(entry.slot) + range;
                 if (static_cast<u64>(entry.slot) < previousEnd && static_cast<u64>(previous.slot) < entryEnd)
                 {
@@ -627,8 +624,8 @@ namespace vanguard::rhi
         return descriptor;
     }
 
-    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const TextureRef texture,
-                         const BindingType type, const TextureViewDesc& view, Failure* const failure) noexcept
+    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const TextureRef texture, const BindingType type,
+                         const TextureViewDesc& view, Failure* const failure) noexcept
     {
         ClearFailure(failure);
         if (!RequireBackend(failure))
@@ -640,8 +637,8 @@ namespace vanguard::rhi
         return Accept(g_backend->WriteDescriptor(domain, descriptor, texture, type, view), failure);
     }
 
-    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const BufferRef buffer,
-                         const BindingType type, const BufferViewDesc& view, Failure* const failure) noexcept
+    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const BufferRef buffer, const BindingType type,
+                         const BufferViewDesc& view, Failure* const failure) noexcept
     {
         ClearFailure(failure);
         if (!RequireBackend(failure))
@@ -650,16 +647,14 @@ namespace vanguard::rhi
             return Reject(failure, FailureCode::InvalidReference, "buffer descriptor write contains an invalid reference");
         const bool compatible = type == BindingType::ConstantBuffer || type == BindingType::TypedBufferShaderResource ||
                                 type == BindingType::TypedBufferUnorderedAccess || type == BindingType::StructuredBufferShaderResource ||
-                                type == BindingType::StructuredBufferUnorderedAccess ||
-                                type == BindingType::ByteAddressBufferShaderResource ||
+                                type == BindingType::StructuredBufferUnorderedAccess || type == BindingType::ByteAddressBufferShaderResource ||
                                 type == BindingType::ByteAddressBufferUnorderedAccess;
         if (!compatible)
             return Reject(failure, FailureCode::InvalidArgument, "buffer descriptor write has an incompatible descriptor type");
         return Accept(g_backend->WriteDescriptor(domain, descriptor, buffer, type, view), failure);
     }
 
-    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const SamplerStateRef sampler,
-                         Failure* const failure) noexcept
+    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const SamplerStateRef sampler, Failure* const failure) noexcept
     {
         ClearFailure(failure);
         if (!RequireBackend(failure))
@@ -669,11 +664,12 @@ namespace vanguard::rhi
         return Accept(g_backend->WriteDescriptor(domain, descriptor, sampler), failure);
     }
 
-    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor,
-                         const AccelerationStructureRef accelerationStructure, Failure* const failure) noexcept
+    bool WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const AccelerationStructureRef accelerationStructure,
+                         Failure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (!g_capabilities.rayTracing)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
         if (!domain || !descriptor || !accelerationStructure)
@@ -718,8 +714,7 @@ namespace vanguard::rhi
         ClearFailure(failure);
         if (!RequireBackend(failure))
             return {};
-        if (desc.bytecode == nullptr || desc.bytecodeSize == 0 || desc.entryPoint == nullptr || desc.entryPoint[0] == '\0' ||
-            desc.stage >= ShaderStage::Count)
+        if (desc.bytecode == nullptr || desc.bytecodeSize == 0 || desc.entryPoint == nullptr || desc.entryPoint[0] == '\0' || desc.stage >= ShaderStage::Count)
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid shader descriptor");
             return {};
@@ -769,8 +764,7 @@ namespace vanguard::rhi
             bool knownBinding = false;
             for (u32 bindingIndex = 0; bindingIndex < desc.bindingCount; ++bindingIndex)
                 knownBinding = knownBinding || desc.bindings[bindingIndex].binding == attribute.binding;
-            if (!knownBinding || attribute.format == Format::Unknown || semanticLength == 0 ||
-                semanticLength == MaximumVertexSemanticNameLength)
+            if (!knownBinding || attribute.format == Format::Unknown || semanticLength == 0 || semanticLength == MaximumVertexSemanticNameLength)
             {
                 Reject(failure, FailureCode::InvalidArgument, "vertex attribute references an unknown binding or format");
                 return {};
@@ -798,9 +792,8 @@ namespace vanguard::rhi
         if (!desc.vertexShader || desc.bindingLayoutCount > MaximumBindingLayoutsPerPipeline ||
             desc.bindingLayoutCount + desc.descriptorDomainCount > MaximumBindingLayoutsPerPipeline ||
             (desc.bindingLayouts == nullptr) != (desc.bindingLayoutCount == 0) || desc.attachments.colorCount > MaximumColorAttachments ||
-            desc.descriptorDomainCount > MaximumDescriptorDomainsPerPipeline ||
-            (desc.descriptorDomains == nullptr) != (desc.descriptorDomainCount == 0) || desc.attachments.sampleCount == 0 ||
-            (desc.topology == PrimitiveTopology::PatchList && desc.patchControlPoints == 0))
+            desc.descriptorDomainCount > MaximumDescriptorDomainsPerPipeline || (desc.descriptorDomains == nullptr) != (desc.descriptorDomainCount == 0) ||
+            desc.attachments.sampleCount == 0 || (desc.topology == PrimitiveTopology::PatchList && desc.patchControlPoints == 0))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid graphics-pipeline descriptor");
             return {};
@@ -846,11 +839,9 @@ namespace vanguard::rhi
         ClearFailure(failure);
         if (!RequireBackend(failure))
             return {};
-        if (!desc.computeShader || !IsResourceReferenceValid(ResourceRef(desc.computeShader)) ||
-            desc.bindingLayoutCount > MaximumBindingLayoutsPerPipeline ||
+        if (!desc.computeShader || !IsResourceReferenceValid(ResourceRef(desc.computeShader)) || desc.bindingLayoutCount > MaximumBindingLayoutsPerPipeline ||
             desc.bindingLayoutCount + desc.descriptorDomainCount > MaximumBindingLayoutsPerPipeline ||
-            (desc.bindingLayouts == nullptr) != (desc.bindingLayoutCount == 0) ||
-            desc.descriptorDomainCount > MaximumDescriptorDomainsPerPipeline ||
+            (desc.bindingLayouts == nullptr) != (desc.bindingLayoutCount == 0) || desc.descriptorDomainCount > MaximumDescriptorDomainsPerPipeline ||
             (desc.descriptorDomains == nullptr) != (desc.descriptorDomainCount == 0))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid compute-pipeline descriptor");
@@ -889,8 +880,8 @@ namespace vanguard::rhi
             (desc.globalBindingLayouts == nullptr) != (desc.globalBindingLayoutCount == 0) ||
             desc.globalBindingLayoutCount > MaximumBindingLayoutsPerPipeline ||
             desc.globalBindingLayoutCount + desc.descriptorDomainCount > MaximumBindingLayoutsPerPipeline ||
-            desc.descriptorDomainCount > MaximumDescriptorDomainsPerPipeline ||
-            (desc.descriptorDomains == nullptr) != (desc.descriptorDomainCount == 0) || desc.maximumRecursionDepth == 0)
+            desc.descriptorDomainCount > MaximumDescriptorDomainsPerPipeline || (desc.descriptorDomains == nullptr) != (desc.descriptorDomainCount == 0) ||
+            desc.maximumRecursionDepth == 0)
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid ray-tracing pipeline descriptor");
             return {};
@@ -935,8 +926,7 @@ namespace vanguard::rhi
         for (u32 index = 0; index < desc.hitGroupCount; ++index)
         {
             const RayTracingHitGroupDesc& group = desc.hitGroups[index];
-            if (group.exportName == nullptr || group.exportName[0] == '\0' ||
-                (!group.closestHitShader && !group.anyHitShader && !group.intersectionShader) ||
+            if (group.exportName == nullptr || group.exportName[0] == '\0' || (!group.closestHitShader && !group.anyHitShader && !group.intersectionShader) ||
                 (group.proceduralPrimitive != static_cast<bool>(group.intersectionShader)))
             {
                 Reject(failure, FailureCode::InvalidArgument, "ray-tracing pipeline contains an invalid hit group");
@@ -961,32 +951,33 @@ namespace vanguard::rhi
         return pipeline;
     }
 
-    AccelerationStructureRef CreateAccelerationStructure(const AccelerationStructureDesc& desc,
-                                                         Failure* const failure) noexcept
+    AccelerationStructureRef CreateAccelerationStructure(const AccelerationStructureDesc& desc, Failure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (!RequireBackend(failure)) return {};
+        if (!RequireBackend(failure))
+            return {};
         if (!g_capabilities.rayTracing)
         {
             Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
             return {};
         }
-        if ((desc.kind == AccelerationStructureKind::BottomLevel &&
-             (desc.geometries == nullptr || desc.geometryCount == 0)) ||
+        if ((desc.kind == AccelerationStructureKind::BottomLevel && (desc.geometries == nullptr || desc.geometryCount == 0)) ||
             (desc.kind == AccelerationStructureKind::TopLevel && desc.maximumInstanceCount == 0))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid acceleration-structure descriptor");
             return {};
         }
         const AccelerationStructureRef result = g_backend->CreateAccelerationStructure(desc);
-        if (!result) Reject(failure, FailureCode::BackendFailure, "RHI backend failed to create acceleration structure");
+        if (!result)
+            Reject(failure, FailureCode::BackendFailure, "RHI backend failed to create acceleration structure");
         return result;
     }
 
     ShaderTableRef CreateShaderTable(const ShaderTableDesc& desc, Failure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (!RequireBackend(failure)) return {};
+        if (!RequireBackend(failure))
+            return {};
         if (!g_capabilities.rayTracingPipeline)
         {
             Reject(failure, FailureCode::Unsupported, "ray-tracing shader tables are not supported");
@@ -998,15 +989,16 @@ namespace vanguard::rhi
             return {};
         }
         const ShaderTableRef result = g_backend->CreateShaderTable(desc);
-        if (!result) Reject(failure, FailureCode::BackendFailure, "RHI backend failed to create shader table");
+        if (!result)
+            Reject(failure, FailureCode::BackendFailure, "RHI backend failed to create shader table");
         return result;
     }
 
-    u64 GetAccelerationStructureDeviceAddress(const AccelerationStructureRef accelerationStructure,
-                                              Failure* const failure) noexcept
+    u64 GetAccelerationStructureDeviceAddress(const AccelerationStructureRef accelerationStructure, Failure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (!RequireBackend(failure)) return 0;
+        if (!RequireBackend(failure))
+            return 0;
         if (!g_capabilities.rayTracing)
         {
             Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
@@ -1018,8 +1010,10 @@ namespace vanguard::rhi
             return 0;
         }
         u64 address = 0;
-        if (!Accept(g_backend->GetAccelerationStructureDeviceAddress(accelerationStructure, address), failure)) return 0;
-        if (address == 0) Reject(failure, FailureCode::BackendFailure, "backend returned an invalid acceleration-structure address");
+        if (!Accept(g_backend->GetAccelerationStructureDeviceAddress(accelerationStructure, address), failure))
+            return 0;
+        if (address == 0)
+            Reject(failure, FailureCode::BackendFailure, "backend returned an invalid acceleration-structure address");
         return address;
     }
 
@@ -1060,65 +1054,80 @@ namespace vanguard::rhi
 
     bool BeginQuery(const QueryPoolRef queryPool, const u32 index, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!queryPool.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!queryPool.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
         return Accept(g_backend->BeginQuery(g_boundCommandList, queryPool, index), failure);
     }
 
     bool EndQuery(const QueryPoolRef queryPool, const u32 index, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!queryPool.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!queryPool.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
         return Accept(g_backend->EndQuery(g_boundCommandList, queryPool, index), failure);
     }
 
     bool IssueQuery(const QueryPoolRef queryPool, const u32 index, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!queryPool.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!queryPool.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
         return Accept(g_backend->IssueQuery(g_boundCommandList, queryPool, index), failure);
     }
 
     bool ResolveQueries(const QueryPoolRef queryPool, const u32 start, const u32 count, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!queryPool.IsValid() || count == 0) return Reject(failure, FailureCode::InvalidArgument, "invalid query resolve range");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!queryPool.IsValid() || count == 0)
+            return Reject(failure, FailureCode::InvalidArgument, "invalid query resolve range");
         return Accept(g_backend->ResolveQueries(g_boundCommandList, queryPool, start, count), failure);
     }
 
     bool AcquireQueries(const QueryPoolRef queryPool, const u32 start, const u32 count, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
-        if (!queryPool.IsValid() || count == 0) return Reject(failure, FailureCode::InvalidArgument, "invalid query acquisition range");
+        if (!RequireBackend(failure))
+            return false;
+        if (!queryPool.IsValid() || count == 0)
+            return Reject(failure, FailureCode::InvalidArgument, "invalid query acquisition range");
         return Accept(g_backend->AcquireQueries(queryPool, start, count), failure);
     }
 
     void ReleaseQueries(const QueryPoolRef queryPool) noexcept
     {
         VG_ASSERT_MSG(g_backend != nullptr, "cannot release query results after RHI shutdown");
-        if (g_backend != nullptr && queryPool.IsValid()) g_backend->ReleaseQueries(queryPool);
+        if (g_backend != nullptr && queryPool.IsValid())
+            g_backend->ReleaseQueries(queryPool);
     }
 
     bool GetQueryResult(const QueryPoolRef queryPool, const u32 index, u64& result, Failure* const failure) noexcept
     {
         result = 0;
-        if (!RequireBackend(failure)) return false;
-        if (!queryPool.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
+        if (!RequireBackend(failure))
+            return false;
+        if (!queryPool.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
         return Accept(g_backend->GetQueryResult(queryPool, index, result), failure);
     }
 
-    bool GetQueryResult(const QueryPoolRef queryPool, const u32 index, PipelineStatistics& result,
-                        Failure* const failure) noexcept
+    bool GetQueryResult(const QueryPoolRef queryPool, const u32 index, PipelineStatistics& result, Failure* const failure) noexcept
     {
         result = {};
-        if (!RequireBackend(failure)) return false;
-        if (!queryPool.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
+        if (!RequireBackend(failure))
+            return false;
+        if (!queryPool.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid query pool");
         return Accept(g_backend->GetQueryResult(queryPool, index, result), failure);
     }
 
     u64 GetTimestampFrequency(const QueueType queue, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return 0;
+        if (!RequireBackend(failure))
+            return 0;
         u64 frequency = 0;
         return Accept(g_backend->GetTimestampFrequency(queue, frequency), failure) ? frequency : 0;
     }
@@ -1126,7 +1135,8 @@ namespace vanguard::rhi
     bool CalibrateTimestamps(const QueueType queue, TimestampCalibration& calibration, Failure* const failure) noexcept
     {
         calibration = {};
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         return Accept(g_backend->CalibrateTimestamps(queue, calibration), failure);
     }
 
@@ -1270,8 +1280,7 @@ namespace vanguard::rhi
         ClearFailure(failure);
         if (!RequireBackend(failure))
             return {};
-        if (type <= CommandListType::None || type > CommandListType::Compute ||
-            (type == CommandListType::Compute && !g_capabilities.asyncCompute) ||
+        if (type <= CommandListType::None || type > CommandListType::Compute || (type == CommandListType::Compute && !g_capabilities.asyncCompute) ||
             (type == CommandListType::CopyAsync && !g_capabilities.copyQueue))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid command-list type");
@@ -1315,19 +1324,17 @@ namespace vanguard::rhi
     }
     CommandListType GetBoundCommandListType() noexcept
     {
-        return g_backend != nullptr && g_boundCommandList.IsValid() ? g_backend->GetCommandListType(g_boundCommandList)
-                                                                    : CommandListType::None;
+        return g_backend != nullptr && g_boundCommandList.IsValid() ? g_backend->GetCommandListType(g_boundCommandList) : CommandListType::None;
     }
 
-    bool CloseAndSubmitCommandLists(const char* const scopeName, const containers::ArraySpan<const CommandListRef> commandLists,
-                                    const CommandListSyncType sync, GpuFence& completion, Failure* const failure) noexcept
+    bool CloseAndSubmitCommandLists(const char* const scopeName, const containers::ArraySpan<const CommandListRef> commandLists, const CommandListSyncType sync,
+                                    GpuFence& completion, Failure* const failure) noexcept
     {
         completion = {};
         if (!RequireBackend(failure))
             return false;
         if (scopeName == nullptr || scopeName[0] == '\0' || commandLists.Data() == nullptr || commandLists.Size() == 0 ||
-            sync > CommandListSyncType::JoinAsyncCompute ||
-            commandLists.Size() > MaximumCommandListsPerSubmission)
+            sync > CommandListSyncType::JoinAsyncCompute || commandLists.Size() > MaximumCommandListsPerSubmission)
             return Reject(failure, FailureCode::InvalidArgument, "invalid command-list submission span");
         for (u32 index = 0; index < commandLists.Size(); ++index)
         {
@@ -1366,10 +1373,8 @@ namespace vanguard::rhi
             return false;
         if (!resource.IsValid() || !IsResourceReferenceValid(resource))
             return Reject(failure, FailureCode::InvalidReference, "cannot add an invalid resource to the residency working set");
-        if (resource.Kind() != ResourceKind::Texture && resource.Kind() != ResourceKind::Buffer &&
-            resource.Kind() != ResourceKind::Heap)
-            return Reject(failure, FailureCode::IncompatibleBinding,
-                          "only textures, buffers and heaps belong to a residency working set");
+        if (resource.GetKind() != ResourceKind::Texture && resource.GetKind() != ResourceKind::Buffer && resource.GetKind() != ResourceKind::Heap)
+            return Reject(failure, FailureCode::IncompatibleBinding, "only textures, buffers and heaps belong to a residency working set");
         return Accept(g_backend->AddToResidencyWorkingSet(g_boundCommandList, resource), failure);
     }
 
@@ -1407,14 +1412,12 @@ namespace vanguard::rhi
         if (!g_capabilities.variableRateShading)
             return Reject(failure, FailureCode::Unsupported, "variable-rate shading is not supported");
         if (GetBoundCommandListType() != CommandListType::Default)
-            return Reject(failure, FailureCode::InvalidCommandList,
-                          "variable-rate shading requires a graphics command list");
+            return Reject(failure, FailureCode::InvalidCommandList, "variable-rate shading requires a graphics command list");
         if (!state.enabled)
             return Accept(g_backend->SetVariableRateShading(g_boundCommandList, state), failure);
 
         const VariableRateShadingCapabilities& capabilities = g_capabilities.variableRateShadingDetails;
-        if (!capabilities.Supports(state.rate) || !capabilities.Supports(state.primitiveCombiner) ||
-            !capabilities.Supports(state.imageCombiner))
+        if (!capabilities.Supports(state.rate) || !capabilities.Supports(state.primitiveCombiner) || !capabilities.Supports(state.imageCombiner))
             return Reject(failure, FailureCode::Unsupported, "the requested shading rate or combiner is not supported");
         if (state.primitiveCombiner != ShadingRateCombiner::Passthrough && !capabilities.perPrimitive)
             return Reject(failure, FailureCode::Unsupported, "per-primitive shading rates are not supported");
@@ -1426,8 +1429,7 @@ namespace vanguard::rhi
                 return Reject(failure, FailureCode::InvalidReference, "the shading-rate image is invalid");
         }
         else if (state.imageCombiner != ShadingRateCombiner::Passthrough)
-            return Reject(failure, FailureCode::InvalidArgument,
-                          "an image combiner requires a shading-rate image");
+            return Reject(failure, FailureCode::InvalidArgument, "an image combiner requires a shading-rate image");
         return Accept(g_backend->SetVariableRateShading(g_boundCommandList, state), failure);
     }
 
@@ -1450,8 +1452,7 @@ namespace vanguard::rhi
         return Accept(g_backend->SetScissors(g_boundCommandList, rect), failure);
     }
 
-    bool BindVertexBuffers(const u32 startIndex, const containers::ArraySpan<const VertexBufferBinding> bindings,
-                           Failure* const failure) noexcept
+    bool BindVertexBuffers(const u32 startIndex, const containers::ArraySpan<const VertexBufferBinding> bindings, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
@@ -1459,8 +1460,7 @@ namespace vanguard::rhi
             startIndex >= MaximumVertexBindings || bindings.Size() > MaximumVertexBindings - startIndex)
             return Reject(failure, FailureCode::InvalidArgument, "invalid vertex-buffer binding span");
         for (u32 index = 0; index < bindings.Size(); ++index)
-            if (!bindings[index].buffer || bindings[index].binding != startIndex + index ||
-                !IsResourceReferenceValid(ResourceRef(bindings[index].buffer)))
+            if (!bindings[index].buffer || bindings[index].binding != startIndex + index || !IsResourceReferenceValid(ResourceRef(bindings[index].buffer)))
                 return Reject(failure, FailureCode::InvalidReference, "vertex-buffer span contains an invalid binding");
         return Accept(g_backend->BindVertexBuffers(g_boundCommandList, startIndex, bindings), failure);
     }
@@ -1469,8 +1469,7 @@ namespace vanguard::rhi
     {
         if (!RequireBoundCommandList(failure))
             return false;
-        if (GetBoundCommandListType() != CommandListType::Default || !binding.buffer ||
-            !IsResourceReferenceValid(ResourceRef(binding.buffer)))
+        if (GetBoundCommandListType() != CommandListType::Default || !binding.buffer || !IsResourceReferenceValid(ResourceRef(binding.buffer)))
             return Reject(failure, FailureCode::InvalidReference, "invalid index-buffer binding");
         return Accept(g_backend->BindIndexBuffer(g_boundCommandList, binding), failure);
     }
@@ -1493,114 +1492,138 @@ namespace vanguard::rhi
         return Accept(g_backend->SetPushConstants(g_boundCommandList, data, size), failure);
     }
 
-    bool ClearColorTarget(const TextureRef target, const ColorValue& value, const SubresourceRange& range,
-                          const Rect* const rectangle, Failure* const failure) noexcept
+    bool ClearColorTarget(const TextureRef target, const ColorValue& value, const SubresourceRange& range, const Rect* const rectangle,
+                          Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!target.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid color target");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!target.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid color target");
         if (rectangle != nullptr && (rectangle->x < 0 || rectangle->y < 0 || rectangle->width <= 0 || rectangle->height <= 0))
             return Reject(failure, FailureCode::InvalidArgument, "invalid color-clear rectangle");
         return Accept(g_backend->ClearColorTarget(g_boundCommandList, target, value, range, rectangle), failure);
     }
 
-    bool ClearDepthTarget(const TextureRef target, const f32 depth, const SubresourceRange& range,
-                          const Rect* const rectangle, Failure* const failure) noexcept
+    bool ClearDepthTarget(const TextureRef target, const f32 depth, const SubresourceRange& range, const Rect* const rectangle, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!target.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid depth target");
-        if (!(depth >= 0.0f && depth <= 1.0f)) return Reject(failure, FailureCode::InvalidArgument, "depth clear value must be in [0, 1]");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!target.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid depth target");
+        if (!(depth >= 0.0f && depth <= 1.0f))
+            return Reject(failure, FailureCode::InvalidArgument, "depth clear value must be in [0, 1]");
         if (rectangle != nullptr && (rectangle->x < 0 || rectangle->y < 0 || rectangle->width <= 0 || rectangle->height <= 0))
             return Reject(failure, FailureCode::InvalidArgument, "invalid depth-clear rectangle");
         return Accept(g_backend->ClearDepthStencilTarget(g_boundCommandList, target, true, depth, false, 0, range, rectangle), failure);
     }
 
-    bool ClearStencilTarget(const TextureRef target, const u8 stencil, const SubresourceRange& range,
-                            const Rect* const rectangle, Failure* const failure) noexcept
+    bool ClearStencilTarget(const TextureRef target, const u8 stencil, const SubresourceRange& range, const Rect* const rectangle,
+                            Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!target.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid stencil target");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!target.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid stencil target");
         if (rectangle != nullptr && (rectangle->x < 0 || rectangle->y < 0 || rectangle->width <= 0 || rectangle->height <= 0))
             return Reject(failure, FailureCode::InvalidArgument, "invalid stencil-clear rectangle");
         return Accept(g_backend->ClearDepthStencilTarget(g_boundCommandList, target, false, 1.0f, true, stencil, range, rectangle), failure);
     }
 
-    bool ClearDepthStencilTarget(const TextureRef target, const f32 depth, const u8 stencil, const SubresourceRange& range,
-                                 const Rect* const rectangle, Failure* const failure) noexcept
+    bool ClearDepthStencilTarget(const TextureRef target, const f32 depth, const u8 stencil, const SubresourceRange& range, const Rect* const rectangle,
+                                 Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!target.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid depth-stencil target");
-        if (!(depth >= 0.0f && depth <= 1.0f)) return Reject(failure, FailureCode::InvalidArgument, "depth clear value must be in [0, 1]");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!target.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid depth-stencil target");
+        if (!(depth >= 0.0f && depth <= 1.0f))
+            return Reject(failure, FailureCode::InvalidArgument, "depth clear value must be in [0, 1]");
         if (rectangle != nullptr && (rectangle->x < 0 || rectangle->y < 0 || rectangle->width <= 0 || rectangle->height <= 0))
             return Reject(failure, FailureCode::InvalidArgument, "invalid depth-stencil-clear rectangle");
         return Accept(g_backend->ClearDepthStencilTarget(g_boundCommandList, target, true, depth, true, stencil, range, rectangle), failure);
     }
 
-    bool ClearTextureUav(const TextureRef texture, const ColorValue& value, const SubresourceRange& range,
-                         Failure* const failure) noexcept
+    bool ClearTextureUav(const TextureRef texture, const ColorValue& value, const SubresourceRange& range, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!texture.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid texture UAV");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!texture.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid texture UAV");
         return Accept(g_backend->ClearTextureUav(g_boundCommandList, texture, value, range), failure);
     }
 
-    bool ClearTextureUav(const TextureRef texture, const u32 value, const SubresourceRange& range,
-                         Failure* const failure) noexcept
+    bool ClearTextureUav(const TextureRef texture, const u32 value, const SubresourceRange& range, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!texture.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid texture UAV");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!texture.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid texture UAV");
         return Accept(g_backend->ClearTextureUav(g_boundCommandList, texture, value, range), failure);
     }
 
     bool ClearBufferUav(const BufferRef buffer, const u32 value, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!buffer.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid buffer UAV");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!buffer.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid buffer UAV");
         return Accept(g_backend->ClearBufferUav(g_boundCommandList, buffer, value), failure);
     }
 
     bool DiscardTexture(const TextureRef texture, const SubresourceRange& range, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!texture.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid texture discard target");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!texture.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid texture discard target");
         return Accept(g_backend->DiscardTexture(g_boundCommandList, texture, range), failure);
     }
 
     bool DiscardBuffer(const BufferRef buffer, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (!buffer.IsValid()) return Reject(failure, FailureCode::InvalidReference, "invalid buffer discard target");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (!buffer.IsValid())
+            return Reject(failure, FailureCode::InvalidReference, "invalid buffer discard target");
         return Accept(g_backend->DiscardBuffer(g_boundCommandList, buffer), failure);
     }
 
     bool SetStencilRefValue(const u8 value, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         return Accept(g_backend->SetStencilRefValue(g_boundCommandList, value), failure);
     }
 
     bool SetBlendFactor(const ColorValue& value, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         return Accept(g_backend->SetBlendFactor(g_boundCommandList, value), failure);
     }
 
     bool BeginGpuEvent(const char* const name, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (name == nullptr || name[0] == '\0') return Reject(failure, FailureCode::InvalidArgument, "GPU event name is empty");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (name == nullptr || name[0] == '\0')
+            return Reject(failure, FailureCode::InvalidArgument, "GPU event name is empty");
         return Accept(g_backend->BeginGpuEvent(g_boundCommandList, name), failure);
     }
 
     bool EndGpuEvent(Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         return Accept(g_backend->EndGpuEvent(g_boundCommandList), failure);
     }
 
     bool SetGpuMarker(const char* const name, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
-        if (name == nullptr || name[0] == '\0') return Reject(failure, FailureCode::InvalidArgument, "GPU marker name is empty");
+        if (!RequireBoundCommandList(failure))
+            return false;
+        if (name == nullptr || name[0] == '\0')
+            return Reject(failure, FailureCode::InvalidArgument, "GPU marker name is empty");
         return Accept(g_backend->SetGpuMarker(g_boundCommandList, name), failure);
     }
 
@@ -1626,7 +1649,7 @@ namespace vanguard::rhi
     {
         if (!RequireBoundCommandList(failure))
             return false;
-        if (GetBoundCommandListType() != CommandListType::Default || commandCount == 0 || argumentsOffset > 0xffffffffu)
+        if (GetBoundCommandListType() != CommandListType::Default || commandCount == 0 || argumentsOffset > 0xffffffffu || (argumentsOffset & 3u) != 0)
             return Reject(failure, FailureCode::InvalidArgument, "invalid indirect draw arguments");
         return Accept(g_backend->DrawPrimitiveIndirect(g_boundCommandList, argumentsOffset, commandCount), failure);
     }
@@ -1635,21 +1658,19 @@ namespace vanguard::rhi
     {
         if (!RequireBoundCommandList(failure))
             return false;
-        if (GetBoundCommandListType() != CommandListType::Default || commandCount == 0 || argumentsOffset > 0xffffffffu)
+        if (GetBoundCommandListType() != CommandListType::Default || commandCount == 0 || argumentsOffset > 0xffffffffu || (argumentsOffset & 3u) != 0)
             return Reject(failure, FailureCode::InvalidArgument, "invalid indexed indirect draw arguments");
         return Accept(g_backend->DrawIndexedPrimitiveIndirect(g_boundCommandList, argumentsOffset, commandCount), failure);
     }
 
-    bool DrawIndexedPrimitiveIndirectCount(const u64 argumentsOffset, const u64 countOffset, const u32 maximumCommandCount,
-                                           Failure* const failure) noexcept
+    bool DrawIndexedPrimitiveIndirectCount(const u64 argumentsOffset, const u64 countOffset, const u32 maximumCommandCount, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
-        if (GetBoundCommandListType() != CommandListType::Default || maximumCommandCount == 0 || argumentsOffset > 0xffffffffu ||
-            countOffset > 0xffffffffu)
+        if (GetBoundCommandListType() != CommandListType::Default || maximumCommandCount == 0 || argumentsOffset > 0xffffffffu || countOffset > 0xffffffffu ||
+            (argumentsOffset & 3u) != 0 || (countOffset & 3u) != 0)
             return Reject(failure, FailureCode::InvalidArgument, "invalid counted indirect draw arguments");
-        return Accept(g_backend->DrawIndexedPrimitiveIndirectCount(g_boundCommandList, argumentsOffset, countOffset, maximumCommandCount),
-                      failure);
+        return Accept(g_backend->DrawIndexedPrimitiveIndirectCount(g_boundCommandList, argumentsOffset, countOffset, maximumCommandCount), failure);
     }
 
     bool DispatchCompute(const u32 groupCountX, const u32 groupCountY, const u32 groupCountZ, Failure* const failure) noexcept
@@ -1657,8 +1678,7 @@ namespace vanguard::rhi
         if (!RequireBoundCommandList(failure))
             return false;
         const CommandListType type = GetBoundCommandListType();
-        if ((type != CommandListType::Default && type != CommandListType::Compute) || groupCountX == 0 || groupCountY == 0 ||
-            groupCountZ == 0)
+        if ((type != CommandListType::Default && type != CommandListType::Compute) || groupCountX == 0 || groupCountY == 0 || groupCountZ == 0)
             return Reject(failure, FailureCode::InvalidArgument, "invalid compute dispatch arguments");
         return Accept(g_backend->DispatchCompute(g_boundCommandList, groupCountX, groupCountY, groupCountZ), failure);
     }
@@ -1668,17 +1688,16 @@ namespace vanguard::rhi
         if (!RequireBoundCommandList(failure))
             return false;
         const CommandListType type = GetBoundCommandListType();
-        if ((type != CommandListType::Default && type != CommandListType::Compute) || argumentsOffset > 0xffffffffu)
+        if ((type != CommandListType::Default && type != CommandListType::Compute) || argumentsOffset > 0xffffffffu || (argumentsOffset & 3u) != 0)
             return Reject(failure, FailureCode::InvalidArgument, "invalid indirect dispatch arguments");
         return Accept(g_backend->DispatchIndirectCompute(g_boundCommandList, argumentsOffset), failure);
     }
 
-    bool BuildBottomLevelAccelerationStructure(
-        const AccelerationStructureRef destination,
-        const containers::ArraySpan<const RayTracingGeometryDesc> geometries,
-        const AccelerationStructureBuildMode mode, Failure* const failure) noexcept
+    bool BuildBottomLevelAccelerationStructure(const AccelerationStructureRef destination, const containers::ArraySpan<const RayTracingGeometryDesc> geometries,
+                                               const AccelerationStructureBuildMode mode, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         if (!g_capabilities.rayTracing)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
         if (!destination || geometries.Size() == 0)
@@ -1686,12 +1705,11 @@ namespace vanguard::rhi
         return Accept(g_backend->BuildBottomLevelAccelerationStructure(g_boundCommandList, destination, geometries, mode), failure);
     }
 
-    bool BuildTopLevelAccelerationStructure(
-        const AccelerationStructureRef destination,
-        const containers::ArraySpan<const RayTracingInstanceDesc> instances,
-        const AccelerationStructureBuildMode mode, Failure* const failure) noexcept
+    bool BuildTopLevelAccelerationStructure(const AccelerationStructureRef destination, const containers::ArraySpan<const RayTracingInstanceDesc> instances,
+                                            const AccelerationStructureBuildMode mode, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         if (!g_capabilities.rayTracing)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
         if (!destination || instances.Size() == 0)
@@ -1699,25 +1717,24 @@ namespace vanguard::rhi
         return Accept(g_backend->BuildTopLevelAccelerationStructure(g_boundCommandList, destination, instances, mode), failure);
     }
 
-    bool BuildTopLevelAccelerationStructureIndirect(
-        const AccelerationStructureRef destination, const BufferRef nativeInstanceBuffer, const u64 offset,
-        const u32 instanceCount, const AccelerationStructureBuildMode mode, Failure* const failure) noexcept
+    bool BuildTopLevelAccelerationStructureIndirect(const AccelerationStructureRef destination, const BufferRef nativeInstanceBuffer, const u64 offset,
+                                                    const u32 instanceCount, const AccelerationStructureBuildMode mode, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         if (!g_capabilities.rayTracing)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
         if (!destination || !nativeInstanceBuffer || instanceCount == 0)
             return Reject(failure, FailureCode::InvalidArgument, "invalid GPU-driven top-level acceleration-structure build");
-        return Accept(g_backend->BuildTopLevelAccelerationStructureIndirect(
-                          g_boundCommandList, destination, nativeInstanceBuffer, offset, instanceCount, mode), failure);
+        return Accept(g_backend->BuildTopLevelAccelerationStructureIndirect(g_boundCommandList, destination, nativeInstanceBuffer, offset, instanceCount, mode),
+                      failure);
     }
 
-    bool CopyAccelerationStructure(const AccelerationStructureRef destination,
-                                   const AccelerationStructureRef source,
-                                   const AccelerationStructureCopyMode mode,
+    bool CopyAccelerationStructure(const AccelerationStructureRef destination, const AccelerationStructureRef source, const AccelerationStructureCopyMode mode,
                                    Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         if (!g_capabilities.rayTracing)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
         if (!destination || !source || destination == source)
@@ -1725,23 +1742,22 @@ namespace vanguard::rhi
         return Accept(g_backend->CopyAccelerationStructure(g_boundCommandList, destination, source, mode), failure);
     }
 
-    bool WriteAccelerationStructureCompactedSize(const AccelerationStructureRef accelerationStructure,
-                                                  const QueryPoolRef queryPool, const u32 queryIndex,
-                                                  Failure* const failure) noexcept
+    bool WriteAccelerationStructureCompactedSize(const AccelerationStructureRef accelerationStructure, const QueryPoolRef queryPool, const u32 queryIndex,
+                                                 Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         if (!g_capabilities.rayTracing)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing acceleration structures are not supported");
         if (!accelerationStructure || !queryPool)
             return Reject(failure, FailureCode::InvalidReference, "invalid acceleration-structure compaction query");
-        return Accept(g_backend->WriteAccelerationStructureCompactedSize(
-                          g_boundCommandList, accelerationStructure, queryPool, queryIndex), failure);
+        return Accept(g_backend->WriteAccelerationStructureCompactedSize(g_boundCommandList, accelerationStructure, queryPool, queryIndex), failure);
     }
 
-    bool DispatchRays(const ShaderTableRef shaderTable, const DispatchRaysArguments& arguments,
-                      Failure* const failure) noexcept
+    bool DispatchRays(const ShaderTableRef shaderTable, const DispatchRaysArguments& arguments, Failure* const failure) noexcept
     {
-        if (!RequireBoundCommandList(failure)) return false;
+        if (!RequireBoundCommandList(failure))
+            return false;
         if (!g_capabilities.rayTracingPipeline)
             return Reject(failure, FailureCode::Unsupported, "ray-tracing dispatch is not supported");
         if (!shaderTable || arguments.width == 0 || arguments.height == 0 || arguments.depth == 0)
@@ -1749,8 +1765,7 @@ namespace vanguard::rhi
         return Accept(g_backend->DispatchRays(g_boundCommandList, shaderTable, arguments), failure);
     }
 
-    bool WriteBuffer(const BufferRef buffer, const void* const data, const u64 size, const u64 destinationOffset,
-                     Failure* const failure) noexcept
+    bool WriteBuffer(const BufferRef buffer, const void* const data, const u64 size, const u64 destinationOffset, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
@@ -1768,19 +1783,17 @@ namespace vanguard::rhi
         return Accept(g_backend->WriteTexture(g_boundCommandList, texture, data), failure);
     }
 
-    bool CopyBuffer(const BufferRef destination, const u64 destinationOffset, const BufferRef source, const u64 sourceOffset,
-                    const u64 size, Failure* const failure) noexcept
+    bool CopyBuffer(const BufferRef destination, const u64 destinationOffset, const BufferRef source, const u64 sourceOffset, const u64 size,
+                    Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
-        if (!destination.IsValid() || !source.IsValid() || size == 0 || destinationOffset + size < destinationOffset ||
-            sourceOffset + size < sourceOffset)
+        if (!destination.IsValid() || !source.IsValid() || size == 0 || destinationOffset + size < destinationOffset || sourceOffset + size < sourceOffset)
             return Reject(failure, FailureCode::InvalidArgument, "invalid buffer copy");
         return Accept(g_backend->CopyBuffer(g_boundCommandList, destination, destinationOffset, source, sourceOffset, size), failure);
     }
 
-    bool CopyTexture(const TextureRef destination, const TextureRef source, const TextureCopyRegion& region,
-                     Failure* const failure) noexcept
+    bool CopyTexture(const TextureRef destination, const TextureRef source, const TextureCopyRegion& region, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
@@ -1793,8 +1806,7 @@ namespace vanguard::rhi
         return Accept(g_backend->CopyTexture(g_boundCommandList, destination, source, region), failure);
     }
 
-    bool ResolveTexture(const TextureRef destination, const TextureRef source, const TextureResolveRegion& region,
-                        Failure* const failure) noexcept
+    bool ResolveTexture(const TextureRef destination, const TextureRef source, const TextureResolveRegion& region, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
@@ -1805,8 +1817,7 @@ namespace vanguard::rhi
         return Accept(g_backend->ResolveTexture(g_boundCommandList, destination, source, region), failure);
     }
 
-    TextureReadbackRef RequestTextureReadback(const TextureRef source, const TextureReadbackRegion& region,
-                                              Failure* const failure) noexcept
+    TextureReadbackRef RequestTextureReadback(const TextureRef source, const TextureReadbackRegion& region, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return {};
@@ -1823,12 +1834,10 @@ namespace vanguard::rhi
             return {};
         }
         TextureReadbackRef readback;
-        return Accept(g_backend->RequestTextureReadback(g_boundCommandList, source, region, readback), failure) ? readback
-                                                                                                                : TextureReadbackRef{};
+        return Accept(g_backend->RequestTextureReadback(g_boundCommandList, source, region, readback), failure) ? readback : TextureReadbackRef{};
     }
 
-    bool GetTextureReadbackInfo(const TextureReadbackRef readback, TextureReadbackInfo& info,
-                                Failure* const failure) noexcept
+    bool GetTextureReadbackInfo(const TextureReadbackRef readback, TextureReadbackInfo& info, Failure* const failure) noexcept
     {
         info = {};
         if (g_backend == nullptr)
@@ -1838,8 +1847,7 @@ namespace vanguard::rhi
         return Accept(g_backend->GetTextureReadbackInfo(readback, info), failure);
     }
 
-    bool MapTextureReadback(const TextureReadbackRef readback, TextureReadbackMapping& mapping,
-                            Failure* const failure) noexcept
+    bool MapTextureReadback(const TextureReadbackRef readback, TextureReadbackMapping& mapping, Failure* const failure) noexcept
     {
         mapping = {};
         if (g_backend == nullptr)
@@ -1922,8 +1930,7 @@ namespace vanguard::rhi
             return Reject(failure, FailureCode::InvalidReference, "invalid buffer UAV barrier");
         return Accept(g_backend->BarrierBufferUav(g_boundCommandList, buffer), failure);
     }
-    bool BarrierTextureAliasing(const bool discardAfter, const TextureRef textureAfter, const TextureRef textureBefore,
-                                Failure* const failure) noexcept
+    bool BarrierTextureAliasing(const bool discardAfter, const TextureRef textureAfter, const TextureRef textureBefore, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
@@ -1931,8 +1938,7 @@ namespace vanguard::rhi
             return Reject(failure, FailureCode::InvalidReference, "aliasing barrier requires the texture after aliasing");
         return Accept(g_backend->BarrierTextureAliasing(g_boundCommandList, discardAfter, textureAfter, textureBefore), failure);
     }
-    bool BarrierBufferAliasing(const bool discardAfter, const BufferRef bufferAfter, const BufferRef bufferBefore,
-                               Failure* const failure) noexcept
+    bool BarrierBufferAliasing(const bool discardAfter, const BufferRef bufferAfter, const BufferRef bufferBefore, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
             return false;
@@ -1968,11 +1974,10 @@ namespace vanguard::rhi
         ClearFailure(failure);
         if (!RequireBackend(failure))
             return {};
-        if (desc.surface.kind == PresentationSurfaceKind::None || desc.surface.nativeWindow == nullptr || desc.width == 0 ||
-            desc.height == 0 || desc.bufferCount < 2 || desc.bufferCount > MaximumSwapChainBuffers ||
-            desc.format == Format::Unknown || (desc.frameLatency.enabled &&
-            (desc.frameLatency.maximumFramesInFlight == 0 || desc.frameLatency.maximumFramesInFlight > desc.bufferCount ||
-             desc.frameLatency.waitTimeoutMilliseconds == 0)))
+        if (desc.surface.kind == PresentationSurfaceKind::None || desc.surface.nativeWindow == nullptr || desc.width == 0 || desc.height == 0 ||
+            desc.bufferCount < 2 || desc.bufferCount > MaximumSwapChainBuffers || desc.format == Format::Unknown ||
+            (desc.frameLatency.enabled && (desc.frameLatency.maximumFramesInFlight == 0 || desc.frameLatency.maximumFramesInFlight > desc.bufferCount ||
+                                           desc.frameLatency.waitTimeoutMilliseconds == 0)))
         {
             Reject(failure, FailureCode::InvalidArgument, "invalid swap-chain descriptor");
             return {};
@@ -1990,10 +1995,10 @@ namespace vanguard::rhi
             return Reject(failure, FailureCode::InvalidArgument, "invalid swap-chain resize");
         return Accept(g_backend->ResizeBackbuffer(swapChain, width, height), failure);
     }
-    bool SetSwapChainPresentParameters(const SwapChainRef swapChain, const PresentParameters& parameters,
-                                       Failure* const failure) noexcept
+    bool SetSwapChainPresentParameters(const SwapChainRef swapChain, const PresentParameters& parameters, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (!swapChain.IsValid())
             return Reject(failure, FailureCode::InvalidReference, "invalid swap chain");
         if (parameters.mode == PresentMode::Mailbox)
@@ -2005,11 +2010,11 @@ namespace vanguard::rhi
         return Accept(g_backend->SetSwapChainPresentParameters(swapChain, parameters), failure);
     }
 
-    bool AcquireBackBuffer(const SwapChainRef swapChain, AcquiredBackBuffer& acquisition,
-                           Failure* const failure) noexcept
+    bool AcquireBackBuffer(const SwapChainRef swapChain, AcquiredBackBuffer& acquisition, Failure* const failure) noexcept
     {
         acquisition = {};
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (!swapChain.IsValid())
             return Reject(failure, FailureCode::InvalidReference, "invalid swap chain");
         return Accept(g_backend->AcquireBackBuffer(swapChain, acquisition), failure);
@@ -2017,7 +2022,8 @@ namespace vanguard::rhi
 
     bool AbandonBackBuffer(const AcquiredBackBuffer& acquisition, Failure* const failure) noexcept
     {
-        if (!RequireBackend(failure)) return false;
+        if (!RequireBackend(failure))
+            return false;
         if (!acquisition.IsValid())
             return Reject(failure, FailureCode::InvalidReference, "invalid back-buffer acquisition");
         return Accept(g_backend->AbandonBackBuffer(acquisition), failure);

@@ -72,7 +72,7 @@ namespace vanguard::jobs
     };
 
     [[nodiscard]] Config RuntimeConfig() noexcept;
-    [[nodiscard]] Config EditorConfig() noexcept;
+    [[nodiscard]] Config GetEditorConfig() noexcept;
     [[nodiscard]] Config ToolConfig() noexcept;
 
     // Initialization and shutdown are composition-root operations and must be
@@ -81,10 +81,10 @@ namespace vanguard::jobs
     [[nodiscard]] bool Shutdown() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
 
-    [[nodiscard]] u32 WorkerCount() noexcept;
-    [[nodiscard]] u32 OutstandingJobCount() noexcept;
+    [[nodiscard]] u32 GetWorkerCount() noexcept;
+    [[nodiscard]] u32 GetOutstandingJobCount() noexcept;
     [[nodiscard]] SchedulerStats GetSchedulerStats() noexcept;
-    [[nodiscard]] u32 DispatcherThreadIndex() noexcept;
+    [[nodiscard]] u32 GetDispatcherThreadIndex() noexcept;
     [[nodiscard]] bool IsWorkerThread() noexcept;
     void RegisterCurrentThread(const char* name) noexcept;
 
@@ -147,10 +147,14 @@ namespace vanguard::jobs
 
         [[nodiscard]] bool Wait(bool processLatent = false, i32 timeoutMilliseconds = -1) const noexcept;
 
+        // Completes a frame-boundary wait on the main thread while helping the
+        // RenderPath queue. Large unrelated jobs remain on workers when the
+        // dispatcher has enough worker threads to make forward progress.
+        [[nodiscard]] bool WaitOnProcessFrame() const noexcept;
+
         // Adds one completion deferral to this counter. The counter cannot
         // become ready until the returned object is finished or destroyed.
-        [[nodiscard]] CompletionDeferral CreateDeferral(const char* staticDebugName = nullptr,
-                                                        const void* debugUserData = nullptr) noexcept;
+        [[nodiscard]] CompletionDeferral CreateDeferral(const char* staticDebugName = nullptr, const void* debugUserData = nullptr) noexcept;
 
         // Emits blocker, dependency, and deferral analysis through Vanguard Diagnostics.
         // Config::enableDebugger must be enabled for the complete report.
@@ -181,8 +185,8 @@ namespace vanguard::jobs
 
         [[nodiscard]] bool DispatchAfter(const Counter& dependency, JobName& name, Task&& task, Fence fence = Fence::None) noexcept;
 
-        [[nodiscard]] bool DispatchParallel(JobName& name, u32 elementCount, ParallelTask&& task, Task&& epilogue = {},
-                                            u32 maximumBatchSize = 0, Fence fence = Fence::Full) noexcept;
+        [[nodiscard]] bool DispatchParallel(JobName& name, u32 elementCount, ParallelTask&& task, Task&& epilogue = {}, u32 maximumBatchSize = 0,
+                                            Fence fence = Fence::Full) noexcept;
 
         void AddDependency(const Counter& dependency) noexcept;
 

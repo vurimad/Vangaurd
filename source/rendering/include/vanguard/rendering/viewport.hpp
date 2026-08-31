@@ -1,11 +1,14 @@
 #pragma once
 
 #include <vanguard/jobs/jobs.hpp>
+#include <vanguard/rendering/render_camera.hpp>
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/window/window_types.hpp>
 
 namespace vanguard::rendering
 {
+    class RenderCommandSystem;
+
     inline constexpr u32 MaximumRenderViewports = 64;
     inline constexpr u32 MaximumEngineViewports = 64;
     inline constexpr u32 MaximumViewportNameBytes = 96;
@@ -19,8 +22,7 @@ namespace vanguard::rendering
         {
             return index < MaximumRenderViewports && generation != 0;
         }
-        [[nodiscard]] friend constexpr bool operator==(const RenderViewportHandle&,
-                                                       const RenderViewportHandle&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const RenderViewportHandle&, const RenderViewportHandle&) noexcept = default;
     };
 
     struct EngineViewportHandle
@@ -32,8 +34,7 @@ namespace vanguard::rendering
         {
             return index < MaximumEngineViewports && generation != 0;
         }
-        [[nodiscard]] friend constexpr bool operator==(const EngineViewportHandle&,
-                                                       const EngineViewportHandle&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const EngineViewportHandle&, const EngineViewportHandle&) noexcept = default;
     };
 
     inline constexpr RenderViewportHandle InvalidRenderViewportHandle{};
@@ -44,7 +45,10 @@ namespace vanguard::rendering
         u32 width = 0;
         u32 height = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return width != 0 && height != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return width != 0 && height != 0;
+        }
         [[nodiscard]] friend constexpr bool operator==(const ViewportExtent&, const ViewportExtent&) noexcept = default;
     };
 
@@ -180,31 +184,93 @@ namespace vanguard::rendering
         bool present = true;
     };
 
+    struct RenderFrameViewSetup
+    {
+        RenderSceneHandle scene;
+        containers::ArraySpan<const RenderCameraHandle> rootCameras;
+        u32 jitterIndex = 0;
+        bool enableTemporalJitter = true;
+        bool forceCameraCut = false;
+    };
+
     class RenderFrameInfo final
     {
     public:
         RenderFrameInfo() noexcept = default;
 
-        [[nodiscard]] u64 Serial() const noexcept { return m_serial; }
-        [[nodiscard]] EngineViewportHandle EngineViewport() const noexcept { return m_engineViewport; }
-        [[nodiscard]] RenderViewportHandle OutputViewport() const noexcept { return m_renderViewport; }
-        [[nodiscard]] RenderingMode Mode() const noexcept { return m_mode; }
-        [[nodiscard]] RenderFramePurpose Purpose() const noexcept { return m_purpose; }
-        [[nodiscard]] ViewportExtent RenderExtent() const noexcept { return m_renderExtent; }
-        [[nodiscard]] ViewportExtent OutputExtent() const noexcept { return m_outputExtent; }
-        [[nodiscard]] bool ShouldPresent() const noexcept { return m_present; }
-        [[nodiscard]] const char* ContextName() const noexcept { return m_contextName; }
-        [[nodiscard]] const RenderFramePayload& Payload() const noexcept { return m_payload; }
+        [[nodiscard]] u64 GetSerial() const noexcept
+        {
+            return m_serial;
+        }
+        [[nodiscard]] EngineViewportHandle GetEngineViewport() const noexcept
+        {
+            return m_engineViewport;
+        }
+        [[nodiscard]] RenderViewportHandle GetOutputViewport() const noexcept
+        {
+            return m_renderViewport;
+        }
+        [[nodiscard]] RenderingMode GetMode() const noexcept
+        {
+            return m_mode;
+        }
+        [[nodiscard]] RenderFramePurpose GetPurpose() const noexcept
+        {
+            return m_purpose;
+        }
+        [[nodiscard]] ViewportExtent GetRenderExtent() const noexcept
+        {
+            return m_renderExtent;
+        }
+        [[nodiscard]] ViewportExtent GetOutputExtent() const noexcept
+        {
+            return m_outputExtent;
+        }
+        [[nodiscard]] bool ShouldPresent() const noexcept
+        {
+            return m_present;
+        }
+        [[nodiscard]] const char* GetContextName() const noexcept
+        {
+            return m_contextName;
+        }
+        [[nodiscard]] const RenderFramePayload& GetPayload() const noexcept
+        {
+            return m_payload;
+        }
+        [[nodiscard]] const PreparedRenderViewFamily& GetViewFamily() const noexcept
+        {
+            return m_viewFamily;
+        }
+        [[nodiscard]] bool HasViewSetup() const noexcept
+        {
+            return m_viewSetupConfigured;
+        }
+        [[nodiscard]] RenderFrameViewSetup GetViewSetup() const noexcept
+        {
+            return {m_scene, containers::ArraySpan<const RenderCameraHandle>(m_rootCameras, m_rootCameraCount), m_jitterIndex, m_enableTemporalJitter,
+                    m_forceCameraCut};
+        }
+
+        /// Transfers the caller's prepared view family into this frame packet.
+        [[nodiscard]] bool AttachViewFamily(PreparedRenderViewFamily& family) noexcept
+        {
+            if (!family.IsValid() || family.GetFrameSerial() != m_serial || m_viewFamily.IsValid() || (m_viewSetupConfigured && family.GetScene() != m_scene))
+                return false;
+            m_viewFamily = static_cast<PreparedRenderViewFamily&&>(family);
+            return true;
+        }
 
         [[nodiscard]] bool SetPayload(const RenderFramePayload& payload) noexcept
         {
-            if (!payload.IsValid()) return false;
+            if (!payload.IsValid())
+                return false;
             m_payload = payload;
             return true;
         }
 
     private:
-        friend class RenderFrameDispatcher;
+        friend class RenderCommandSystem;
         friend class ViewportManager;
 
         u64 m_serial = 0;
@@ -215,14 +281,25 @@ namespace vanguard::rendering
         ViewportExtent m_renderExtent;
         ViewportExtent m_outputExtent;
         RenderFramePayload m_payload;
+        PreparedRenderViewFamily m_viewFamily;
+        RenderCameraHandle m_rootCameras[MaximumRenderViewsPerFamily]{};
+        RenderSceneHandle m_scene;
+        u32 m_rootCameraCount = 0;
+        u32 m_jitterIndex = 0;
         bool m_present = false;
+        bool m_enableTemporalJitter = true;
+        bool m_forceCameraCut = false;
+        bool m_viewSetupConfigured = false;
         char m_contextName[MaximumViewportNameBytes]{};
     };
 
     struct RenderFrameSubmission
     {
         u64 serial = 0;
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return serial != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return serial != 0;
+        }
     };
 
     /// Identifies the exact output image acquired for one render frame. Presentation outputs must be
@@ -238,7 +315,10 @@ namespace vanguard::rendering
         {
             return viewport.IsValid() && texture.IsValid() && outputRevision != 0;
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
     };
 
     class ViewportManager;
@@ -250,21 +330,19 @@ namespace vanguard::rendering
         RenderViewport() noexcept = default;
 
         [[nodiscard]] bool IsValid() const noexcept;
-        [[nodiscard]] RenderViewportHandle Handle() const noexcept { return m_handle; }
-        [[nodiscard]] bool Snapshot(RenderViewportSnapshot& snapshot) const noexcept;
-        [[nodiscard]] bool AcquireOutput(RenderOutputAcquisition& acquisition,
-                                         ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AbandonOutput(RenderOutputAcquisition& acquisition,
-                                         ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] RenderViewportHandle GetHandle() const noexcept
+        {
+            return m_handle;
+        }
+        [[nodiscard]] bool GetSnapshot(RenderViewportSnapshot& snapshot) const noexcept;
+        [[nodiscard]] bool AcquireOutput(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AbandonOutput(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool RequestRenderExtent(ViewportExtent extent, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool BindSwapChain(rhi::SwapChainRef swapChain, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool UnbindSwapChain(ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool UpdatePresentation(const window::PresentationAttachmentSnapshot& presentation,
-                                              ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool GetPresentationAcknowledgement(
-            window::PresentationAcknowledgement& acknowledgement) const noexcept;
-        [[nodiscard]] bool Present(RenderOutputAcquisition& acquisition,
-                                   ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool UpdatePresentation(const window::PresentationAttachmentSnapshot& presentation, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool GetPresentationAcknowledgement(window::PresentationAcknowledgement& acknowledgement) const noexcept;
+        [[nodiscard]] bool Present(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
 
     private:
         friend class ViewportManager;
@@ -279,12 +357,14 @@ namespace vanguard::rendering
         EngineViewport() noexcept = default;
 
         [[nodiscard]] bool IsValid() const noexcept;
-        [[nodiscard]] EngineViewportHandle Handle() const noexcept { return m_handle; }
-        [[nodiscard]] bool Snapshot(EngineViewportSnapshot& snapshot) const noexcept;
-        [[nodiscard]] bool BeginFrame(const RenderFrameSetup& setup, RenderFrameInfo& frame,
-                                      ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool SubmitFrame(RenderFrameInfo& frame, RenderFrameSubmission& submission,
-                                       ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] EngineViewportHandle GetHandle() const noexcept
+        {
+            return m_handle;
+        }
+        [[nodiscard]] bool GetSnapshot(EngineViewportSnapshot& snapshot) const noexcept;
+        [[nodiscard]] bool BeginFrame(const RenderFrameSetup& setup, RenderFrameInfo& frame, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ConfigureViews(RenderFrameInfo& frame, const RenderFrameViewSetup& setup, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool SubmitFrame(RenderFrameInfo& frame, RenderFrameSubmission& submission, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool AbandonFrame(RenderFrameInfo& frame, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool FlushFrame(ViewportFailure* failure = nullptr) noexcept;
 
@@ -294,56 +374,46 @@ namespace vanguard::rendering
         EngineViewportHandle m_handle;
     };
 
+    enum class RenderFrameExecutionOutcome : u8
+    {
+        Success,
+        Failure,
+        Skipped
+    };
+
     struct RenderFrameExecutionStatus
     {
-        bool success = true;
+        RenderFrameExecutionOutcome outcome = RenderFrameExecutionOutcome::Success;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr RenderFrameExecutionStatus Success() noexcept { return {}; }
+        [[nodiscard]] static constexpr RenderFrameExecutionStatus Success() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr RenderFrameExecutionStatus Failure(const char* const message) noexcept
         {
-            return {false, message};
+            return {RenderFrameExecutionOutcome::Failure, message};
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return success; }
-    };
-
-    using ExecuteRenderFrame = RenderFrameExecutionStatus (*)(const RenderFrameInfo& frame,
-                                                               const jobs::JobContext& context,
-                                                               void* userData) noexcept;
-
-    struct RenderFrameDispatcherStats
-    {
-        u64 submittedFrames = 0;
-        u64 completedFrames = 0;
-        u64 failedFrames = 0;
-        u64 lastCompletedSerial = 0;
-        bool initialized = false;
-        bool workOutstanding = false;
-    };
-
-    class RenderFrameDispatcher final
-    {
-    public:
-        struct Impl;
-
-        RenderFrameDispatcher() noexcept = default;
-        ~RenderFrameDispatcher();
-
-        RenderFrameDispatcher(const RenderFrameDispatcher&) = delete;
-        RenderFrameDispatcher& operator=(const RenderFrameDispatcher&) = delete;
-
-        [[nodiscard]] bool Initialize(ExecuteRenderFrame execute, void* userData = nullptr,
-                                      ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Shutdown(ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool IsInitialized() const noexcept;
-        [[nodiscard]] bool Submit(const RenderFrameInfo& frame, RenderFrameSubmission& submission,
-                                  ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Flush(ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool IsIdle() const noexcept;
-        [[nodiscard]] RenderFrameDispatcherStats GetStats() const noexcept;
-
-    private:
-        Impl* m_impl = nullptr;
+        [[nodiscard]] static constexpr RenderFrameExecutionStatus Skipped(const char* const message = nullptr) noexcept
+        {
+            return {RenderFrameExecutionOutcome::Skipped, message};
+        }
+        [[nodiscard]] constexpr bool IsSuccess() const noexcept
+        {
+            return outcome == RenderFrameExecutionOutcome::Success;
+        }
+        [[nodiscard]] constexpr bool IsFailure() const noexcept
+        {
+            return outcome == RenderFrameExecutionOutcome::Failure;
+        }
+        [[nodiscard]] constexpr bool IsSkipped() const noexcept
+        {
+            return outcome == RenderFrameExecutionOutcome::Skipped;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsSuccess();
+        }
     };
 
     struct ViewportManagerStats
@@ -371,49 +441,35 @@ namespace vanguard::rendering
         ViewportManager(const ViewportManager&) = delete;
         ViewportManager& operator=(const ViewportManager&) = delete;
 
-        [[nodiscard]] bool Initialize(RenderFrameDispatcher& dispatcher,
-                                      ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(RenderCommandSystem& commands, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] bool CreateRenderViewport(const RenderViewportDesc& desc, RenderViewportHandle& viewport,
-                                                ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool DestroyRenderViewport(RenderViewportHandle viewport,
-                                                 ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool BindSwapChain(RenderViewportHandle viewport, rhi::SwapChainRef swapChain,
-                                         ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool UnbindSwapChain(RenderViewportHandle viewport,
-                                           ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool UpdatePresentation(RenderViewportHandle viewport,
-                                              const window::PresentationAttachmentSnapshot& presentation,
+        [[nodiscard]] bool CreateRenderViewport(const RenderViewportDesc& desc, RenderViewportHandle& viewport, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool DestroyRenderViewport(RenderViewportHandle viewport, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BindSwapChain(RenderViewportHandle viewport, rhi::SwapChainRef swapChain, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool UnbindSwapChain(RenderViewportHandle viewport, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool UpdatePresentation(RenderViewportHandle viewport, const window::PresentationAttachmentSnapshot& presentation,
                                               ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool GetPresentationAcknowledgement(
-            RenderViewportHandle viewport, window::PresentationAcknowledgement& acknowledgement) const noexcept;
-        [[nodiscard]] bool RequestRenderExtent(RenderViewportHandle viewport, ViewportExtent extent,
-                                               ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AcquireOutput(RenderViewportHandle viewport, RenderOutputAcquisition& acquisition,
-                                         ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AbandonOutput(RenderOutputAcquisition& acquisition,
-                                         ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Present(RenderOutputAcquisition& acquisition,
-                                   ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool GetPresentationAcknowledgement(RenderViewportHandle viewport, window::PresentationAcknowledgement& acknowledgement) const noexcept;
+        [[nodiscard]] bool RequestRenderExtent(RenderViewportHandle viewport, ViewportExtent extent, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AcquireOutput(RenderViewportHandle viewport, RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AbandonOutput(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Present(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool CreateEngineViewport(const EngineViewportDesc& desc, EngineViewportHandle& viewport,
-                                                ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool DestroyEngineViewport(EngineViewportHandle viewport,
-                                                 ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool BeginFrame(EngineViewportHandle viewport, const RenderFrameSetup& setup,
-                                      RenderFrameInfo& frame, ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool SubmitFrame(EngineViewportHandle viewport, RenderFrameInfo& frame,
-                                       RenderFrameSubmission& submission,
-                                       ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AbandonFrame(EngineViewportHandle viewport, RenderFrameInfo& frame,
-                                        ViewportFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool FlushFrame(EngineViewportHandle viewport,
+        [[nodiscard]] bool CreateEngineViewport(const EngineViewportDesc& desc, EngineViewportHandle& viewport, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool DestroyEngineViewport(EngineViewportHandle viewport, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginFrame(EngineViewportHandle viewport, const RenderFrameSetup& setup, RenderFrameInfo& frame,
                                       ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ConfigureViews(EngineViewportHandle viewport, RenderFrameInfo& frame, const RenderFrameViewSetup& setup,
+                                          ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool SubmitFrame(EngineViewportHandle viewport, RenderFrameInfo& frame, RenderFrameSubmission& submission,
+                                       ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AbandonFrame(EngineViewportHandle viewport, RenderFrameInfo& frame, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool FlushFrame(EngineViewportHandle viewport, ViewportFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool Snapshot(RenderViewportHandle viewport, RenderViewportSnapshot& snapshot) const noexcept;
-        [[nodiscard]] bool Snapshot(EngineViewportHandle viewport, EngineViewportSnapshot& snapshot) const noexcept;
+        [[nodiscard]] bool GetSnapshot(RenderViewportHandle viewport, RenderViewportSnapshot& snapshot) const noexcept;
+        [[nodiscard]] bool GetSnapshot(EngineViewportHandle viewport, EngineViewportSnapshot& snapshot) const noexcept;
         [[nodiscard]] bool Resolve(RenderViewportHandle handle, RenderViewport& viewport) noexcept;
         [[nodiscard]] bool Resolve(EngineViewportHandle handle, EngineViewport& viewport) noexcept;
         void VisitRenderViewports(VisitRenderViewport visitor, void* userData = nullptr) const noexcept;

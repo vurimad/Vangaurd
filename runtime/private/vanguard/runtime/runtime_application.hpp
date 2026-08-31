@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/application/application.hpp>
+#include <vanguard/engine/rendering_service.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 
 namespace vanguard::runtime
@@ -19,7 +20,10 @@ namespace vanguard::runtime
     class RunningState final : public application::ApplicationState
     {
     public:
-        void ExitAfterFirstTick(const bool enabled) noexcept { m_exitAfterFirstTick = enabled; }
+        void ExitAfterFirstTick(const bool enabled) noexcept
+        {
+            m_exitAfterFirstTick = enabled;
+        }
 
     protected:
         application::StateOperationStatus OnEnter(application::StateContext& context) noexcept override;
@@ -34,13 +38,12 @@ namespace vanguard::runtime
     {
     public:
         [[nodiscard]] ApplicationTraits GetTraits() const noexcept override;
-        [[nodiscard]] application::CompositionStatus Compose(
-            const application::ApplicationStartupContext& startup,
-            application::EngineHost& services,
-            application::ApplicationStateMachine& states) noexcept override;
+        [[nodiscard]] application::CompositionStatus Compose(const application::ApplicationStartupContext& startup, application::EngineHost& services,
+                                                             application::ApplicationStateMachine& states) noexcept override;
 
     private:
         filesystem::Config m_filesystemConfig;
+        engine::RenderingServiceConfig m_renderingConfig;
         StartupSessionState m_startupSessionState;
         RunningState m_runningState;
     };

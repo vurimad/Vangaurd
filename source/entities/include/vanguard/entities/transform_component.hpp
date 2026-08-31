@@ -1,0 +1,13 @@
+#pragma once
+
+#include <vanguard/entities/placed_component.hpp>
+
+namespace vanguard::entities
+{
+    class TransformComponent : public IPlacedComponent
+    {
+    private:
+        void OnTransformUpdated(math::Box& worldBounds) noexcept override;
+    };
+
+} // namespace vanguard::entities

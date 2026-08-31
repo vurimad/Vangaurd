@@ -16,8 +16,7 @@ namespace vanguard::rendering
         {
             return index < MaximumPresentationOutputs && generation != 0;
         }
-        [[nodiscard]] friend constexpr bool operator==(const PresentationOutputHandle&,
-                                                       const PresentationOutputHandle&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const PresentationOutputHandle&, const PresentationOutputHandle&) noexcept = default;
     };
 
     enum class PresentationOutputState : u8
@@ -135,19 +134,15 @@ namespace vanguard::rendering
         PresentationService(const PresentationService&) = delete;
         PresentationService& operator=(const PresentationService&) = delete;
 
-        [[nodiscard]] bool Initialize(window::WindowManager& windows, ViewportManager& viewports,
-                                      PresentationFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(window::WindowManager& windows, ViewportManager& viewports, PresentationFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(PresentationFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] bool CreateOutput(const PresentationOutputDesc& desc, PresentationOutputHandle& output,
-                                        PresentationFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool DestroyOutput(PresentationOutputHandle output,
-                                         PresentationFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool CreateOutput(const PresentationOutputDesc& desc, PresentationOutputHandle& output, PresentationFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool DestroyOutput(PresentationOutputHandle output, PresentationFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Tick(PresentationFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool Snapshot(PresentationOutputHandle output,
-                                    PresentationOutputSnapshot& snapshot) const noexcept;
+        [[nodiscard]] bool GetSnapshot(PresentationOutputHandle output, PresentationOutputSnapshot& snapshot) const noexcept;
         [[nodiscard]] RenderViewportHandle ResolveRenderViewport(PresentationOutputHandle output) const noexcept;
         [[nodiscard]] PresentationServiceStats GetStats() const noexcept;
 

@@ -24,16 +24,14 @@ namespace
 
     void HashU32(crypto::Sha256Builder& hash, const u32 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u)};
+        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
     void HashU64(crypto::Sha256Builder& hash, const u64 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                            static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                            static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
@@ -55,23 +53,20 @@ namespace
 
         [[nodiscard]] bool WriteU32(const u32 value) noexcept
         {
-            const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                                static_cast<u8>(value >> 24u)};
+            const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
             return WriteBytes(bytes, sizeof(bytes));
         }
 
         [[nodiscard]] bool WriteU64(const u64 value) noexcept
         {
-            const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u),
-                                static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                                static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+            const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                                static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
             return WriteBytes(bytes, sizeof(bytes));
         }
 
         [[nodiscard]] bool WriteBytes(const void* const data, const u32 size) noexcept
         {
-            if ((size != 0 && data == nullptr) || static_cast<u64>(m_bytes.Size()) + size > m_limit ||
-                static_cast<u64>(m_bytes.Size()) + size > ~u32{0})
+            if ((size != 0 && data == nullptr) || static_cast<u64>(m_bytes.Size()) + size > m_limit || static_cast<u64>(m_bytes.Size()) + size > ~u32{0})
             {
                 return false;
             }
@@ -141,8 +136,7 @@ namespace
             {
                 return false;
             }
-            value = static_cast<u32>(bytes[0]) | (static_cast<u32>(bytes[1]) << 8u) | (static_cast<u32>(bytes[2]) << 16u) |
-                    (static_cast<u32>(bytes[3]) << 24u);
+            value = static_cast<u32>(bytes[0]) | (static_cast<u32>(bytes[1]) << 8u) | (static_cast<u32>(bytes[2]) << 16u) | (static_cast<u32>(bytes[3]) << 24u);
             return true;
         }
 
@@ -202,8 +196,7 @@ namespace
 
     [[nodiscard]] bool LessReference(const resources::ResourceReference left, const resources::ResourceReference right) noexcept
     {
-        return left.Path().Id() < right.Path().Id() ||
-               (left.Path().Id() == right.Path().Id() && left.ExpectedType() < right.ExpectedType());
+        return left.GetPath().Id() < right.GetPath().Id() || (left.GetPath().Id() == right.GetPath().Id() && left.ExpectedType() < right.ExpectedType());
     }
 
     [[nodiscard]] bool ContainsReference(const containers::DynamicArray<resources::ResourceReference>& values,
@@ -249,9 +242,9 @@ namespace vanguard::assets
 
         explicit Impl(const DependencyIndexConfig& value) noexcept
             : config(value), root(filesystem::AbsolutePath::ParseDirPath(value.root)), path(root.AddFilePath(IndexFileName)),
-              temporaryPath(root.AddFilePath(TemporaryFileName)), records(memory::pools::Assets::GetInstance()),
-              lookup(memory::pools::Assets::GetInstance()), reverseEdges(memory::pools::Assets::GetInstance()),
-              stagedRecords(memory::pools::Assets::GetInstance()), stagedLookup(memory::pools::Assets::GetInstance())
+              temporaryPath(root.AddFilePath(TemporaryFileName)), records(memory::pools::Assets::GetInstance()), lookup(memory::pools::Assets::GetInstance()),
+              reverseEdges(memory::pools::Assets::GetInstance()), stagedRecords(memory::pools::Assets::GetInstance()),
+              stagedLookup(memory::pools::Assets::GetInstance())
         {
             config.root = nullptr;
         }
@@ -315,7 +308,7 @@ namespace vanguard::assets
             lookup.Clear();
             for (u32 index = 0; index < records.Size(); ++index)
             {
-                if (!lookup.Insert(records[index]->output.Path().Id(), index).IsSuccessful())
+                if (!lookup.Insert(records[index]->output.GetPath().Id(), index).IsSuccessful())
                 {
                     lookup.Clear();
                     return false;
@@ -327,7 +320,7 @@ namespace vanguard::assets
         [[nodiscard]] DependencyRecord* FindLocked(const resources::ResourceReference output) noexcept
         {
             u32 index = 0;
-            if (!lookup.Find(output.Path().Id(), index) || index >= records.Size() || records[index]->output != output)
+            if (!lookup.Find(output.GetPath().Id(), index) || index >= records.Size() || records[index]->output != output)
             {
                 return nullptr;
             }
@@ -337,7 +330,7 @@ namespace vanguard::assets
         [[nodiscard]] const DependencyRecord* FindLocked(const resources::ResourceReference output) const noexcept
         {
             u32 index = 0;
-            if (!lookup.Find(output.Path().Id(), index) || index >= records.Size() || records[index]->output != output)
+            if (!lookup.Find(output.GetPath().Id(), index) || index >= records.Size() || records[index]->output != output)
             {
                 return nullptr;
             }
@@ -403,8 +396,8 @@ namespace vanguard::assets
                 while (position != 0)
                 {
                     const ReverseEdge& previous = reverseEdges[position - 1u];
-                    const bool less = LessReference(value.input, previous.input) ||
-                                      (value.input == previous.input && LessReference(value.output, previous.output));
+                    const bool less =
+                        LessReference(value.input, previous.input) || (value.input == previous.input && LessReference(value.output, previous.output));
                     if (!less)
                     {
                         break;
@@ -419,10 +412,7 @@ namespace vanguard::assets
         }
     };
 
-    DependencyRecord::DependencyRecord() noexcept
-        : dependencies(memory::pools::Assets::GetInstance()), artifacts(memory::pools::Assets::GetInstance())
-    {
-    }
+    DependencyRecord::DependencyRecord() noexcept : dependencies(memory::pools::Assets::GetInstance()), artifacts(memory::pools::Assets::GetInstance()) {}
 
     const char* ToString(const IndexResult result) noexcept
     {
@@ -457,9 +447,9 @@ namespace vanguard::assets
         constexpr char Domain[] = "vanguard.asset-source-input.v1";
         crypto::Sha256Builder hash;
         static_cast<void>(hash.Update(Domain, sizeof(Domain) - 1u));
-        HashU64(hash, request.source.identity.Path().Id());
+        HashU64(hash, request.source.identity.GetPath().Id());
         HashU32(hash, request.source.identity.ExpectedType());
-        HashU64(hash, request.output.Path().Id());
+        HashU64(hash, request.output.GetPath().Id());
         HashU32(hash, request.output.ExpectedType());
         HashU8(hash, static_cast<u8>(request.target));
         const BuildFingerprint content = crypto::Sha256(request.source.content.Data(), request.source.content.SizeInBytes());
@@ -475,8 +465,7 @@ namespace vanguard::assets
 
     namespace
     {
-        [[nodiscard]] bool ReadFile(const filesystem::AbsolutePath& path, const u64 maximumBytes,
-                                    containers::DynamicArray<u8>& bytes) noexcept
+        [[nodiscard]] bool ReadFile(const filesystem::AbsolutePath& path, const u64 maximumBytes, containers::DynamicArray<u8>& bytes) noexcept
         {
             filesystem::Manager& manager = filesystem::GetManager();
             const u64 size = manager.GetFileSize(path);
@@ -507,29 +496,27 @@ namespace vanguard::assets
 
         [[nodiscard]] bool WriteDependency(BufferWriter& writer, const BuildDependency& dependency) noexcept
         {
-            return writer.WriteU64(dependency.identity.Path().Id()) && writer.WriteU32(dependency.identity.ExpectedType()) &&
-                   writer.WriteBytes(dependency.content.bytes, BuildFingerprint::ByteCount) &&
-                   writer.WriteU8(static_cast<u8>(dependency.role)) && writer.WriteU8(static_cast<u8>(dependency.requirement)) &&
-                   writer.WriteU16(0);
+            return writer.WriteU64(dependency.identity.GetPath().Id()) && writer.WriteU32(dependency.identity.ExpectedType()) &&
+                   writer.WriteBytes(dependency.content.bytes, BuildFingerprint::ByteCount) && writer.WriteU8(static_cast<u8>(dependency.role)) &&
+                   writer.WriteU8(static_cast<u8>(dependency.requirement)) && writer.WriteU16(0);
         }
 
         [[nodiscard]] bool WriteArtifact(BufferWriter& writer, const IndexedArtifact& artifact) noexcept
         {
-            return writer.WriteU64(artifact.resource.Path().Id()) && writer.WriteU32(artifact.resource.ExpectedType()) &&
-                   writer.WriteU32(artifact.segment) && writer.WriteU16(static_cast<u16>(artifact.flags)) &&
-                   writer.WriteU8(artifact.alignmentLog2) && writer.WriteU8(0) && writer.WriteU64(artifact.byteCount) && writer.WriteU32(0);
+            return writer.WriteU64(artifact.resource.GetPath().Id()) && writer.WriteU32(artifact.resource.ExpectedType()) && writer.WriteU32(artifact.segment) &&
+                   writer.WriteU16(static_cast<u16>(artifact.flags)) && writer.WriteU8(artifact.alignmentLog2) && writer.WriteU8(0) &&
+                   writer.WriteU64(artifact.byteCount) && writer.WriteU32(0);
         }
 
         [[nodiscard]] bool WriteRecord(BufferWriter& writer, const DependencyRecord& record) noexcept
         {
-            return writer.WriteU64(record.source.Path().Id()) && writer.WriteU32(record.source.ExpectedType()) &&
-                   writer.WriteU64(record.output.Path().Id()) && writer.WriteU32(record.output.ExpectedType()) &&
-                   writer.WriteU8(static_cast<u8>(record.target)) && writer.WriteU8(0) && writer.WriteU16(0) &&
+            return writer.WriteU64(record.source.GetPath().Id()) && writer.WriteU32(record.source.ExpectedType()) && writer.WriteU64(record.output.GetPath().Id()) &&
+                   writer.WriteU32(record.output.ExpectedType()) && writer.WriteU8(static_cast<u8>(record.target)) && writer.WriteU8(0) && writer.WriteU16(0) &&
                    writer.WriteU64(record.compiler) && writer.WriteU32(record.compilerVersion) &&
                    writer.WriteBytes(record.sourceInputFingerprint.bytes, BuildFingerprint::ByteCount) &&
                    writer.WriteBytes(record.buildFingerprint.bytes, BuildFingerprint::ByteCount) &&
-                   writer.WriteBytes(record.contentFingerprint.bytes, BuildFingerprint::ByteCount) &&
-                   writer.WriteU32(record.dependencies.Size()) && writer.WriteU32(record.artifacts.Size());
+                   writer.WriteBytes(record.contentFingerprint.bytes, BuildFingerprint::ByteCount) && writer.WriteU32(record.dependencies.Size()) &&
+                   writer.WriteU32(record.artifacts.Size());
         }
 
         [[nodiscard]] IndexResult BuildSerializedIndex(const DependencyIndex::Impl& impl, BufferWriter& writer) noexcept
@@ -566,10 +553,9 @@ namespace vanguard::assets
 
             BuildFingerprint empty;
             bool written = writer.WriteU32(IndexMagic) && writer.WriteU16(IndexMajorVersion) && writer.WriteU16(IndexMinorVersion) &&
-                           writer.WriteU32(IndexHeaderSize) && writer.WriteU32(impl.records.Size()) &&
-                           writer.WriteU32(static_cast<u32>(dependencyCount)) && writer.WriteU32(static_cast<u32>(artifactCount)) &&
-                           writer.WriteU32(0) && writer.WriteU64(0) && writer.WriteU64(impl.generation + 1u) &&
-                           writer.WriteBytes(impl.config.settingsFingerprint.bytes, BuildFingerprint::ByteCount) &&
+                           writer.WriteU32(IndexHeaderSize) && writer.WriteU32(impl.records.Size()) && writer.WriteU32(static_cast<u32>(dependencyCount)) &&
+                           writer.WriteU32(static_cast<u32>(artifactCount)) && writer.WriteU32(0) && writer.WriteU64(0) &&
+                           writer.WriteU64(impl.generation + 1u) && writer.WriteBytes(impl.config.settingsFingerprint.bytes, BuildFingerprint::ByteCount) &&
                            writer.WriteBytes(empty.bytes, BuildFingerprint::ByteCount);
             const u8 reserved[IndexHeaderSize - 108]{};
             written = written && writer.WriteBytes(reserved, sizeof(reserved));
@@ -617,16 +603,14 @@ namespace vanguard::assets
             u64 generation = 0;
             BuildFingerprint settings;
             BuildFingerprint payload;
-            if (!reader.ReadU32(magic) || !reader.ReadU16(major) || !reader.ReadU16(minor) || !reader.ReadU32(headerSize) ||
-                !reader.ReadU32(recordCount) || !reader.ReadU32(dependencyCount) || !reader.ReadU32(artifactCount) ||
-                !reader.ReadU32(reserved32) || !reader.ReadU64(fileSize) || !reader.ReadU64(generation) ||
-                !reader.ReadBytes(settings.bytes, BuildFingerprint::ByteCount) ||
+            if (!reader.ReadU32(magic) || !reader.ReadU16(major) || !reader.ReadU16(minor) || !reader.ReadU32(headerSize) || !reader.ReadU32(recordCount) ||
+                !reader.ReadU32(dependencyCount) || !reader.ReadU32(artifactCount) || !reader.ReadU32(reserved32) || !reader.ReadU64(fileSize) ||
+                !reader.ReadU64(generation) || !reader.ReadBytes(settings.bytes, BuildFingerprint::ByteCount) ||
                 !reader.ReadBytes(payload.bytes, BuildFingerprint::ByteCount) || !reader.Skip(IndexHeaderSize - 108))
             {
                 return IndexResult::Corrupt;
             }
-            if (magic != IndexMagic || major != IndexMajorVersion || minor > IndexMinorVersion ||
-                settings != impl.config.settingsFingerprint)
+            if (magic != IndexMagic || major != IndexMajorVersion || minor > IndexMinorVersion || settings != impl.config.settingsFingerprint)
             {
                 return IndexResult::Incompatible;
             }
@@ -656,9 +640,8 @@ namespace vanguard::assets
                 u16 reserved16 = 0;
                 u32 recordDependencyCount = 0;
                 u32 recordArtifactCount = 0;
-                const bool fixedRead = reader.ReadU64(sourcePath) && reader.ReadU32(sourceType) && reader.ReadU64(outputPath) &&
-                                       reader.ReadU32(outputType) && reader.ReadU8(target) && reader.ReadU8(reserved8) &&
-                                       reader.ReadU16(reserved16) && reader.ReadU64(record->compiler) &&
+                const bool fixedRead = reader.ReadU64(sourcePath) && reader.ReadU32(sourceType) && reader.ReadU64(outputPath) && reader.ReadU32(outputType) &&
+                                       reader.ReadU8(target) && reader.ReadU8(reserved8) && reader.ReadU16(reserved16) && reader.ReadU64(record->compiler) &&
                                        reader.ReadU32(record->compilerVersion) &&
                                        reader.ReadBytes(record->sourceInputFingerprint.bytes, BuildFingerprint::ByteCount) &&
                                        reader.ReadBytes(record->buildFingerprint.bytes, BuildFingerprint::ByteCount) &&
@@ -667,17 +650,16 @@ namespace vanguard::assets
                 record->source = resources::ResourceReference(resources::ResourcePath::FromId(sourcePath), sourceType);
                 record->output = resources::ResourceReference(resources::ResourcePath::FromId(outputPath), outputType);
                 record->target = static_cast<TargetPlatform>(target);
-                if (!fixedRead || reserved8 != 0 || reserved16 != 0 || !record->source.IsValid() || !record->source.IsTyped() ||
-                    !record->output.IsValid() || !record->output.IsTyped() || record->target >= TargetPlatform::Count ||
-                    record->compiler == InvalidCompilerId || record->compilerVersion == 0 ||
-                    recordDependencyCount > impl.config.maximumDependenciesPerRecord ||
+                if (!fixedRead || reserved8 != 0 || reserved16 != 0 || !record->source.IsValid() || !record->source.IsTyped() || !record->output.IsValid() ||
+                    !record->output.IsTyped() || record->target >= TargetPlatform::Count || record->compiler == InvalidCompilerId ||
+                    record->compilerVersion == 0 || recordDependencyCount > impl.config.maximumDependenciesPerRecord ||
                     recordArtifactCount > impl.config.maximumArtifactsPerRecord)
                 {
                     VANGUARD_DELETE(record);
                     return IndexResult::Corrupt;
                 }
                 u32 duplicateIndex = 0;
-                if (impl.lookup.Find(record->output.Path().Id(), duplicateIndex))
+                if (impl.lookup.Find(record->output.GetPath().Id(), duplicateIndex))
                 {
                     VANGUARD_DELETE(record);
                     return IndexResult::Corrupt;
@@ -697,9 +679,8 @@ namespace vanguard::assets
                     u32 type = 0;
                     u8 role = 0;
                     u8 requirement = 0;
-                    valid = valid && reader.ReadU64(path) && reader.ReadU32(type) &&
-                            reader.ReadBytes(dependency.content.bytes, BuildFingerprint::ByteCount) && reader.ReadU8(role) &&
-                            reader.ReadU8(requirement) && reader.ReadU16(reserved16);
+                    valid = valid && reader.ReadU64(path) && reader.ReadU32(type) && reader.ReadBytes(dependency.content.bytes, BuildFingerprint::ByteCount) &&
+                            reader.ReadU8(role) && reader.ReadU8(requirement) && reader.ReadU16(reserved16);
                     dependency.identity = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
                     dependency.role = static_cast<DependencyRole>(role);
                     dependency.requirement = static_cast<DependencyRequirement>(requirement);
@@ -710,9 +691,9 @@ namespace vanguard::assets
                     u64 path = 0;
                     u32 type = 0;
                     u16 flags = 0;
-                    valid = valid && reader.ReadU64(path) && reader.ReadU32(type) && reader.ReadU32(artifact.segment) &&
-                            reader.ReadU16(flags) && reader.ReadU8(artifact.alignmentLog2) && reader.ReadU8(reserved8) &&
-                            reader.ReadU64(artifact.byteCount) && reader.ReadU32(reserved32);
+                    valid = valid && reader.ReadU64(path) && reader.ReadU32(type) && reader.ReadU32(artifact.segment) && reader.ReadU16(flags) &&
+                            reader.ReadU8(artifact.alignmentLog2) && reader.ReadU8(reserved8) && reader.ReadU64(artifact.byteCount) &&
+                            reader.ReadU32(reserved32);
                     artifact.resource = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
                     artifact.flags = static_cast<ArtifactFlags>(flags);
                     valid = valid && artifact.resource.IsValid() && artifact.resource.IsTyped() && reserved8 == 0 && reserved32 == 0 &&
@@ -730,7 +711,7 @@ namespace vanguard::assets
                     VANGUARD_DELETE(record);
                     return IndexResult::OutOfMemory;
                 }
-                if (!impl.lookup.Insert(record->output.Path().Id(), previous).IsSuccessful())
+                if (!impl.lookup.Insert(record->output.GetPath().Id(), previous).IsSuccessful())
                 {
                     static_cast<void>(impl.records.RemoveAt(previous));
                     VANGUARD_DELETE(record);
@@ -789,7 +770,7 @@ namespace vanguard::assets
                 ++impl.stats.ioFailures;
                 return IndexResult::IoFailure;
             }
-            if (!manager.MoveFile(impl.temporaryPath, impl.path))
+            if (!filesystem::ReplaceFile(impl.temporaryPath, impl.path))
             {
                 static_cast<void>(manager.DeleteFile(impl.temporaryPath));
                 ++impl.stats.ioFailures;
@@ -813,10 +794,9 @@ namespace vanguard::assets
         {
             return IndexResult::InvalidState;
         }
-        if (!memory::IsInitialized() || !containers::IsInitialized() || !filesystem::IsInitialized() || config.root == nullptr ||
-            config.root[0] == '\0' || config.maximumRecords == 0 || config.maximumDependenciesPerRecord == 0 ||
-            config.maximumArtifactsPerRecord == 0 || config.maximumSerializedBytes < IndexHeaderSize ||
-            config.maximumSerializedBytes > ~u32{0} || !filesystem::AbsolutePath::IsValidPath(config.root) ||
+        if (!memory::IsInitialized() || !containers::IsInitialized() || !filesystem::IsInitialized() || config.root == nullptr || config.root[0] == '\0' ||
+            config.maximumRecords == 0 || config.maximumDependenciesPerRecord == 0 || config.maximumArtifactsPerRecord == 0 ||
+            config.maximumSerializedBytes < IndexHeaderSize || config.maximumSerializedBytes > ~u32{0} || !filesystem::AbsolutePath::IsValidPath(config.root) ||
             !filesystem::paths::IsAbsolutePath(config.root))
         {
             return IndexResult::InvalidArgument;
@@ -928,9 +908,8 @@ namespace vanguard::assets
             return IndexResult::InvalidState;
         }
         if (!request.IsValid() || !plan.IsPrepared() || output.buildFingerprint.IsEmpty() || output.contentFingerprint.IsEmpty() ||
-            plan.SourceType() != request.source.identity.ExpectedType() || plan.OutputType() != request.output.ExpectedType() ||
-            output.artifacts.Empty() || plan.Dependencies().Count() > m_impl->config.maximumDependenciesPerRecord ||
-            output.artifacts.Size() > m_impl->config.maximumArtifactsPerRecord)
+            plan.GetSourceType() != request.source.identity.ExpectedType() || plan.GetOutputType() != request.output.ExpectedType() || output.artifacts.Empty() ||
+            plan.GetDependencies().Count() > m_impl->config.maximumDependenciesPerRecord || output.artifacts.Size() > m_impl->config.maximumArtifactsPerRecord)
         {
             return IndexResult::InvalidArgument;
         }
@@ -948,36 +927,35 @@ namespace vanguard::assets
         replacement->sourceInputFingerprint = ComputeSourceInputFingerprint(request);
         replacement->buildFingerprint = output.buildFingerprint;
         replacement->contentFingerprint = output.contentFingerprint;
-        replacement->dependencies.Resize(plan.Dependencies().Count());
+        replacement->dependencies.Resize(plan.GetDependencies().Count());
         replacement->artifacts.Resize(output.artifacts.Size());
-        if (replacement->dependencies.Size() != plan.Dependencies().Count() || replacement->artifacts.Size() != output.artifacts.Size())
+        if (replacement->dependencies.Size() != plan.GetDependencies().Count() || replacement->artifacts.Size() != output.artifacts.Size())
         {
             VANGUARD_DELETE(replacement);
             return IndexResult::OutOfMemory;
         }
-        for (u32 index = 0; index < plan.Dependencies().Count(); ++index)
+        for (u32 index = 0; index < plan.GetDependencies().Count(); ++index)
         {
-            replacement->dependencies[index] = plan.Dependencies()[index];
+            replacement->dependencies[index] = plan.GetDependencies()[index];
         }
         for (u32 index = 0; index < output.artifacts.Size(); ++index)
         {
             const Artifact& artifact = output.artifacts[index];
-            replacement->artifacts[index] = {artifact.resource, artifact.segment, artifact.flags, artifact.alignmentLog2,
-                                             artifact.bytes.Size()};
+            replacement->artifacts[index] = {artifact.resource, artifact.segment, artifact.flags, artifact.alignmentLog2, artifact.bytes.Size()};
         }
 
         concurrency::ScopedLock guard(m_impl->lock);
         if (m_impl->transactionActive)
         {
             u32 committedPathIndex = 0;
-            if (m_impl->lookup.Find(request.output.Path().Id(), committedPathIndex) &&
+            if (m_impl->lookup.Find(request.output.GetPath().Id(), committedPathIndex) &&
                 (committedPathIndex >= m_impl->records.Size() || m_impl->records[committedPathIndex]->output != request.output))
             {
                 VANGUARD_DELETE(replacement);
                 return IndexResult::InvalidArgument;
             }
             u32 stagedIndex = 0;
-            if (m_impl->stagedLookup.Find(request.output.Path().Id(), stagedIndex))
+            if (m_impl->stagedLookup.Find(request.output.GetPath().Id(), stagedIndex))
             {
                 if (stagedIndex >= m_impl->stagedRecords.Size() || m_impl->stagedRecords[stagedIndex]->output != request.output)
                 {
@@ -992,8 +970,7 @@ namespace vanguard::assets
             {
                 const u32 previous = m_impl->stagedRecords.Size();
                 m_impl->stagedRecords.PushBack(replacement);
-                if (m_impl->stagedRecords.Size() != previous + 1u ||
-                    !m_impl->stagedLookup.Insert(request.output.Path().Id(), previous).IsSuccessful())
+                if (m_impl->stagedRecords.Size() != previous + 1u || !m_impl->stagedLookup.Insert(request.output.GetPath().Id(), previous).IsSuccessful())
                 {
                     if (m_impl->stagedRecords.Size() == previous + 1u)
                     {
@@ -1007,7 +984,7 @@ namespace vanguard::assets
             return IndexResult::Success;
         }
         u32 pathIndex = 0;
-        if (m_impl->lookup.Find(request.output.Path().Id(), pathIndex) &&
+        if (m_impl->lookup.Find(request.output.GetPath().Id(), pathIndex) &&
             (pathIndex >= m_impl->records.Size() || m_impl->records[pathIndex]->output != request.output))
         {
             VANGUARD_DELETE(replacement);
@@ -1017,7 +994,7 @@ namespace vanguard::assets
         if (existing != nullptr)
         {
             u32 recordIndex = 0;
-            static_cast<void>(m_impl->lookup.Find(request.output.Path().Id(), recordIndex));
+            static_cast<void>(m_impl->lookup.Find(request.output.GetPath().Id(), recordIndex));
             m_impl->records[recordIndex] = replacement;
             VANGUARD_DELETE(existing);
             ++m_impl->stats.replacements;
@@ -1036,7 +1013,7 @@ namespace vanguard::assets
                 VANGUARD_DELETE(replacement);
                 return IndexResult::OutOfMemory;
             }
-            if (!m_impl->lookup.Insert(request.output.Path().Id(), previous).IsSuccessful())
+            if (!m_impl->lookup.Insert(request.output.GetPath().Id(), previous).IsSuccessful())
             {
                 static_cast<void>(m_impl->records.RemoveAt(previous));
                 VANGUARD_DELETE(replacement);
@@ -1066,7 +1043,7 @@ namespace vanguard::assets
             return IndexResult::InvalidState;
         }
         u32 index = 0;
-        if (!m_impl->lookup.Find(output.Path().Id(), index) || index >= m_impl->records.Size() || m_impl->records[index]->output != output)
+        if (!m_impl->lookup.Find(output.GetPath().Id(), index) || index >= m_impl->records.Size() || m_impl->records[index]->output != output)
         {
             return IndexResult::NotFound;
         }
@@ -1242,11 +1219,11 @@ namespace vanguard::assets
             return DirtyReason::SourceChanged;
         }
         if (record->compiler != plan.Compiler() || record->compilerVersion != plan.CompilerVersion() ||
-            plan.SourceType() != request.source.identity.ExpectedType() || plan.OutputType() != request.output.ExpectedType())
+            plan.GetSourceType() != request.source.identity.ExpectedType() || plan.GetOutputType() != request.output.ExpectedType())
         {
             return DirtyReason::CompilerChanged;
         }
-        const containers::ArraySpan<const BuildDependency> dependencies = plan.Dependencies();
+        const containers::ArraySpan<const BuildDependency> dependencies = plan.GetDependencies();
         if (record->dependencies.Size() != dependencies.Count())
         {
             return DirtyReason::DependenciesChanged;
@@ -1255,8 +1232,7 @@ namespace vanguard::assets
         {
             const BuildDependency& left = record->dependencies[index];
             const BuildDependency& right = dependencies[index];
-            if (left.identity != right.identity || left.content != right.content || left.role != right.role ||
-                left.requirement != right.requirement)
+            if (left.identity != right.identity || left.content != right.content || left.role != right.role || left.requirement != right.requirement)
             {
                 return DirtyReason::DependenciesChanged;
             }
@@ -1334,7 +1310,7 @@ namespace vanguard::assets
         for (DependencyRecord* const staged : m_impl->stagedRecords)
         {
             u32 recordIndex = 0;
-            if (m_impl->lookup.Find(staged->output.Path().Id(), recordIndex))
+            if (m_impl->lookup.Find(staged->output.GetPath().Id(), recordIndex))
             {
                 if (recordIndex >= m_impl->records.Size() || m_impl->records[recordIndex]->output != staged->output)
                 {
@@ -1386,7 +1362,7 @@ namespace vanguard::assets
         {
             DependencyRecord* const staged = m_impl->stagedRecords[stageIndex];
             u32 recordIndex = 0;
-            if (m_impl->lookup.Find(staged->output.Path().Id(), recordIndex))
+            if (m_impl->lookup.Find(staged->output.GetPath().Id(), recordIndex))
             {
                 applied[appliedCount++] = {stageIndex, recordIndex, m_impl->records[recordIndex], false};
                 m_impl->records[recordIndex] = staged;
@@ -1396,8 +1372,7 @@ namespace vanguard::assets
             {
                 recordIndex = m_impl->records.Size();
                 m_impl->records.PushBack(staged);
-                if (m_impl->records.Size() != recordIndex + 1u ||
-                    !m_impl->lookup.Insert(staged->output.Path().Id(), recordIndex).IsSuccessful())
+                if (m_impl->records.Size() != recordIndex + 1u || !m_impl->lookup.Insert(staged->output.GetPath().Id(), recordIndex).IsSuccessful())
                 {
                     if (m_impl->records.Size() == recordIndex + 1u)
                     {

@@ -10,11 +10,9 @@ namespace
 {
     using namespace vanguard;
 
-    constexpr u16 KnownObjectFlags =
-        static_cast<u16>(schemas::ObjectFlags::Deterministic) | static_cast<u16>(schemas::ObjectFlags::HasEditorData);
-    constexpr u16 KnownFieldFlags =
-        static_cast<u16>(reflection::FieldFlags::Required) | static_cast<u16>(reflection::FieldFlags::EditorOnly) |
-        static_cast<u16>(reflection::FieldFlags::OptionalDependency) | static_cast<u16>(reflection::FieldFlags::SoftDependency);
+    constexpr u16 KnownObjectFlags = static_cast<u16>(schemas::ObjectFlags::Deterministic) | static_cast<u16>(schemas::ObjectFlags::HasEditorData);
+    constexpr u16 KnownFieldFlags = static_cast<u16>(reflection::FieldFlags::Required) | static_cast<u16>(reflection::FieldFlags::EditorOnly) |
+                                    static_cast<u16>(reflection::FieldFlags::OptionalDependency) | static_cast<u16>(reflection::FieldFlags::SoftDependency);
 
     void StoreU16(u8* const output, const u16 value) noexcept
     {
@@ -225,15 +223,14 @@ namespace
                (options.includeEditorFields || !reflection::HasFlag(field.flags, reflection::FieldFlags::EditorOnly));
     }
 
-    [[nodiscard]] schemas::Result WriteObjectInternal(vanguard::serialization::BinaryWriter& writer, const reflection::Schema& schema,
-                                                      const void* object, const schemas::WriteOptions& options, u32 depth) noexcept;
+    [[nodiscard]] schemas::Result WriteObjectInternal(vanguard::serialization::BinaryWriter& writer, const reflection::Schema& schema, const void* object,
+                                                      const schemas::WriteOptions& options, u32 depth) noexcept;
 
-    [[nodiscard]] schemas::Result ReadObjectInternal(vanguard::serialization::BinaryReader& reader, const reflection::Schema& schema,
-                                                     void* object, const schemas::ReadLimits& limits, schemas::ReadInfo* info,
-                                                     u32 depth) noexcept;
+    [[nodiscard]] schemas::Result ReadObjectInternal(vanguard::serialization::BinaryReader& reader, const reflection::Schema& schema, void* object,
+                                                     const schemas::ReadLimits& limits, schemas::ReadInfo* info, u32 depth) noexcept;
 
-    [[nodiscard]] schemas::Result WriteValue(vanguard::serialization::BinaryWriter& writer, const reflection::SchemaField& field,
-                                             const void* data, const schemas::WriteOptions& options, const u32 depth) noexcept
+    [[nodiscard]] schemas::Result WriteValue(vanguard::serialization::BinaryWriter& writer, const reflection::SchemaField& field, const void* data,
+                                             const schemas::WriteOptions& options, const u32 depth) noexcept
     {
         bool success = false;
         switch (field.kind)
@@ -246,44 +243,34 @@ namespace
             success = writer.WriteBool(*static_cast<const bool*>(data));
             break;
         case reflection::ValueKind::U8:
-            success =
-                field.size == sizeof(u8) && field.valueType == reflection::builtin::U8 && writer.WriteU8(*static_cast<const u8*>(data));
+            success = field.size == sizeof(u8) && field.valueType == reflection::builtin::U8 && writer.WriteU8(*static_cast<const u8*>(data));
             break;
         case reflection::ValueKind::U16:
-            success =
-                field.size == sizeof(u16) && field.valueType == reflection::builtin::U16 && writer.WriteU16(*static_cast<const u16*>(data));
+            success = field.size == sizeof(u16) && field.valueType == reflection::builtin::U16 && writer.WriteU16(*static_cast<const u16*>(data));
             break;
         case reflection::ValueKind::U32:
-            success =
-                field.size == sizeof(u32) && field.valueType == reflection::builtin::U32 && writer.WriteU32(*static_cast<const u32*>(data));
+            success = field.size == sizeof(u32) && field.valueType == reflection::builtin::U32 && writer.WriteU32(*static_cast<const u32*>(data));
             break;
         case reflection::ValueKind::U64:
-            success =
-                field.size == sizeof(u64) && field.valueType == reflection::builtin::U64 && writer.WriteU64(*static_cast<const u64*>(data));
+            success = field.size == sizeof(u64) && field.valueType == reflection::builtin::U64 && writer.WriteU64(*static_cast<const u64*>(data));
             break;
         case reflection::ValueKind::I8:
-            success =
-                field.size == sizeof(i8) && field.valueType == reflection::builtin::I8 && writer.WriteI8(*static_cast<const i8*>(data));
+            success = field.size == sizeof(i8) && field.valueType == reflection::builtin::I8 && writer.WriteI8(*static_cast<const i8*>(data));
             break;
         case reflection::ValueKind::I16:
-            success =
-                field.size == sizeof(i16) && field.valueType == reflection::builtin::I16 && writer.WriteI16(*static_cast<const i16*>(data));
+            success = field.size == sizeof(i16) && field.valueType == reflection::builtin::I16 && writer.WriteI16(*static_cast<const i16*>(data));
             break;
         case reflection::ValueKind::I32:
-            success =
-                field.size == sizeof(i32) && field.valueType == reflection::builtin::I32 && writer.WriteI32(*static_cast<const i32*>(data));
+            success = field.size == sizeof(i32) && field.valueType == reflection::builtin::I32 && writer.WriteI32(*static_cast<const i32*>(data));
             break;
         case reflection::ValueKind::I64:
-            success =
-                field.size == sizeof(i64) && field.valueType == reflection::builtin::I64 && writer.WriteI64(*static_cast<const i64*>(data));
+            success = field.size == sizeof(i64) && field.valueType == reflection::builtin::I64 && writer.WriteI64(*static_cast<const i64*>(data));
             break;
         case reflection::ValueKind::F32:
-            success =
-                field.size == sizeof(f32) && field.valueType == reflection::builtin::F32 && writer.WriteF32(*static_cast<const f32*>(data));
+            success = field.size == sizeof(f32) && field.valueType == reflection::builtin::F32 && writer.WriteF32(*static_cast<const f32*>(data));
             break;
         case reflection::ValueKind::F64:
-            success =
-                field.size == sizeof(f64) && field.valueType == reflection::builtin::F64 && writer.WriteF64(*static_cast<const f64*>(data));
+            success = field.size == sizeof(f64) && field.valueType == reflection::builtin::F64 && writer.WriteF64(*static_cast<const f64*>(data));
             break;
         case reflection::ValueKind::Enumeration:
             switch (field.size)
@@ -315,7 +302,7 @@ namespace
             {
                 return schemas::Result::FieldMismatch;
             }
-            success = writer.WriteU64(reference.Path().Id()) && writer.WriteU32(reference.ExpectedType());
+            success = writer.WriteU64(reference.GetPath().Id()) && writer.WriteU32(reference.ExpectedType());
             break;
         }
         case reflection::ValueKind::String:
@@ -350,15 +337,14 @@ namespace
             break;
         case reflection::ValueKind::Array:
         {
-            if (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) ||
-                field.elementKind == reflection::ValueKind::Array)
+            if (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) || field.elementKind == reflection::ValueKind::Array)
             {
                 return schemas::Result::FieldMismatch;
             }
             const u32 count = field.arrayOperations->size(data);
             if (count > options.maximumArrayElements || !writer.WriteVarUInt(count))
             {
-                return count > options.maximumArrayElements ? schemas::Result::LimitExceeded : ConvertStatus(writer.Status());
+                return count > options.maximumArrayElements ? schemas::Result::LimitExceeded : ConvertStatus(writer.GetStatus());
             }
             reflection::SchemaField element;
             element.valueType = field.valueType;
@@ -381,7 +367,7 @@ namespace
             return schemas::Result::Success;
         }
         }
-        return success ? schemas::Result::Success : writer.Good() ? schemas::Result::FieldMismatch : ConvertStatus(writer.Status());
+        return success ? schemas::Result::Success : writer.IsGood() ? schemas::Result::FieldMismatch : ConvertStatus(writer.GetStatus());
     }
 
     [[nodiscard]] schemas::Result ReadValue(vanguard::serialization::BinaryReader& reader, const reflection::SchemaField& field, void* data,
@@ -475,7 +461,7 @@ namespace
             u64 length = 0;
             if (!reader.ReadVarUInt(length))
             {
-                return ConvertStatus(reader.Status());
+                return ConvertStatus(reader.GetStatus());
             }
             if (length > limits.maximumStringBytes || length > static_cast<u64>(~u32{0}))
             {
@@ -507,15 +493,14 @@ namespace
             break;
         case reflection::ValueKind::Array:
         {
-            if (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) ||
-                field.elementKind == reflection::ValueKind::Array)
+            if (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) || field.elementKind == reflection::ValueKind::Array)
             {
                 return schemas::Result::FieldMismatch;
             }
             u64 count64 = 0;
             if (!reader.ReadVarUInt(count64))
             {
-                return ConvertStatus(reader.Status());
+                return ConvertStatus(reader.GetStatus());
             }
             if (count64 > limits.maximumArrayElements || count64 > static_cast<u64>(~u32{0}))
             {
@@ -552,12 +537,11 @@ namespace
             return schemas::Result::Success;
         }
         }
-        return success ? schemas::Result::Success : reader.Good() ? schemas::Result::FieldMismatch : ConvertStatus(reader.Status());
+        return success ? schemas::Result::Success : reader.IsGood() ? schemas::Result::FieldMismatch : ConvertStatus(reader.GetStatus());
     }
 
-    [[nodiscard]] schemas::Result WriteObjectInternal(vanguard::serialization::BinaryWriter& writer, const reflection::Schema& schema,
-                                                      const void* const object, const schemas::WriteOptions& options,
-                                                      const u32 depth) noexcept
+    [[nodiscard]] schemas::Result WriteObjectInternal(vanguard::serialization::BinaryWriter& writer, const reflection::Schema& schema, const void* const object,
+                                                      const schemas::WriteOptions& options, const u32 depth) noexcept
     {
         if (object == nullptr || schema.id == reflection::InvalidSchemaTypeId || options.maximumFields == 0 ||
             options.maximumObjectBytes < schemas::ObjectHeader::WireSize || depth > options.maximumNestingDepth)
@@ -578,21 +562,20 @@ namespace
         {
             return schemas::Result::LimitExceeded;
         }
-        std::sort(fields.Begin(), fields.End(), [](const reflection::SchemaField* const left, const reflection::SchemaField* const right)
-                  { return left->id < right->id; });
+        std::sort(fields.Begin(), fields.End(),
+                  [](const reflection::SchemaField* const left, const reflection::SchemaField* const right) { return left->id < right->id; });
 
         const u64 origin = writer.Position();
         schemas::ObjectHeader header;
         header.schema = schema.id;
         header.schemaVersion = schema.currentVersion;
-        header.flags = schemas::ObjectFlags::Deterministic |
-                       (options.includeEditorFields ? schemas::ObjectFlags::HasEditorData : schemas::ObjectFlags::None);
+        header.flags = schemas::ObjectFlags::Deterministic | (options.includeEditorFields ? schemas::ObjectFlags::HasEditorData : schemas::ObjectFlags::None);
         header.fieldCount = fields.Size();
 
         u8 headerBytes[schemas::ObjectHeader::WireSize] = {};
         if (!writer.WriteBytes(headerBytes, sizeof(headerBytes)))
         {
-            return ConvertStatus(writer.Status());
+            return ConvertStatus(writer.GetStatus());
         }
         constexpr u8 zeros[256] = {};
         u64 tableBytes = static_cast<u64>(fields.Size()) * schemas::FieldRecord::WireSize;
@@ -601,7 +584,7 @@ namespace
             const usize batch = tableBytes > sizeof(zeros) ? sizeof(zeros) : static_cast<usize>(tableBytes);
             if (!writer.WriteBytes(zeros, batch))
             {
-                return ConvertStatus(writer.Status());
+                return ConvertStatus(writer.GetStatus());
             }
             tableBytes -= batch;
         }
@@ -610,7 +593,7 @@ namespace
         {
             if (!WriteRelativeAlignment(writer, origin, 8))
             {
-                return ConvertStatus(writer.Status());
+                return ConvertStatus(writer.GetStatus());
             }
             const reflection::SchemaField& field = *fields[index];
             const u64 fieldBegin = writer.Position();
@@ -635,10 +618,10 @@ namespace
             record.flags = field.flags;
             u8 recordBytes[schemas::FieldRecord::WireSize];
             EncodeField(record, recordBytes);
-            if (!writer.WriteBytesAt(origin + schemas::ObjectHeader::WireSize + static_cast<u64>(index) * schemas::FieldRecord::WireSize,
-                                     recordBytes, sizeof(recordBytes)))
+            if (!writer.WriteBytesAt(origin + schemas::ObjectHeader::WireSize + static_cast<u64>(index) * schemas::FieldRecord::WireSize, recordBytes,
+                                     sizeof(recordBytes)))
             {
-                return ConvertStatus(writer.Status());
+                return ConvertStatus(writer.GetStatus());
             }
         }
 
@@ -648,12 +631,11 @@ namespace
             return schemas::Result::LimitExceeded;
         }
         EncodeHeader(header, headerBytes);
-        return writer.WriteBytesAt(origin, headerBytes, sizeof(headerBytes)) ? schemas::Result::Success : ConvertStatus(writer.Status());
+        return writer.WriteBytesAt(origin, headerBytes, sizeof(headerBytes)) ? schemas::Result::Success : ConvertStatus(writer.GetStatus());
     }
 
-    [[nodiscard]] schemas::Result ReadObjectInternal(vanguard::serialization::BinaryReader& reader, const reflection::Schema& schema,
-                                                     void* const object, const schemas::ReadLimits& limits, schemas::ReadInfo* const info,
-                                                     const u32 depth) noexcept
+    [[nodiscard]] schemas::Result ReadObjectInternal(vanguard::serialization::BinaryReader& reader, const reflection::Schema& schema, void* const object,
+                                                     const schemas::ReadLimits& limits, schemas::ReadInfo* const info, const u32 depth) noexcept
     {
         if (object == nullptr || schema.id == reflection::InvalidSchemaTypeId || limits.maximumFields == 0 ||
             limits.maximumObjectBytes < schemas::ObjectHeader::WireSize || depth > limits.maximumNestingDepth)
@@ -665,7 +647,7 @@ namespace
         u8 headerBytes[schemas::ObjectHeader::WireSize];
         if (!reader.ReadBytes(headerBytes, sizeof(headerBytes)))
         {
-            return ConvertStatus(reader.Status());
+            return ConvertStatus(reader.GetStatus());
         }
         schemas::ObjectHeader header;
         schemas::Result result = DecodeHeader(headerBytes, header);
@@ -685,8 +667,7 @@ namespace
         {
             return schemas::Result::LimitExceeded;
         }
-        if (header.fieldTableOffset != schemas::ObjectHeader::WireSize || origin > reader.Size() ||
-            header.objectSize > reader.Size() - origin)
+        if (header.fieldTableOffset != schemas::ObjectHeader::WireSize || origin > reader.Size() || header.objectSize > reader.Size() - origin)
         {
             return schemas::Result::InvalidLayout;
         }
@@ -703,7 +684,7 @@ namespace
             u8 recordBytes[schemas::FieldRecord::WireSize];
             if (!reader.ReadBytes(recordBytes, sizeof(recordBytes)))
             {
-                return ConvertStatus(reader.Status());
+                return ConvertStatus(reader.GetStatus());
             }
             schemas::FieldRecord record;
             result = DecodeField(recordBytes, record);
@@ -722,8 +703,7 @@ namespace
         for (const schemas::FieldRecord& record : records)
         {
             expectedOffset = AlignUp(expectedOffset, 8);
-            if (record.dataOffset != expectedOffset || record.dataOffset > header.objectSize ||
-                record.dataSize > header.objectSize - record.dataOffset)
+            if (record.dataOffset != expectedOffset || record.dataOffset > header.objectSize || record.dataSize > header.objectSize - record.dataOffset)
             {
                 return schemas::Result::InvalidLayout;
             }
@@ -755,9 +735,8 @@ namespace
             {
                 continue;
             }
-            const auto found =
-                std::lower_bound(records.Begin(), records.End(), field.id,
-                                 [](const schemas::FieldRecord& record, const reflection::SchemaFieldId id) { return record.field < id; });
+            const auto found = std::lower_bound(records.Begin(), records.End(), field.id,
+                                                [](const schemas::FieldRecord& record, const reflection::SchemaFieldId id) { return record.field < id; });
             if (found == records.End() || found->field != field.id)
             {
                 return schemas::Result::MissingRequiredField;
@@ -768,14 +747,14 @@ namespace
         {
             if (!ReadRelativeAlignment(reader, origin, 8) || reader.Position() != origin + record.dataOffset)
             {
-                return reader.Good() ? schemas::Result::InvalidLayout : ConvertStatus(reader.Status());
+                return reader.IsGood() ? schemas::Result::InvalidLayout : ConvertStatus(reader.GetStatus());
             }
             const reflection::SchemaField* const field = FindField(schema, record.field);
             if (field == nullptr)
             {
                 if (!reader.Skip(record.dataSize))
                 {
-                    return ConvertStatus(reader.Status());
+                    return ConvertStatus(reader.GetStatus());
                 }
                 if (info != nullptr)
                 {
@@ -803,7 +782,7 @@ namespace
 
         if (reader.Position() != origin + header.objectSize && !reader.Seek(origin + header.objectSize))
         {
-            return ConvertStatus(reader.Status());
+            return ConvertStatus(reader.GetStatus());
         }
         if (info != nullptr && depth == 0)
         {
@@ -814,8 +793,8 @@ namespace
     }
 
     [[nodiscard]] schemas::Result VisitDependenciesInternal(const reflection::Schema& schema, const void* const object,
-                                                            const schemas::DependencyVisitor visitor, void* const userData,
-                                                            const u32 maximumDepth, const u32 depth) noexcept
+                                                            const schemas::DependencyVisitor visitor, void* const userData, const u32 maximumDepth,
+                                                            const u32 depth) noexcept
     {
         if (depth > maximumDepth)
         {
@@ -874,8 +853,7 @@ namespace
             }
             else if (field.kind == reflection::ValueKind::Array)
             {
-                if (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) ||
-                    field.elementKind == reflection::ValueKind::Array)
+                if (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) || field.elementKind == reflection::ValueKind::Array)
                 {
                     return schemas::Result::FieldMismatch;
                 }
@@ -928,8 +906,7 @@ namespace
                         {
                             return schemas::Result::SchemaNotFound;
                         }
-                        const schemas::Result result =
-                            VisitDependenciesInternal(*nested, value, visitor, userData, maximumDepth, depth + 1u);
+                        const schemas::Result result = VisitDependenciesInternal(*nested, value, visitor, userData, maximumDepth, depth + 1u);
                         if (result != schemas::Result::Success)
                         {
                             return result;
@@ -980,8 +957,7 @@ namespace vanguard::schemas
         return "Unknown";
     }
 
-    Result WriteObject(serialization::BinaryWriter& writer, const reflection::Schema& schema, const void* const object,
-                       const WriteOptions& options) noexcept
+    Result WriteObject(serialization::BinaryWriter& writer, const reflection::Schema& schema, const void* const object, const WriteOptions& options) noexcept
     {
         return WriteObjectInternal(writer, schema, object, options, 0);
     }
@@ -996,8 +972,8 @@ namespace vanguard::schemas
         return ReadObjectInternal(reader, schema, object, limits, info, 0);
     }
 
-    Result VisitDependencies(const reflection::Schema& schema, const void* const object, const DependencyVisitor visitor,
-                             void* const userData, const u32 maximumNestingDepth) noexcept
+    Result VisitDependencies(const reflection::Schema& schema, const void* const object, const DependencyVisitor visitor, void* const userData,
+                             const u32 maximumNestingDepth) noexcept
     {
         if (object == nullptr || visitor == nullptr || maximumNestingDepth == 0)
         {

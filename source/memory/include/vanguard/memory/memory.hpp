@@ -95,8 +95,8 @@ namespace vanguard::memory
 
     [[nodiscard]] bool IsValidPool(PoolId pool) noexcept;
     [[nodiscard]] bool IsAllocatablePool(PoolId pool) noexcept;
-    [[nodiscard]] PoolId ParentPool(PoolId pool) noexcept;
-    [[nodiscard]] const char* PoolName(PoolId pool) noexcept;
+    [[nodiscard]] PoolId GetParentPool(PoolId pool) noexcept;
+    [[nodiscard]] const char* GetPoolName(PoolId pool) noexcept;
 
     // Requests larger than the active backend's 32-bit allocation contract
     // fail without modifying allocator state.

@@ -189,12 +189,10 @@ namespace vanguard::math
         REDMATH_API Bool IntersectSegment(const Segment& segment, Vector4& enterPoint, Vector4& exitPoint) const;
 
         // Check if the infinite line intersects the bounding box, returns enter and exit distance on the ray (possibly negative)
-        REDMATH_API Bool IntersectLine(const Vector4& origin, const Vector4& direction, Float& enterDistFromOrigin,
-                                       Float& exitDistFromOrigin) const;
+        REDMATH_API Bool IntersectLine(const Vector4& origin, const Vector4& direction, Float& enterDistFromOrigin, Float& exitDistFromOrigin) const;
 
         // Check if the ray intersects the bounding box, returns enter and exit distance on the ray
-        REDMATH_API Bool IntersectRay(const Vector4& origin, const Vector4& direction, Float& enterDistFromOrigin,
-                                      Float* exitDistFromOrigin = nullptr) const;
+        REDMATH_API Bool IntersectRay(const Vector4& origin, const Vector4& direction, Float& enterDistFromOrigin, Float* exitDistFromOrigin = nullptr) const;
 
         // Check if the ray intersects the bounding box
         REDMATH_API Bool IntersectRay(const Vector4& origin, const Vector4& direction, Vector4& enterPoint) const;

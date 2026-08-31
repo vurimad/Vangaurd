@@ -21,8 +21,8 @@ namespace vanguard::math::simd
 
         Quad Cross(Quad _a, Quad _b)
         {
-            Quad c = _mm_sub_ps(_mm_mul_ps(_a, _mm_shuffle_ps(_b, _b, _MM_SHUFFLE(3, 0, 2, 1))),
-                                _mm_mul_ps(_b, _mm_shuffle_ps(_a, _a, _MM_SHUFFLE(3, 0, 2, 1))));
+            Quad c =
+                _mm_sub_ps(_mm_mul_ps(_a, _mm_shuffle_ps(_b, _b, _MM_SHUFFLE(3, 0, 2, 1))), _mm_mul_ps(_b, _mm_shuffle_ps(_a, _a, _MM_SHUFFLE(3, 0, 2, 1))));
             return _mm_shuffle_ps(c, c, _MM_SHUFFLE(3, 0, 2, 1));
         }
 
@@ -80,8 +80,7 @@ namespace vanguard::math::simd
             /* _mm_addsub_ps adds elements 1 and 3 and subtracts elements 0 and 2, so we get: */
             /* _mm_addsub_ps(*, *) = (xd+yc-zb+wa, xb-ya+zd+wc, wd-zc+yb+xa, yd-xc+wb+za)     */
 
-            Quad XZWY =
-                _mm_addsub_ps(_mm_shuffle_ps(XZYnW, ZnXWY, _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_ps(ZnXWY, XZYnW, _MM_SHUFFLE(2, 3, 0, 1)));
+            Quad XZWY = _mm_addsub_ps(_mm_shuffle_ps(XZYnW, ZnXWY, _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_ps(ZnXWY, XZYnW, _MM_SHUFFLE(2, 3, 0, 1)));
 
             /* now we only need to shuffle the components in place and return the result      */
             return _mm_shuffle_ps(XZWY, XZWY, _MM_SHUFFLE(2, 1, 3, 0));
@@ -123,8 +122,7 @@ namespace vanguard::math::simd
                 const Float q1_modifier = MSin((1.f - t) * theta);
                 const Float q2_modifier = MSin(t * theta);
 
-                return _mm_div_ps(_mm_add_ps(_mm_mul_ps(q1, _mm_set_ps1(q1_modifier)), _mm_mul_ps(q2, _mm_set_ps1(q2_modifier))),
-                                  _mm_set_ps1(sin_theta));
+                return _mm_div_ps(_mm_add_ps(_mm_mul_ps(q1, _mm_set_ps1(q1_modifier)), _mm_mul_ps(q2, _mm_set_ps1(q2_modifier))), _mm_set_ps1(sin_theta));
             }
         }
 
@@ -163,10 +161,7 @@ namespace vanguard::math::simd
     {
     }
 
-    RED_INLINE QsTransform::QsTransform(const QsTransform& xform)
-        : Translation(xform.Translation), Rotation(xform.Rotation), Scale(xform.Scale)
-    {
-    }
+    RED_INLINE QsTransform::QsTransform(const QsTransform& xform) : Translation(xform.Translation), Rotation(xform.Rotation), Scale(xform.Scale) {}
 
     RED_INLINE QsTransform::QsTransform(const Vector4& _translation, const vanguard::math::Quaternion& _rotation, const Vector4& _scale)
         : Translation(_translation), Rotation(_rotation), Scale(_scale)
@@ -362,7 +357,7 @@ namespace vanguard::math::simd
         xmm3 = _mm_sub_ps(xmm3, xmm2);                                  // xmm3 = -yy2-zz2+1, xy2+wz2, xz2-wy2, yz2-wx2
         Quad row0 = xmm3;                                               // row0 = -yy2-zz2+1, xy2+wz2, xz2-wy2, yz2-wx2
         const Quad scaleX = _mm_set_ps(0.f, Scale.X, Scale.X, Scale.X); // scaleX = Scale.X, Scale.X, Scale.X, 0
-        row0 = _mm_mul_ps(row0, scaleX); // row0 = (-yy2-zz2+1)*Scale.X, (xy2+wz2)*Scale.X, (xz2-wy2)*Scale.X, 0
+        row0 = _mm_mul_ps(row0, scaleX);                                // row0 = (-yy2-zz2+1)*Scale.X, (xy2+wz2)*Scale.X, (xz2-wy2)*Scale.X, 0
         m.X.vec = row0;
 
         // calculate second row
@@ -372,7 +367,7 @@ namespace vanguard::math::simd
         xmm4 = _mm_shuffle_ps(xmm4, xmm4, _MM_SHUFFLE(2, 3, 0, 1));     // xmm4 = xy2-wz2, -xx2-zz2+1, yz2+wx2, xz2+wy2
         Quad row1 = xmm4;                                               // row1 = xy2-wz2, -xx2-zz2+1, yz2+wx2, xz2+wy2
         const Quad scaleY = _mm_set_ps(0.f, Scale.Y, Scale.Y, Scale.Y); // scaleY = Scale.Y, Scale.Y, Scale.Y, 0
-        row1 = _mm_mul_ps(row1, scaleY); // row1 = (xy2-wz2)*Scale.Y, (-xx2-zz2+1)*Scale.Y, (yz2+wx2)*Scale.Y, 0
+        row1 = _mm_mul_ps(row1, scaleY);                                // row1 = (xy2-wz2)*Scale.Y, (-xx2-zz2+1)*Scale.Y, (yz2+wx2)*Scale.Y, 0
         m.Y.vec = row1;
 
         // calculate third row
@@ -380,7 +375,7 @@ namespace vanguard::math::simd
         xmm3 = _mm_shuffle_ps(xmm3, xmm7, _MM_SHUFFLE(2, 0, 3, 1)); // xmm3 = xz2+wy2, yz2-wx2, -xx2-yy2+1, 0.f
         Quad row2 = xmm3;                                           // row2 = xz2+wy2, yz2-wx2, -xx2-yy2+1, 0.f
         const Quad scaleZ = _mm_set_ps1(Scale.Z);                   // scaleZ = Scale.Z, Scale.Z, Scale.Z, Scale.Z
-        row2 = _mm_mul_ps(row2, scaleZ); // row2 = (xz2+wy2)*Scale.Z, (yz2-wx2)*Scale.Z, (-xx2-yy2+1)*Scale.Z, 0.f
+        row2 = _mm_mul_ps(row2, scaleZ);                            // row2 = (xz2+wy2)*Scale.Z, (yz2-wx2)*Scale.Z, (-xx2-yy2+1)*Scale.Z, 0.f
         m.Z.vec = row2;
 
         m.W.vec = Translation.V;

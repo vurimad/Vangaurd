@@ -42,8 +42,8 @@ namespace vanguard::resources
 {
     struct ResourceRequest::Control
     {
-        Control(ResourceRegistry* const registry, const ResourceReference reference, const u32 slotIndex, const u32 entryGeneration,
-                const u64 operationSerial, const State initialState, const Failure initialFailure) noexcept
+        Control(ResourceRegistry* const registry, const ResourceReference reference, const u32 slotIndex, const u32 entryGeneration, const u64 operationSerial,
+                const State initialState, const Failure initialFailure) noexcept
             : owner(registry), resourceReference(reference), slot(slotIndex), generation(entryGeneration), serial(operationSerial),
               state(static_cast<u32>(initialState)), failure(static_cast<u32>(initialFailure)), completion(IsTerminal(initialState))
         {
@@ -131,16 +131,14 @@ namespace vanguard::resources
     namespace
     {
         template <typename Implementation>
-        [[nodiscard]] bool IsRequestCurrent(const Implementation& impl, const ResourceRequest::Control& control,
-                                            RegistryEntry*& entry) noexcept
+        [[nodiscard]] bool IsRequestCurrent(const Implementation& impl, const ResourceRequest::Control& control, RegistryEntry*& entry) noexcept
         {
             if (control.slot >= impl.entries.Size())
             {
                 return false;
             }
             entry = impl.entries[control.slot];
-            return entry != nullptr && entry->generation == control.generation && entry->requestSerial == control.serial &&
-                   entry->activeRequest == &control;
+            return entry != nullptr && entry->generation == control.generation && entry->requestSerial == control.serial && entry->activeRequest == &control;
         }
 
         [[nodiscard]] bool IsObjectAlive(const State state) noexcept
@@ -151,8 +149,7 @@ namespace vanguard::resources
 
     ResourceRequest ResourceRegistry::MakeFailedRequest(const ResourceReference reference, const Failure failure) noexcept
     {
-        ResourceRequest::Control* const control =
-            AllocateObject<ResourceRequest::Control>(this, reference, 0, 0, 0, State::Failed, failure);
+        ResourceRequest::Control* const control = AllocateObject<ResourceRequest::Control>(this, reference, 0, 0, 0, State::Failed, failure);
         if (control == nullptr)
         {
             return {};
@@ -208,29 +205,29 @@ namespace vanguard::resources
         return m_control != nullptr ? m_control->resourceReference : ResourceReference{};
     }
 
-    State ResourceRequest::Status() const noexcept
+    State ResourceRequest::GetStatus() const noexcept
     {
         return m_control != nullptr ? static_cast<State>(m_control->state.GetValue()) : State::Failed;
     }
 
-    Failure ResourceRequest::Error() const noexcept
+    Failure ResourceRequest::GetError() const noexcept
     {
         return m_control != nullptr ? static_cast<Failure>(m_control->failure.GetValue()) : Failure::InternalError;
     }
 
     bool ResourceRequest::HasFinished() const noexcept
     {
-        return m_control != nullptr && IsTerminal(Status());
+        return m_control != nullptr && IsTerminal(GetStatus());
     }
 
     bool ResourceRequest::HasLoaded() const noexcept
     {
-        return m_control != nullptr && Status() == State::Loaded;
+        return m_control != nullptr && GetStatus() == State::Loaded;
     }
 
     bool ResourceRequest::HasFailed() const noexcept
     {
-        return m_control != nullptr && (Status() == State::Failed || Status() == State::Cancelled);
+        return m_control != nullptr && (GetStatus() == State::Failed || GetStatus() == State::Cancelled);
     }
 
     bool ResourceRequest::IsValid() const noexcept
@@ -263,7 +260,7 @@ namespace vanguard::resources
 
     ResourceHandle ResourceRequest::Acquire() const noexcept
     {
-        if (m_control == nullptr || Status() != State::Loaded || m_control->owner == nullptr)
+        if (m_control == nullptr || GetStatus() != State::Loaded || m_control->owner == nullptr)
         {
             return {};
         }
@@ -279,8 +276,7 @@ namespace vanguard::resources
         }
     }
 
-    ResourceHandle::ResourceHandle(ResourceRegistry* const registry, const u32 slot, const u32 generation, const ResourceKey key,
-                                   AdoptTag) noexcept
+    ResourceHandle::ResourceHandle(ResourceRegistry* const registry, const u32 slot, const u32 generation, const ResourceKey key, AdoptTag) noexcept
         : m_registry(registry), m_slot(slot), m_generation(generation), m_key(key)
     {
     }
@@ -340,17 +336,17 @@ namespace vanguard::resources
         return m_registry != nullptr ? m_registry->Resolve(m_slot, m_generation) : nullptr;
     }
 
-    ResourcePath ResourceHandle::Path() const noexcept
+    ResourcePath ResourceHandle::GetPath() const noexcept
     {
         return m_key.path;
     }
 
-    ResourceTypeId ResourceHandle::Type() const noexcept
+    ResourceTypeId ResourceHandle::GetType() const noexcept
     {
         return m_key.type;
     }
 
-    u32 ResourceHandle::Generation() const noexcept
+    u32 ResourceHandle::GetGeneration() const noexcept
     {
         return m_generation;
     }
@@ -387,8 +383,7 @@ namespace vanguard::resources
         return WeakResourceHandle(m_registry, m_slot, m_generation, m_key, WeakResourceHandle::AdoptTag{});
     }
 
-    WeakResourceHandle::WeakResourceHandle(ResourceRegistry* const registry, const u32 slot, const u32 generation, const ResourceKey key,
-                                           AdoptTag) noexcept
+    WeakResourceHandle::WeakResourceHandle(ResourceRegistry* const registry, const u32 slot, const u32 generation, const ResourceKey key, AdoptTag) noexcept
         : m_registry(registry), m_slot(slot), m_generation(generation), m_key(key)
     {
     }
@@ -448,17 +443,17 @@ namespace vanguard::resources
         return m_registry != nullptr ? m_registry->LockWeak(m_slot, m_generation, m_key) : ResourceHandle{};
     }
 
-    ResourcePath WeakResourceHandle::Path() const noexcept
+    ResourcePath WeakResourceHandle::GetPath() const noexcept
     {
         return m_key.path;
     }
 
-    ResourceTypeId WeakResourceHandle::Type() const noexcept
+    ResourceTypeId WeakResourceHandle::GetType() const noexcept
     {
         return m_key.type;
     }
 
-    u32 WeakResourceHandle::Generation() const noexcept
+    u32 WeakResourceHandle::GetGeneration() const noexcept
     {
         return m_generation;
     }
@@ -519,8 +514,7 @@ namespace vanguard::resources
         m_impl->lock.Acquire();
         for (RegistryEntry* const entry : m_impl->entries)
         {
-            if (entry->strongHandles != 0 || entry->weakHandles != 0 ||
-                (entry->activeRequest != nullptr && entry->activeRequest->references.GetValue() != 1))
+            if (entry->strongHandles != 0 || entry->weakHandles != 0 || (entry->activeRequest != nullptr && entry->activeRequest->references.GetValue() != 1))
             {
                 m_impl->lock.Release();
                 return false;
@@ -580,9 +574,8 @@ namespace vanguard::resources
         VG_SCOPE_LOCK(m_impl->lock);
         for (const RegistryEntry* const entry : m_impl->entries)
         {
-            if (entry->key.type == type &&
-                (entry->state == State::Queued || entry->state == State::Loading || entry->state == State::Loaded ||
-                 entry->state == State::Reloading || entry->state == State::Evicting))
+            if (entry->key.type == type && (entry->state == State::Queued || entry->state == State::Loading || entry->state == State::Loaded ||
+                                            entry->state == State::Reloading || entry->state == State::Evicting))
             {
                 return false;
             }
@@ -625,7 +618,7 @@ namespace vanguard::resources
 
         u32 slot = 0;
         RegistryEntry* entry = nullptr;
-        if (m_impl->pathToSlot.Find(reference.Path().Id(), slot))
+        if (m_impl->pathToSlot.Find(reference.GetPath().Id(), slot))
         {
             entry = m_impl->entries[slot];
             if (entry->key.type != reference.ExpectedType())
@@ -642,10 +635,10 @@ namespace vanguard::resources
                 m_impl->lock.Release();
                 return MakeFailedRequest(reference, Failure::OutOfMemory);
             }
-            entry->key = reference.Key();
+            entry->key = reference.GetKey();
             slot = m_impl->entries.Size();
             m_impl->entries.PushBack(entry);
-            if (!m_impl->pathToSlot.Insert(reference.Path().Id(), slot).IsSuccessful())
+            if (!m_impl->pathToSlot.Insert(reference.GetPath().Id(), slot).IsSuccessful())
             {
                 m_impl->entries.PopBack();
                 DeleteObject(entry);
@@ -661,8 +654,8 @@ namespace vanguard::resources
             // deferred eviction and coalesce onto the published operation.
             entry->state = State::Loaded;
         }
-        if (entry->activeRequest != nullptr && (entry->state == State::Queued || entry->state == State::Loading ||
-                                                entry->state == State::Loaded || entry->state == State::Reloading))
+        if (entry->activeRequest != nullptr &&
+            (entry->state == State::Queued || entry->state == State::Loading || entry->state == State::Loaded || entry->state == State::Reloading))
         {
             ++m_impl->coalescedRequests;
             request = ResourceRequest(entry->activeRequest);
@@ -737,8 +730,8 @@ namespace vanguard::resources
 
         VG_SCOPE_LOCK(m_impl->lock);
         RegistryEntry* entry = nullptr;
-        if (!IsRequestCurrent(*m_impl, *request.m_control, entry) || entry->state != State::Loading ||
-            resource->Type() != entry->key.type || entry->resource != nullptr)
+        if (!IsRequestCurrent(*m_impl, *request.m_control, entry) || entry->state != State::Loading || resource->GetType() != entry->key.type ||
+            entry->resource != nullptr)
         {
             return false;
         }
@@ -754,8 +747,7 @@ namespace vanguard::resources
 
     bool ResourceRegistry::Fail(const ResourceRequest& request, const Failure failure) noexcept
     {
-        if (m_impl == nullptr || request.m_control == nullptr || request.m_control->owner != this || failure == Failure::None ||
-            failure == Failure::Cancelled)
+        if (m_impl == nullptr || request.m_control == nullptr || request.m_control->owner != this || failure == Failure::None || failure == Failure::Cancelled)
         {
             return false;
         }
@@ -805,13 +797,12 @@ namespace vanguard::resources
 
         VG_SCOPE_LOCK(m_impl->lock);
         u32 slot = 0;
-        if (!m_impl->pathToSlot.Find(reference.Path().Id(), slot))
+        if (!m_impl->pathToSlot.Find(reference.GetPath().Id(), slot))
         {
             return {};
         }
         RegistryEntry* const entry = m_impl->entries[slot];
-        if (!IsObjectAlive(entry->state) || entry->resource == nullptr ||
-            (reference.IsTyped() && reference.ExpectedType() != entry->key.type))
+        if (!IsObjectAlive(entry->state) || entry->resource == nullptr || (reference.IsTyped() && reference.ExpectedType() != entry->key.type))
         {
             return {};
         }

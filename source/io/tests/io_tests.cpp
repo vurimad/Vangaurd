@@ -28,9 +28,8 @@ namespace
         vanguard::io::ShareableIOMemory memory;
     };
 
-    void OnAsyncRead(const vanguard::io::AsyncReadToken& token, const vanguard::io::AsyncResult result,
-                     const vanguard::u32 bytesTransferred, vanguard::io::ShareableIOMemory memory, const vanguard::u32 memoryOffset,
-                     vanguard::io::UniqueBuffer)
+    void OnAsyncRead(const vanguard::io::AsyncReadToken& token, const vanguard::io::AsyncResult result, const vanguard::u32 bytesTransferred,
+                     vanguard::io::ShareableIOMemory memory, const vanguard::u32 memoryOffset, vanguard::io::UniqueBuffer)
     {
         auto* const state = static_cast<AsyncReadResult*>(token.m_userData);
         state->result = result;
@@ -55,7 +54,7 @@ int main()
     Check(io::Initialize(), "I/O initialization");
     Check(io::IsInitialized(), "I/O initialized state");
     Check(io::Initialize(), "I/O idempotent initialization");
-    Check(&io::System() == &io::System(), "stable global I/O system");
+    Check(&io::GetSystem() == &io::GetSystem(), "stable global I/O system");
 
     char absolutePath[io::MaxPathLength] = {};
     const char* const localPath = "vanguard_io_conformance.tmp";
@@ -92,21 +91,21 @@ int main()
         Check(file.Close(), "native reader close");
     }
 
-    Check(io::System().OpenFile("vanguard_io_file_that_does_not_exist.tmp") == io::InvalidFileHandle, "missing async file is rejected");
+    Check(io::GetSystem().OpenFile("vanguard_io_file_that_does_not_exist.tmp") == io::InvalidFileHandle, "missing async file is rejected");
 
     io::AsyncIOStats statsBefore;
-    io::System().GetStats(statsBefore);
+    io::GetSystem().GetStats(statsBefore);
 
-    const io::FileHandle asyncFile = io::System().OpenFile(absolutePath);
+    const io::FileHandle asyncFile = io::GetSystem().OpenFile(absolutePath);
     Check(asyncFile != io::InvalidFileHandle, "async file open");
     if (asyncFile != io::InvalidFileHandle)
     {
-        Check(io::System().GetFileSize(asyncFile) == payloadSize, "async file size");
-        Check(std::strcmp(io::System().GetFileName(asyncFile), absolutePath) == 0, "async file name");
-        Check(io::System().GetAsyncFlags(asyncFile) == io::eAsyncFlag_None, "async file flags");
+        Check(io::GetSystem().GetFileSize(asyncFile) == payloadSize, "async file size");
+        Check(std::strcmp(io::GetSystem().GetFileName(asyncFile), absolutePath) == 0, "async file name");
+        Check(io::GetSystem().GetAsyncFlags(asyncFile) == io::eAsyncFlag_None, "async file flags");
 
-        io::System().AddRefFile(asyncFile);
-        io::System().ReleaseFile(asyncFile);
+        io::GetSystem().AddRefFile(asyncFile);
+        io::GetSystem().ReleaseFile(asyncFile);
 
         char asyncBuffer[payloadSize] = {};
         AsyncReadResult asyncResult;
@@ -119,7 +118,7 @@ int main()
         token.m_numberOfBytesToRead = payloadSize;
         token.m_requestSource = io::RequestSource::Tools;
 
-        io::System().BeginRead(asyncFile, token, io::eAsyncPriority_GAME);
+        io::GetSystem().BeginRead(asyncFile, token, io::eAsyncPriority_GAME);
         Check(asyncResult.completed.TryWait(10000), "async read completion");
         Check(asyncResult.result == io::eAsyncResult_Success, "async read result");
         Check(asyncResult.bytesTransferred == payloadSize, "async read byte count");
@@ -134,7 +133,7 @@ int main()
         ownedToken.m_numberOfBytesToRead = payloadSize;
         ownedToken.m_requestSource = io::RequestSource::Tools;
 
-        io::System().BeginRead(asyncFile, ownedToken, io::eAsyncPriority_UI);
+        io::GetSystem().BeginRead(asyncFile, ownedToken, io::eAsyncPriority_UI);
         Check(ownedResult.completed.TryWait(10000), "allocator-backed async read completion");
         Check(ownedResult.result == io::eAsyncResult_Success, "allocator-backed async read result");
         Check(ownedResult.bytesTransferred == payloadSize && ownedResult.memory.GetSize() >= payloadSize, "allocator-backed async memory");
@@ -160,7 +159,7 @@ int main()
                                                : index % 4 == 1 ? io::eAsyncPriority_UI
                                                : index % 4 == 2 ? io::eAsyncPriority_AUDIO
                                                                 : io::eAsyncPriority_FULLSCREENVIDEO;
-            io::System().BeginRead(asyncFile, stressToken, priority);
+            io::GetSystem().BeginRead(asyncFile, stressToken, priority);
         }
 
         for (vanguard::u32 index = 0; index < stressReadCount; ++index)
@@ -171,11 +170,11 @@ int main()
                   "queued async stress payload");
         }
 
-        io::System().ReleaseFile(asyncFile);
+        io::GetSystem().ReleaseFile(asyncFile);
     }
 
     io::AsyncIOStats statsAfter;
-    io::System().GetStats(statsAfter);
+    io::GetSystem().GetStats(statsAfter);
     Check(statsAfter.bytesReadTotal >= statsBefore.bytesReadTotal + payloadSize * (2 + 256), "async byte telemetry");
 
     io::IOContext context;
@@ -193,9 +192,9 @@ int main()
 
     io::AsyncIO::SortFlags sortFlags;
     sortFlags.loadingMode = true;
-    io::System().SortIOQueues(sortFlags);
-    io::System().ADVANCED_BeginBulkReadThreadLocal();
-    io::System().ADVANCED_FinishBulkReadThreadLocal();
+    io::GetSystem().SortIOQueues(sortFlags);
+    io::GetSystem().ADVANCED_BeginBulkReadThreadLocal();
+    io::GetSystem().ADVANCED_FinishBulkReadThreadLocal();
 
     io::Shutdown();
     Check(!io::IsInitialized(), "I/O shutdown state");

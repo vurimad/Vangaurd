@@ -29,7 +29,9 @@ namespace vanguard::meshes
         InvalidBuffer,
         InvalidPage,
         InvalidMaterial,
+        DependencyMismatch,
         BufferTooSmall,
+        Cancelled,
         IoFailure
     };
 
@@ -321,8 +323,7 @@ namespace vanguard::meshes
         RequiredForLowestLod = 1u << 2u
     };
 
-    [[nodiscard]] constexpr StorageSegmentFlags operator|(const StorageSegmentFlags left,
-                                                           const StorageSegmentFlags right) noexcept
+    [[nodiscard]] constexpr StorageSegmentFlags operator|(const StorageSegmentFlags left, const StorageSegmentFlags right) noexcept
     {
         return static_cast<StorageSegmentFlags>(static_cast<u8>(left) | static_cast<u8>(right));
     }
@@ -352,27 +353,29 @@ namespace vanguard::meshes
 
         MeshFile(const MeshFile&) = delete;
         MeshFile& operator=(const MeshFile&) = delete;
+        MeshFile(MeshFile&& other) noexcept;
+        MeshFile& operator=(MeshFile&& other) noexcept;
 
         [[nodiscard]] Result Open(filesystem::IFile& reader, const ReadLimits& limits = {}) noexcept;
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] MeshKind Kind() const noexcept;
-        [[nodiscard]] u64 Name() const noexcept;
-        [[nodiscard]] const Bounds& MeshBounds() const noexcept;
-        [[nodiscard]] const PositionQuantization& Quantization() const noexcept;
-        [[nodiscard]] const crypto::Digest256& SourceFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
-        [[nodiscard]] resources::ResourceReference Skeleton() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const BufferRecord> Buffers() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const PageRecord> Pages() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const VertexLayoutRecord> VertexLayouts() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const VertexStream> VertexStreams() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const MaterialSlot> MaterialSlots() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const LodRecord> Lods() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const SubmeshRecord> Submeshes() const noexcept;
-        [[nodiscard]] u64 GeometryOffset() const noexcept;
-        [[nodiscard]] u64 GeometrySize() const noexcept;
+        [[nodiscard]] MeshKind GetKind() const noexcept;
+        [[nodiscard]] u64 GetName() const noexcept;
+        [[nodiscard]] const Bounds& GetMeshBounds() const noexcept;
+        [[nodiscard]] const PositionQuantization& GetQuantization() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetSourceFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] resources::ResourceReference GetSkeleton() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const BufferRecord> GetBuffers() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const PageRecord> GetPages() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const VertexLayoutRecord> GetVertexLayouts() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const VertexStream> GetVertexStreams() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const MaterialSlot> GetMaterialSlots() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const LodRecord> GetLods() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const SubmeshRecord> GetSubmeshes() const noexcept;
+        [[nodiscard]] u64 GetGeometryOffset() const noexcept;
+        [[nodiscard]] u64 GetGeometrySize() const noexcept;
 
         [[nodiscard]] Result ReadPage(filesystem::IFile& reader, u32 pageIndex, void* destination, usize capacity) const noexcept;
 
@@ -397,11 +400,7 @@ namespace vanguard::meshes
     };
 
     [[nodiscard]] Result WriteMesh(filesystem::IFile& writer, const BuildDescription& description) noexcept;
-    [[nodiscard]] u32 VertexFormatByteSize(VertexFormat format) noexcept;
-    [[nodiscard]] Result BuildStorageSegments(const MeshFile& mesh, u64 documentSize,
-                                              containers::DynamicArray<StorageSegment>& segments,
-                                              u32 maximumSegments = 65536) noexcept;
-    [[nodiscard]] Result CollectLodPages(const MeshFile& mesh, u16 lod,
-                                         containers::DynamicArray<u32>& pages,
-                                         u32 maximumPages = 65536) noexcept;
+    [[nodiscard]] u32 GetVertexFormatByteSize(VertexFormat format) noexcept;
+    [[nodiscard]] Result BuildStorageSegments(const MeshFile& mesh, u64 documentSize, containers::DynamicArray<StorageSegment>& segments, u32 maximumSegments = 65536) noexcept;
+    [[nodiscard]] Result CollectLodPages(const MeshFile& mesh, u16 lod, containers::DynamicArray<u32>& pages, u32 maximumPages = 65536) noexcept;
 } // namespace vanguard::meshes

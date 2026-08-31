@@ -26,14 +26,14 @@ namespace vanguard::memory
         return backend::IsAllocatablePool(pool);
     }
 
-    PoolId ParentPool(const PoolId pool) noexcept
+    PoolId GetParentPool(const PoolId pool) noexcept
     {
-        return backend::ParentPool(pool);
+        return backend::GetParentPool(pool);
     }
 
-    const char* PoolName(const PoolId pool) noexcept
+    const char* GetPoolName(const PoolId pool) noexcept
     {
-        return backend::PoolName(pool);
+        return backend::GetPoolName(pool);
     }
 
     MemoryBlock Allocate(const usize size, const usize alignment) noexcept
@@ -80,10 +80,10 @@ namespace vanguard::memory
         }
 
         snapshot.id = pool;
-        snapshot.parent = ParentPool(pool);
-        snapshot.handle = backend::PoolHandleValue(pool);
-        snapshot.parentHandle = backend::PoolHandleValue(snapshot.parent);
-        snapshot.name = PoolName(pool);
+        snapshot.parent = GetParentPool(pool);
+        snapshot.handle = backend::GetPoolHandleValue(pool);
+        snapshot.parentHandle = backend::GetPoolHandleValue(snapshot.parent);
+        snapshot.name = GetPoolName(pool);
         snapshot.allocatable = IsAllocatablePool(pool);
         snapshot.vanguardOwned = true;
         return GetPoolMetrics(pool, snapshot.metrics);

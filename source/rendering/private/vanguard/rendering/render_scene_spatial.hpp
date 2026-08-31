@@ -33,17 +33,6 @@ namespace vanguard::rendering::spatial
         bool movedProxyRelocated = false;
     };
 
-    struct CellSnapshot
-    {
-        i32 x = 0;
-        i32 y = 0;
-        i32 z = 0;
-        RenderProxyBounds aggregate;
-        u32 firstProxy = 0;
-        u32 proxyCount = 0;
-        bool alwaysTraverse = false;
-    };
-
     struct Cell
     {
         Cell() noexcept;
@@ -52,6 +41,7 @@ namespace vanguard::rendering::spatial
         i32 y = 0;
         i32 z = 0;
         i32 nextInBucket = -1;
+        u32 activeIndex = ~u32{0};
         bool allocated = false;
         bool occupied = false;
         bool dirty = false;
@@ -68,6 +58,8 @@ namespace vanguard::rendering::spatial
         containers::DynamicArray<Cell> cells;
         containers::DynamicArray<i32> buckets;
         containers::DynamicArray<u32> freeCells;
+        containers::DynamicArray<u32> activeCellIndices;
+        containers::DynamicArray<u32> dirtyCellIndices;
         containers::DynamicArray<RenderProxyHandle> unindexedProxies;
     };
 
@@ -78,53 +70,51 @@ namespace vanguard::rendering::spatial
         Rejected
     };
 
-    using ResolveProxyBoundsFunction = bool (*)(void* userData, RenderProxyHandle proxy,
-                                                RenderProxyBounds& bounds) noexcept;
-    using ValidateProxyEntryFunction = bool (*)(void* userData, RenderProxyHandle proxy,
-                                                EntryHandle& entry, RenderProxyBounds& bounds) noexcept;
+    using ResolveProxyBoundsFunction = bool (*)(void* userData, RenderProxyHandle proxy, RenderProxyBounds& bounds) noexcept;
+    using ValidateProxyEntryFunction = bool (*)(void* userData, RenderProxyHandle proxy, EntryHandle& entry, RenderProxyBounds& bounds) noexcept;
+    struct VisibilityProxyReadView
+    {
+        const RenderProxyBounds* bounds = nullptr;
+        const RenderProxyVisibilityFlags* visibility = nullptr;
+        const u64* layerMask = nullptr;
+        const u32* visibilityMask = nullptr;
+        const RenderProxyPayloadKind* payloadKind = nullptr;
+        const GpuInstanceIndex* gpuInstanceIndex = nullptr;
 
-    void Reset(WriteIndex& index, const SpatialWriteIndexConfig& config,
-               CounterDelta* delta = nullptr) noexcept;
-    [[nodiscard]] bool BoundsInFiniteExtent(const WriteIndex& index,
-                                            const RenderProxyBounds& bounds) noexcept;
-    [[nodiscard]] bool BoundsAccepted(const WriteIndex& index,
-                                      const RenderProxyBounds& bounds) noexcept;
-    [[nodiscard]] InsertResult Insert(WriteIndex& index, RenderProxyHandle proxy,
-                                      const RenderProxyBounds& bounds,
-                                      RenderProxySpatialMode mode,
-                                      EntryHandle& entry,
-                                      CounterDelta* delta = nullptr) noexcept;
-    void Remove(WriteIndex& index, EntryHandle& entry, RemoveResult* result = nullptr,
-                CounterDelta* delta = nullptr) noexcept;
-    void Move(WriteIndex& index, RenderProxyHandle proxy, const RenderProxyBounds& oldBounds,
-              const RenderProxyBounds& newBounds, RenderProxySpatialMode mode,
-              EntryHandle& entry, RemoveResult* result = nullptr,
-              CounterDelta* delta = nullptr) noexcept;
-    void Repair(WriteIndex& index, void* userData, ResolveProxyBoundsFunction resolveBounds,
-                CounterDelta* delta = nullptr) noexcept;
-    [[nodiscard]] bool Validate(const WriteIndex& index, void* userData,
-                                ValidateProxyEntryFunction validateProxy,
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return bounds != nullptr && visibility != nullptr && layerMask != nullptr && visibilityMask != nullptr && payloadKind != nullptr;
+        }
+    };
+
+    using ResolveVisibilityProxyFunction = bool (*)(void* userData, RenderProxyHandle proxy, VisibilityProxyReadView& view) noexcept;
+
+    void Reset(WriteIndex& index, const SpatialWriteIndexConfig& config, CounterDelta* delta = nullptr) noexcept;
+    [[nodiscard]] bool BoundsInFiniteExtent(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept;
+    [[nodiscard]] bool BoundsAccepted(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept;
+    [[nodiscard]] InsertResult Insert(WriteIndex& index, RenderProxyHandle proxy, const RenderProxyBounds& bounds, RenderProxySpatialMode mode,
+                                      EntryHandle& entry, CounterDelta* delta = nullptr) noexcept;
+    void Remove(WriteIndex& index, EntryHandle& entry, RemoveResult* result = nullptr, CounterDelta* delta = nullptr) noexcept;
+    void Move(WriteIndex& index, RenderProxyHandle proxy, const RenderProxyBounds& oldBounds, const RenderProxyBounds& newBounds, RenderProxySpatialMode mode,
+              EntryHandle& entry, RemoveResult* result = nullptr, CounterDelta* delta = nullptr) noexcept;
+    /// Returns true only when the object must enter the serialized structural-move lane.
+    /// A false result means the live proxy bounds remain covered by the current cell aggregate.
+    [[nodiscard]] bool QuickConditionalMove(const WriteIndex& index, const EntryHandle& entry, const RenderProxyBounds& newBounds) noexcept;
+    void Repair(WriteIndex& index, void* userData, ResolveProxyBoundsFunction resolveBounds, CounterDelta* delta = nullptr) noexcept;
+    [[nodiscard]] bool Validate(const WriteIndex& index, void* userData, ValidateProxyEntryFunction validateProxy,
                                 SpatialWriteIndexStats* stats = nullptr) noexcept;
-    void PublishCells(const WriteIndex& index, const containers::DynamicArray<u32>& proxyLookup,
-                      const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-                      containers::DynamicArray<CellSnapshot>& cells,
-                      containers::DynamicArray<RenderProxyHandle>& cellProxies) noexcept;
-    void BuildBatches(u32 cellCount, u32 targetCellsPerBatch,
-                      containers::DynamicArray<VisibilityQueryBatch>& batches,
-                      VisibilityQueryPlan& plan) noexcept;
-    void Collect(const VisibilityQueryRequest& request,
-                 const containers::DynamicArray<CellSnapshot>& cells,
-                 const containers::DynamicArray<RenderProxyHandle>& cellProxies,
-                 const containers::DynamicArray<u32>& proxyLookup,
-                 const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-                 containers::DynamicArray<RenderProxyHandle>& proxies,
-                 VisibilityQueryResult& result) noexcept;
-    void CollectRange(const VisibilityQueryRequest& request,
-                      const containers::DynamicArray<CellSnapshot>& cells,
-                      const containers::DynamicArray<RenderProxyHandle>& cellProxies,
-                      const containers::DynamicArray<u32>& proxyLookup,
-                      const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-                      VisibilityQueryBatch batch,
-                      containers::DynamicArray<RenderProxyHandle>& proxies,
-                      VisibilityQueryResult& result) noexcept;
+    void BuildBatches(u32 cellCount, u32 targetCellsPerBatch, containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan) noexcept;
+    void BuildLiveBatches(const WriteIndex& index, RenderSceneHandle scene, u64 mutationEpoch, u32 targetCellsPerBatch,
+                          containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan) noexcept;
+    [[nodiscard]] bool BuildGpuCandidateBatches(const WriteIndex& index, RenderSceneHandle scene, u64 mutationEpoch, u64 planSerial,
+                                                u32 targetCandidatesPerBatch, containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
+                                                RenderSceneGpuCandidatePlan& plan) noexcept;
+    void CollectLive(const WriteIndex& index, const VisibilityQueryRequest& request, void* userData, ResolveVisibilityProxyFunction resolveProxy,
+                     containers::DynamicArray<RenderProxyHandle>& proxies, VisibilityQueryResult& result) noexcept;
+    void CollectLiveRange(const WriteIndex& index, const VisibilityQueryRequest& request, const VisibilityQueryBatch& batch, void* userData,
+                          ResolveVisibilityProxyFunction resolveProxy, containers::DynamicArray<RenderProxyHandle>& proxies,
+                          VisibilityQueryResult& result) noexcept;
+    void WriteGpuCandidateRange(const WriteIndex& index, const VisibilityQueryRequest& request, const RenderSceneGpuCandidateBatch& batch, void* userData,
+                                ResolveVisibilityProxyFunction resolveProxy, GpuInstanceIndex* destination, GpuVisibilityCandidateRange& range,
+                                RenderSceneGpuCandidateBatchResult& result) noexcept;
 } // namespace vanguard::rendering::spatial

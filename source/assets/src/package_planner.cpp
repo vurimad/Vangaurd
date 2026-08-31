@@ -11,24 +11,46 @@ namespace
     constexpr u8 ManifestEncoding = 1;
     constexpr u32 KnownManifestFlags = static_cast<u32>(PackageManifestFlags::IncludeGeneratedDependencies) |
                                        static_cast<u32>(PackageManifestFlags::IncludeOptionalDependencies) |
-                                       static_cast<u32>(PackageManifestFlags::IncludeEditorArtifacts) |
-                                       static_cast<u32>(PackageManifestFlags::HasDebugPaths);
+                                       static_cast<u32>(PackageManifestFlags::IncludeEditorArtifacts) | static_cast<u32>(PackageManifestFlags::HasDebugPaths);
     constexpr u8 KnownRootFlags = static_cast<u8>(PackageRootFlags::Startup) | static_cast<u8>(PackageRootFlags::Optional);
+
+    struct PlannedResourceIdentity
+    {
+        resources::ResourceId path = resources::InvalidResourceId;
+        resources::ResourceTypeId type = resources::InvalidResourceTypeId;
+
+        [[nodiscard]] u32 CalcHash() const noexcept
+        {
+            u64 value = path;
+            value ^= static_cast<u64>(type) + 0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
+            value ^= value >> 33u;
+            value *= 0xff51afd7ed558ccdull;
+            value ^= value >> 33u;
+            return static_cast<u32>(value ^ (value >> 32u));
+        }
+
+        [[nodiscard]] friend constexpr bool operator==(const PlannedResourceIdentity&, const PlannedResourceIdentity&) noexcept = default;
+    };
+
+    [[nodiscard]] PlannedResourceIdentity Identity(const resources::ResourceReference resource) noexcept
+    {
+        return {resource.GetPath().Id(), resource.ExpectedType()};
+    }
 
     [[nodiscard]] bool RootLess(const PackageRoot& left, const PackageRoot& right) noexcept
     {
-        if (left.resource.Path() != right.resource.Path())
+        if (left.resource.GetPath() != right.resource.GetPath())
         {
-            return left.resource.Path() < right.resource.Path();
+            return left.resource.GetPath() < right.resource.GetPath();
         }
         return left.resource.ExpectedType() < right.resource.ExpectedType();
     }
 
     [[nodiscard]] bool ReferenceLess(const resources::ResourceReference left, const resources::ResourceReference right) noexcept
     {
-        if (left.Path() != right.Path())
+        if (left.GetPath() != right.GetPath())
         {
-            return left.Path() < right.Path();
+            return left.GetPath() < right.GetPath();
         }
         return left.ExpectedType() < right.ExpectedType();
     }
@@ -48,8 +70,7 @@ namespace
         }
     }
 
-    [[nodiscard]] packages::ResourceFlags RootResourceFlags(const PackageManifest& manifest,
-                                                            const resources::ResourceReference resource) noexcept
+    [[nodiscard]] packages::ResourceFlags RootResourceFlags(const PackageManifest& manifest, const resources::ResourceReference resource) noexcept
     {
         packages::ResourceFlags flags = packages::ResourceFlags::None;
         for (const PackageRoot& root : manifest.roots)
@@ -82,8 +103,8 @@ namespace
         return nullptr;
     }
 
-    [[nodiscard]] bool AddDependency(PlannedPackageResource& resource, const PlannedPackageDependency& dependency,
-                                     const PackagePlanLimits& limits, u32& dependencyCount) noexcept
+    [[nodiscard]] bool AddDependency(PlannedPackageResource& resource, const PlannedPackageDependency& dependency, const PackagePlanLimits& limits,
+                                     u32& dependencyCount) noexcept
     {
         for (const PlannedPackageDependency& existing : resource.dependencies)
         {
@@ -113,16 +134,14 @@ namespace
 
     void HashU32(crypto::Sha256Builder& hash, const u32 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u)};
+        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
     void HashU64(crypto::Sha256Builder& hash, const u64 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                            static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                            static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
@@ -134,10 +153,11 @@ namespace
         HashU32(hash, plan.resources.Size());
         for (const PlannedPackageResource& resource : plan.resources)
         {
-            HashU64(hash, resource.resource.Path().Id());
+            HashU64(hash, resource.resource.GetPath().Id());
             HashU32(hash, resource.resource.ExpectedType());
             HashU32(hash, static_cast<u32>(resource.flags));
-            static_cast<void>(hash.Update(resource.contentFingerprint.bytes, BuildFingerprint::ByteCount));
+            static_cast<void>(hash.Update(resource.origin.build.bytes, BuildFingerprint::ByteCount));
+            static_cast<void>(hash.Update(resource.origin.content.bytes, BuildFingerprint::ByteCount));
             HashU32(hash, resource.segments.Size());
             for (const PlannedPackageSegment& segment : resource.segments)
             {
@@ -151,7 +171,7 @@ namespace
             HashU32(hash, resource.dependencies.Size());
             for (const PlannedPackageDependency& dependency : resource.dependencies)
             {
-                HashU64(hash, dependency.resource.Path().Id());
+                HashU64(hash, dependency.resource.GetPath().Id());
                 HashU32(hash, dependency.resource.ExpectedType());
                 HashU8(hash, static_cast<u8>(dependency.kind));
             }
@@ -162,9 +182,8 @@ namespace
             return 0;
         }
         return static_cast<u64>(digest.bytes[0]) | (static_cast<u64>(digest.bytes[1]) << 8u) | (static_cast<u64>(digest.bytes[2]) << 16u) |
-               (static_cast<u64>(digest.bytes[3]) << 24u) | (static_cast<u64>(digest.bytes[4]) << 32u) |
-               (static_cast<u64>(digest.bytes[5]) << 40u) | (static_cast<u64>(digest.bytes[6]) << 48u) |
-               (static_cast<u64>(digest.bytes[7]) << 56u);
+               (static_cast<u64>(digest.bytes[3]) << 24u) | (static_cast<u64>(digest.bytes[4]) << 32u) | (static_cast<u64>(digest.bytes[5]) << 40u) |
+               (static_cast<u64>(digest.bytes[6]) << 48u) | (static_cast<u64>(digest.bytes[7]) << 56u);
     }
 } // namespace
 
@@ -234,7 +253,7 @@ namespace vanguard::assets
             {
                 return PackagingResult::DuplicateRoot;
             }
-            if (existing.resource.Path() == root.resource.Path())
+            if (existing.resource.GetPath() == root.resource.GetPath())
             {
                 return PackagingResult::InvalidArgument;
             }
@@ -255,9 +274,8 @@ namespace vanguard::assets
 
     bool PackageManifest::IsValid(const PackageManifestLimits& limits) const noexcept
     {
-        if (version != CurrentVersion || packageId == 0 || target >= TargetPlatform::Count ||
-            static_cast<u8>(codec) > static_cast<u8>(packages::Codec::Lz4) || dataAlignmentLog2 > 20 || roots.Empty() ||
-            roots.Size() > limits.maximumRoots || (static_cast<u32>(flags) & ~KnownManifestFlags) != 0)
+        if (version != CurrentVersion || packageId == 0 || target >= TargetPlatform::Count || static_cast<u8>(codec) > static_cast<u8>(packages::Codec::Lz4) ||
+            dataAlignmentLog2 > 20 || roots.Empty() || roots.Size() > limits.maximumRoots || (static_cast<u32>(flags) & ~KnownManifestFlags) != 0)
         {
             return false;
         }
@@ -274,8 +292,7 @@ namespace vanguard::assets
         return payloadSize <= limits.maximumBytes && HeaderWireSize <= limits.maximumBytes - payloadSize;
     }
 
-    PackagingResult WritePackageManifest(filesystem::IFile& file, const PackageManifest& manifest,
-                                         const PackageManifestLimits& limits) noexcept
+    PackagingResult WritePackageManifest(filesystem::IFile& file, const PackageManifest& manifest, const PackageManifestLimits& limits) noexcept
     {
         if (!file.IsWriter() || file.GetOffset() != 0 || file.GetSize() != 0 || !manifest.IsValid(limits))
         {
@@ -286,22 +303,21 @@ namespace vanguard::assets
         bytes.Reserve(static_cast<u32>(PackageManifest::HeaderWireSize + payloadSize));
         filesystem::MemoryFileWriter memoryFile(bytes);
         serialization::BinaryWriter writer(memoryFile);
-        const bool headerWritten = writer.WriteU32(PackageManifestMagic) && writer.WriteU8(ManifestLittleEndian) &&
-                                   writer.WriteU8(ManifestEncoding) && writer.WriteU16(PackageManifest::HeaderWireSize) &&
-                                   writer.WriteU16(manifest.version.major) && writer.WriteU16(manifest.version.minor) &&
-                                   writer.WriteU32(static_cast<u32>(manifest.flags)) && writer.WriteU8(static_cast<u8>(manifest.target)) &&
-                                   writer.WriteU8(static_cast<u8>(manifest.codec)) && writer.WriteU8(manifest.dataAlignmentLog2) &&
-                                   writer.WriteU8(0) && writer.WriteU64(manifest.packageId) && writer.WriteU32(manifest.roots.Size()) &&
-                                   writer.WriteU16(PackageManifest::RootWireSize) && writer.WriteU16(0) && writer.WriteU64(payloadSize) &&
-                                   writer.WriteU64(0) && writer.WriteU32(0) && writer.WriteU64(0);
+        const bool headerWritten = writer.WriteU32(PackageManifestMagic) && writer.WriteU8(ManifestLittleEndian) && writer.WriteU8(ManifestEncoding) &&
+                                   writer.WriteU16(PackageManifest::HeaderWireSize) && writer.WriteU16(manifest.version.major) &&
+                                   writer.WriteU16(manifest.version.minor) && writer.WriteU32(static_cast<u32>(manifest.flags)) &&
+                                   writer.WriteU8(static_cast<u8>(manifest.target)) && writer.WriteU8(static_cast<u8>(manifest.codec)) &&
+                                   writer.WriteU8(manifest.dataAlignmentLog2) && writer.WriteU8(0) && writer.WriteU64(manifest.packageId) &&
+                                   writer.WriteU32(manifest.roots.Size()) && writer.WriteU16(PackageManifest::RootWireSize) && writer.WriteU16(0) &&
+                                   writer.WriteU64(payloadSize) && writer.WriteU64(0) && writer.WriteU32(0) && writer.WriteU64(0);
         if (!headerWritten || writer.Position() != PackageManifest::HeaderWireSize)
         {
             return PackagingResult::OutOfMemory;
         }
         for (const PackageRoot& root : manifest.roots)
         {
-            if (!writer.WriteU64(root.resource.Path().Id()) || !writer.WriteU32(root.resource.ExpectedType()) ||
-                !writer.WriteU8(static_cast<u8>(root.flags)) || !writer.WriteU8(0) || !writer.WriteU16(0))
+            if (!writer.WriteU64(root.resource.GetPath().Id()) || !writer.WriteU32(root.resource.ExpectedType()) || !writer.WriteU8(static_cast<u8>(root.flags)) ||
+                !writer.WriteU8(0) || !writer.WriteU16(0))
             {
                 return PackagingResult::OutOfMemory;
             }
@@ -322,8 +338,8 @@ namespace vanguard::assets
 
     PackagingResult ReadPackageManifest(filesystem::IFile& file, PackageManifest& manifest, const PackageManifestLimits& limits) noexcept
     {
-        if (!file.IsReader() || file.GetOffset() != 0 || file.GetSize() < PackageManifest::HeaderWireSize ||
-            file.GetSize() > limits.maximumBytes || file.GetSize() > static_cast<u64>(0xffffffffu))
+        if (!file.IsReader() || file.GetOffset() != 0 || file.GetSize() < PackageManifest::HeaderWireSize || file.GetSize() > limits.maximumBytes ||
+            file.GetSize() > static_cast<u64>(0xffffffffu))
         {
             return PackagingResult::InvalidArgument;
         }
@@ -358,10 +374,10 @@ namespace vanguard::assets
         u32 headerCrc = 0;
         u64 reserved64 = 0;
         if (!reader.ReadU32(magic) || !reader.ReadU8(byteOrder) || !reader.ReadU8(encoding) || !reader.ReadU16(headerSize) ||
-            !reader.ReadU16(decoded.version.major) || !reader.ReadU16(decoded.version.minor) || !reader.ReadU32(flags) ||
-            !reader.ReadU8(target) || !reader.ReadU8(codec) || !reader.ReadU8(alignment) || !reader.ReadU8(reserved8) ||
-            !reader.ReadU64(decoded.packageId) || !reader.ReadU32(rootCount) || !reader.ReadU16(rootSize) || !reader.ReadU16(reserved16) ||
-            !reader.ReadU64(payloadSize) || !reader.ReadU64(payloadCrc) || !reader.ReadU32(headerCrc) || !reader.ReadU64(reserved64))
+            !reader.ReadU16(decoded.version.major) || !reader.ReadU16(decoded.version.minor) || !reader.ReadU32(flags) || !reader.ReadU8(target) ||
+            !reader.ReadU8(codec) || !reader.ReadU8(alignment) || !reader.ReadU8(reserved8) || !reader.ReadU64(decoded.packageId) ||
+            !reader.ReadU32(rootCount) || !reader.ReadU16(rootSize) || !reader.ReadU16(reserved16) || !reader.ReadU64(payloadSize) ||
+            !reader.ReadU64(payloadCrc) || !reader.ReadU32(headerCrc) || !reader.ReadU64(reserved64))
         {
             return PackagingResult::IoFailure;
         }
@@ -375,9 +391,9 @@ namespace vanguard::assets
         }
         const u64 expectedPayload = static_cast<u64>(rootCount) * PackageManifest::RootWireSize;
         if (byteOrder != ManifestLittleEndian || encoding != ManifestEncoding || headerSize != PackageManifest::HeaderWireSize ||
-            rootSize != PackageManifest::RootWireSize || rootCount == 0 || rootCount > limits.maximumRoots ||
-            payloadSize != expectedPayload || PackageManifest::HeaderWireSize + payloadSize != bytes.Size() || reserved8 != 0 ||
-            reserved16 != 0 || reserved64 != 0 || headerCrc != serialization::Crc32(bytes.TypedData(), 52) ||
+            rootSize != PackageManifest::RootWireSize || rootCount == 0 || rootCount > limits.maximumRoots || payloadSize != expectedPayload ||
+            PackageManifest::HeaderWireSize + payloadSize != bytes.Size() || reserved8 != 0 || reserved16 != 0 || reserved64 != 0 ||
+            headerCrc != serialization::Crc32(bytes.TypedData(), 52) ||
             payloadCrc != serialization::Crc64(bytes.TypedData() + PackageManifest::HeaderWireSize, static_cast<usize>(payloadSize)))
         {
             return PackagingResult::CorruptManifest;
@@ -395,13 +411,12 @@ namespace vanguard::assets
             u8 rootFlags = 0;
             u8 rootReserved8 = 0;
             u16 rootReserved16 = 0;
-            if (!reader.ReadU64(id) || !reader.ReadU32(type) || !reader.ReadU8(rootFlags) || !reader.ReadU8(rootReserved8) ||
-                !reader.ReadU16(rootReserved16) || rootReserved8 != 0 || rootReserved16 != 0)
+            if (!reader.ReadU64(id) || !reader.ReadU32(type) || !reader.ReadU8(rootFlags) || !reader.ReadU8(rootReserved8) || !reader.ReadU16(rootReserved16) ||
+                rootReserved8 != 0 || rootReserved16 != 0)
             {
                 return PackagingResult::CorruptManifest;
             }
-            const PackageRoot root{resources::ResourceReference(resources::ResourcePath::FromId(id), type),
-                                   static_cast<PackageRootFlags>(rootFlags)};
+            const PackageRoot root{resources::ResourceReference(resources::ResourcePath::FromId(id), type), static_cast<PackageRootFlags>(rootFlags)};
             if (hasPreviousRoot && !RootLess(previousRoot, root))
             {
                 return PackagingResult::CorruptManifest;
@@ -440,7 +455,19 @@ namespace vanguard::assets
 
     bool PackageBuildPlan::IsPrepared() const noexcept
     {
-        return packageId != 0 && buildId != 0 && !resources.Empty() && options.packageId == packageId && options.buildId == buildId;
+        if (packageId == 0 || buildId == 0 || resources.Empty() || options.packageId != packageId || options.buildId != buildId)
+        {
+            return false;
+        }
+        for (const PlannedPackageResource& resource : resources)
+        {
+            if (!resource.resource.IsValid() || !resource.resource.IsTyped() || !resource.origin.IsValid() || resource.origin.content.IsEmpty() ||
+                resource.segments.Empty())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     PackagingResult PackagePlanner::Prepare(const PackageManifest& manifest, const DependencyIndex& index, PackageBuildPlan& plan,
@@ -460,9 +487,10 @@ namespace vanguard::assets
 
         containers::DynamicArray<PendingResource> pending(memory::pools::Assets::GetInstance());
         containers::HashMap<resources::ResourceId, u8> queued(memory::pools::Assets::GetInstance());
+        containers::HashMap<PlannedResourceIdentity, u8> artifactAudiences(memory::pools::Assets::GetInstance());
         for (const PackageRoot& root : manifest.roots)
         {
-            if (!queued.Insert(root.resource.Path().Id(), 1).IsSuccessful())
+            if (!queued.Insert(root.resource.GetPath().Id(), 1).IsSuccessful())
             {
                 return PackagingResult::OutOfMemory;
             }
@@ -514,9 +542,8 @@ namespace vanguard::assets
                 {
                     continue;
                 }
-                const resources::DependencyKind kind = dependency.requirement == DependencyRequirement::Required
-                                                           ? resources::DependencyKind::Required
-                                                           : resources::DependencyKind::Optional;
+                const resources::DependencyKind kind =
+                    dependency.requirement == DependencyRequirement::Required ? resources::DependencyKind::Required : resources::DependencyKind::Optional;
                 const u32 previousRuntimeDependencies = runtimeDependencies.Size();
                 runtimeDependencies.PushBack({dependency.identity, kind});
                 if (runtimeDependencies.Size() != previousRuntimeDependencies + 1u)
@@ -524,13 +551,13 @@ namespace vanguard::assets
                     plan.Clear();
                     return PackagingResult::OutOfMemory;
                 }
-                const bool includeDependency = HasFlag(manifest.flags, PackageManifestFlags::IncludeGeneratedDependencies) &&
-                                               (dependency.requirement == DependencyRequirement::Required ||
-                                                HasFlag(manifest.flags, PackageManifestFlags::IncludeOptionalDependencies));
+                const bool includeDependency =
+                    HasFlag(manifest.flags, PackageManifestFlags::IncludeGeneratedDependencies) &&
+                    (dependency.requirement == DependencyRequirement::Required || HasFlag(manifest.flags, PackageManifestFlags::IncludeOptionalDependencies));
                 u8 alreadyQueued = 0;
-                if (includeDependency && !queued.Find(dependency.identity.Path().Id(), alreadyQueued))
+                if (includeDependency && !queued.Find(dependency.identity.GetPath().Id(), alreadyQueued))
                 {
-                    if (pending.Size() >= limits.maximumResources || !queued.Insert(dependency.identity.Path().Id(), 1).IsSuccessful())
+                    if (pending.Size() >= limits.maximumResources || !queued.Insert(dependency.identity.GetPath().Id(), 1).IsSuccessful())
                     {
                         plan.Clear();
                         return pending.Size() >= limits.maximumResources ? PackagingResult::LimitExceeded : PackagingResult::OutOfMemory;
@@ -548,11 +575,27 @@ namespace vanguard::assets
             u32 selectedArtifacts = 0;
             for (const IndexedArtifact& artifact : record.artifacts)
             {
-                if (HasFlag(artifact.flags, ArtifactFlags::EditorOnly) &&
-                    !HasFlag(manifest.flags, PackageManifestFlags::IncludeEditorArtifacts))
+                const u8 audience = HasFlag(artifact.flags, ArtifactFlags::EditorOnly) ? 2u : 1u;
+                u8* const knownAudience = artifactAudiences.FindPtr(Identity(artifact.resource));
+                if (knownAudience == nullptr)
+                {
+                    if (!artifactAudiences.Insert(Identity(artifact.resource), audience).IsSuccessful())
+                    {
+                        plan.Clear();
+                        return PackagingResult::OutOfMemory;
+                    }
+                }
+                else if ((*knownAudience | audience) == 3u)
+                {
+                    plan.Clear();
+                    return PackagingResult::InvalidArtifactData;
+                }
+
+                if (HasFlag(artifact.flags, ArtifactFlags::EditorOnly) && !HasFlag(manifest.flags, PackageManifestFlags::IncludeEditorArtifacts))
                 {
                     continue;
                 }
+                const ArtifactSetKey origin{record.buildFingerprint, record.contentFingerprint};
                 PlannedPackageResource* resource = FindPlanned(plan, artifact.resource);
                 if (resource == nullptr)
                 {
@@ -564,7 +607,7 @@ namespace vanguard::assets
                     PlannedPackageResource created;
                     created.resource = artifact.resource;
                     created.flags = RootResourceFlags(manifest, record.output);
-                    created.contentFingerprint = record.contentFingerprint;
+                    created.origin = origin;
                     const u32 previousResources = plan.resources.Size();
                     plan.resources.PushBack(static_cast<PlannedPackageResource&&>(created));
                     if (plan.resources.Size() != previousResources + 1u)
@@ -573,6 +616,11 @@ namespace vanguard::assets
                         return PackagingResult::OutOfMemory;
                     }
                     resource = &plan.resources.Back();
+                }
+                else if (resource->origin != origin)
+                {
+                    plan.Clear();
+                    return PackagingResult::InvalidArtifactData;
                 }
                 for (const PlannedPackageSegment& existing : resource->segments)
                 {
@@ -617,8 +665,7 @@ namespace vanguard::assets
                     if (!AddDependency(*resource, dependency, limits, dependencyCount))
                     {
                         plan.Clear();
-                        return dependencyCount >= limits.maximumDependencies ? PackagingResult::LimitExceeded
-                                                                             : PackagingResult::OutOfMemory;
+                        return dependencyCount >= limits.maximumDependencies ? PackagingResult::LimitExceeded : PackagingResult::OutOfMemory;
                     }
                 }
             }
@@ -644,13 +691,13 @@ namespace vanguard::assets
             {
                 resource.flags = resource.flags | packages::ResourceFlags::EditorOnly;
             }
-            InsertionSort(resource.segments, [](const PlannedPackageSegment& left, const PlannedPackageSegment& right)
-                          { return left.artifact.segment < right.artifact.segment; });
+            InsertionSort(resource.segments,
+                          [](const PlannedPackageSegment& left, const PlannedPackageSegment& right) { return left.artifact.segment < right.artifact.segment; });
             InsertionSort(resource.dependencies, [](const PlannedPackageDependency& left, const PlannedPackageDependency& right)
                           { return ReferenceLess(left.resource, right.resource); });
         }
-        InsertionSort(plan.resources, [](const PlannedPackageResource& left, const PlannedPackageResource& right)
-                      { return ReferenceLess(left.resource, right.resource); });
+        InsertionSort(plan.resources,
+                      [](const PlannedPackageResource& left, const PlannedPackageResource& right) { return ReferenceLess(left.resource, right.resource); });
 
         plan.packageId = manifest.packageId;
         plan.target = manifest.target;
@@ -671,28 +718,23 @@ namespace vanguard::assets
         return PackagingResult::Success;
     }
 
-    PackagingResult PackageAssembler::Assemble(const PackageBuildPlan& plan, filesystem::IFile& output,
-                                               const PackageAssemblyCallbacks& callbacks,
+    PackagingResult PackageAssembler::Assemble(const PackageBuildPlan& plan, filesystem::IFile& output, const PackageAssemblyCallbacks& callbacks,
                                                const PackageAssemblyLimits& limits) const noexcept
     {
         return AssembleInternal(plan, output, callbacks, nullptr, limits);
     }
 
-    PackagingResult PackageAssembler::Assemble(const PackageBuildPlan& plan, filesystem::IFile& output,
-                                               const PackageAssemblyCallbacks& callbacks,
-                                               const packages::PackageSetBuild& packageSet,
-                                               const PackageAssemblyLimits& limits) const noexcept
+    PackagingResult PackageAssembler::Assemble(const PackageBuildPlan& plan, filesystem::IFile& output, const PackageAssemblyCallbacks& callbacks,
+                                               const packages::PackageSetBuild& packageSet, const PackageAssemblyLimits& limits) const noexcept
     {
         return AssembleInternal(plan, output, callbacks, &packageSet, limits);
     }
 
-    PackagingResult PackageAssembler::AssembleInternal(const PackageBuildPlan& plan, filesystem::IFile& output,
-                                                       const PackageAssemblyCallbacks& callbacks,
-                                                       const packages::PackageSetBuild* const packageSet,
-                                                       const PackageAssemblyLimits& limits) const noexcept
+    PackagingResult PackageAssembler::AssembleInternal(const PackageBuildPlan& plan, filesystem::IFile& output, const PackageAssemblyCallbacks& callbacks,
+                                                       const packages::PackageSetBuild* const packageSet, const PackageAssemblyLimits& limits) const noexcept
     {
-        if (!plan.IsPrepared() || !output.IsWriter() || output.GetOffset() != 0 || output.GetSize() != 0 ||
-            callbacks.resolvePath == nullptr || callbacks.readArtifact == nullptr || limits.maximumResourceBytes == 0)
+        if (!plan.IsPrepared() || !output.IsWriter() || output.GetOffset() != 0 || output.GetSize() != 0 || callbacks.resolvePath == nullptr ||
+            callbacks.readArtifact == nullptr || limits.maximumResourceBytes == 0)
         {
             return PackagingResult::InvalidArgument;
         }
@@ -705,8 +747,7 @@ namespace vanguard::assets
         };
 
         packages::PackageWriter writer;
-        const packages::Result beginResult = packageSet != nullptr ? writer.Begin(output, plan.options, *packageSet)
-                                                                    : writer.Begin(output, plan.options);
+        const packages::Result beginResult = packageSet != nullptr ? writer.Begin(output, plan.options, *packageSet) : writer.Begin(output, plan.options);
         if (beginResult != packages::Result::Success)
         {
             return PackagingResult::PackageWriteFailed;
@@ -716,7 +757,7 @@ namespace vanguard::assets
         {
             char path[packages::MaximumResourcePathBytes];
             usize pathSize = 0;
-            if (!callbacks.resolvePath(resource.resource, path, sizeof(path), pathSize, callbacks.userData) || pathSize == 0 ||
+            if (!callbacks.resolvePath(resource.resource, path, sizeof(path), pathSize, callbacks.resolvePathUserData) || pathSize == 0 ||
                 pathSize > sizeof(path))
             {
                 writer.Reset();
@@ -741,7 +782,7 @@ namespace vanguard::assets
             {
                 const PlannedPackageSegment& planned = resource.segments[index];
                 Payload& payload = payloads[index];
-                if (!callbacks.readArtifact(planned.artifact, payload.bytes, callbacks.userData))
+                if (!callbacks.readArtifact(resource.origin, planned.artifact, payload.bytes, callbacks.readArtifactUserData))
                 {
                     writer.Reset();
                     return PackagingResult::ArtifactReadFailed;
@@ -753,18 +794,17 @@ namespace vanguard::assets
                     return PackagingResult::InvalidArtifactData;
                 }
                 resourceBytes += payload.bytes.Size();
-                segments[index] = {payload.bytes.TypedData(), payload.bytes.Size(), planned.codec, planned.artifact.alignmentLog2,
-                                   planned.flags};
+                segments[index] = {payload.bytes.TypedData(), payload.bytes.Size(), planned.codec, planned.artifact.alignmentLog2, planned.flags};
             }
 
             for (u32 index = 0; index < resource.dependencies.Size(); ++index)
             {
                 const PlannedPackageDependency& planned = resource.dependencies[index];
-                dependencies[index] = {planned.resource.Path().Id(), planned.resource.ExpectedType(), planned.kind};
+                dependencies[index] = {planned.resource.GetPath().Id(), planned.resource.ExpectedType(), planned.kind};
             }
 
             const packages::BuildResource build{{path, pathSize}, resource.resource.ExpectedType(), resource.flags, segments, dependencies};
-            if (packages::HashResourcePath(build.path) != resource.resource.Path().Id() || writer.Add(build) != packages::Result::Success)
+            if (packages::HashResourcePath(build.path) != resource.resource.GetPath().Id() || writer.Add(build) != packages::Result::Success)
             {
                 writer.Reset();
                 return PackagingResult::PackageWriteFailed;
@@ -773,12 +813,10 @@ namespace vanguard::assets
         return writer.Finalize() == packages::Result::Success ? PackagingResult::Success : PackagingResult::PackageWriteFailed;
     }
 
-    PackagingResult PackageAssembler::Publish(const PackageBuildPlan& plan, const filesystem::AbsolutePath& target,
-                                              const filesystem::AbsolutePath& temporary, const PackageAssemblyCallbacks& callbacks,
-                                              const PackageAssemblyLimits& limits) const noexcept
+    PackagingResult PackageAssembler::Publish(const PackageBuildPlan& plan, const filesystem::AbsolutePath& target, const filesystem::AbsolutePath& temporary,
+                                              const PackageAssemblyCallbacks& callbacks, const PackageAssemblyLimits& limits) const noexcept
     {
-        if (!plan.IsPrepared() || target.Empty() || temporary.Empty() || !target.IsFilePath() || !temporary.IsFilePath() ||
-            target == temporary)
+        if (!plan.IsPrepared() || target.Empty() || temporary.Empty() || !target.IsFilePath() || !temporary.IsFilePath() || target == temporary)
         {
             return PackagingResult::InvalidArgument;
         }
@@ -809,8 +847,8 @@ namespace vanguard::assets
         }
         packages::PackageReader package;
         const packages::Result opened = package.Open(*reader, limits.validation);
-        const bool valid = opened == packages::Result::Success && package.Header().packageId == plan.packageId &&
-                           package.Header().buildId == plan.buildId && package.Header().resourceCount == plan.resources.Size();
+        const bool valid = opened == packages::Result::Success && package.GetHeader().packageId == plan.packageId && package.GetHeader().buildId == plan.buildId &&
+                           package.GetHeader().resourceCount == plan.resources.Size();
         package.Close();
         reader.Reset();
         if (!valid)
@@ -818,7 +856,7 @@ namespace vanguard::assets
             static_cast<void>(manager.DeleteFile(temporary));
             return PackagingResult::ValidationFailed;
         }
-        if (!manager.MoveFile(temporary, target))
+        if (!filesystem::ReplaceFile(temporary, target))
         {
             static_cast<void>(manager.DeleteFile(temporary));
             return PackagingResult::PublicationFailed;

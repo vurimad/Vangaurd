@@ -12,11 +12,11 @@ project "shaderTools"
     objdir(object_root)
     files { "include/**.hpp", "src/**.cpp", "README.md" }
     includedirs {
-        "include", "../shaders/include", "../crypto/include", "../serialization/include", "../resources/include",
+        "include", "../assets/include", "../shaders/include", "../crypto/include", "../serialization/include", "../resources/include",
         "../filesystem/include", "../io/include", "../containers/include", "../concurrency/include", "../memory/include",
-        "../system/include", path.join(slang_root, "include")
+        "../diagnostics/include", "../system/include", path.join(slang_root, "include")
     }
-    links { "shaders", "crypto", "serialization", "resources", "filesystem", "io", "containers", "concurrency", "memory", "system" }
+    links { "assets", "shaders", "crypto", "serialization", "resources", "filesystem", "io", "diagnostics", "containers", "concurrency", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" }, ["Source/*"] = { "src/**.cpp" }, ["Documentation"] = { "README.md" }
     }
@@ -34,13 +34,13 @@ project "shaderToolsTests"
     objdir(object_root)
     files { "tests/**.cpp", "tests/data/**.slang" }
     includedirs {
-        "include", "../shaders/include", "../crypto/include", "../serialization/include", "../resources/include",
+        "include", "../assets/include", "../shaders/include", "../crypto/include", "../serialization/include", "../resources/include",
         "../filesystem/include", "../io/include", "../containers/include", "../concurrency/include", "../memory/include",
         "../diagnostics/include", "../system/include", path.join(slang_root, "include")
     }
     libdirs { path.join(slang_root, "lib") }
     links {
-        "shaderTools", "shaders", "crypto", "serialization", "serializationCompat", "resources", "filesystem", "io",
+        "shaderTools", "assets", "shaders", "crypto", "serialization", "serializationCompat", "resources", "filesystem", "io",
         "containers", "containersCompat", "concurrency", "concurrencyCompat", "diagnostics", "diagnosticsCompat", "memory",
         "redSystemCompat", "system", "slang-compiler", "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Version", "ws2_32"
     }

@@ -43,8 +43,7 @@ namespace
 
     [[nodiscard]] u32 LoadU32(const u8* const source) noexcept
     {
-        return static_cast<u32>(source[0]) | (static_cast<u32>(source[1]) << 8u) | (static_cast<u32>(source[2]) << 16u) |
-               (static_cast<u32>(source[3]) << 24u);
+        return static_cast<u32>(source[0]) | (static_cast<u32>(source[1]) << 8u) | (static_cast<u32>(source[2]) << 16u) | (static_cast<u32>(source[3]) << 24u);
     }
 
     [[nodiscard]] u64 LoadU64(const u8* const source) noexcept
@@ -59,12 +58,12 @@ namespace
 
     [[nodiscard]] vanguard::serialization::Result WriterResult(const vanguard::serialization::BinaryWriter& writer) noexcept
     {
-        return writer.Good() ? vanguard::serialization::Result::Success : writer.Status();
+        return writer.IsGood() ? vanguard::serialization::Result::Success : writer.GetStatus();
     }
 
     [[nodiscard]] vanguard::serialization::Result ReaderResult(const vanguard::serialization::BinaryReader& reader) noexcept
     {
-        return reader.Good() ? vanguard::serialization::Result::Success : reader.Status();
+        return reader.IsGood() ? vanguard::serialization::Result::Success : reader.GetStatus();
     }
 
     [[nodiscard]] bool RangesOverlap(const u64 firstOffset, const u64 firstSize, const u64 secondOffset, const u64 secondSize) noexcept
@@ -119,12 +118,12 @@ namespace vanguard::serialization
         }
     }
 
-    Result BinaryReader::Status() const noexcept
+    Result BinaryReader::GetStatus() const noexcept
     {
         return m_status;
     }
 
-    bool BinaryReader::Good() const noexcept
+    bool BinaryReader::IsGood() const noexcept
     {
         return m_status == Result::Success;
     }
@@ -139,7 +138,7 @@ namespace vanguard::serialization
         return m_file ? m_file->GetSize() : 0;
     }
 
-    u64 BinaryReader::Remaining() const noexcept
+    u64 BinaryReader::GetRemaining() const noexcept
     {
         const u64 position = Position();
         const u64 size = Size();
@@ -157,7 +156,7 @@ namespace vanguard::serialization
 
     bool BinaryReader::Seek(const u64 position) noexcept
     {
-        if (!Good())
+        if (!IsGood())
         {
             return false;
         }
@@ -210,7 +209,7 @@ namespace vanguard::serialization
 
     bool BinaryReader::ReadBytes(void* const destination, const usize size) noexcept
     {
-        if (!Good())
+        if (!IsGood())
         {
             return false;
         }
@@ -218,7 +217,7 @@ namespace vanguard::serialization
         {
             return Fail(Result::InvalidArgument);
         }
-        if (static_cast<u64>(size) > Remaining())
+        if (static_cast<u64>(size) > GetRemaining())
         {
             return Fail(Result::EndOfStream);
         }
@@ -406,12 +405,12 @@ namespace vanguard::serialization
         }
     }
 
-    Result BinaryWriter::Status() const noexcept
+    Result BinaryWriter::GetStatus() const noexcept
     {
         return m_status;
     }
 
-    bool BinaryWriter::Good() const noexcept
+    bool BinaryWriter::IsGood() const noexcept
     {
         return m_status == Result::Success;
     }
@@ -437,7 +436,7 @@ namespace vanguard::serialization
 
     bool BinaryWriter::Seek(const u64 position) noexcept
     {
-        if (!Good())
+        if (!IsGood())
         {
             return false;
         }
@@ -474,7 +473,7 @@ namespace vanguard::serialization
 
     bool BinaryWriter::WriteBytes(const void* const source, const usize size) noexcept
     {
-        if (!Good())
+        if (!IsGood())
         {
             return false;
         }
@@ -601,7 +600,7 @@ namespace vanguard::serialization
 
     bool BinaryWriter::Flush() noexcept
     {
-        if (!Good())
+        if (!IsGood())
         {
             return false;
         }
@@ -772,8 +771,8 @@ namespace vanguard::serialization
             {
                 return Result::InvalidEncoding;
             }
-            constexpr u32 knownFlags = static_cast<u32>(SectionFlags::Optional) | static_cast<u32>(SectionFlags::EditorOnly) |
-                                       static_cast<u32>(SectionFlags::Streamable);
+            constexpr u32 knownFlags =
+                static_cast<u32>(SectionFlags::Optional) | static_cast<u32>(SectionFlags::EditorOnly) | static_cast<u32>(SectionFlags::Streamable);
             if ((static_cast<u32>(section.flags) & ~knownFlags) != 0)
             {
                 return Result::InvalidEncoding;
@@ -783,8 +782,8 @@ namespace vanguard::serialization
                 return Result::LimitExceeded;
             }
             const u64 alignment = u64{1} << section.alignmentLog2;
-            if ((section.offset & (alignment - 1u)) != 0 || AddWouldOverflow(section.offset, section.storedSize) ||
-                section.offset < previousEnd || section.offset + section.storedSize > header.fileSize)
+            if ((section.offset & (alignment - 1u)) != 0 || AddWouldOverflow(section.offset, section.storedSize) || section.offset < previousEnd ||
+                section.offset + section.storedSize > header.fileSize)
             {
                 return Result::InvalidLayout;
             }
@@ -802,8 +801,7 @@ namespace vanguard::serialization
         return Result::Success;
     }
 
-    Result ValidateSectionChecksum(BinaryReader& reader, const SectionDescriptor& section, void* const scratch,
-                                   const usize scratchSize) noexcept
+    Result ValidateSectionChecksum(BinaryReader& reader, const SectionDescriptor& section, void* const scratch, const usize scratchSize) noexcept
     {
         if (scratch == nullptr || scratchSize == 0)
         {

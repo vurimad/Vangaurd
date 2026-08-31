@@ -89,9 +89,8 @@ namespace vanguard::pipeline_cache
         VANGUARD_USE_MEMORY_POOL(memory::pools::Rendering);
 
         explicit Impl(const Backend& backendValue, const Config& configValue) noexcept
-            : backend(backendValue), config(configValue), workerName("Rendering/PipelineCache/Create"),
-              buckets(memory::pools::Rendering::GetInstance()), entries(memory::pools::Rendering::GetInstance()),
-              pending(memory::pools::Rendering::GetInstance())
+            : backend(backendValue), config(configValue), workerName("Rendering/PipelineCache/Create"), buckets(memory::pools::Rendering::GetInstance()),
+              entries(memory::pools::Rendering::GetInstance()), pending(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -473,19 +472,19 @@ namespace vanguard::pipeline_cache
         return IsValid();
     }
 
-    State PipelineRequest::Status() const noexcept
+    State PipelineRequest::GetStatus() const noexcept
     {
         return m_entry != nullptr ? static_cast<State>(m_entry->state.GetValue()) : State::Invalid;
     }
 
     bool PipelineRequest::HasFinished() const noexcept
     {
-        return m_entry != nullptr && Status() != State::Pending;
+        return m_entry != nullptr && GetStatus() != State::Pending;
     }
 
     bool PipelineRequest::HasSucceeded() const noexcept
     {
-        return m_entry != nullptr && Status() == State::Valid;
+        return m_entry != nullptr && GetStatus() == State::Valid;
     }
 
     void PipelineRequest::Wait() const noexcept
@@ -501,23 +500,23 @@ namespace vanguard::pipeline_cache
         return m_entry != nullptr && m_entry->finished.TryWait(timeoutMilliseconds);
     }
 
-    NativePipeline PipelineRequest::NativeObject() const noexcept
+    NativePipeline PipelineRequest::GetNativeObject() const noexcept
     {
         return HasSucceeded() ? m_entry->native : NativePipeline{};
     }
 
-    FailureEvidence PipelineRequest::Error() const noexcept
+    FailureEvidence PipelineRequest::GetError() const noexcept
     {
         return m_entry != nullptr && HasFinished() ? m_entry->failure : FailureEvidence{};
     }
 
-    const crypto::Digest256& PipelineRequest::Key() const noexcept
+    const crypto::Digest256& PipelineRequest::GetKey() const noexcept
     {
         static const crypto::Digest256 invalid;
         return m_entry != nullptr ? m_entry->key : invalid;
     }
 
-    u64 PipelineRequest::Generation() const noexcept
+    u64 PipelineRequest::GetGeneration() const noexcept
     {
         return m_entry != nullptr ? m_entry->generation : 0;
     }
@@ -544,8 +543,8 @@ namespace vanguard::pipeline_cache
 
     bool PipelineCache::Initialize(const Backend& backend, const Config& config) noexcept
     {
-        if (m_impl != nullptr || !backend.IsValid() || !jobs::IsInitialized() || config.maximumEntries == 0 ||
-            config.maximumEntries > (1u << 28u) || config.maximumConcurrentCreations == 0)
+        if (m_impl != nullptr || !backend.IsValid() || !jobs::IsInitialized() || config.maximumEntries == 0 || config.maximumEntries > (1u << 28u) ||
+            config.maximumConcurrentCreations == 0)
         {
             return false;
         }
@@ -670,8 +669,7 @@ namespace vanguard::pipeline_cache
         const u32 previousPending = m_impl->pending.Size();
         m_impl->entries.PushBack(entry);
         m_impl->pending.PushBack(entry);
-        if (m_impl->entries.Size() != previousEntries + 1u || m_impl->pending.Size() != previousPending + 1u ||
-            !m_impl->InsertLocked(*entry))
+        if (m_impl->entries.Size() != previousEntries + 1u || m_impl->pending.Size() != previousPending + 1u || !m_impl->InsertLocked(*entry))
         {
             if (m_impl->entries.Size() == previousEntries + 1u)
             {

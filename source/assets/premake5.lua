@@ -10,10 +10,10 @@ project "assets"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
-    files { "include/**.hpp", "src/**.hpp", "src/**.cpp" }
+    files { "include/**.hpp", "private/**.hpp", "src/**.cpp" }
     includedirs {
         "include",
-        "src",
+        "private",
         "../system/include",
         "../memory/include",
         "../concurrency/include",
@@ -40,7 +40,8 @@ project "assets"
     }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
-        ["Source/*"] = { "src/**.hpp", "src/**.cpp" }
+        ["Private API/*"] = { "private/**.hpp" },
+        ["Source/*"] = { "src/**.cpp" }
     }
 
 group "Tests/Assets"

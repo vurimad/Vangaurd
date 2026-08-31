@@ -12,11 +12,10 @@ namespace vanguard::engine
     public:
         ~InputService() override = default;
 
-        [[nodiscard]] virtual const input::FrameSnapshot& Snapshot() const noexcept = 0;
-        [[nodiscard]] virtual containers::ArraySpan<const input::RawEvent> Events() const noexcept = 0;
+        [[nodiscard]] virtual const input::FrameSnapshot& GetSnapshot() const noexcept = 0;
+        [[nodiscard]] virtual containers::ArraySpan<const input::RawEvent> GetEvents() const noexcept = 0;
         [[nodiscard]] virtual const input::GamepadState* FindGamepad(input::DeviceId device) const noexcept = 0;
-        [[nodiscard]] virtual bool SetRumble(input::DeviceId device, f32 lowFrequency, f32 highFrequency,
-                                             u32 durationMilliseconds) noexcept = 0;
+        [[nodiscard]] virtual bool SetRumble(input::DeviceId device, f32 lowFrequency, f32 highFrequency, u32 durationMilliseconds) noexcept = 0;
         virtual void RequestReset() noexcept = 0;
         virtual void RequestDeviceRefresh() noexcept = 0;
         [[nodiscard]] virtual input::InputStats GetStats() const noexcept = 0;
@@ -27,4 +26,4 @@ namespace vanguard::engine
 
     [[nodiscard]] InputService* FindInputService(application::EngineHost& host) noexcept;
     [[nodiscard]] InputService* FindInputService(application::ServiceContext& context) noexcept;
-}
+} // namespace vanguard::engine

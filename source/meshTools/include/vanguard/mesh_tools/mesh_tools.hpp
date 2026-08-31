@@ -57,7 +57,7 @@ namespace vanguard::mesh_tools
         inline constexpr MeshCookingProfileId PreserveSource = 0x7072657365727665ull;
         inline constexpr MeshCookingProfileId RuntimeStatic = 0x7374617469630001ull;
         inline constexpr MeshCookingProfileId RuntimeSkinned4 = 0x736b696e6e656434ull;
-    }
+    } // namespace profiles
 
     enum class MeshCookingProfileFlags : u8
     {
@@ -65,16 +65,12 @@ namespace vanguard::mesh_tools
         QuantizePositions = 1u << 0u
     };
 
-    [[nodiscard]] constexpr MeshCookingProfileFlags operator|(
-        const MeshCookingProfileFlags left,
-        const MeshCookingProfileFlags right) noexcept
+    [[nodiscard]] constexpr MeshCookingProfileFlags operator|(const MeshCookingProfileFlags left, const MeshCookingProfileFlags right) noexcept
     {
         return static_cast<MeshCookingProfileFlags>(static_cast<u8>(left) | static_cast<u8>(right));
     }
 
-    [[nodiscard]] constexpr bool HasFlag(
-        const MeshCookingProfileFlags value,
-        const MeshCookingProfileFlags flag) noexcept
+    [[nodiscard]] constexpr bool HasFlag(const MeshCookingProfileFlags value, const MeshCookingProfileFlags flag) noexcept
     {
         return (static_cast<u8>(value) & static_cast<u8>(flag)) != 0;
     }
@@ -86,16 +82,12 @@ namespace vanguard::mesh_tools
         MatchAnySemanticIndex = 1u << 1u
     };
 
-    [[nodiscard]] constexpr VertexPackingRuleFlags operator|(
-        const VertexPackingRuleFlags left,
-        const VertexPackingRuleFlags right) noexcept
+    [[nodiscard]] constexpr VertexPackingRuleFlags operator|(const VertexPackingRuleFlags left, const VertexPackingRuleFlags right) noexcept
     {
         return static_cast<VertexPackingRuleFlags>(static_cast<u8>(left) | static_cast<u8>(right));
     }
 
-    [[nodiscard]] constexpr bool HasFlag(
-        const VertexPackingRuleFlags value,
-        const VertexPackingRuleFlags flag) noexcept
+    [[nodiscard]] constexpr bool HasFlag(const VertexPackingRuleFlags value, const VertexPackingRuleFlags flag) noexcept
     {
         return (static_cast<u8>(value) & static_cast<u8>(flag)) != 0;
     }
@@ -106,11 +98,8 @@ namespace vanguard::mesh_tools
         PreserveInDedicatedBinding
     };
 
-    using VertexPackFunction = bool (*)(
-        u8* destination,
-        const SourceVertexStream& sourceStream,
-        const u8* sourceElement,
-        const meshes::PositionQuantization& positionQuantization) noexcept;
+    using VertexPackFunction = bool (*)(u8* destination, const SourceVertexStream& sourceStream, const u8* sourceElement,
+                                        const meshes::PositionQuantization& positionQuantization) noexcept;
 
     /// One declarative source-to-runtime vertex element rule. Rules with the same bindingGroup
     /// are emitted into one interleaved binding in canonical semantic/index order. A null pack
@@ -179,15 +168,18 @@ namespace vanguard::mesh_tools
     ///
     /// | Attribute      | Accepted source        | Stored format          | Stored meaning and runtime interpretation |
     /// |----------------|------------------------|------------------------|-------------------------------------------|
-    /// | Position       | Float3                 | R16G16B16A16SNorm      | XYZ is object-space position encoded with the vmesh-wide PositionQuantization scale and bias. Decode as `snorm.xyz * scale + bias`. W is positive one. |
-    /// | Normal         | Float3                 | R10G10B10A2UNorm       | XYZ maps `[-1, +1]` to `[0, 1]`. Decode as `unorm.xyz * 2 - 1`, then normalize. A is positive one and has no normal-specific meaning. |
-    /// | Tangent        | Float3 or Float4       | R10G10B10A2UNorm       | XYZ uses the normal encoding. Decode and normalize it identically. A stores tangent-frame handedness: zero represents `-1`, one represents `+1`. |
-    /// | TexCoord       | Float2                 | R16G16Float            | UV coordinates stored as IEEE half values. GPU vertex fetch expands them directly to floats. |
-    /// | Color          | Float4                 | R8G8B8A8UNorm          | RGBA components quantized to `[0, 1]`. |
-    /// | JointIndices   | Integer vertex format  | Source integer format  | Integer indices selecting the influencing skeleton joints. |
-    /// | JointWeights   | Float4                 | R8G8B8A8UNorm          | Bone influences quantized to `[0, 1]`. The importer must provide a normalized set; packing does not silently renormalize it. |
-    /// | MorphPosition  | Any supported format   | Source format          | Preserved byte-exact in a dedicated binding. |
-    /// | Custom         | Any supported format   | Source format          | Preserved byte-exact in a dedicated binding. |
+    /// | Position       | Float3                 | R16G16B16A16SNorm      | XYZ is object-space position encoded with the vmesh-wide
+    /// PositionQuantization scale and bias. Decode as `snorm.xyz * scale + bias`. W is positive one. | | Normal         | Float3 |
+    /// R10G10B10A2UNorm       | XYZ maps `[-1, +1]` to `[0, 1]`. Decode as `unorm.xyz * 2 - 1`, then normalize. A is positive one and has
+    /// no normal-specific meaning. | | Tangent        | Float3 or Float4       | R10G10B10A2UNorm       | XYZ uses the normal encoding.
+    /// Decode and normalize it identically. A stores tangent-frame handedness: zero represents `-1`, one represents `+1`. | | TexCoord |
+    /// Float2                 | R16G16Float            | UV coordinates stored as IEEE half values. GPU vertex fetch expands them directly
+    /// to floats. | | Color          | Float4                 | R8G8B8A8UNorm          | RGBA components quantized to `[0, 1]`. | |
+    /// JointIndices   | Integer vertex format  | Source integer format  | Integer indices selecting the influencing skeleton joints. | |
+    /// JointWeights   | Float4                 | R8G8B8A8UNorm          | Bone influences quantized to `[0, 1]`. The importer must provide
+    /// a normalized set; packing does not silently renormalize it. | | MorphPosition  | Any supported format   | Source format          |
+    /// Preserved byte-exact in a dedicated binding. | | Custom         | Any supported format   | Source format          | Preserved
+    /// byte-exact in a dedicated binding. |
     ///
     /// Packed Position occupies its own binding for position-only/depth passes. Normal,
     /// Tangent, TexCoord, and Color streams are interleaved into the shading binding.
@@ -245,11 +237,7 @@ namespace vanguard::mesh_tools
 
     struct CookReport
     {
-        CookReport() noexcept
-            : submeshes(memory::pools::Assets::GetInstance()),
-              lods(memory::pools::Assets::GetInstance())
-        {
-        }
+        CookReport() noexcept : submeshes(memory::pools::Assets::GetInstance()), lods(memory::pools::Assets::GetInstance()) {}
 
         containers::DynamicArray<SubmeshCookStatistics> submeshes;
         containers::DynamicArray<LodCookStatistics> lods;
@@ -268,9 +256,6 @@ namespace vanguard::mesh_tools
     [[nodiscard]] const MeshCookingProfile* FindMeshCookingProfile(MeshCookingProfileId id) noexcept;
 
     // Source data is importer-neutral and caller-owned. The output is a complete, deterministic vmesh document.
-    [[nodiscard]] Result CookMesh(
-        const SourceMesh& source,
-        filesystem::IFile& output,
-        const CookSettings& settings = {},
-        CookReport* report = nullptr) noexcept;
+    [[nodiscard]] Result CookMesh(const SourceMesh& source, filesystem::IFile& output, const CookSettings& settings = {},
+                                  CookReport* report = nullptr) noexcept;
 } // namespace vanguard::mesh_tools

@@ -121,6 +121,7 @@ function enforceEngineCodePolicy()
 end
 
 include "external/meshoptimizer"
+include "external/assimp"
 include "external/bcCodecs"
 include "external/compressonatorCore"
 include "external/imageCodecs"

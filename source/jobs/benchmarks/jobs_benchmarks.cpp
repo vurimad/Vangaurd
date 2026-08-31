@@ -120,8 +120,7 @@ namespace
 
     [[nodiscard]] bool MeasureParallel(const Clock& clock, JobName& name, double (&samples)[SampleCount]) noexcept
     {
-        vanguard::memory::MemoryBlock block =
-            vanguard::memory::Allocate(static_cast<vanguard::usize>(ParallelElements) * sizeof(u32), alignof(u32));
+        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(static_cast<vanguard::usize>(ParallelElements) * sizeof(u32), alignof(u32));
         if (!block)
         {
             return false;
@@ -133,8 +132,7 @@ namespace
         {
             Builder builder;
             const u64 begin = clock.Now();
-            ParallelTask task =
-                ParallelTask::Create([values](const u32 index, const JobContext&) noexcept { values[index] = index ^ 0xA5A5A5A5u; });
+            ParallelTask task = ParallelTask::Create([values](const u32 index, const JobContext&) noexcept { values[index] = index ^ 0xA5A5A5A5u; });
             if (!builder.DispatchParallel(name, ParallelElements, std::move(task), {}, 256))
             {
                 succeeded = false;
@@ -220,9 +218,8 @@ int main()
                 "  idle wake p95:      %.1f us dispatch-to-start\n"
                 "  parallel p50:       %.3f M elements/s\n"
                 "  parallel p95:       %.3f M elements/s\n",
-                config.maxWorkers, enqueueSamples[SampleCount / 2], enqueueSamples[SampleCount - 1],
-                completionSamples[SampleCount / 2] / 1000000.0, completionSamples[SampleCount - 1] / 1000000.0,
-                wakeSamples[WakeSamples / 2] / 1000.0, wakeSamples[WakeSamples - 1] / 1000.0, parallelSamples[SampleCount / 2] / 1000000.0,
-                parallelSamples[SampleCount - 1] / 1000000.0);
+                config.maxWorkers, enqueueSamples[SampleCount / 2], enqueueSamples[SampleCount - 1], completionSamples[SampleCount / 2] / 1000000.0,
+                completionSamples[SampleCount - 1] / 1000000.0, wakeSamples[WakeSamples / 2] / 1000.0, wakeSamples[WakeSamples - 1] / 1000.0,
+                parallelSamples[SampleCount / 2] / 1000000.0, parallelSamples[SampleCount - 1] / 1000000.0);
     return 0;
 }

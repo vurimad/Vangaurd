@@ -76,8 +76,7 @@ namespace vanguard::math
 
         // Check edge-sphere intersection; returns number of intersection points (0, 1 or 2); calculated intersection points are clamped
         // within a and b
-        REDMATH_API Uint32 IntersectEdge(const Vector4& a, const Vector4& b, Vector4& intersectionPoint0, Vector4& intersectionPoint1)
-            const;
+        REDMATH_API Uint32 IntersectEdge(const Vector4& a, const Vector4& b, Vector4& intersectionPoint0, Vector4& intersectionPoint1) const;
 
         // Check line-sphere intersection; returns the number of intersection points (0, 1 or 2);
         // t1 and t2 are parameters of intersection points for line equation 'origin + t * direction' (direction does not need to be

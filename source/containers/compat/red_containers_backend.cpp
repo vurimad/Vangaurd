@@ -25,4 +25,4 @@ namespace vanguard::containers::backend
     {
         return g_vanguardContainersInitialized;
     }
-}
+} // namespace vanguard::containers::backend

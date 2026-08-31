@@ -1,5 +1,19 @@
 #pragma once
 
+#include <vanguard/entities/component.hpp>
+#include <vanguard/entities/component_directory.hpp>
+#include <vanguard/entities/component_runtime.hpp>
 #include <vanguard/entities/component_registry.hpp>
+#include <vanguard/entities/entity_state.hpp>
 #include <vanguard/entities/cell_streaming_system.hpp>
 #include <vanguard/entities/materializer.hpp>
+#include <vanguard/entities/hard_attachment.hpp>
+#include <vanguard/entities/placed_component.hpp>
+#include <vanguard/entities/rendering_runtime.hpp>
+#include <vanguard/entities/root_transform_component.hpp>
+#include <vanguard/entities/transform_attachment.hpp>
+#include <vanguard/entities/transform_binding.hpp>
+#include <vanguard/entities/transform_component.hpp>
+#include <vanguard/entities/transform_system.hpp>
+#include <vanguard/entities/transform_runtime.hpp>
+#include <vanguard/entities/visual_component.hpp>

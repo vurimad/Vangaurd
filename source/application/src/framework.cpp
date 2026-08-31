@@ -2,8 +2,7 @@
 
 namespace vanguard
 {
-    i32 RunFramework(Application& appInstance, const FrameworkLaunchParameters& parameters,
-                     application::IPlatformHost& platform) noexcept
+    i32 RunFramework(Application& appInstance, const FrameworkLaunchParameters& parameters, application::IPlatformHost& platform) noexcept
     {
         const ApplicationTraits traits = appInstance.GetTraits();
         application::RunnerSettings settings;
@@ -15,8 +14,10 @@ namespace vanguard
 
         application::ApplicationRunner runner;
         const application::RunnerResult result = runner.Run(platform, appInstance, settings);
-        if (result) return result.exitCode;
-        if (result.exitCode != 0) return result.exitCode;
+        if (result)
+            return result.exitCode;
+        if (result.exitCode != 0)
+            return result.exitCode;
         return -static_cast<i32>(result.failure);
     }
 } // namespace vanguard

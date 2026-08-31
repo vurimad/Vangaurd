@@ -1,4 +1,5 @@
 #include <vanguard/diagnostics/diagnostics.hpp>
+#include <vanguard/streaming/resource_source.hpp>
 #include <vanguard/streaming/streaming.hpp>
 
 #include <vanguard/concurrency/concurrency.hpp>
@@ -54,8 +55,7 @@ namespace
     const auto g_budgetPayload = MakeBudgetPayload();
     constexpr std::array<u8, 13> g_tail{0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x11, 0x22, 0x33, 0x44, 0x55};
     constexpr std::array<u8, 11> g_dependency{9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 42};
-    constexpr std::array<u8, 17> g_looseOverride{0x56, 0x41, 0x4e, 0x47, 0x55, 0x41, 0x52, 0x44, 0x2d,
-                                                 0x4c, 0x4f, 0x4f, 0x53, 0x45, 1,    2,    3};
+    constexpr std::array<u8, 17> g_looseOverride{0x56, 0x41, 0x4e, 0x47, 0x55, 0x41, 0x52, 0x44, 0x2d, 0x4c, 0x4f, 0x4f, 0x53, 0x45, 1, 2, 3};
     constexpr std::array<u8, 4096> g_corruptPayload{};
 
     [[nodiscard]] resources::ResourceReference MakeReference(const char* const path) noexcept
@@ -70,13 +70,12 @@ namespace
     public:
         VANGUARD_USE_MEMORY_POOL(memory::pools::Resources);
 
-        BlobResource(const resources::ResourceId identity, const u64 contentCrc64, const usize byteCount,
-                     const u32 dependencyCount) noexcept
+        BlobResource(const resources::ResourceId identity, const u64 contentCrc64, const usize byteCount, const u32 dependencyCount) noexcept
             : m_identity(identity), m_contentCrc64(contentCrc64), m_byteCount(byteCount), m_dependencyCount(dependencyCount)
         {
         }
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override
         {
             return BlobType;
         }
@@ -93,21 +92,20 @@ namespace
         concurrency::Atomic<u32> destroyed{0};
     };
 
-    resources::ResourceObject* DecodeBlob(const resources::ResourceReference reference, const void* const data, const usize size,
-                                          const resources::LoadContext& context, resources::Failure& failure, void* const userData) noexcept
+    resources::ResourceObject* DecodeBlob(const resources::ResourceReference reference, const void* const data, const usize size, const resources::LoadContext& context,
+                                          resources::Failure& failure, void* const userData) noexcept
     {
         auto& state = *static_cast<DecoderState*>(userData);
-        for (u32 index = 0; index < context.DependencyCount(); ++index)
+        for (u32 index = 0; index < context.GetDependencyCount(); ++index)
         {
-            if (!context.Dependency(index))
+            if (!context.GetDependency(index))
             {
                 failure = resources::Failure::DependencyFailure;
                 return nullptr;
             }
         }
         static_cast<void>(state.decoded.Increment());
-        return VANGUARD_NEW(BlobResource)(reference.Path().Id(), vanguard::serialization::Crc64(data, size), size,
-                                          context.DependencyCount());
+        return VANGUARD_NEW(BlobResource)(reference.GetPath().Id(), vanguard::serialization::Crc64(data, size), size, context.GetDependencyCount());
     }
 
     void DestroyBlob(resources::ResourceObject* const resource, void* const userData) noexcept
@@ -147,6 +145,102 @@ namespace
         return writer->GetSize() == size;
     }
 
+    void RunResourceSourceTest(const filesystem::AbsolutePath& packagePath, const filesystem::AbsolutePath& loosePath)
+    {
+        streaming::ResourceSource loose;
+        Check(loose.OpenLoose(loosePath) == streaming::ResourceSourceResult::Success, "open generic loose resource source");
+        Check(loose.GetLogicalSize() == g_looseOverride.size(), "generic loose source exposes logical size");
+        streaming::ResourceSourceReader looseReader;
+        Check(looseReader.Open(loose) == streaming::ResourceSourceResult::Success, "open generic loose source reader");
+        std::array<u8, 5> looseRange{};
+        looseReader.Seek(4);
+        looseReader.Serialize(looseRange.data(), looseRange.size());
+        Check(std::memcmp(looseRange.data(), g_looseOverride.data() + 4, looseRange.size()) == 0, "generic loose reader reads exact range");
+        Check(looseReader.GetStats().storedBytesRead == looseRange.size(), "generic loose reader accounts physical bytes");
+
+        streaming::ResourceReadPlan loosePlan;
+        Check(loose.PlanRead(3, 7, loosePlan) == streaming::ResourceSourceResult::Success && loosePlan.logicalBytes == 7 && loosePlan.storedBytes == 7 && loosePlan.decodedBytes == 7 &&
+                  loosePlan.touchedSegments == 1,
+              "generic loose source plans exact asynchronous range cost");
+        std::array<u8, 7> asyncLooseRange{};
+        streaming::ResourceReadRequest looseRequest;
+        Check(loose.ReadAsync({3, asyncLooseRange.size(), asyncLooseRange.data(), asyncLooseRange.size()}, looseRequest) == streaming::ResourceSourceResult::Success,
+              "submit generic asynchronous loose range");
+        loose.Close();
+        Check(looseRequest.TryWait(10000) && looseRequest.GetResult() == streaming::ResourceSourceResult::Success &&
+                  std::memcmp(asyncLooseRange.data(), g_looseOverride.data() + 3, asyncLooseRange.size()) == 0,
+              "asynchronous loose range pins source generation through completion");
+        Check(looseRequest.GetStats().storedBytesRead == asyncLooseRange.size() && looseRequest.GetStats().decodedBytesProduced == asyncLooseRange.size(),
+              "asynchronous loose range reports stored and produced bytes");
+
+        streaming::ResourceSource package;
+        const resources::ResourceId root = packages::HashResourcePath("stream/root.vblob");
+        Check(package.OpenPackage(packagePath, root, BlobType) == streaming::ResourceSourceResult::Success, "open generic packaged resource source");
+        Check(package.GetLogicalSize() == g_compressible.size() + g_tail.size(), "generic packaged source exposes logical size");
+
+        streaming::ResourceSourceReader first;
+        streaming::ResourceSourceReader second;
+        Check(first.Open(package) == streaming::ResourceSourceResult::Success && second.Open(package) == streaming::ResourceSourceResult::Success,
+              "generic packaged source permits independent readers");
+        std::array<u8, 32> firstRange{};
+        std::array<u8, 13> secondRange{};
+        first.Seek(96);
+        first.Serialize(firstRange.data(), firstRange.size());
+        second.Seek(static_cast<i64>(g_compressible.size()));
+        second.Serialize(secondRange.data(), secondRange.size());
+        Check(std::memcmp(firstRange.data(), g_compressible.data() + 96, firstRange.size()) == 0, "first packaged reader decodes selected range");
+        Check(std::memcmp(secondRange.data(), g_tail.data(), secondRange.size()) == 0, "second packaged reader reads another segment independently");
+        Check(first.GetStats().decodedSegments == 1 && second.GetStats().decodedSegments == 1, "packaged readers account their own decoded segments");
+
+        streaming::ResourceReadPlan packagePlan;
+        constexpr u64 crossingOffset = g_compressible.size() - 4u;
+        Check(package.PlanRead(crossingOffset, 8, packagePlan) == streaming::ResourceSourceResult::Success && packagePlan.logicalBytes == 8 && packagePlan.touchedSegments == 2 &&
+                  packagePlan.decodedBytes == g_compressible.size() + g_tail.size(),
+              "packaged range plan accounts complete authenticated segments");
+        std::array<u8, 8> asyncPackageRange{};
+        streaming::ResourceReadRequest packageRequest;
+        Check(package.ReadAsync({crossingOffset, asyncPackageRange.size(), asyncPackageRange.data(), asyncPackageRange.size()}, packageRequest) == streaming::ResourceSourceResult::Success,
+              "submit generic asynchronous packaged range");
+        package.Close();
+        std::array<u8, 8> expectedCrossing{};
+        std::memcpy(expectedCrossing.data(), g_compressible.data() + crossingOffset, 4);
+        std::memcpy(expectedCrossing.data() + 4, g_tail.data(), 4);
+        Check(packageRequest.TryWait(10000) && packageRequest.GetResult() == streaming::ResourceSourceResult::Success &&
+                  std::memcmp(asyncPackageRange.data(), expectedCrossing.data(), expectedCrossing.size()) == 0,
+              "asynchronous packaged range decodes exact logical bytes after source owner closes");
+        Check(packageRequest.GetStats().storedBytesRead == packagePlan.storedBytes && packageRequest.GetStats().decodedSegments == 2,
+              "asynchronous packaged range reports physical and decode work");
+    }
+
+    void RunRangeQueueTest(streaming::ResourceStreamer& streamer)
+    {
+        Check(streaming::ClassifyFailure(streaming::ResourceSourceResult::IoFailure) == streaming::ResourceFailureClass::Transient &&
+                  streaming::ClassifyFailure(streaming::ResourceSourceResult::Cancelled) == streaming::ResourceFailureClass::Cancelled &&
+                  streaming::ClassifyFailure(streaming::ResourceSourceResult::IntegrityFailure) == streaming::ResourceFailureClass::Permanent,
+              "streaming failures distinguish retryable I/O from terminal failures");
+        streaming::ResourceSource source;
+        containers::DynamicArray<streaming::DependencyDescriptor> dependencies(memory::pools::Streaming::GetInstance());
+        Check(streamer.OpenSource(MakeReference("stream/root.vblob"), source, dependencies) == resources::Failure::None,
+              "open governed source for queued range reads");
+        streaming::ResourceRangeReadQueue queue;
+        Check(queue.Open(source) == streaming::ResourceSourceResult::Success, "open generic coalesced range queue");
+
+        std::array<streaming::CoalescedResourceReadRequest, 7> reads;
+        for (u32 index = 0; index < 6; ++index)
+            Check(queue.Read(index * 512u, 4096u, reads[index]) == streaming::ResourceSourceResult::Success, "queue bounded range read");
+        Check(queue.Read(5u * 512u, 4096u, reads[6]) == streaming::ResourceSourceResult::Success && reads[5].IsSameOperation(reads[6]),
+              "equal generation ranges coalesce into one operation");
+
+        for (u32 index = 0; index < 5; ++index)
+            Check(reads[index].TryWait(10000) && reads[index].GetResult() == streaming::ResourceSourceResult::Success, "admitted range finishes");
+        Check(!reads[5].HasFinished(), "over-budget range waits in FIFO admission queue");
+        reads[0].Reset();
+        Check(reads[5].TryWait(10000) && reads[5].GetResult() == streaming::ResourceSourceResult::Success,
+              "queued range starts after earlier shared bytes are released");
+        for (auto& read : reads)
+            read.Reset();
+    }
+
     bool BuildBasePackage(ByteArray& output)
     {
         output.Clear();
@@ -160,11 +254,9 @@ namespace
             return false;
         }
 
-        const std::array<packages::BuildSegment, 2> rootSegments{
-            {{g_compressible.data(), g_compressible.size(), packages::Codec::Lz4, 12, packages::SegmentFlags::Streamable},
-             {g_tail.data(), g_tail.size(), packages::Codec::None, 12, packages::SegmentFlags::Inline}}};
-        const std::array<packages::BuildSegment, 1> dependencySegments{
-            {{g_dependency.data(), g_dependency.size(), packages::Codec::None, 12, packages::SegmentFlags::MemoryResident}}};
+        const std::array<packages::BuildSegment, 2> rootSegments{{{g_compressible.data(), g_compressible.size(), packages::Codec::Lz4, 12, packages::SegmentFlags::Streamable},
+                                                                  {g_tail.data(), g_tail.size(), packages::Codec::None, 12, packages::SegmentFlags::Inline}}};
+        const std::array<packages::BuildSegment, 1> dependencySegments{{{g_dependency.data(), g_dependency.size(), packages::Codec::None, 12, packages::SegmentFlags::MemoryResident}}};
         const resources::ResourceId dependencyId = packages::HashResourcePath("stream/dependency.vblob");
         const std::array<packages::Dependency, 1> dependencies{{{dependencyId, BlobType, resources::DependencyKind::Required}}};
 
@@ -184,8 +276,7 @@ namespace
         std::array<packages::BuildResource*, 2> ordered{&root, &dependency};
         std::sort(ordered.begin(), ordered.end(), [](const packages::BuildResource* const left, const packages::BuildResource* const right)
                   { return packages::HashResourcePath(left->path) < packages::HashResourcePath(right->path); });
-        return writer.Add(*ordered[0]) == packages::Result::Success && writer.Add(*ordered[1]) == packages::Result::Success &&
-               writer.Finalize() == packages::Result::Success;
+        return writer.Add(*ordered[0]) == packages::Result::Success && writer.Add(*ordered[1]) == packages::Result::Success && writer.Finalize() == packages::Result::Success;
     }
 
     bool BuildCorruptPackage(ByteArray& output, packages::PackageReader& metadata)
@@ -199,8 +290,7 @@ namespace
         {
             return false;
         }
-        const std::array<packages::BuildSegment, 1> segments{
-            {{g_corruptPayload.data(), g_corruptPayload.size(), packages::Codec::None, 12, packages::SegmentFlags::Streamable}}};
+        const std::array<packages::BuildSegment, 1> segments{{{g_corruptPayload.data(), g_corruptPayload.size(), packages::Codec::None, 12, packages::SegmentFlags::Streamable}}};
         packages::BuildResource resource;
         resource.path = "stream/corrupt.vblob";
         resource.type = BlobType;
@@ -220,7 +310,7 @@ namespace
         {
             return false;
         }
-        const auto storedSegments = metadata.Segments(*stored);
+        const auto storedSegments = metadata.GetSegments(*stored);
         if (storedSegments.Count() != 1)
         {
             return false;
@@ -229,8 +319,7 @@ namespace
         return true;
     }
 
-    bool BuildSinglePackage(ByteArray& output, const u64 packageId, const u64 buildId, const char* const resourcePath,
-                            const void* const payload, const usize payloadSize)
+    bool BuildSinglePackage(ByteArray& output, const u64 packageId, const u64 buildId, const char* const resourcePath, const void* const payload, const usize payloadSize)
     {
         output.Clear();
         filesystem::MemoryFileWriter file(output);
@@ -242,8 +331,7 @@ namespace
         {
             return false;
         }
-        const packages::BuildSegment segment{payload, payloadSize, packages::Codec::None, 12,
-                                             packages::SegmentFlags::Streamable};
+        const packages::BuildSegment segment{payload, payloadSize, packages::Codec::None, 12, packages::SegmentFlags::Streamable};
         packages::BuildResource resource;
         resource.path = resourcePath;
         resource.type = BlobType;
@@ -252,8 +340,7 @@ namespace
         return writer.Add(resource) == packages::Result::Success && writer.Finalize() == packages::Result::Success;
     }
 
-    bool MakeCatalogEntry(ByteArray& bytes, const u32 packageNumber, const packages::PackageSetEntryFlags flags,
-                          const i32 priority, packages::PackageSetEntry& entry)
+    bool MakeCatalogEntry(ByteArray& bytes, const u32 packageNumber, const packages::PackageSetEntryFlags flags, const i32 priority, packages::PackageSetEntry& entry)
     {
         filesystem::MemoryFileReader file(bytes, 0);
         packages::PackageReader reader;
@@ -264,10 +351,10 @@ namespace
         entry.packageNumber = packageNumber;
         entry.flags = flags;
         entry.mountPriority = priority;
-        entry.packageId = reader.Header().packageId;
-        entry.buildId = reader.Header().buildId;
-        entry.fileSize = reader.Header().fileSize;
-        entry.indexCrc64 = reader.Header().indexCrc64;
+        entry.packageId = reader.GetHeader().packageId;
+        entry.buildId = reader.GetHeader().buildId;
+        entry.fileSize = reader.GetHeader().fileSize;
+        entry.indexCrc64 = reader.GetHeader().indexCrc64;
         const crypto::Digest256 digest = crypto::Sha256(bytes.Data(), bytes.Size());
         for (u32 byte = 0; byte < crypto::Digest256::ByteCount; ++byte)
         {
@@ -281,17 +368,14 @@ namespace
     {
         constexpr u64 RootPackageId = 0x4441544130303001ull;
         constexpr u64 PackageSetBuildId = 0x202608040001ull;
-        if (!BuildSinglePackage(bulkBytes, 0x4441544130303101ull, 0x202608040101ull, "stream/set.vblob", g_dependency.data(),
-                                g_dependency.size()) ||
-            !BuildSinglePackage(optionalBytes, 0x4441544130303201ull, 0x202608040201ull, "stream/optional.vblob", g_tail.data(),
-                                g_tail.size()))
+        if (!BuildSinglePackage(bulkBytes, 0x4441544130303101ull, 0x202608040101ull, "stream/set.vblob", g_dependency.data(), g_dependency.size()) ||
+            !BuildSinglePackage(optionalBytes, 0x4441544130303201ull, 0x202608040201ull, "stream/optional.vblob", g_tail.data(), g_tail.size()))
         {
             return false;
         }
 
         std::array<packages::PackageSetEntry, 2> entries{};
-        if (!MakeCatalogEntry(bulkBytes, 1,
-                              packages::PackageSetEntryFlags::Required | packages::PackageSetEntryFlags::Override, 10, entries[0]) ||
+        if (!MakeCatalogEntry(bulkBytes, 1, packages::PackageSetEntryFlags::Required | packages::PackageSetEntryFlags::Override, 10, entries[0]) ||
             !MakeCatalogEntry(optionalBytes, 2, packages::PackageSetEntryFlags::Optional, 20, entries[1]))
         {
             return false;
@@ -315,10 +399,8 @@ namespace
         {
             return false;
         }
-        const packages::BuildSegment startupSegment{g_tail.data(), g_tail.size(), packages::Codec::None, 12,
-                                                    packages::SegmentFlags::MemoryResident};
-        const packages::BuildSegment shadowedSegment{g_tail.data(), g_tail.size(), packages::Codec::None, 12,
-                                                     packages::SegmentFlags::Streamable};
+        const packages::BuildSegment startupSegment{g_tail.data(), g_tail.size(), packages::Codec::None, 12, packages::SegmentFlags::MemoryResident};
+        const packages::BuildSegment shadowedSegment{g_tail.data(), g_tail.size(), packages::Codec::None, 12, packages::SegmentFlags::Streamable};
         packages::BuildResource startup;
         startup.path = "world/startup.vworld";
         startup.type = BlobType;
@@ -330,15 +412,12 @@ namespace
         shadowed.flags = packages::ResourceFlags::Streamable;
         shadowed.segments = {&shadowedSegment, 1};
         std::array<packages::BuildResource*, 2> ordered{&startup, &shadowed};
-        std::sort(ordered.begin(), ordered.end(), [](const packages::BuildResource* const left,
-                                                     const packages::BuildResource* const right)
+        std::sort(ordered.begin(), ordered.end(), [](const packages::BuildResource* const left, const packages::BuildResource* const right)
                   { return packages::HashResourcePath(left->path) < packages::HashResourcePath(right->path); });
-        return writer.Add(*ordered[0]) == packages::Result::Success && writer.Add(*ordered[1]) == packages::Result::Success &&
-               writer.Finalize() == packages::Result::Success;
+        return writer.Add(*ordered[0]) == packages::Result::Success && writer.Add(*ordered[1]) == packages::Result::Success && writer.Finalize() == packages::Result::Success;
     }
 
-    void RunPackageSetMountTest(const filesystem::AbsolutePath& directory, filesystem::Manager& files,
-                                resources::ResourcePipeline& pipeline, streaming::ResourceStreamer& streamer)
+    void RunPackageSetMountTest(const filesystem::AbsolutePath& directory, filesystem::Manager& files, resources::ResourcePipeline& pipeline, streaming::ResourceStreamer& streamer)
     {
         const filesystem::AbsolutePath data000 = directory.AddFilePath("DATA000.vpak");
         const filesystem::AbsolutePath data001 = directory.AddFilePath("DATA001.vpak");
@@ -359,59 +438,49 @@ namespace
         config.expectedBuildId = 0x202608040001ull;
         config.expectedTargetPlatformId = vanguard::serialization::MakeFourCC('W', 'D', '1', '2');
         streaming::PackageSetMount mount;
-        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::Success && mount.IsMounted() &&
-                  mount.GameId() == config.expectedGameId && mount.BuildId() == config.expectedBuildId &&
-                  mount.TargetPlatformId() == config.expectedTargetPlatformId && mount.PackageCount() == 2 &&
-                  mount.FindPackage(0) != nullptr && mount.FindPackage(1) != nullptr && mount.FindPackage(2) == nullptr &&
-                  mount.StartupWorld() == MakeReference("world/startup.vworld") &&
-                  mount.DefaultInput() == MakeReference("input/default.vinput") &&
-                  streamer.GetStats().mountedPackages == baselineMounts + 2,
+        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::Success && mount.IsMounted() && mount.GetGameId() == config.expectedGameId &&
+                  mount.BuildId() == config.expectedBuildId && mount.GetTargetPlatformId() == config.expectedTargetPlatformId && mount.PackageCount() == 2 &&
+                  mount.FindPackage(0) != nullptr && mount.FindPackage(1) != nullptr && mount.FindPackage(2) == nullptr && mount.StartupWorld() == MakeReference("world/startup.vworld") &&
+                  mount.GetDefaultInput() == MakeReference("input/default.vinput") && streamer.GetStats().mountedPackages == baselineMounts + 2,
               "DATA000 mounts root and required catalog packages while tolerating absent optional data");
 
         resources::PipelineRequest request = streamer.Request(MakeReference("stream/set.vblob"), resources::LoadPriority::High);
         Check(request.TryWait(10000) && request.HasLoaded(), "package-set resource resolves through ResourceStreamer");
         resources::ResourceHandle handle = request.Acquire();
         const auto* const resource = static_cast<const BlobResource*>(handle.Get());
-        Check(resource != nullptr &&
-                  resource->m_contentCrc64 == vanguard::serialization::Crc64(g_dependency.data(), g_dependency.size()),
+        Check(resource != nullptr && resource->m_contentCrc64 == vanguard::serialization::Crc64(g_dependency.data(), g_dependency.size()),
               "higher-priority override package reaches the registered decoder");
         handle.Reset();
         request.Reset();
         WaitForDrain(pipeline, streamer);
-        Check(mount.Unmount() == streaming::PackageSetMountResult::Success && !mount.IsMounted() &&
-                  streamer.GetStats().mountedPackages == baselineMounts,
+        Check(mount.Unmount() == streaming::PackageSetMountResult::Success && !mount.IsMounted() && streamer.GetStats().mountedPackages == baselineMounts,
               "package-set unmount removes the complete set atomically");
 
         Check(SaveBytes(data002, optionalBytes), "install optional package fixture");
         streaming::PackageSetMountConfig requiredOnly = config;
         requiredOnly.mountOptionalPackages = false;
-        Check(mount.Mount(streamer, directory, requiredOnly) == streaming::PackageSetMountResult::Success &&
-                  mount.PackageCount() == 2 && mount.FindPackage(2) == nullptr,
+        Check(mount.Mount(streamer, directory, requiredOnly) == streaming::PackageSetMountResult::Success && mount.PackageCount() == 2 && mount.FindPackage(2) == nullptr,
               "optional package mounting can be disabled explicitly");
         Check(mount.Unmount() == streaming::PackageSetMountResult::Success, "required-only package set unmount");
-        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::Success && mount.PackageCount() == 3 &&
-                  mount.FindPackage(2) != nullptr,
+        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::Success && mount.PackageCount() == 3 && mount.FindPackage(2) != nullptr,
               "installed optional package joins the same atomic mount transaction");
         Check(mount.Unmount() == streaming::PackageSetMountResult::Success, "optional package set unmount");
         static_cast<void>(files.DeleteFile(data002));
 
         streaming::PackageSetMountConfig wrongGame = config;
         wrongGame.expectedGameId ^= 1u;
-        Check(mount.Mount(streamer, directory, wrongGame) == streaming::PackageSetMountResult::GameMismatch &&
-                  streamer.GetStats().mountedPackages == baselineMounts,
+        Check(mount.Mount(streamer, directory, wrongGame) == streaming::PackageSetMountResult::GameMismatch && streamer.GetStats().mountedPackages == baselineMounts,
               "game identity mismatch leaves no partial mounts");
 
         static_cast<void>(files.DeleteFile(data001));
-        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::MissingRequiredPackage &&
-                  streamer.GetStats().mountedPackages == baselineMounts,
+        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::MissingRequiredPackage && streamer.GetStats().mountedPackages == baselineMounts,
               "missing required package leaves no partial mounts");
         Check(SaveBytes(data001, bulkBytes), "restore required package");
 
         ByteArray oversizedBulk(bulkBytes);
         oversizedBulk.PushBack(0xff);
         Check(SaveBytes(data001, oversizedBulk), "write size-mismatched required package");
-        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::PackageMetadataMismatch &&
-                  streamer.GetStats().mountedPackages == baselineMounts,
+        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::PackageMetadataMismatch && streamer.GetStats().mountedPackages == baselineMounts,
               "catalog size mismatch leaves no partial mounts");
 
         ByteArray digestMismatch(bulkBytes);
@@ -421,7 +490,7 @@ namespace
         const packages::Resource* const stored = bulkReader.Find("stream/set.vblob");
         if (stored != nullptr)
         {
-            const auto segments = bulkReader.Segments(*stored);
+            const auto segments = bulkReader.GetSegments(*stored);
             if (!segments.Empty())
             {
                 digestMismatch[static_cast<u32>(segments[0].offset)] ^= 0x5a;
@@ -431,13 +500,11 @@ namespace
         Check(SaveBytes(data001, digestMismatch), "write digest-mismatched required package");
         streaming::PackageSetMountConfig wholeFile = config;
         wholeFile.verification = packages::CatalogVerification::WholeFileDigest;
-        Check(mount.Mount(streamer, directory, wholeFile) == streaming::PackageSetMountResult::PackageDigestMismatch &&
-                  streamer.GetStats().mountedPackages == baselineMounts,
+        Check(mount.Mount(streamer, directory, wholeFile) == streaming::PackageSetMountResult::PackageDigestMismatch && streamer.GetStats().mountedPackages == baselineMounts,
               "whole-file verification rejects altered payload before mounting");
 
         static_cast<void>(files.DeleteFile(data000));
-        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::MissingRootPackage &&
-                  streamer.GetStats().mountedPackages == baselineMounts,
+        Check(mount.Mount(streamer, directory, config) == streaming::PackageSetMountResult::MissingRootPackage && streamer.GetStats().mountedPackages == baselineMounts,
               "missing DATA000 is reported without directory discovery or partial mounts");
         static_cast<void>(files.DeleteFile(data001));
         static_cast<void>(files.DeleteFile(data002));
@@ -466,8 +533,7 @@ namespace
     {
         explicit ShaderMaterialLayout() noexcept : fields(memory::pools::Resources::GetInstance()) {}
 
-        [[nodiscard]] bool Build(const char* const interfaceName, const ShaderParameter* const parameters,
-                                 const u32 parameterCount) noexcept
+        [[nodiscard]] bool Build(const char* const interfaceName, const ShaderParameter* const parameters, const u32 parameterCount) noexcept
         {
             fields.Resize(parameterCount + 1u);
             if (fields.Size() != parameterCount + 1u)
@@ -476,9 +542,8 @@ namespace
             }
 
             u32 offset = 0;
-            fields[0] = reflection::MakeField("shader", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                                              offset, sizeof(resources::ResourceReference), alignof(resources::ResourceReference), 1, 0,
-                                              reflection::FieldFlags::Required);
+            fields[0] = reflection::MakeField("shader", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference, offset, sizeof(resources::ResourceReference),
+                                              alignof(resources::ResourceReference), 1, 0, reflection::FieldFlags::Required);
             offset += sizeof(resources::ResourceReference);
             u32 objectAlignment = alignof(resources::ResourceReference);
 
@@ -490,8 +555,7 @@ namespace
                     return false;
                 }
                 offset = AlignValue(offset, parameter.alignment);
-                fields[index + 1u] = reflection::MakeField(parameter.name, parameter.type, parameter.kind, offset, parameter.size,
-                                                           parameter.alignment, 1, 0, parameter.flags);
+                fields[index + 1u] = reflection::MakeField(parameter.name, parameter.type, parameter.kind, offset, parameter.size, parameter.alignment, 1, 0, parameter.flags);
                 offset += parameter.size;
                 if (parameter.alignment > objectAlignment)
                 {
@@ -499,14 +563,7 @@ namespace
                 }
             }
 
-            schema = {reflection::HashSchemaName(interfaceName),
-                      interfaceName,
-                      AlignValue(offset, objectAlignment),
-                      objectAlignment,
-                      1,
-                      1,
-                      fields.TypedData(),
-                      fields.Size()};
+            schema = {reflection::HashSchemaName(interfaceName), interfaceName, AlignValue(offset, objectAlignment), objectAlignment, 1, 1, fields.TypedData(), fields.Size()};
             return schema.id != reflection::InvalidSchemaTypeId;
         }
 
@@ -534,7 +591,7 @@ namespace
 
         explicit ShaderResource(const ShaderMaterialLayout& layout) noexcept : m_layout(&layout) {}
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override
         {
             return ShaderType;
         }
@@ -547,7 +604,7 @@ namespace
     public:
         VANGUARD_USE_MEMORY_POOL(memory::pools::Resources);
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override
         {
             return TextureType;
         }
@@ -559,8 +616,7 @@ namespace
         VANGUARD_USE_MEMORY_POOL(memory::pools::Resources);
 
         explicit DynamicMaterialResource(const reflection::Schema& schema) noexcept
-            : m_schema(&schema), m_storage(memory::Allocate(memory::PoolId::Resources, schema.size, schema.alignment)),
-              m_dependencies(memory::pools::Resources::GetInstance())
+            : m_schema(&schema), m_storage(memory::Allocate(memory::PoolId::Resources, schema.size, schema.alignment)), m_dependencies(memory::pools::Resources::GetInstance())
         {
             auto* const bytes = static_cast<u8*>(m_storage.address);
             for (usize index = 0; index < m_storage.size; ++index)
@@ -574,7 +630,7 @@ namespace
             memory::Free(m_storage);
         }
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override
         {
             return MaterialType;
         }
@@ -584,15 +640,13 @@ namespace
         containers::DynamicArray<resources::ResourceHandle> m_dependencies;
     };
 
-    resources::ResourceObject* DecodeShader(resources::ResourceReference, const void*, usize, const resources::LoadContext&,
-                                            resources::Failure& failure, void* const userData) noexcept
+    resources::ResourceObject* DecodeShader(resources::ResourceReference, const void*, usize, const resources::LoadContext&, resources::Failure& failure, void* const userData) noexcept
     {
         failure = resources::Failure::None;
         return VANGUARD_NEW(ShaderResource)(*static_cast<ShaderMaterialLayout*>(userData));
     }
 
-    resources::ResourceObject* DecodeTexture(resources::ResourceReference, const void*, usize, const resources::LoadContext&,
-                                             resources::Failure& failure, void*) noexcept
+    resources::ResourceObject* DecodeTexture(resources::ResourceReference, const void*, usize, const resources::LoadContext&, resources::Failure& failure, void*) noexcept
     {
         failure = resources::Failure::None;
         return VANGUARD_NEW(TextureResource)();
@@ -610,10 +664,10 @@ namespace
 
     const reflection::Schema* ResolveMaterialSchema(const resources::LoadContext& context, void*) noexcept
     {
-        for (u32 index = 0; index < context.DependencyCount(); ++index)
+        for (u32 index = 0; index < context.GetDependencyCount(); ++index)
         {
-            const resources::ResourceObject* const dependency = context.Dependency(index).Get();
-            if (dependency != nullptr && dependency->Type() == ShaderType)
+            const resources::ResourceObject* const dependency = context.GetDependency(index).Get();
+            if (dependency != nullptr && dependency->GetType() == ShaderType)
             {
                 return &static_cast<const ShaderResource*>(dependency)->m_layout->schema;
             }
@@ -640,9 +694,9 @@ namespace
     bool BindDynamicMaterial(resources::ResourceObject& resource, const resources::LoadContext& context, void*) noexcept
     {
         auto& material = static_cast<DynamicMaterialResource&>(resource);
-        for (u32 index = 0; index < context.DependencyCount(); ++index)
+        for (u32 index = 0; index < context.GetDependencyCount(); ++index)
         {
-            const resources::ResourceHandle& dependency = context.Dependency(index);
+            const resources::ResourceHandle& dependency = context.GetDependency(index);
             if (dependency)
             {
                 material.m_dependencies.PushBack(dependency);
@@ -663,8 +717,7 @@ namespace
         containers::DynamicArray<streaming::DependencyDescriptor> values;
     };
 
-    bool CollectMaterialDependency(const resources::ResourceReference reference, const resources::DependencyKind kind,
-                                   void* const userData) noexcept
+    bool CollectMaterialDependency(const resources::ResourceReference reference, const resources::DependencyKind kind, void* const userData) noexcept
     {
         static_cast<MaterialDependencies*>(userData)->values.PushBack({reference, kind});
         return true;
@@ -676,8 +729,8 @@ namespace
         {
             const resources::PipelineStats pipelineStats = pipeline.GetStats();
             const streaming::Stats streamingStats = streamer.GetStats();
-            if (pipelineStats.activeJobs == 0 && pipelineStats.activeOperations == 0 && pipelineStats.activePreparations == 0 &&
-                streamingStats.activeLoads == 0 && streamingStats.activeReads == 0)
+            if (pipelineStats.activeJobs == 0 && pipelineStats.activeOperations == 0 && pipelineStats.activePreparations == 0 && streamingStats.activeLoads == 0 &&
+                streamingStats.activeReads == 0)
             {
                 return;
             }
@@ -686,34 +739,27 @@ namespace
         Check(false, "resource and streaming work drains");
     }
 
-    void RunShaderDerivedMaterialTest(const filesystem::AbsolutePath& directory, filesystem::Manager& files,
-                                      resources::ResourcePipeline& pipeline, streaming::ResourceStreamer& streamer)
+    void RunShaderDerivedMaterialTest(const filesystem::AbsolutePath& directory, filesystem::Manager& files, resources::ResourcePipeline& pipeline, streaming::ResourceStreamer& streamer)
     {
-        const ShaderParameter pbrParameters[] = {
-            {"roughness", reflection::builtin::F32, reflection::ValueKind::F32, sizeof(f32), alignof(f32),
-             reflection::FieldFlags::Required},
-            {"metallic", reflection::builtin::F32, reflection::ValueKind::F32, sizeof(f32), alignof(f32), reflection::FieldFlags::None},
-            {"albedo", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-             sizeof(resources::ResourceReference), alignof(resources::ResourceReference), reflection::FieldFlags::OptionalDependency}};
-        const ShaderParameter emissiveParameters[] = {{"emissive_intensity", reflection::builtin::F32, reflection::ValueKind::F32,
-                                                       sizeof(f32), alignof(f32), reflection::FieldFlags::None}};
+        const ShaderParameter pbrParameters[] = {{"roughness", reflection::builtin::F32, reflection::ValueKind::F32, sizeof(f32), alignof(f32), reflection::FieldFlags::Required},
+                                                 {"metallic", reflection::builtin::F32, reflection::ValueKind::F32, sizeof(f32), alignof(f32), reflection::FieldFlags::None},
+                                                 {"albedo", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference, sizeof(resources::ResourceReference),
+                                                  alignof(resources::ResourceReference), reflection::FieldFlags::OptionalDependency}};
+        const ShaderParameter emissiveParameters[] = {{"emissive_intensity", reflection::builtin::F32, reflection::ValueKind::F32, sizeof(f32), alignof(f32), reflection::FieldFlags::None}};
 
         ShaderMaterialLayout pbrLayout;
         ShaderMaterialLayout emissiveLayout;
-        Check(pbrLayout.Build("vanguard.shader_interface.test_pbr", pbrParameters, 3) &&
-                  emissiveLayout.Build("vanguard.shader_interface.test_emissive", emissiveParameters, 1),
+        Check(pbrLayout.Build("vanguard.shader_interface.test_pbr", pbrParameters, 3) && emissiveLayout.Build("vanguard.shader_interface.test_emissive", emissiveParameters, 1),
               "shader parameter declarations generate material schemas");
-        Check(pbrLayout.schema.fieldCount == 4 && pbrLayout.Find("roughness") != nullptr && pbrLayout.Find("albedo") != nullptr &&
-                  pbrLayout.Find("emissive_intensity") == nullptr && emissiveLayout.schema.fieldCount == 2 &&
-                  emissiveLayout.Find("emissive_intensity") != nullptr && pbrLayout.schema.id != emissiveLayout.schema.id &&
+        Check(pbrLayout.schema.fieldCount == 4 && pbrLayout.Find("roughness") != nullptr && pbrLayout.Find("albedo") != nullptr && pbrLayout.Find("emissive_intensity") == nullptr &&
+                  emissiveLayout.schema.fieldCount == 2 && emissiveLayout.Find("emissive_intensity") != nullptr && pbrLayout.schema.id != emissiveLayout.schema.id &&
                   pbrLayout.schema.size != emissiveLayout.schema.size,
               "material layouts differ with shader interfaces");
         Check(reflection::RegisterSchema(pbrLayout.schema), "shader-derived schema registration");
 
         const resources::ResourceReference shader(resources::ResourcePath::FromString("shaders/test_pbr.vshader"), ShaderType);
         const resources::ResourceReference albedo(resources::ResourcePath::FromString("textures/test_albedo.vtex"), TextureType);
-        const resources::ResourceReference materialReference(resources::ResourcePath::FromString("materials/test_stone.vmat"),
-                                                             MaterialType);
+        const resources::ResourceReference materialReference(resources::ResourcePath::FromString("materials/test_stone.vmat"), MaterialType);
 
         memory::MemoryBlock source = memory::Allocate(memory::PoolId::Resources, pbrLayout.schema.size, pbrLayout.schema.alignment);
         Check(static_cast<bool>(source), "dynamic material source storage allocation");
@@ -726,8 +772,7 @@ namespace
         const reflection::SchemaField* const roughnessField = pbrLayout.Find("roughness");
         const reflection::SchemaField* const metallicField = pbrLayout.Find("metallic");
         const reflection::SchemaField* const albedoField = pbrLayout.Find("albedo");
-        Check(shaderField != nullptr && roughnessField != nullptr && metallicField != nullptr && albedoField != nullptr,
-              "generated PBR fields are discoverable");
+        Check(shaderField != nullptr && roughnessField != nullptr && metallicField != nullptr && albedoField != nullptr, "generated PBR fields are discoverable");
         *reinterpret_cast<resources::ResourceReference*>(sourceBytes + shaderField->offset) = shader;
         *reinterpret_cast<f32*>(sourceBytes + roughnessField->offset) = 0.72f;
         *reinterpret_cast<f32*>(sourceBytes + metallicField->offset) = 0.14f;
@@ -736,13 +781,10 @@ namespace
         ByteArray materialBytes(memory::pools::Serialization::GetInstance());
         filesystem::MemoryFileWriter materialFile(materialBytes);
         vanguard::serialization::BinaryWriter materialWriter(materialFile);
-        Check(schemas::WriteObject(materialWriter, pbrLayout.schema, source.address) == schemas::Result::Success && materialWriter.Flush(),
-              "shader-derived material serialization");
+        Check(schemas::WriteObject(materialWriter, pbrLayout.schema, source.address) == schemas::Result::Success && materialWriter.Flush(), "shader-derived material serialization");
 
         MaterialDependencies dependencies;
-        Check(schemas::VisitDependencies(pbrLayout.schema, source.address, &CollectMaterialDependency, &dependencies) ==
-                      schemas::Result::Success &&
-                  dependencies.values.Size() == 2,
+        Check(schemas::VisitDependencies(pbrLayout.schema, source.address, &CollectMaterialDependency, &dependencies) == schemas::Result::Success && dependencies.values.Size() == 2,
               "generated schema drives material dependency extraction");
         memory::Free(source);
 
@@ -750,8 +792,7 @@ namespace
         const filesystem::AbsolutePath texturePath = directory.AddFilePath("test_albedo.vtex");
         const filesystem::AbsolutePath materialPath = directory.AddFilePath("test_stone.vmat");
         const u8 leafBytes[] = {0x56, 0x47};
-        Check(SaveBytes(shaderPath, leafBytes, 2) && SaveBytes(texturePath, leafBytes, 2) && SaveBytes(materialPath, materialBytes),
-              "shader-derived material fixtures");
+        Check(SaveBytes(shaderPath, leafBytes, 2) && SaveBytes(texturePath, leafBytes, 2) && SaveBytes(materialPath, materialBytes), "shader-derived material fixtures");
 
         streaming::SchemaDecoderDescriptor materialDecoder;
         materialDecoder.type = MaterialType;
@@ -761,8 +802,7 @@ namespace
         materialDecoder.object = &DynamicMaterialObject;
         materialDecoder.bindDependencies = &BindDynamicMaterial;
         materialDecoder.destroy = &DestroyDynamicMaterial;
-        Check(streamer.RegisterSchemaDecoder(materialDecoder) &&
-                  streamer.RegisterDecoder({ShaderType, "test shader interface", &DecodeShader, &DestroyShader, &pbrLayout}) &&
+        Check(streamer.RegisterSchemaDecoder(materialDecoder) && streamer.RegisterDecoder({ShaderType, "test shader interface", &DecodeShader, &DestroyShader, &pbrLayout}) &&
                   streamer.RegisterDecoder({TextureType, "test texture", &DecodeTexture, &DestroyTexture, nullptr}),
               "dynamic material and dependency decoders");
 
@@ -780,15 +820,13 @@ namespace
         const auto* const material = static_cast<const DynamicMaterialResource*>(handle.Get());
         const auto* const loadedBytes = material != nullptr ? static_cast<const u8*>(material->m_storage.address) : nullptr;
         Check(material != nullptr && material->m_schema == &pbrLayout.schema && material->m_dependencies.Size() == 2 &&
-                  *reinterpret_cast<const f32*>(loadedBytes + roughnessField->offset) == 0.72f &&
-                  *reinterpret_cast<const f32*>(loadedBytes + metallicField->offset) == 0.14f,
+                  *reinterpret_cast<const f32*>(loadedBytes + roughnessField->offset) == 0.72f && *reinterpret_cast<const f32*>(loadedBytes + metallicField->offset) == 0.14f,
               "published material storage follows loaded shader layout");
 
         handle.Reset();
         request.Reset();
         WaitForDrain(pipeline, streamer);
-        Check(streamer.UnregisterDecoder(MaterialType) && streamer.UnregisterDecoder(ShaderType) && streamer.UnregisterDecoder(TextureType),
-              "dynamic material decoders unregister");
+        Check(streamer.UnregisterDecoder(MaterialType) && streamer.UnregisterDecoder(ShaderType) && streamer.UnregisterDecoder(TextureType), "dynamic material decoders unregister");
         Check(reflection::UnregisterSchema(pbrLayout.schema.id), "shader-derived schema unregister");
         static_cast<void>(files.DeleteFile(shaderPath));
         static_cast<void>(files.DeleteFile(texturePath));
@@ -835,6 +873,8 @@ int main()
     Check(SaveBytes(budgetPath, g_budgetPayload.data(), g_budgetPayload.size()), "write over-budget loose resource");
     Check(SaveBytes(cancelPath, g_budgetPayload.data(), 48 * 1024), "write cancellable loose resource");
 
+    RunResourceSourceTest(packagePath, loosePath);
+
     auto baseFile = filesystem::RawFileReader::Create(packagePath);
     packages::PackageReader basePackage;
     Check(baseFile && basePackage.Open(*baseFile) == packages::Result::Success, "open segmented VPAK metadata");
@@ -853,8 +893,7 @@ int main()
     RunShaderDerivedMaterialTest(testDirectory, files, pipeline, streamer);
 
     DecoderState decoderState;
-    Check(streamer.RegisterDecoder({BlobType, "streaming blob", &DecodeBlob, &DestroyBlob, &decoderState}),
-          "streaming decoder registration");
+    Check(streamer.RegisterDecoder({BlobType, "streaming blob", &DecodeBlob, &DestroyBlob, &decoderState}), "streaming decoder registration");
     RunPackageSetMountTest(testDirectory, files, pipeline, streamer);
     Check(streamer.MountPackage(basePackage, packagePath, 0), "base VPAK mount");
     Check(streamer.MountPackage(corruptPackage, corruptPackagePath, 0), "corrupt test VPAK mount");
@@ -862,9 +901,7 @@ int main()
     const resources::ResourceReference root = MakeReference("stream/root.vblob");
     const resources::ResourceReference dependency = MakeReference("stream/dependency.vblob");
     const std::array<streaming::DependencyDescriptor, 1> looseDependencies{{{dependency, resources::DependencyKind::Required}}};
-    Check(streamer.RegisterLoose({root, loosePath,
-                                  containers::ArraySpan<const streaming::DependencyDescriptor>(looseDependencies.data(),
-                                                                                               static_cast<u32>(looseDependencies.size())),
+    Check(streamer.RegisterLoose({root, loosePath, containers::ArraySpan<const streaming::DependencyDescriptor>(looseDependencies.data(), static_cast<u32>(looseDependencies.size())),
                                   vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()), 100}),
           "loose override registration");
 
@@ -872,14 +909,15 @@ int main()
     Check(looseRequest.TryWait(10000) && looseRequest.HasLoaded(), "loose source loads asynchronously");
     resources::ResourceHandle looseHandle = looseRequest.Acquire();
     const auto* const looseResource = static_cast<const BlobResource*>(looseHandle.Get());
-    Check(looseResource != nullptr &&
-              looseResource->m_contentCrc64 == vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()) &&
+    Check(looseResource != nullptr && looseResource->m_contentCrc64 == vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()) &&
               looseResource->m_dependencyCount == 1,
           "loose source precedence and package dependency fan-in");
     looseHandle.Reset();
     looseRequest.Reset();
     WaitForDrain(pipeline, streamer);
-    Check(streamer.UnregisterLoose(root.Path()), "loose override removal");
+    Check(streamer.UnregisterLoose(root.GetPath()), "loose override removal");
+
+    RunRangeQueueTest(streamer);
 
     resources::PipelineRequest packageRequest = streamer.Request(root, resources::LoadPriority::Critical);
     Check(packageRequest.TryWait(10000) && packageRequest.HasLoaded(), "segmented VPAK loads asynchronously");
@@ -890,44 +928,35 @@ int main()
     std::memcpy(expectedPackageBytes.data(), g_compressible.data(), g_compressible.size());
     std::memcpy(expectedPackageBytes.data() + g_compressible.size(), g_tail.data(), g_tail.size());
     expectedPackageCrc = vanguard::serialization::Crc64(expectedPackageBytes.data(), expectedPackageBytes.size());
-    Check(packageResource != nullptr && packageResource->m_contentCrc64 == expectedPackageCrc &&
-              packageResource->m_byteCount == expectedPackageBytes.size() && packageResource->m_dependencyCount == 1,
+    Check(packageResource != nullptr && packageResource->m_contentCrc64 == expectedPackageCrc && packageResource->m_byteCount == expectedPackageBytes.size() &&
+              packageResource->m_dependencyCount == 1,
           "mixed LZ4/raw VPAK segments decode and validate");
     packageHandle.Reset();
     packageRequest.Reset();
 
     resources::PipelineRequest corruptRequest = streamer.Request(MakeReference("stream/corrupt.vblob"));
-    Check(corruptRequest.TryWait(10000) && corruptRequest.HasFailed() && corruptRequest.Error() == resources::Failure::IntegrityFailure,
-          "stored-segment corruption is rejected");
+    Check(corruptRequest.TryWait(10000) && corruptRequest.HasFailed() && corruptRequest.GetError() == resources::Failure::IntegrityFailure, "stored-segment corruption is rejected");
     corruptRequest.Reset();
 
-    Check(streamer.RegisterLoose({MakeReference("stream/budget.vblob"),
-                                  budgetPath,
-                                  {},
-                                  vanguard::serialization::Crc64(g_budgetPayload.data(), g_budgetPayload.size()),
-                                  0}),
+    Check(streamer.RegisterLoose({MakeReference("stream/budget.vblob"), budgetPath, {}, vanguard::serialization::Crc64(g_budgetPayload.data(), g_budgetPayload.size()), 0}),
           "over-budget source registration");
     resources::PipelineRequest budgetRequest = streamer.Request(MakeReference("stream/budget.vblob"));
-    Check(budgetRequest.TryWait(10000) && budgetRequest.HasFailed() && budgetRequest.Error() == resources::Failure::OutOfMemory,
-          "staging budget rejects oversized load");
+    Check(budgetRequest.TryWait(10000) && budgetRequest.HasFailed() && budgetRequest.GetError() == resources::Failure::OutOfMemory, "staging budget rejects oversized load");
     budgetRequest.Reset();
 
     Check(streamer.RegisterLoose({MakeReference("stream/cancel.vblob"), cancelPath, {}, 0, 0}), "cancellable source registration");
     resources::PipelineRequest cancelRequest = streamer.Request(MakeReference("stream/cancel.vblob"), resources::LoadPriority::Background);
     Check(cancelRequest.Cancel(), "explicit cancellation accepted");
-    Check(cancelRequest.Status() == resources::State::Cancelled ||
-              (cancelRequest.TryWait(10000) && cancelRequest.Error() == resources::Failure::Cancelled),
+    Check(cancelRequest.GetStatus() == resources::State::Cancelled || (cancelRequest.TryWait(10000) && cancelRequest.GetError() == resources::Failure::Cancelled),
           "cancelled request reaches terminal cancellation");
     cancelRequest.Reset();
 
     WaitForDrain(pipeline, streamer);
     const streaming::Stats stats = streamer.GetStats();
-    Check(stats.registeredDecoders == 1 && stats.mountedPackages == 2 && stats.activeLoads == 0 && stats.activeReads == 0 &&
-              stats.stagingBytesInUse == 0 && stats.bytesRead != 0 && stats.completedLoads >= 3 && stats.integrityFailures >= 1 &&
-              stats.budgetRejections >= 1,
+    Check(stats.registeredDecoders == 1 && stats.mountedPackages == 2 && stats.activeLoads == 0 && stats.activeReads == 0 && stats.stagingBytesInUse == 0 && stats.bytesRead != 0 &&
+              stats.completedLoads >= 3 && stats.integrityFailures >= 1 && stats.budgetRejections >= 1,
           "streaming telemetry reports work, failures, and no leaks");
-    Check(decoderState.decoded.GetValue() == decoderState.destroyed.GetValue(),
-          "decoded resource objects are released after request drain");
+    Check(decoderState.decoded.GetValue() == decoderState.destroyed.GetValue(), "decoded resource objects are released after request drain");
 
     Check(streamer.UnmountPackage(corruptPackage), "corrupt package unmount");
     Check(streamer.UnmountPackage(basePackage), "base package unmount");

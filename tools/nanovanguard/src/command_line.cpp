@@ -48,8 +48,7 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool AppendPath(char* const destination, const vanguard::u32 capacity, const char* const parent,
-                                  const char* const name) noexcept
+    [[nodiscard]] bool AppendPath(char* const destination, const vanguard::u32 capacity, const char* const parent, const char* const name) noexcept
     {
         vanguard::u32 written = 0;
         if (parent != nullptr && parent[0] != '\0')
@@ -75,8 +74,7 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool WriteUsageError(vanguard::nanovanguard::Output& output, const char* const message,
-                                       const char* const detail = nullptr) noexcept
+    [[nodiscard]] bool WriteUsageError(vanguard::nanovanguard::Output& output, const char* const message, const char* const detail = nullptr) noexcept
     {
         bool written = output.Write("nanovanguard: ") && output.Write(message);
         if (detail != nullptr)
@@ -87,10 +85,7 @@ namespace
 
 namespace vanguard::nanovanguard
 {
-    Output::Output(const WriteCallback callback, void* const userData) noexcept
-        : m_callback(callback), m_userData(userData), m_good(callback != nullptr)
-    {
-    }
+    Output::Output(const WriteCallback callback, void* const userData) noexcept : m_callback(callback), m_userData(userData), m_good(callback != nullptr) {}
 
     bool Output::Write(const char* const text) noexcept
     {
@@ -343,8 +338,7 @@ namespace vanguard::nanovanguard
             }
             ++cursor;
         }
-        if (invocation.m_positionalCount < command->descriptor.minimumPositionals ||
-            invocation.m_positionalCount > command->descriptor.maximumPositionals)
+        if (invocation.m_positionalCount < command->descriptor.minimumPositionals || invocation.m_positionalCount > command->descriptor.maximumPositionals)
         {
             static_cast<void>(WriteUsageError(output, "incorrect number of positional arguments", command->path));
             return ExitCode::UsageError;
@@ -375,8 +369,7 @@ namespace vanguard::nanovanguard
 
     bool CommandRegistry::PrintRootHelp(Output& output) const noexcept
     {
-        bool written = output.Write(
-            "nanovanguard - Vanguard project and build orchestration\n\nUsage:\n  nanovanguard <command> [options]\n\nCommands:\n");
+        bool written = output.Write("nanovanguard - Vanguard project and build orchestration\n\nUsage:\n  nanovanguard <command> [options]\n\nCommands:\n");
         for (u32 index = 0; index < m_count; ++index)
         {
             if (m_commands[index].descriptor.parent != nullptr && m_commands[index].descriptor.parent[0] != '\0')
@@ -389,8 +382,7 @@ namespace vanguard::nanovanguard
 
     bool CommandRegistry::PrintCommandHelp(const Record& command, Output& output) const noexcept
     {
-        bool written =
-            output.Write(command.descriptor.summary) && output.Write("\n\nUsage:\n  nanovanguard ") && output.Write(command.path);
+        bool written = output.Write(command.descriptor.summary) && output.Write("\n\nUsage:\n  nanovanguard ") && output.Write(command.path);
         if (command.descriptor.positionalUsage != nullptr && command.descriptor.positionalUsage[0] != '\0')
             written = written && output.Write(" ") && output.Write(command.descriptor.positionalUsage);
         if (command.descriptor.optionCount != 0)

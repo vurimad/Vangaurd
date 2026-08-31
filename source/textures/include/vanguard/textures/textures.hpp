@@ -28,6 +28,7 @@ namespace vanguard::textures
         DuplicateSubresource,
         MissingSubresource,
         BufferTooSmall,
+        Cancelled,
         IoFailure
     };
 
@@ -222,6 +223,8 @@ namespace vanguard::textures
     {
     public:
         TextureFile() noexcept;
+        TextureFile(TextureFile&& other) noexcept;
+        TextureFile& operator=(TextureFile&& other) noexcept;
         TextureFile(const TextureFile&) = delete;
         TextureFile& operator=(const TextureFile&) = delete;
 
@@ -229,24 +232,23 @@ namespace vanguard::textures
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] TextureDimension Dimension() const noexcept;
+        [[nodiscard]] TextureDimension GetDimension() const noexcept;
         [[nodiscard]] PixelFormat Format() const noexcept;
-        [[nodiscard]] ColorSpace Space() const noexcept;
-        [[nodiscard]] TextureFlags Flags() const noexcept;
-        [[nodiscard]] u32 Width() const noexcept;
-        [[nodiscard]] u32 Height() const noexcept;
-        [[nodiscard]] u32 Depth() const noexcept;
-        [[nodiscard]] u16 ArrayLayers() const noexcept;
-        [[nodiscard]] u8 MipCount() const noexcept;
-        [[nodiscard]] u8 MipTailFirstLevel() const noexcept;
-        [[nodiscard]] const crypto::Digest256& SourceFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const SubresourceRecord> Subresources() const noexcept;
-        [[nodiscard]] u64 TextureDataOffset() const noexcept;
-        [[nodiscard]] u64 TextureDataSize() const noexcept;
+        [[nodiscard]] ColorSpace GetSpace() const noexcept;
+        [[nodiscard]] TextureFlags GetFlags() const noexcept;
+        [[nodiscard]] u32 GetWidth() const noexcept;
+        [[nodiscard]] u32 GetHeight() const noexcept;
+        [[nodiscard]] u32 GetDepth() const noexcept;
+        [[nodiscard]] u16 GetArrayLayers() const noexcept;
+        [[nodiscard]] u8 GetMipCount() const noexcept;
+        [[nodiscard]] u8 GetMipTailFirstLevel() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetSourceFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const SubresourceRecord> GetSubresources() const noexcept;
+        [[nodiscard]] u64 GetTextureDataOffset() const noexcept;
+        [[nodiscard]] u64 GetTextureDataSize() const noexcept;
         [[nodiscard]] u32 FindSubresource(u8 mipLevel, u16 arrayLayer = 0, u8 face = 0) const noexcept;
-        [[nodiscard]] Result ReadSubresource(filesystem::IFile& reader, u32 index, void* destination,
-                                             usize capacity) const noexcept;
+        [[nodiscard]] Result ReadSubresource(filesystem::IFile& reader, u32 index, void* destination, usize capacity) const noexcept;
 
     private:
         bool m_open = false;
@@ -268,7 +270,6 @@ namespace vanguard::textures
     };
 
     [[nodiscard]] Result WriteTexture(filesystem::IFile& writer, const BuildDescription& description) noexcept;
-    [[nodiscard]] Result BuildStorageSegments(const TextureFile& texture, u64 documentSize,
-                                              containers::DynamicArray<StorageSegment>& segments,
+    [[nodiscard]] Result BuildStorageSegments(const TextureFile& texture, u64 documentSize, containers::DynamicArray<StorageSegment>& segments,
                                               u32 maximumSegments = 1048577) noexcept;
 } // namespace vanguard::textures

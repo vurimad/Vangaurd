@@ -2,12 +2,22 @@
 
 #include <vanguard/application/engine_host.hpp>
 
-namespace vanguard::input { class IInputBackend; }
-namespace vanguard::application { class IPlatformHost; }
-namespace vanguard::filesystem { struct Config; }
+namespace vanguard::input
+{
+    class IInputBackend;
+}
+namespace vanguard::application
+{
+    class IPlatformHost;
+}
+namespace vanguard::filesystem
+{
+    struct Config;
+}
 
 namespace vanguard::engine
 {
+    struct RenderingServiceConfig;
     inline constexpr application::ModuleId EngineModuleId = 0x656e67696e650001ull;
     inline constexpr application::ServiceId IoServiceId = 0x696f000000000001ull;
     inline constexpr application::ServiceId FilesystemServiceId = 0x66696c6573797301ull;
@@ -23,7 +33,7 @@ namespace vanguard::engine
     inline constexpr application::ServiceId GameWorldServiceId = 0x67616d65776f7201ull;
     inline constexpr application::ServiceId StreamingObserverServiceId = 0x7374726f62737601ull;
     inline constexpr application::ServiceId WorldSessionServiceId = 0x7773657373696f01ull;
-    inline constexpr application::ServiceId RenderSceneServiceId = 0x727363656e657301ull;
+    inline constexpr application::ServiceId RenderingServiceId = 0x72656e6465727301ull;
     inline constexpr application::CapabilityId InputCapabilityId = 0x696e707574636101ull;
     inline constexpr application::CapabilityId WindowCapabilityId = 0x77696e646f776301ull;
     inline constexpr application::CapabilityId GameInputCapabilityId = 0x67616d65696e6301ull;
@@ -39,41 +49,27 @@ namespace vanguard::engine
     inline constexpr application::CapabilityId GameWorldCapabilityId = 0x67616d65776f7211ull;
     inline constexpr application::CapabilityId StreamingObserverCapabilityId = 0x7374726f62737611ull;
     inline constexpr application::CapabilityId WorldSessionCapabilityId = 0x7773657373696f11ull;
-    inline constexpr application::CapabilityId RenderSceneCapabilityId = 0x727363656e656311ull;
+    inline constexpr application::CapabilityId RenderingCapabilityId = 0x72656e6465726311ull;
 
-    [[nodiscard]] bool RegisterEngineModule(application::EngineHost& host,
-                                            application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterIoService(application::EngineHost& host,
-                                         application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterFilesystemService(application::EngineHost& host,
+    [[nodiscard]] bool RegisterEngineModule(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterIoService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterFilesystemService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterFilesystemService(application::EngineHost& host, const filesystem::Config& config,
                                                  application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterFilesystemService(application::EngineHost& host,
-                                                 const filesystem::Config& config,
-                                                 application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterJobsService(application::EngineHost& host,
-                                           application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterFramePipelineService(application::EngineHost& host,
-                                                    application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterReflectionService(application::EngineHost& host,
-                                                 application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterJobsService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterFramePipelineService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterReflectionService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterWindowService(application::EngineHost& host, application::IPlatformHost* platform,
                                              application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterInputService(application::EngineHost& host, input::IInputBackend* backend,
-                                            application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterGameInputService(application::EngineHost& host,
+    [[nodiscard]] bool RegisterInputService(application::EngineHost& host, input::IInputBackend* backend, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterGameInputService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterResourcesService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterResourceStreamingService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterWorldService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterGameWorldService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterStreamingObserverService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterWorldSessionService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterRenderingService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterRenderingService(application::EngineHost& host, const RenderingServiceConfig& config,
                                                 application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterResourcesService(application::EngineHost& host,
-                                                application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterResourceStreamingService(application::EngineHost& host,
-                                                        application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterWorldService(application::EngineHost& host,
-                                            application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterGameWorldService(application::EngineHost& host,
-                                                application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterStreamingObserverService(application::EngineHost& host,
-                                                        application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterWorldSessionService(application::EngineHost& host,
-                                                   application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterRenderSceneService(application::EngineHost& host,
-                                                  application::HostFailure* failure = nullptr) noexcept;
 } // namespace vanguard::engine

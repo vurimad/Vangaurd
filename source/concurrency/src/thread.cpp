@@ -9,9 +9,9 @@ namespace
 
 namespace vanguard::concurrency
 {
-    ThreadId ThreadId::CurrentThread() noexcept
+    ThreadId ThreadId::GetCurrentThread() noexcept
     {
-        return backend::CurrentThreadId();
+        return backend::GetCurrentThreadId();
     }
     void YieldCurrentThread() noexcept
     {
@@ -36,11 +36,11 @@ namespace vanguard::concurrency
 
     void InitializeMainThread() noexcept
     {
-        g_mainThreadId = ThreadId::CurrentThread();
+        g_mainThreadId = ThreadId::GetCurrentThread();
     }
     bool IsMainThread() noexcept
     {
-        return !g_mainThreadId.IsValid() || g_mainThreadId == ThreadId::CurrentThread();
+        return !g_mainThreadId.IsValid() || g_mainThreadId == ThreadId::GetCurrentThread();
     }
 
     Thread::Thread(const char* const name, const ThreadMemoryParameters parameters) noexcept

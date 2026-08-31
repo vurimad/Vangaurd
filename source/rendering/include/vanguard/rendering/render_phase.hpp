@@ -12,7 +12,10 @@ namespace vanguard::rendering
     {
         u64 value = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return value != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
         [[nodiscard]] friend constexpr bool operator==(const RenderPhaseKey&, const RenderPhaseKey&) noexcept = default;
     };
 
@@ -20,7 +23,8 @@ namespace vanguard::rendering
     /// this identity to a compact RenderPhaseId before frame execution.
     [[nodiscard]] constexpr RenderPhaseKey MakeRenderPhaseKey(const char* const name, const u32 pass = 0) noexcept
     {
-        if (name == nullptr || name[0] == '\0') return {};
+        if (name == nullptr || name[0] == '\0')
+            return {};
         u64 hash = 1469598103934665603ull;
         for (const char* character = name; *character != '\0'; ++character)
         {
@@ -39,7 +43,10 @@ namespace vanguard::rendering
     {
         u8 index = InvalidRenderPhaseIndex;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return index < MaximumRenderPhases; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index < MaximumRenderPhases;
+        }
         [[nodiscard]] friend constexpr bool operator==(const RenderPhaseId&, const RenderPhaseId&) noexcept = default;
     };
 
@@ -51,8 +58,14 @@ namespace vanguard::rendering
         constexpr RenderPhaseSet() noexcept = default;
         explicit constexpr RenderPhaseSet(const u64 bits) noexcept : m_bits(bits) {}
 
-        [[nodiscard]] constexpr bool Empty() const noexcept { return m_bits == 0; }
-        [[nodiscard]] constexpr u64 Bits() const noexcept { return m_bits; }
+        [[nodiscard]] constexpr bool Empty() const noexcept
+        {
+            return m_bits == 0;
+        }
+        [[nodiscard]] constexpr u64 Bits() const noexcept
+        {
+            return m_bits;
+        }
         [[nodiscard]] constexpr bool Contains(const RenderPhaseId phase) const noexcept
         {
             return phase.IsValid() && (m_bits & (1ull << phase.index)) != 0;
@@ -67,17 +80,22 @@ namespace vanguard::rendering
         }
         constexpr bool Add(const RenderPhaseId phase) noexcept
         {
-            if (!phase.IsValid()) return false;
+            if (!phase.IsValid())
+                return false;
             m_bits |= 1ull << phase.index;
             return true;
         }
         constexpr bool Remove(const RenderPhaseId phase) noexcept
         {
-            if (!phase.IsValid()) return false;
+            if (!phase.IsValid())
+                return false;
             m_bits &= ~(1ull << phase.index);
             return true;
         }
-        constexpr void Clear() noexcept { m_bits = 0; }
+        constexpr void Clear() noexcept
+        {
+            m_bits = 0;
+        }
 
         [[nodiscard]] friend constexpr bool operator==(const RenderPhaseSet&, const RenderPhaseSet&) noexcept = default;
 
@@ -160,14 +178,12 @@ namespace vanguard::rendering
         RenderPhaseRegistry(const RenderPhaseRegistry&) = delete;
         RenderPhaseRegistry& operator=(const RenderPhaseRegistry&) = delete;
 
-        [[nodiscard]] bool Initialize(const RenderPhaseRegistryConfig& config = {},
-                                      RenderPhaseFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(const RenderPhaseRegistryConfig& config = {}, RenderPhaseFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(RenderPhaseFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
         [[nodiscard]] bool IsSealed() const noexcept;
 
-        [[nodiscard]] bool Register(const RenderPhaseDesc& desc, RenderPhaseId& phase,
-                                    RenderPhaseFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Register(const RenderPhaseDesc& desc, RenderPhaseId& phase, RenderPhaseFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Seal(RenderPhaseFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] RenderPhaseId Find(RenderPhaseKey key) const noexcept;
@@ -191,6 +207,5 @@ namespace vanguard::rendering
         inline constexpr RenderPhaseKey Selection = MakeRenderPhaseKey("vanguard.render.selection");
     } // namespace standardRenderPhases
 
-    [[nodiscard]] bool RegisterStandardRenderPhases(RenderPhaseRegistry& registry,
-                                                    RenderPhaseFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RegisterStandardRenderPhases(RenderPhaseRegistry& registry, RenderPhaseFailure* failure = nullptr) noexcept;
 } // namespace vanguard::rendering

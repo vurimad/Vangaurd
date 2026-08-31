@@ -22,7 +22,10 @@ namespace
             VG_ASSERT_MSG(!m_active.Exchange(true), "window backend commands must not nest or re-enter the manager");
         }
 
-        ~BackendCallGuard() { m_active.SetValue(false); }
+        ~BackendCallGuard()
+        {
+            m_active.SetValue(false);
+        }
 
         BackendCallGuard(const BackendCallGuard&) = delete;
         BackendCallGuard& operator=(const BackendCallGuard&) = delete;
@@ -41,8 +44,10 @@ namespace
         case win::WindowRole::GamePreview:
         case win::WindowRole::Tool:
         case win::WindowRole::Utility:
-        case win::WindowRole::Embedded: return true;
-        default: return false;
+        case win::WindowRole::Embedded:
+            return true;
+        default:
+            return false;
         }
     }
 
@@ -54,8 +59,10 @@ namespace
         case win::WindowRelationship::Owned:
         case win::WindowRelationship::Modal:
         case win::WindowRelationship::Embedded:
-        case win::WindowRelationship::ImGuiViewport: return true;
-        default: return false;
+        case win::WindowRelationship::ImGuiViewport:
+            return true;
+        default:
+            return false;
         }
     }
 
@@ -65,8 +72,10 @@ namespace
         {
         case win::WindowMode::Windowed:
         case win::WindowMode::BorderlessFullscreen:
-        case win::WindowMode::ExclusiveFullscreen: return true;
-        default: return false;
+        case win::WindowMode::ExclusiveFullscreen:
+            return true;
+        default:
+            return false;
         }
     }
 
@@ -76,8 +85,10 @@ namespace
         {
         case win::InitialWindowPlacement::Explicit:
         case win::InitialWindowPlacement::CenteredOnDisplay:
-        case win::InitialWindowPlacement::PlatformDefault: return true;
-        default: return false;
+        case win::InitialWindowPlacement::PlatformDefault:
+            return true;
+        default:
+            return false;
         }
     }
 
@@ -87,8 +98,10 @@ namespace
         {
         case win::PresentationSurfaceKind::None:
         case win::PresentationSurfaceKind::PlatformNative:
-        case win::PresentationSurfaceKind::Vulkan: return true;
-        default: return false;
+        case win::PresentationSurfaceKind::Vulkan:
+            return true;
+        default:
+            return false;
         }
     }
 
@@ -115,19 +128,18 @@ namespace
         case win::BackendEventType::SafeAreaChanged:
         case win::BackendEventType::OcclusionChanged:
         case win::BackendEventType::HdrStateChanged:
-        case win::BackendEventType::Failure: return true;
-        default: return false;
+        case win::BackendEventType::Failure:
+            return true;
+        default:
+            return false;
         }
     }
 
     [[nodiscard]] bool IsValidFlags(const win::WindowFlag value) noexcept
     {
-        constexpr vanguard::u32 valid = static_cast<vanguard::u32>(win::WindowFlag::Resizable) |
-                                        static_cast<vanguard::u32>(win::WindowFlag::Borderless) |
-                                        static_cast<vanguard::u32>(win::WindowFlag::AlwaysOnTop) |
-                                        static_cast<vanguard::u32>(win::WindowFlag::Utility) |
-                                        static_cast<vanguard::u32>(win::WindowFlag::SkipTaskbar) |
-                                        static_cast<vanguard::u32>(win::WindowFlag::Transparent) |
+        constexpr vanguard::u32 valid = static_cast<vanguard::u32>(win::WindowFlag::Resizable) | static_cast<vanguard::u32>(win::WindowFlag::Borderless) |
+                                        static_cast<vanguard::u32>(win::WindowFlag::AlwaysOnTop) | static_cast<vanguard::u32>(win::WindowFlag::Utility) |
+                                        static_cast<vanguard::u32>(win::WindowFlag::SkipTaskbar) | static_cast<vanguard::u32>(win::WindowFlag::Transparent) |
                                         static_cast<vanguard::u32>(win::WindowFlag::AcceptFileDrop) |
                                         static_cast<vanguard::u32>(win::WindowFlag::HighPixelDensity);
         return (static_cast<vanguard::u32>(value) & ~valid) == 0;
@@ -140,50 +152,51 @@ namespace
 
     [[nodiscard]] bool IsValidConstraints(const win::WindowConstraints& constraints) noexcept
     {
-        return constraints.minimum.IsValid() && constraints.maximum.IsValid() &&
-               constraints.minimum.width <= constraints.maximum.width &&
+        return constraints.minimum.IsValid() && constraints.maximum.IsValid() && constraints.minimum.width <= constraints.maximum.width &&
                constraints.minimum.height <= constraints.maximum.height;
     }
 
-    [[nodiscard]] bool IsWithinConstraints(const win::WindowExtent extent,
-                                           const win::WindowConstraints& constraints) noexcept
+    [[nodiscard]] bool IsWithinConstraints(const win::WindowExtent extent, const win::WindowConstraints& constraints) noexcept
     {
-        return extent.IsValid() && extent.width >= constraints.minimum.width &&
-               extent.height >= constraints.minimum.height && extent.width <= constraints.maximum.width &&
-               extent.height <= constraints.maximum.height;
+        return extent.IsValid() && extent.width >= constraints.minimum.width && extent.height >= constraints.minimum.height &&
+               extent.width <= constraints.maximum.width && extent.height <= constraints.maximum.height;
     }
 
-    [[nodiscard]] bool CopyString(const char* const source, char* const destination,
-                                  const vanguard::u32 capacity) noexcept
+    [[nodiscard]] bool CopyString(const char* const source, char* const destination, const vanguard::u32 capacity) noexcept
     {
-        if (source == nullptr || source[0] == '\0' || destination == nullptr || capacity == 0) return false;
+        if (source == nullptr || source[0] == '\0' || destination == nullptr || capacity == 0)
+            return false;
         vanguard::u32 length = 0;
         while (length + 1u < capacity && source[length] != '\0')
         {
             destination[length] = source[length];
             ++length;
         }
-        if (source[length] != '\0') return false;
+        if (source[length] != '\0')
+            return false;
         destination[length] = '\0';
         return true;
     }
 
     [[nodiscard]] bool StringsEqual(const char* left, const char* right) noexcept
     {
-        if (left == nullptr || right == nullptr) return left == right;
-        while (*left != '\0' && *left == *right) { ++left; ++right; }
+        if (left == nullptr || right == nullptr)
+            return left == right;
+        while (*left != '\0' && *left == *right)
+        {
+            ++left;
+            ++right;
+        }
         return *left == '\0' && *right == '\0';
     }
 
-    [[nodiscard]] bool DisplayDataEqual(const win::DisplaySnapshot& left,
-                                        const win::BackendDisplaySnapshot& right) noexcept
+    [[nodiscard]] bool DisplayDataEqual(const win::DisplaySnapshot& left, const win::BackendDisplaySnapshot& right) noexcept
     {
-        return left.fingerprint == right.fingerprint && left.bounds == right.bounds &&
-               left.workArea == right.workArea && left.desktopPixelExtent == right.desktopPixelExtent &&
-               left.desktopRefreshRate == right.desktopRefreshRate && left.contentScale == right.contentScale &&
-               left.primary == right.primary && left.hdrCapable == right.hdrCapable;
+        return left.fingerprint == right.fingerprint && left.bounds == right.bounds && left.workArea == right.workArea &&
+               left.desktopPixelExtent == right.desktopPixelExtent && left.desktopRefreshRate == right.desktopRefreshRate &&
+               left.contentScale == right.contentScale && left.primary == right.primary && left.hdrCapable == right.hdrCapable;
     }
-}
+} // namespace
 
 namespace vanguard::window
 {
@@ -231,7 +244,7 @@ namespace vanguard::window
 
         [[nodiscard]] bool IsOwnerThread() const noexcept
         {
-            return ownerThread == concurrency::ThreadId::CurrentThread();
+            return ownerThread == concurrency::ThreadId::GetCurrentThread();
         }
 
         [[nodiscard]] bool IsBackendReentry() const noexcept
@@ -239,86 +252,97 @@ namespace vanguard::window
             return IsOwnerThread() && backendCallActive.GetValue();
         }
 
-        void Reject(Failure* const failure, const FailureCode code, const char* const message,
-                    const WindowHandle window = {}, const DisplayHandle display = {},
+        void Reject(Failure* const failure, const FailureCode code, const char* const message, const WindowHandle window = {}, const DisplayHandle display = {},
                     const i32 backendCode = 0) noexcept
         {
             static_cast<void>(rejectedOperations.Increment());
-            if (failure != nullptr) *failure = {code, window, display, backendCode, message};
+            if (failure != nullptr)
+                *failure = {code, window, display, backendCode, message};
         }
 
         [[nodiscard]] WindowRecord* FindWindow(const WindowHandle handle) noexcept
         {
-            if (!handle.IsValid()) return nullptr;
+            if (!handle.IsValid())
+                return nullptr;
             WindowRecord& record = windows[handle.index];
             return record.occupied && record.generation == handle.generation ? &record : nullptr;
         }
 
         [[nodiscard]] const WindowRecord* FindWindow(const WindowHandle handle) const noexcept
         {
-            if (!handle.IsValid()) return nullptr;
+            if (!handle.IsValid())
+                return nullptr;
             const WindowRecord& record = windows[handle.index];
             return record.occupied && record.generation == handle.generation ? &record : nullptr;
         }
 
         [[nodiscard]] WindowRecord* FindWindow(const BackendWindowId id) noexcept
         {
-            if (!id.IsValid()) return nullptr;
+            if (!id.IsValid())
+                return nullptr;
             for (WindowRecord& record : windows)
-                if (record.occupied && record.backend == id) return &record;
+                if (record.occupied && record.backend == id)
+                    return &record;
             return nullptr;
         }
 
         [[nodiscard]] DisplayRecord* FindDisplay(const DisplayHandle handle) noexcept
         {
-            if (!handle.IsValid()) return nullptr;
+            if (!handle.IsValid())
+                return nullptr;
             DisplayRecord& record = displays[handle.index];
             return record.occupied && record.generation == handle.generation ? &record : nullptr;
         }
 
         [[nodiscard]] const DisplayRecord* FindDisplay(const DisplayHandle handle) const noexcept
         {
-            if (!handle.IsValid()) return nullptr;
+            if (!handle.IsValid())
+                return nullptr;
             const DisplayRecord& record = displays[handle.index];
             return record.occupied && record.generation == handle.generation ? &record : nullptr;
         }
 
         [[nodiscard]] DisplayRecord* FindDisplay(const BackendDisplayId id) noexcept
         {
-            if (!id.IsValid()) return nullptr;
+            if (!id.IsValid())
+                return nullptr;
             for (DisplayRecord& record : displays)
-                if (record.occupied && record.backend == id) return &record;
+                if (record.occupied && record.backend == id)
+                    return &record;
             return nullptr;
         }
 
         [[nodiscard]] const DisplayRecord* FindDisplay(const BackendDisplayId id) const noexcept
         {
-            if (!id.IsValid()) return nullptr;
+            if (!id.IsValid())
+                return nullptr;
             for (const DisplayRecord& record : displays)
-                if (record.occupied && record.backend == id) return &record;
+                if (record.occupied && record.backend == id)
+                    return &record;
             return nullptr;
         }
 
         [[nodiscard]] PresentationRecord* FindPresentation(const PresentationAttachmentHandle handle) noexcept
         {
-            if (!handle.IsValid()) return nullptr;
+            if (!handle.IsValid())
+                return nullptr;
             PresentationRecord& record = presentations[handle.index];
             return record.occupied && record.generation == handle.generation ? &record : nullptr;
         }
 
-        [[nodiscard]] const PresentationRecord* FindPresentation(
-            const PresentationAttachmentHandle handle) const noexcept
+        [[nodiscard]] const PresentationRecord* FindPresentation(const PresentationAttachmentHandle handle) const noexcept
         {
-            if (!handle.IsValid()) return nullptr;
+            if (!handle.IsValid())
+                return nullptr;
             const PresentationRecord& record = presentations[handle.index];
             return record.occupied && record.generation == handle.generation ? &record : nullptr;
         }
 
-        [[nodiscard]] bool BuildPresentationSnapshot(const PresentationRecord& presentation,
-                                                     PresentationAttachmentSnapshot& snapshot) const noexcept
+        [[nodiscard]] bool BuildPresentationSnapshot(const PresentationRecord& presentation, PresentationAttachmentSnapshot& snapshot) const noexcept
         {
             const WindowRecord* const window = FindWindow(presentation.window);
-            if (window == nullptr) return false;
+            if (window == nullptr)
+                return false;
             snapshot = {};
             snapshot.handle = {static_cast<u32>(&presentation - presentations), presentation.generation};
             snapshot.window = presentation.window;
@@ -351,9 +375,11 @@ namespace vanguard::window
         [[nodiscard]] DisplayRecord* PrimaryDisplayRecord() noexcept
         {
             for (DisplayRecord& record : displays)
-                if (record.occupied && record.snapshot.primary) return &record;
+                if (record.occupied && record.snapshot.primary)
+                    return &record;
             for (DisplayRecord& record : displays)
-                if (record.occupied) return &record;
+                if (record.occupied)
+                    return &record;
             return nullptr;
         }
 
@@ -373,8 +399,7 @@ namespace vanguard::window
             ++stats.publishedEvents;
         }
 
-        void PublishWindowEvent(const WindowEventType type, const WindowRecord& record,
-                                const u64 timestampNanoseconds = 0, const i32 backendCode = 0) noexcept
+        void PublishWindowEvent(const WindowEventType type, const WindowRecord& record, const u64 timestampNanoseconds = 0, const i32 backendCode = 0) noexcept
         {
             WindowEvent event{};
             event.type = type;
@@ -399,19 +424,17 @@ namespace vanguard::window
             Publish(event);
         }
 
-        [[nodiscard]] bool MapBackendState(const BackendWindowState& source, WindowNativeState& destination,
-                                           Failure* const failure, const WindowHandle window) noexcept
+        [[nodiscard]] bool MapBackendState(const BackendWindowState& source, WindowNativeState& destination, Failure* const failure,
+                                           const WindowHandle window) noexcept
         {
             DisplayRecord* const display = FindDisplay(source.placement.display);
             if (display == nullptr)
             {
-                Reject(failure, FailureCode::DisplayUnavailable, "window backend reported an unknown display",
-                       window);
+                Reject(failure, FailureCode::DisplayUnavailable, "window backend reported an unknown display", window);
                 return false;
             }
-            if (!source.placement.logicalExtent.IsValid() || !source.pixelExtent.IsValid() ||
-                !source.safeArea.extent.IsValid() || !IsValidScale(source.contentScale) ||
-                !IsValidMode(source.placement.mode))
+            if (!source.placement.logicalExtent.IsValid() || !source.pixelExtent.IsValid() || !source.safeArea.extent.IsValid() ||
+                !IsValidScale(source.contentScale) || !IsValidMode(source.placement.mode))
             {
                 Reject(failure, FailureCode::BackendFailure, "window backend reported invalid native state", window);
                 return false;
@@ -435,13 +458,11 @@ namespace vanguard::window
             return true;
         }
 
-        void PublishStateDifferences(WindowRecord& record, const WindowNativeState& previous,
-                                     const u64 timestampNanoseconds) noexcept
+        void PublishStateDifferences(WindowRecord& record, const WindowNativeState& previous, const u64 timestampNanoseconds) noexcept
         {
             const WindowNativeState& current = record.snapshot.nativeState;
-            if (!(previous.placement.display == current.placement.display) ||
-                previous.placement.mode != current.placement.mode || previous.hdrCapable != current.hdrCapable ||
-                previous.sdrWhiteLevel != current.sdrWhiteLevel || previous.hdrHeadroom != current.hdrHeadroom)
+            if (!(previous.placement.display == current.placement.display) || previous.placement.mode != current.placement.mode ||
+                previous.hdrCapable != current.hdrCapable || previous.sdrWhiteLevel != current.sdrWhiteLevel || previous.hdrHeadroom != current.hdrHeadroom)
                 ++record.snapshot.surfaceRevision;
             if (!(previous.placement.position == current.placement.position))
                 PublishWindowEvent(WindowEventType::Moved, record, timestampNanoseconds);
@@ -457,18 +478,15 @@ namespace vanguard::window
             if (previous.placement.mode != current.placement.mode)
                 PublishWindowEvent(WindowEventType::ModeChanged, record, timestampNanoseconds);
             if (previous.placement.visible != current.placement.visible)
-                PublishWindowEvent(current.placement.visible ? WindowEventType::Shown : WindowEventType::Hidden,
-                                   record, timestampNanoseconds);
+                PublishWindowEvent(current.placement.visible ? WindowEventType::Shown : WindowEventType::Hidden, record, timestampNanoseconds);
             if (previous.contentScale != current.contentScale)
                 PublishWindowEvent(WindowEventType::ContentScaleChanged, record, timestampNanoseconds);
             if (!(previous.safeArea == current.safeArea))
                 PublishWindowEvent(WindowEventType::SafeAreaChanged, record, timestampNanoseconds);
             if (previous.focused != current.focused)
-                PublishWindowEvent(current.focused ? WindowEventType::FocusGained : WindowEventType::FocusLost,
-                                   record, timestampNanoseconds);
+                PublishWindowEvent(current.focused ? WindowEventType::FocusGained : WindowEventType::FocusLost, record, timestampNanoseconds);
             if (previous.mouseFocus != current.mouseFocus)
-                PublishWindowEvent(current.mouseFocus ? WindowEventType::MouseEntered : WindowEventType::MouseLeft,
-                                   record, timestampNanoseconds);
+                PublishWindowEvent(current.mouseFocus ? WindowEventType::MouseEntered : WindowEventType::MouseLeft, record, timestampNanoseconds);
             if (previous.minimized != current.minimized && current.minimized)
                 PublishWindowEvent(WindowEventType::Minimized, record, timestampNanoseconds);
             if (previous.maximized != current.maximized && current.maximized)
@@ -484,7 +502,8 @@ namespace vanguard::window
         [[nodiscard]] bool HasChildren(const WindowHandle parent) const noexcept
         {
             for (const WindowRecord& record : windows)
-                if (record.occupied && record.snapshot.parent == parent) return true;
+                if (record.occupied && record.snapshot.parent == parent)
+                    return true;
             return false;
         }
 
@@ -497,24 +516,23 @@ namespace vanguard::window
             record.backend = {};
             record.snapshot = {};
             ++record.generation;
-            if (record.generation == 0) record.generation = 1;
+            if (record.generation == 0)
+                record.generation = 1;
             --stats.activeWindows;
         }
 
-        [[nodiscard]] bool DestroyRecord(WindowRecord& record, Failure* const failure,
-                                         const bool closeAccepted) noexcept
+        [[nodiscard]] bool DestroyRecord(WindowRecord& record, Failure* const failure, const bool closeAccepted) noexcept
         {
             const WindowHandle handle = record.snapshot.handle;
             if (record.snapshot.presentation.IsValid())
             {
-                Reject(failure, FailureCode::PresentationStillAttached,
-                       "presentation resources must be detached before destroying their native window", handle);
+                Reject(failure, FailureCode::PresentationStillAttached, "presentation resources must be detached before destroying their native window",
+                       handle);
                 return false;
             }
             if (HasChildren(handle))
             {
-                Reject(failure, FailureCode::ParentHasChildren,
-                       "owned or embedded windows must be destroyed before their parent", handle);
+                Reject(failure, FailureCode::ParentHasChildren, "owned or embedded windows must be destroyed before their parent", handle);
                 return false;
             }
             const WindowLifecycleState previousLifecycle = record.snapshot.lifecycle;
@@ -526,13 +544,13 @@ namespace vanguard::window
             {
                 record.snapshot.lifecycle = previousLifecycle;
                 ++record.snapshot.stateRevision;
-                Reject(failure, FailureCode::BackendFailure,
-                       status.message != nullptr ? status.message : "window backend destruction failed",
-                       handle, {}, status.code);
+                Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend destruction failed", handle, {},
+                       status.code);
                 PublishWindowEvent(WindowEventType::BackendFailure, record, 0, status.code);
                 return false;
             }
-            if (closeAccepted) PublishWindowEvent(WindowEventType::CloseAccepted, record);
+            if (closeAccepted)
+                PublishWindowEvent(WindowEventType::CloseAccepted, record);
             FinalizeDestroy(record, 0);
             return true;
         }
@@ -540,30 +558,33 @@ namespace vanguard::window
 
     WindowManager::~WindowManager()
     {
-        if (m_impl != nullptr) VG_FATAL("WindowManager requires explicit successful Shutdown");
+        if (m_impl != nullptr)
+            VG_FATAL("WindowManager requires explicit successful Shutdown");
     }
 
     bool WindowManager::Initialize(IWindowBackend& backend, Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl != nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::AlreadyInitialized, {}, {}, 0,
-                                                "WindowManager is already initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::AlreadyInitialized, {}, {}, 0, "WindowManager is already initialized"};
             return false;
         }
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Window, sizeof(Impl), alignof(Impl));
         if (!block)
         {
-            if (failure != nullptr) *failure = {FailureCode::CapacityExceeded, {}, {}, 0,
-                                                "WindowManager storage allocation failed"};
+            if (failure != nullptr)
+                *failure = {FailureCode::CapacityExceeded, {}, {}, 0, "WindowManager storage allocation failed"};
             return false;
         }
         m_impl = ::new (block.address) Impl();
         m_impl->backend = &backend;
-        m_impl->ownerThread = concurrency::ThreadId::CurrentThread();
+        m_impl->ownerThread = concurrency::ThreadId::GetCurrentThread();
         m_impl->journalIdentity = g_nextJournalIdentity.Increment();
-        if (m_impl->journalIdentity == 0) m_impl->journalIdentity = g_nextJournalIdentity.Increment();
+        if (m_impl->journalIdentity == 0)
+            m_impl->journalIdentity = g_nextJournalIdentity.Increment();
         if (!RefreshDisplays(failure))
         {
             m_impl->~Impl();
@@ -577,8 +598,10 @@ namespace vanguard::window
 
     bool WindowManager::Shutdown(Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
-        if (m_impl == nullptr) return true;
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+            return true;
         if (!m_impl->IsOwnerThread())
         {
             m_impl->Reject(failure, FailureCode::WrongThread, "WindowManager shutdown requires its owner thread");
@@ -586,15 +609,13 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter WindowManager shutdown");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter WindowManager shutdown");
             return false;
         }
         m_impl->lock.Acquire();
         if (m_impl->stats.activeWindows != 0)
         {
-            m_impl->Reject(failure, FailureCode::WindowsRemainAlive,
-                           "all windows must be explicitly destroyed before WindowManager shutdown");
+            m_impl->Reject(failure, FailureCode::WindowsRemainAlive, "all windows must be explicitly destroyed before WindowManager shutdown");
             m_impl->lock.Release();
             return false;
         }
@@ -606,15 +627,19 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::IsInitialized() const noexcept { return m_impl != nullptr; }
+    bool WindowManager::IsInitialized() const noexcept
+    {
+        return m_impl != nullptr;
+    }
 
     bool WindowManager::RefreshDisplays(Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -624,8 +649,7 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter display refresh");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter display refresh");
             return false;
         }
         BackendDisplaySnapshot backendDisplays[MaximumDisplays]{};
@@ -638,8 +662,7 @@ namespace vanguard::window
         if (!status || count > MaximumDisplays)
         {
             m_impl->Reject(failure, status ? FailureCode::CapacityExceeded : FailureCode::BackendFailure,
-                           status.message != nullptr ? status.message : "display enumeration exceeded capacity",
-                           {}, {}, status.code);
+                           status.message != nullptr ? status.message : "display enumeration exceeded capacity", {}, {}, status.code);
             return false;
         }
 
@@ -647,34 +670,33 @@ namespace vanguard::window
         for (u32 sourceIndex = 0; sourceIndex < count; ++sourceIndex)
         {
             const BackendDisplaySnapshot& source = backendDisplays[sourceIndex];
-            if (!source.id.IsValid() || source.fingerprint == 0 || !source.bounds.extent.IsValid() ||
-                !source.workArea.extent.IsValid() || !source.desktopPixelExtent.IsValid() ||
-                !IsValidScale(source.contentScale) || source.desktopRefreshRate.denominator == 0)
+            if (!source.id.IsValid() || source.fingerprint == 0 || !source.bounds.extent.IsValid() || !source.workArea.extent.IsValid() ||
+                !source.desktopPixelExtent.IsValid() || !IsValidScale(source.contentScale) || source.desktopRefreshRate.denominator == 0)
             {
-                m_impl->Reject(failure, FailureCode::BackendFailure,
-                               "window backend returned an invalid display snapshot", {}, {}, status.code);
+                m_impl->Reject(failure, FailureCode::BackendFailure, "window backend returned an invalid display snapshot", {}, {}, status.code);
                 return false;
             }
-            if (source.primary) ++primaryCount;
+            if (source.primary)
+                ++primaryCount;
             for (u32 previous = 0; previous < sourceIndex; ++previous)
             {
-                if (!(backendDisplays[previous].id == source.id)) continue;
-                m_impl->Reject(failure, FailureCode::BackendFailure,
-                               "window backend returned duplicate display identities", {}, {}, status.code);
+                if (!(backendDisplays[previous].id == source.id))
+                    continue;
+                m_impl->Reject(failure, FailureCode::BackendFailure, "window backend returned duplicate display identities", {}, {}, status.code);
                 return false;
             }
         }
         if (primaryCount > 1)
         {
-            m_impl->Reject(failure, FailureCode::BackendFailure,
-                           "window backend returned more than one primary display", {}, {}, status.code);
+            m_impl->Reject(failure, FailureCode::BackendFailure, "window backend returned more than one primary display", {}, {}, status.code);
             return false;
         }
 
         m_impl->lock.Acquire();
         u32 sourceSlots[MaximumDisplays]{};
         bool claimedSlots[MaximumDisplays]{};
-        for (u32 index = 0; index < MaximumDisplays; ++index) sourceSlots[index] = ~u32{0};
+        for (u32 index = 0; index < MaximumDisplays; ++index)
+            sourceSlots[index] = ~u32{0};
 
         // Preserve generations for displays that remain present, then plan unmatched displays into any unclaimed slot.
         // Planning completes before registry mutation, so a total topology replacement remains atomic even at capacity.
@@ -689,10 +711,12 @@ namespace vanguard::window
         }
         for (u32 sourceIndex = 0; sourceIndex < count; ++sourceIndex)
         {
-            if (sourceSlots[sourceIndex] != ~u32{0}) continue;
+            if (sourceSlots[sourceIndex] != ~u32{0})
+                continue;
             for (u32 slot = 0; slot < MaximumDisplays; ++slot)
             {
-                if (claimedSlots[slot]) continue;
+                if (claimedSlots[slot])
+                    continue;
                 sourceSlots[sourceIndex] = slot;
                 claimedSlots[slot] = true;
                 break;
@@ -709,10 +733,15 @@ namespace vanguard::window
         for (u32 slot = 0; slot < MaximumDisplays; ++slot)
         {
             Impl::DisplayRecord& record = m_impl->displays[slot];
-            if (!record.occupied) continue;
+            if (!record.occupied)
+                continue;
             u32 assignedSource = ~u32{0};
             for (u32 sourceIndex = 0; sourceIndex < count; ++sourceIndex)
-                if (sourceSlots[sourceIndex] == slot) { assignedSource = sourceIndex; break; }
+                if (sourceSlots[sourceIndex] == slot)
+                {
+                    assignedSource = sourceIndex;
+                    break;
+                }
             if (assignedSource != ~u32{0} && record.backend == backendDisplays[assignedSource].id &&
                 record.snapshot.fingerprint == backendDisplays[assignedSource].fingerprint)
                 continue;
@@ -722,7 +751,8 @@ namespace vanguard::window
             record.backend = {};
             record.snapshot = {};
             ++record.generation;
-            if (record.generation == 0) record.generation = 1;
+            if (record.generation == 0)
+                record.generation = 1;
             --m_impl->stats.activeDisplays;
             changed = true;
         }
@@ -754,20 +784,23 @@ namespace vanguard::window
             record.snapshot.primary = source.primary;
             record.snapshot.hdrCapable = source.hdrCapable;
         }
-        if (changed) ++m_impl->stats.topologyRevision;
+        if (changed)
+            ++m_impl->stats.topologyRevision;
         for (Impl::DisplayRecord& record : m_impl->displays)
-            if (record.occupied) record.snapshot.topologyRevision = m_impl->stats.topologyRevision;
+            if (record.occupied)
+                record.snapshot.topologyRevision = m_impl->stats.topologyRevision;
 
         // Windows referencing a removed or physically replaced display remain alive, but their placement is explicitly
         // unavailable until the platform supplies a fresh authoritative state event for the new topology.
         for (Impl::WindowRecord& record : m_impl->windows)
         {
-            if (!record.occupied) continue;
-            const bool requestedUnavailable = record.snapshot.requested.display.IsValid() &&
-                                              m_impl->FindDisplay(record.snapshot.requested.display) == nullptr;
-            const bool nativeUnavailable = record.snapshot.nativeState.placement.display.IsValid() &&
-                                           m_impl->FindDisplay(record.snapshot.nativeState.placement.display) == nullptr;
-            if (!requestedUnavailable && !nativeUnavailable) continue;
+            if (!record.occupied)
+                continue;
+            const bool requestedUnavailable = record.snapshot.requested.display.IsValid() && m_impl->FindDisplay(record.snapshot.requested.display) == nullptr;
+            const bool nativeUnavailable =
+                record.snapshot.nativeState.placement.display.IsValid() && m_impl->FindDisplay(record.snapshot.nativeState.placement.display) == nullptr;
+            if (!requestedUnavailable && !nativeUnavailable)
+                continue;
             record.snapshot.requested.display = {};
             record.snapshot.nativeState.placement.display = {};
             ++record.snapshot.stateRevision;
@@ -778,15 +811,15 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::Create(const WindowDescriptor& descriptor, WindowHandle& window,
-                               Failure* const failure) noexcept
+    bool WindowManager::Create(const WindowDescriptor& descriptor, WindowHandle& window, Failure* const failure) noexcept
     {
         window = {};
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -796,16 +829,13 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter window creation");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter window creation");
             return false;
         }
         char title[MaximumWindowTitleBytes]{};
-        if (!CopyString(descriptor.title, title, MaximumWindowTitleBytes) || !IsValidRole(descriptor.role) ||
-            !IsValidRelationship(descriptor.relationship) || !IsValidMode(descriptor.placement.mode) ||
-            !IsValidInitialPlacement(descriptor.initialPlacement) ||
-            !IsValidSurfaceKind(descriptor.surfaceKind) || !IsValidConstraints(descriptor.constraints) ||
-            !IsWithinConstraints(descriptor.placement.logicalExtent, descriptor.constraints) ||
+        if (!CopyString(descriptor.title, title, MaximumWindowTitleBytes) || !IsValidRole(descriptor.role) || !IsValidRelationship(descriptor.relationship) ||
+            !IsValidMode(descriptor.placement.mode) || !IsValidInitialPlacement(descriptor.initialPlacement) || !IsValidSurfaceKind(descriptor.surfaceKind) ||
+            !IsValidConstraints(descriptor.constraints) || !IsWithinConstraints(descriptor.placement.logicalExtent, descriptor.constraints) ||
             !IsValidFlags(descriptor.flags))
         {
             m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window descriptor is invalid");
@@ -813,35 +843,33 @@ namespace vanguard::window
         }
 
         m_impl->lock.Acquire();
-        Impl::DisplayRecord* display = descriptor.placement.display.IsValid()
-            ? m_impl->FindDisplay(descriptor.placement.display) : m_impl->PrimaryDisplayRecord();
+        Impl::DisplayRecord* display =
+            descriptor.placement.display.IsValid() ? m_impl->FindDisplay(descriptor.placement.display) : m_impl->PrimaryDisplayRecord();
         Impl::WindowRecord* parent = descriptor.parent.IsValid() ? m_impl->FindWindow(descriptor.parent) : nullptr;
         if (display == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::DisplayUnavailable, "requested window display is unavailable",
-                           {}, descriptor.placement.display);
+            m_impl->Reject(failure, FailureCode::DisplayUnavailable, "requested window display is unavailable", {}, descriptor.placement.display);
             m_impl->lock.Release();
             return false;
         }
         if (descriptor.parent.IsValid() && parent == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::InvalidHandle, "requested parent window is unavailable",
-                           descriptor.parent);
+            m_impl->Reject(failure, FailureCode::InvalidHandle, "requested parent window is unavailable", descriptor.parent);
             m_impl->lock.Release();
             return false;
         }
         if ((descriptor.relationship != WindowRelationship::Independent && parent == nullptr) ||
             (descriptor.relationship == WindowRelationship::Independent && parent != nullptr))
         {
-            m_impl->Reject(failure, FailureCode::InvalidDescriptor,
-                           "window parent and relationship are inconsistent");
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window parent and relationship are inconsistent");
             m_impl->lock.Release();
             return false;
         }
         Impl::WindowRecord* record = nullptr;
         for (Impl::WindowRecord& candidate : m_impl->windows)
         {
-            if (candidate.occupied) continue;
+            if (candidate.occupied)
+                continue;
             record = &candidate;
             break;
         }
@@ -881,9 +909,8 @@ namespace vanguard::window
         {
             record->occupied = false;
             record->snapshot = {};
-            m_impl->Reject(failure, FailureCode::BackendFailure,
-                           status.message != nullptr ? status.message : "window backend creation failed",
-                           {}, display->snapshot.handle, status.code);
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend creation failed", {},
+                           display->snapshot.handle, status.code);
             m_impl->lock.Release();
             return false;
         }
@@ -896,8 +923,7 @@ namespace vanguard::window
         record->snapshot.constraints = descriptor.constraints;
         record->snapshot.requested = descriptor.placement;
         record->snapshot.requested.display = display->snapshot.handle;
-        if (!m_impl->MapBackendState(backendState, record->snapshot.nativeState, failure,
-                                     record->snapshot.handle))
+        if (!m_impl->MapBackendState(backendState, record->snapshot.nativeState, failure, record->snapshot.handle))
         {
             {
                 const BackendCallGuard backendCall(m_impl->backendCallActive);
@@ -923,14 +949,14 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::RequestState(const WindowHandle window, const WindowStateRequest& request,
-                                     Failure* const failure) noexcept
+    bool WindowManager::RequestState(const WindowHandle window, const WindowStateRequest& request, Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, window, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -940,17 +966,13 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter state mutation", window);
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter state mutation", window);
             return false;
         }
-        constexpr u32 validFields = static_cast<u32>(WindowStateField::Position) |
-                                    static_cast<u32>(WindowStateField::LogicalExtent) |
-                                    static_cast<u32>(WindowStateField::Display) |
-                                    static_cast<u32>(WindowStateField::Mode) |
+        constexpr u32 validFields = static_cast<u32>(WindowStateField::Position) | static_cast<u32>(WindowStateField::LogicalExtent) |
+                                    static_cast<u32>(WindowStateField::Display) | static_cast<u32>(WindowStateField::Mode) |
                                     static_cast<u32>(WindowStateField::Visibility);
-        if (request.fields == WindowStateField::None ||
-            (static_cast<u32>(request.fields) & ~validFields) != 0)
+        if (request.fields == WindowStateField::None || (static_cast<u32>(request.fields) & ~validFields) != 0)
         {
             m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window state request fields are invalid", window);
             return false;
@@ -971,14 +993,17 @@ namespace vanguard::window
             return false;
         }
         WindowPlacement requested = record->snapshot.requested;
-        if (HasField(request.fields, WindowStateField::Position)) requested.position = request.placement.position;
+        if (HasField(request.fields, WindowStateField::Position))
+            requested.position = request.placement.position;
         if (HasField(request.fields, WindowStateField::LogicalExtent))
             requested.logicalExtent = request.placement.logicalExtent;
-        if (HasField(request.fields, WindowStateField::Display)) requested.display = request.placement.display;
-        if (HasField(request.fields, WindowStateField::Mode)) requested.mode = request.placement.mode;
-        if (HasField(request.fields, WindowStateField::Visibility)) requested.visible = request.placement.visible;
-        if (!IsWithinConstraints(requested.logicalExtent, record->snapshot.constraints) ||
-            !IsValidMode(requested.mode))
+        if (HasField(request.fields, WindowStateField::Display))
+            requested.display = request.placement.display;
+        if (HasField(request.fields, WindowStateField::Mode))
+            requested.mode = request.placement.mode;
+        if (HasField(request.fields, WindowStateField::Visibility))
+            requested.visible = request.placement.visible;
+        if (!IsWithinConstraints(requested.logicalExtent, record->snapshot.constraints) || !IsValidMode(requested.mode))
         {
             m_impl->Reject(failure, FailureCode::InvalidDescriptor, "requested window state is invalid", window);
             m_impl->lock.Release();
@@ -987,8 +1012,7 @@ namespace vanguard::window
         Impl::DisplayRecord* const display = m_impl->FindDisplay(requested.display);
         if (display == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::DisplayUnavailable, "requested display is stale or unavailable",
-                           window, requested.display);
+            m_impl->Reject(failure, FailureCode::DisplayUnavailable, "requested display is stale or unavailable", window, requested.display);
             m_impl->lock.Release();
             return false;
         }
@@ -1007,8 +1031,7 @@ namespace vanguard::window
         }
         if (!status)
         {
-            m_impl->Reject(failure, FailureCode::BackendFailure,
-                           status.message != nullptr ? status.message : "window backend rejected the state request",
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend rejected the state request",
                            window, requested.display, status.code);
             m_impl->lock.Release();
             return false;
@@ -1030,11 +1053,12 @@ namespace vanguard::window
 
     bool WindowManager::SetTitle(const WindowHandle window, const char* const title, Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, window, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -1044,8 +1068,7 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter title mutation", window);
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter title mutation", window);
             return false;
         }
         char copied[MaximumWindowTitleBytes]{};
@@ -1065,7 +1088,8 @@ namespace vanguard::window
         if (record->snapshot.lifecycle != WindowLifecycleState::Alive || StringsEqual(record->snapshot.title, copied))
         {
             const bool unchanged = StringsEqual(record->snapshot.title, copied);
-            if (!unchanged) m_impl->Reject(failure, FailureCode::InvalidState, "window does not accept title changes", window);
+            if (!unchanged)
+                m_impl->Reject(failure, FailureCode::InvalidState, "window does not accept title changes", window);
             m_impl->lock.Release();
             return unchanged;
         }
@@ -1076,9 +1100,8 @@ namespace vanguard::window
         }
         if (!status)
         {
-            m_impl->Reject(failure, FailureCode::BackendFailure,
-                           status.message != nullptr ? status.message : "window backend rejected the title",
-                           window, {}, status.code);
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend rejected the title", window, {},
+                           status.code);
             m_impl->lock.Release();
             return false;
         }
@@ -1088,14 +1111,15 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::ResolveCloseRequest(const WindowHandle window, const u64 closeRequestSerial,
-                                            const CloseDecision decision, Failure* const failure) noexcept
+    bool WindowManager::ResolveCloseRequest(const WindowHandle window, const u64 closeRequestSerial, const CloseDecision decision,
+                                            Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, window, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -1105,8 +1129,7 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter close resolution", window);
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter close resolution", window);
             return false;
         }
         m_impl->lock.Acquire();
@@ -1155,11 +1178,12 @@ namespace vanguard::window
 
     bool WindowManager::DestroyWindow(const WindowHandle window, Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, window, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -1169,8 +1193,7 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter window destruction", window);
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter window destruction", window);
             return false;
         }
         m_impl->lock.Acquire();
@@ -1186,64 +1209,59 @@ namespace vanguard::window
         return result;
     }
 
-    bool WindowManager::AttachPresentation(const WindowHandle window, PresentationAttachmentHandle& attachment,
-                                           Failure* const failure) noexcept
+    bool WindowManager::AttachPresentation(const WindowHandle window, PresentationAttachmentHandle& attachment, Failure* const failure) noexcept
     {
         attachment = {};
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, window, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not attach presentation resources", window);
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not attach presentation resources", window);
             return false;
         }
         m_impl->lock.Acquire();
         Impl::WindowRecord* const windowRecord = m_impl->FindWindow(window);
         if (windowRecord == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::InvalidHandle,
-                           "presentation attachment references a stale or invalid window", window);
+            m_impl->Reject(failure, FailureCode::InvalidHandle, "presentation attachment references a stale or invalid window", window);
             m_impl->lock.Release();
             return false;
         }
         if (windowRecord->snapshot.lifecycle != WindowLifecycleState::Alive)
         {
-            m_impl->Reject(failure, FailureCode::InvalidState,
-                           "presentation resources can only attach to a live window", window);
+            m_impl->Reject(failure, FailureCode::InvalidState, "presentation resources can only attach to a live window", window);
             m_impl->lock.Release();
             return false;
         }
         if (windowRecord->snapshot.surfaceKind == PresentationSurfaceKind::None)
         {
-            m_impl->Reject(failure, FailureCode::PresentationUnavailable,
-                           "window was created without a presentation-capable surface", window);
+            m_impl->Reject(failure, FailureCode::PresentationUnavailable, "window was created without a presentation-capable surface", window);
             m_impl->lock.Release();
             return false;
         }
         if (windowRecord->snapshot.presentation.IsValid())
         {
-            m_impl->Reject(failure, FailureCode::PresentationAlreadyAttached,
-                           "window already owns a presentation attachment", window);
+            m_impl->Reject(failure, FailureCode::PresentationAlreadyAttached, "window already owns a presentation attachment", window);
             m_impl->lock.Release();
             return false;
         }
         Impl::PresentationRecord* presentation = nullptr;
         for (Impl::PresentationRecord& candidate : m_impl->presentations)
         {
-            if (candidate.occupied) continue;
+            if (candidate.occupied)
+                continue;
             presentation = &candidate;
             break;
         }
         if (presentation == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::CapacityExceeded,
-                           "presentation attachment registry capacity is exhausted", window);
+            m_impl->Reject(failure, FailureCode::CapacityExceeded, "presentation attachment registry capacity is exhausted", window);
             m_impl->lock.Release();
             return false;
         }
@@ -1260,36 +1278,33 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::DetachPresentation(const PresentationAttachmentHandle attachment,
-                                           Failure* const failure) noexcept
+    bool WindowManager::DetachPresentation(const PresentationAttachmentHandle attachment, Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not detach presentation resources");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not detach presentation resources");
             return false;
         }
         m_impl->lock.Acquire();
         Impl::PresentationRecord* const presentation = m_impl->FindPresentation(attachment);
         if (presentation == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::InvalidHandle,
-                           "presentation attachment handle is stale or invalid");
+            m_impl->Reject(failure, FailureCode::InvalidHandle, "presentation attachment handle is stale or invalid");
             m_impl->lock.Release();
             return false;
         }
         Impl::WindowRecord* const windowRecord = m_impl->FindWindow(presentation->window);
         if (windowRecord == nullptr || !(windowRecord->snapshot.presentation == attachment))
         {
-            m_impl->Reject(failure, FailureCode::InvalidState,
-                           "presentation attachment registry is inconsistent");
+            m_impl->Reject(failure, FailureCode::InvalidState, "presentation attachment registry is inconsistent");
             m_impl->lock.Release();
             return false;
         }
@@ -1300,51 +1315,48 @@ namespace vanguard::window
         presentation->acknowledgedPixelExtentRevision = 0;
         presentation->acknowledgedSurfaceRevision = 0;
         ++presentation->generation;
-        if (presentation->generation == 0) presentation->generation = 1;
+        if (presentation->generation == 0)
+            presentation->generation = 1;
         --m_impl->stats.activePresentationAttachments;
         m_impl->lock.Release();
         return true;
     }
 
-    bool WindowManager::AcknowledgePresentation(const PresentationAttachmentHandle attachment,
-                                                const PresentationAcknowledgement& acknowledgement,
+    bool WindowManager::AcknowledgePresentation(const PresentationAttachmentHandle attachment, const PresentationAcknowledgement& acknowledgement,
                                                 Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not acknowledge presentation work");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not acknowledge presentation work");
             return false;
         }
         m_impl->lock.Acquire();
         Impl::PresentationRecord* const presentation = m_impl->FindPresentation(attachment);
         if (presentation == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::InvalidHandle,
-                           "presentation attachment handle is stale or invalid");
+            m_impl->Reject(failure, FailureCode::InvalidHandle, "presentation attachment handle is stale or invalid");
             m_impl->lock.Release();
             return false;
         }
         const Impl::WindowRecord* const windowRecord = m_impl->FindWindow(presentation->window);
         const bool pixelRevisionInvalid = acknowledgement.pixelExtentRevision != 0 &&
-            (acknowledgement.pixelExtentRevision < presentation->acknowledgedPixelExtentRevision ||
-             windowRecord == nullptr || acknowledgement.pixelExtentRevision > windowRecord->snapshot.pixelExtentRevision);
-        const bool surfaceRevisionInvalid = acknowledgement.surfaceRevision != 0 &&
-            (acknowledgement.surfaceRevision < presentation->acknowledgedSurfaceRevision ||
-             windowRecord == nullptr || acknowledgement.surfaceRevision > windowRecord->snapshot.surfaceRevision);
-        if ((acknowledgement.pixelExtentRevision == 0 && acknowledgement.surfaceRevision == 0) ||
-            pixelRevisionInvalid || surfaceRevisionInvalid)
+                                          (acknowledgement.pixelExtentRevision < presentation->acknowledgedPixelExtentRevision || windowRecord == nullptr ||
+                                           acknowledgement.pixelExtentRevision > windowRecord->snapshot.pixelExtentRevision);
+        const bool surfaceRevisionInvalid =
+            acknowledgement.surfaceRevision != 0 && (acknowledgement.surfaceRevision < presentation->acknowledgedSurfaceRevision || windowRecord == nullptr ||
+                                                     acknowledgement.surfaceRevision > windowRecord->snapshot.surfaceRevision);
+        if ((acknowledgement.pixelExtentRevision == 0 && acknowledgement.surfaceRevision == 0) || pixelRevisionInvalid || surfaceRevisionInvalid)
         {
             m_impl->Reject(failure, FailureCode::InvalidPresentationRevision,
-                           "presentation acknowledgement is zero, regressive, or newer than its window state",
-                           presentation->window);
+                           "presentation acknowledgement is zero, regressive, or newer than its window state", presentation->window);
             m_impl->lock.Release();
             return false;
         }
@@ -1356,40 +1368,35 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::ResolvePresentationSurface(const PresentationAttachmentHandle attachment,
-                                                   NativePresentationSurface& surface,
+    bool WindowManager::ResolvePresentationSurface(const PresentationAttachmentHandle attachment, NativePresentationSurface& surface,
                                                    Failure* const failure) noexcept
     {
         surface = {};
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
         {
-            m_impl->Reject(failure, FailureCode::WrongThread,
-                           "presentation-surface resolution requires the owner thread");
+            m_impl->Reject(failure, FailureCode::WrongThread, "presentation-surface resolution requires the owner thread");
             return false;
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backend commands must not re-enter presentation-surface resolution");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter presentation-surface resolution");
             return false;
         }
 
         m_impl->lock.Acquire();
         const Impl::PresentationRecord* const presentation = m_impl->FindPresentation(attachment);
-        const Impl::WindowRecord* const windowRecord = presentation != nullptr
-                                                          ? m_impl->FindWindow(presentation->window)
-                                                          : nullptr;
+        const Impl::WindowRecord* const windowRecord = presentation != nullptr ? m_impl->FindWindow(presentation->window) : nullptr;
         if (presentation == nullptr || windowRecord == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::InvalidHandle,
-                           "presentation attachment handle is stale or invalid");
+            m_impl->Reject(failure, FailureCode::InvalidHandle, "presentation attachment handle is stale or invalid");
             m_impl->lock.Release();
             return false;
         }
@@ -1402,8 +1409,7 @@ namespace vanguard::window
         {
             surface = {};
             m_impl->Reject(failure, FailureCode::PresentationUnavailable,
-                           status.message != nullptr ? status.message : "native presentation surface is unavailable",
-                           presentation->window, {}, status.code);
+                           status.message != nullptr ? status.message : "native presentation surface is unavailable", presentation->window, {}, status.code);
             m_impl->lock.Release();
             return false;
         }
@@ -1413,11 +1419,12 @@ namespace vanguard::window
 
     bool WindowManager::ProcessBackendEvent(const BackendWindowEvent& event, Failure* const failure) noexcept
     {
-        if (failure != nullptr) *failure = {};
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr)
         {
-            if (failure != nullptr) *failure = {FailureCode::NotInitialized, {}, {}, 0,
-                                                "WindowManager is not initialized"};
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
             return false;
         }
         if (!m_impl->IsOwnerThread())
@@ -1427,22 +1434,19 @@ namespace vanguard::window
         }
         if (m_impl->IsBackendReentry())
         {
-            m_impl->Reject(failure, FailureCode::BackendReentry,
-                           "window backends must queue events until the active command returns");
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backends must queue events until the active command returns");
             return false;
         }
         if (!IsValidBackendEventType(event.type))
         {
-            m_impl->Reject(failure, FailureCode::BackendFailure, "window backend emitted an invalid event type",
-                           {}, {}, event.backendCode);
+            m_impl->Reject(failure, FailureCode::BackendFailure, "window backend emitted an invalid event type", {}, {}, event.backendCode);
             return false;
         }
         m_impl->lock.Acquire();
         Impl::WindowRecord* const record = m_impl->FindWindow(event.window);
         if (record == nullptr)
         {
-            m_impl->Reject(failure, FailureCode::InvalidHandle, "backend event references an unknown native window",
-                           {}, {}, event.backendCode);
+            m_impl->Reject(failure, FailureCode::InvalidHandle, "backend event references an unknown native window", {}, {}, event.backendCode);
             m_impl->lock.Release();
             return false;
         }
@@ -1450,8 +1454,7 @@ namespace vanguard::window
         {
             record->snapshot.lifecycle = WindowLifecycleState::Failed;
             ++record->snapshot.stateRevision;
-            m_impl->PublishWindowEvent(WindowEventType::BackendFailure, *record,
-                                       event.timestampNanoseconds, event.backendCode);
+            m_impl->PublishWindowEvent(WindowEventType::BackendFailure, *record, event.timestampNanoseconds, event.backendCode);
             m_impl->lock.Release();
             return true;
         }
@@ -1461,19 +1464,17 @@ namespace vanguard::window
             {
                 record->snapshot.lifecycle = WindowLifecycleState::CloseRequested;
                 ++record->snapshot.closeRequestSerial;
-                if (record->snapshot.closeRequestSerial == 0) ++record->snapshot.closeRequestSerial;
+                if (record->snapshot.closeRequestSerial == 0)
+                    ++record->snapshot.closeRequestSerial;
                 ++record->snapshot.stateRevision;
-                m_impl->PublishWindowEvent(WindowEventType::CloseRequested, *record,
-                                           event.timestampNanoseconds);
+                m_impl->PublishWindowEvent(WindowEventType::CloseRequested, *record, event.timestampNanoseconds);
             }
             m_impl->lock.Release();
             return true;
         }
-        if (record->snapshot.lifecycle != WindowLifecycleState::Alive &&
-            record->snapshot.lifecycle != WindowLifecycleState::CloseRequested)
+        if (record->snapshot.lifecycle != WindowLifecycleState::Alive && record->snapshot.lifecycle != WindowLifecycleState::CloseRequested)
         {
-            m_impl->Reject(failure, FailureCode::InvalidState, "backend event reached a retiring window",
-                           record->snapshot.handle);
+            m_impl->Reject(failure, FailureCode::InvalidState, "backend event reached a retiring window", record->snapshot.handle);
             m_impl->lock.Release();
             return false;
         }
@@ -1498,33 +1499,37 @@ namespace vanguard::window
         return true;
     }
 
-    bool WindowManager::Snapshot(const WindowHandle window, WindowSnapshot& snapshot) const noexcept
+    bool WindowManager::GetSnapshot(const WindowHandle window, WindowSnapshot& snapshot) const noexcept
     {
         snapshot = {};
-        if (m_impl == nullptr || m_impl->IsBackendReentry()) return false;
+        if (m_impl == nullptr || m_impl->IsBackendReentry())
+            return false;
         m_impl->lock.AcquireShared();
         const Impl::WindowRecord* const record = m_impl->FindWindow(window);
-        if (record != nullptr) snapshot = record->snapshot;
+        if (record != nullptr)
+            snapshot = record->snapshot;
         m_impl->lock.ReleaseShared();
         return record != nullptr;
     }
 
-    bool WindowManager::Snapshot(const DisplayHandle display, DisplaySnapshot& snapshot) const noexcept
+    bool WindowManager::GetSnapshot(const DisplayHandle display, DisplaySnapshot& snapshot) const noexcept
     {
         snapshot = {};
-        if (m_impl == nullptr || m_impl->IsBackendReentry()) return false;
+        if (m_impl == nullptr || m_impl->IsBackendReentry())
+            return false;
         m_impl->lock.AcquireShared();
         const Impl::DisplayRecord* const record = m_impl->FindDisplay(display);
-        if (record != nullptr) snapshot = record->snapshot;
+        if (record != nullptr)
+            snapshot = record->snapshot;
         m_impl->lock.ReleaseShared();
         return record != nullptr;
     }
 
-    bool WindowManager::Snapshot(const PresentationAttachmentHandle attachment,
-                                 PresentationAttachmentSnapshot& snapshot) const noexcept
+    bool WindowManager::GetSnapshot(const PresentationAttachmentHandle attachment, PresentationAttachmentSnapshot& snapshot) const noexcept
     {
         snapshot = {};
-        if (m_impl == nullptr || m_impl->IsBackendReentry()) return false;
+        if (m_impl == nullptr || m_impl->IsBackendReentry())
+            return false;
         m_impl->lock.AcquireShared();
         const Impl::PresentationRecord* const record = m_impl->FindPresentation(attachment);
         const bool result = record != nullptr && m_impl->BuildPresentationSnapshot(*record, snapshot);
@@ -1534,12 +1539,14 @@ namespace vanguard::window
 
     WindowHandle WindowManager::ResolveBackendWindow(const BackendWindowId window) const noexcept
     {
-        if (m_impl == nullptr || m_impl->IsBackendReentry() || !window.IsValid()) return {};
+        if (m_impl == nullptr || m_impl->IsBackendReentry() || !window.IsValid())
+            return {};
         m_impl->lock.AcquireShared();
         WindowHandle handle;
         for (const Impl::WindowRecord& record : m_impl->windows)
         {
-            if (!record.occupied || record.backend != window) continue;
+            if (!record.occupied || record.backend != window)
+                continue;
             handle = record.snapshot.handle;
             break;
         }
@@ -1547,9 +1554,10 @@ namespace vanguard::window
         return handle;
     }
 
-    DisplayHandle WindowManager::PrimaryDisplay() const noexcept
+    DisplayHandle WindowManager::GetPrimaryDisplay() const noexcept
     {
-        if (m_impl == nullptr || m_impl->IsBackendReentry()) return {};
+        if (m_impl == nullptr || m_impl->IsBackendReentry())
+            return {};
         m_impl->lock.AcquireShared();
         DisplayHandle display;
         for (const Impl::DisplayRecord& record : m_impl->displays)
@@ -1562,20 +1570,27 @@ namespace vanguard::window
         }
         if (!display.IsValid())
             for (const Impl::DisplayRecord& record : m_impl->displays)
-                if (record.occupied) { display = record.snapshot.handle; break; }
+                if (record.occupied)
+                {
+                    display = record.snapshot.handle;
+                    break;
+                }
         m_impl->lock.ReleaseShared();
         return display;
     }
 
     u32 WindowManager::VisitWindows(WindowSnapshot* const snapshots, const u32 capacity) const noexcept
     {
-        if (m_impl == nullptr || m_impl->IsBackendReentry() || snapshots == nullptr || capacity == 0) return 0;
+        if (m_impl == nullptr || m_impl->IsBackendReentry() || snapshots == nullptr || capacity == 0)
+            return 0;
         m_impl->lock.AcquireShared();
         u32 count = 0;
         for (const Impl::WindowRecord& record : m_impl->windows)
         {
-            if (count == capacity) break;
-            if (!record.occupied) continue;
+            if (count == capacity)
+                break;
+            if (!record.occupied)
+                continue;
             snapshots[count++] = record.snapshot;
         }
         m_impl->lock.ReleaseShared();
@@ -1584,31 +1599,37 @@ namespace vanguard::window
 
     u32 WindowManager::VisitDisplays(DisplaySnapshot* const snapshots, const u32 capacity) const noexcept
     {
-        if (m_impl == nullptr || m_impl->IsBackendReentry() || snapshots == nullptr || capacity == 0) return 0;
+        if (m_impl == nullptr || m_impl->IsBackendReentry() || snapshots == nullptr || capacity == 0)
+            return 0;
         m_impl->lock.AcquireShared();
         u32 count = 0;
         for (const Impl::DisplayRecord& record : m_impl->displays)
         {
-            if (count == capacity) break;
-            if (!record.occupied) continue;
+            if (count == capacity)
+                break;
+            if (!record.occupied)
+                continue;
             snapshots[count++] = record.snapshot;
         }
         m_impl->lock.ReleaseShared();
         return count;
     }
 
-    u32 WindowManager::VisitPresentationAttachments(PresentationAttachmentSnapshot* const snapshots,
-                                                    const u32 capacity) const noexcept
+    u32 WindowManager::VisitPresentationAttachments(PresentationAttachmentSnapshot* const snapshots, const u32 capacity) const noexcept
     {
-        if (m_impl == nullptr || m_impl->IsBackendReentry() || snapshots == nullptr || capacity == 0) return 0;
+        if (m_impl == nullptr || m_impl->IsBackendReentry() || snapshots == nullptr || capacity == 0)
+            return 0;
         m_impl->lock.AcquireShared();
         u32 count = 0;
         for (const Impl::PresentationRecord& record : m_impl->presentations)
         {
-            if (count == capacity) break;
-            if (!record.occupied) continue;
+            if (count == capacity)
+                break;
+            if (!record.occupied)
+                continue;
             PresentationAttachmentSnapshot snapshot{};
-            if (m_impl->BuildPresentationSnapshot(record, snapshot)) snapshots[count++] = snapshot;
+            if (m_impl->BuildPresentationSnapshot(record, snapshot))
+                snapshots[count++] = snapshot;
         }
         m_impl->lock.ReleaseShared();
         return count;
@@ -1617,27 +1638,28 @@ namespace vanguard::window
     bool WindowManager::CreateEventCursor(const EventCursorOrigin origin, WindowEventCursor& cursor) const noexcept
     {
         cursor = {};
-        if (m_impl == nullptr || m_impl->IsBackendReentry()) return false;
+        if (m_impl == nullptr || m_impl->IsBackendReentry())
+            return false;
         switch (origin)
         {
         case EventCursorOrigin::OldestAvailable:
-        case EventCursorOrigin::NextEvent: break;
-        default: return false;
+        case EventCursorOrigin::NextEvent:
+            break;
+        default:
+            return false;
         }
         m_impl->lock.AcquireShared();
         cursor.journalIdentity = m_impl->journalIdentity;
-        cursor.nextSequence = origin == EventCursorOrigin::OldestAvailable ? m_impl->oldestEventSequence
-                                                                           : m_impl->nextEventSequence;
+        cursor.nextSequence = origin == EventCursorOrigin::OldestAvailable ? m_impl->oldestEventSequence : m_impl->nextEventSequence;
         m_impl->lock.ReleaseShared();
         return true;
     }
 
-    WindowEventReadResult WindowManager::ReadEvents(WindowEventCursor& cursor,
-                                                    const containers::ArraySpan<WindowEvent> events) const noexcept
+    WindowEventReadResult WindowManager::ReadEvents(WindowEventCursor& cursor, const containers::ArraySpan<WindowEvent> events) const noexcept
     {
         WindowEventReadResult result{};
-        if (m_impl == nullptr || m_impl->IsBackendReentry() || cursor.journalIdentity == 0 || cursor.nextSequence == 0 ||
-            events.Data() == nullptr || events.Size() == 0)
+        if (m_impl == nullptr || m_impl->IsBackendReentry() || cursor.journalIdentity == 0 || cursor.nextSequence == 0 || events.Data() == nullptr ||
+            events.Size() == 0)
             return result;
         m_impl->lock.AcquireShared();
         if (cursor.journalIdentity != m_impl->journalIdentity || cursor.nextSequence > m_impl->nextEventSequence)
@@ -1669,7 +1691,8 @@ namespace vanguard::window
 
     ManagerStats WindowManager::GetStats() const noexcept
     {
-        if (m_impl == nullptr) return {};
+        if (m_impl == nullptr)
+            return {};
         if (m_impl->IsBackendReentry())
         {
             ManagerStats stats{};

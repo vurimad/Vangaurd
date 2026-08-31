@@ -34,9 +34,11 @@ namespace
 
     bool Equal(const ByteArray& left, const ByteArray& right) noexcept
     {
-        if (left.Size() != right.Size()) return false;
+        if (left.Size() != right.Size())
+            return false;
         for (vanguard::u32 index = 0; index < left.Size(); ++index)
-            if (left[index] != right[index]) return false;
+            if (left[index] != right[index])
+                return false;
         return true;
     }
 
@@ -51,13 +53,16 @@ namespace
     public:
         VANGUARD_USE_MEMORY_POOL(vanguard::memory::pools::Resources);
 
-        StreamingTestResource(const resources::ResourceTypeId type, const resources::ResourceId identity) noexcept
-            : m_type(type), m_identity(identity)
-        {
-        }
+        StreamingTestResource(const resources::ResourceTypeId type, const resources::ResourceId identity) noexcept : m_type(type), m_identity(identity) {}
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override { return m_type; }
-        [[nodiscard]] resources::ResourceId Identity() const noexcept { return m_identity; }
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override
+        {
+            return m_type;
+        }
+        [[nodiscard]] resources::ResourceId GetIdentity() const noexcept
+        {
+            return m_identity;
+        }
 
     private:
         resources::ResourceTypeId m_type = resources::InvalidResourceTypeId;
@@ -72,27 +77,24 @@ namespace
         vanguard::concurrency::ManualResetEvent releaseSlow{false};
         vanguard::concurrency::Atomic<vanguard::u32> constructions{0};
         vanguard::concurrency::Atomic<vanguard::u32> destructions{0};
-        vanguard::concurrency::Atomic<vanguard::u32> sharedPriority{
-            static_cast<vanguard::u32>(resources::LoadPriority::Background)};
+        vanguard::concurrency::Atomic<vanguard::u32> sharedPriority{static_cast<vanguard::u32>(resources::LoadPriority::Background)};
     };
 
-    resources::Failure DiscoverStreamingDependencies(const resources::ResourceReference, resources::DependencyBuilder&,
-                                                      void*) noexcept
+    resources::Failure DiscoverStreamingDependencies(const resources::ResourceReference, resources::DependencyBuilder&, void*) noexcept
     {
         return resources::Failure::None;
     }
 
-    resources::ResourceObject* ConstructStreamingResource(const resources::LoadContext& context,
-                                                           resources::Failure& failure, void* const userData) noexcept
+    resources::ResourceObject* ConstructStreamingResource(const resources::LoadContext& context, resources::Failure& failure, void* const userData) noexcept
     {
         auto& harness = *static_cast<StreamingLoaderHarness*>(userData);
         const resources::ResourceReference reference = context.Reference();
-        if (reference.Path().Id() == harness.failure)
+        if (reference.GetPath().Id() == harness.failure)
         {
             failure = resources::Failure::IoFailure;
             return nullptr;
         }
-        if (reference.Path().Id() == harness.slow)
+        if (reference.GetPath().Id() == harness.slow)
         {
             harness.slowEntered.Signal();
             harness.releaseSlow.Wait();
@@ -102,10 +104,10 @@ namespace
                 return nullptr;
             }
         }
-        if (reference.Path().Id() != harness.slow)
+        if (reference.GetPath().Id() != harness.slow)
             harness.sharedPriority.SetValue(static_cast<vanguard::u32>(context.Priority()));
         static_cast<void>(harness.constructions.Increment());
-        return VANGUARD_NEW(StreamingTestResource)(reference.ExpectedType(), reference.Path().Id());
+        return VANGUARD_NEW(StreamingTestResource)(reference.ExpectedType(), reference.GetPath().Id());
     }
 
     void DestroyStreamingResource(resources::ResourceObject* const resource, void* const userData) noexcept
@@ -115,23 +117,22 @@ namespace
         VANGUARD_DELETE(static_cast<StreamingTestResource*>(resource));
     }
 
-    constexpr reflection::SchemaTypeId VisualOverrideType =
-        reflection::HashSchemaName("vanguard.visual_instance_override");
-    const std::array<reflection::SchemaField, 2> VisualOverrideFields{{
-        reflection::MakeField("material", reflection::builtin::ResourceReference,
-                              reflection::ValueKind::ResourceReference,
-                              static_cast<vanguard::u32>(offsetof(VisualOverride, material)),
-                              static_cast<vanguard::u32>(sizeof(resources::ResourceReference)),
-                              static_cast<vanguard::u32>(alignof(resources::ResourceReference)), 1, 0,
-                              reflection::FieldFlags::Required),
-        reflection::MakeField("tint", reflection::builtin::Blob, reflection::ValueKind::Blob,
-                              static_cast<vanguard::u32>(offsetof(VisualOverride, tint)),
-                              static_cast<vanguard::u32>(sizeof(VisualOverride::tint)),
-                              static_cast<vanguard::u32>(alignof(vanguard::f32)), 1, 0,
-                              reflection::FieldFlags::Required)}};
-    const reflection::Schema VisualOverrideSchema{
-        VisualOverrideType, "vanguard.visual_instance_override", sizeof(VisualOverride), alignof(VisualOverride), 1, 1,
-        VisualOverrideFields.data(), static_cast<vanguard::u32>(VisualOverrideFields.size())};
+    constexpr reflection::SchemaTypeId VisualOverrideType = reflection::HashSchemaName("vanguard.visual_instance_override");
+    const std::array<reflection::SchemaField, 2> VisualOverrideFields{
+        {reflection::MakeField("material", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
+                               static_cast<vanguard::u32>(offsetof(VisualOverride, material)), static_cast<vanguard::u32>(sizeof(resources::ResourceReference)),
+                               static_cast<vanguard::u32>(alignof(resources::ResourceReference)), 1, 0, reflection::FieldFlags::Required),
+         reflection::MakeField("tint", reflection::builtin::Blob, reflection::ValueKind::Blob, static_cast<vanguard::u32>(offsetof(VisualOverride, tint)),
+                               static_cast<vanguard::u32>(sizeof(VisualOverride::tint)), static_cast<vanguard::u32>(alignof(vanguard::f32)), 1, 0,
+                               reflection::FieldFlags::Required)}};
+    const reflection::Schema VisualOverrideSchema{VisualOverrideType,
+                                                  "vanguard.visual_instance_override",
+                                                  sizeof(VisualOverride),
+                                                  alignof(VisualOverride),
+                                                  1,
+                                                  1,
+                                                  VisualOverrideFields.data(),
+                                                  static_cast<vanguard::u32>(VisualOverrideFields.size())};
 
     world::Bounds MakeBounds(const vanguard::f32 minimum, const vanguard::f32 maximum) noexcept
     {
@@ -155,9 +156,8 @@ namespace
         return bounds;
     }
 
-    world::PlacementBuildRecord MakePlacement(const vanguard::u64 entityId, const vanguard::u64 parentId,
-                                               const vanguard::u64 group,
-                                               const resources::ResourceReference prefab) noexcept
+    world::PlacementBuildRecord MakePlacement(const vanguard::u64 entityId, const vanguard::u64 parentId, const vanguard::u64 group,
+                                              const resources::ResourceReference prefab) noexcept
     {
         world::PlacementBuildRecord placement;
         placement.entityId = entityId;
@@ -172,7 +172,7 @@ namespace
         placement.visibilityDistance = 300.0f;
         return placement;
     }
-}
+} // namespace
 
 int main()
 {
@@ -192,27 +192,21 @@ int main()
     Check(reflection::Initialize(), "reflection initialization");
     Check(reflection::RegisterSchema(VisualOverrideSchema), "register override schema");
 
-    const resources::ResourceReference vehiclePrefab(resources::ResourcePath::FromString("entities/vehicle.vprefab"),
-                                                       vanguard::prefabs::PrefabResourceType);
-    const resources::ResourceReference propPrefab(resources::ResourcePath::FromString("entities/prop.vprefab"),
-                                                    vanguard::prefabs::PrefabResourceType);
+    const resources::ResourceReference vehiclePrefab(resources::ResourcePath::FromString("entities/vehicle.vprefab"), vanguard::prefabs::PrefabResourceType);
+    const resources::ResourceReference propPrefab(resources::ResourcePath::FromString("entities/prop.vprefab"), vanguard::prefabs::PrefabResourceType);
     const resources::ResourceReference material(resources::ResourcePath::FromString("materials/red.vmat"),
-                                                 vanguard::serialization::MakeFourCC('V', 'M', 'A', 'T'));
+                                                vanguard::serialization::MakeFourCC('V', 'M', 'A', 'T'));
     VisualOverride visual{material, {1.0f, 0.0f, 0.0f, 1.0f}};
-    const std::array<world::ActivationGroupBuildRecord, 1> groups{{
-        {7, 0x7000, world::ActivationGroupFlags::DefaultActive}}};
-    const std::array<world::PlacementBuildRecord, 3> placements{{
-        MakePlacement(300, world::InvalidEntityId, 7, propPrefab),
-        MakePlacement(100, world::InvalidEntityId, world::AlwaysActiveGroup, vehiclePrefab),
-        MakePlacement(200, 100, 7, propPrefab)}};
-    const std::array<world::ComponentOverrideBuildRecord, 2> overrides{{
-        {200, 0x2200, world::OverrideMode::Remove, nullptr, nullptr, world::OverrideFlags::None},
-        {100, 0x1100, world::OverrideMode::Replace, &VisualOverrideSchema, &visual, world::OverrideFlags::None}}};
-    const std::array<world::EntityReferenceBuildRecord, 2> references{{
-        {200, 0x2001, 300, world::EntityReferenceKind::RequiredLocal},
-        {100, 0x1001, 9999, world::EntityReferenceKind::OptionalWorld}}};
-    const std::array<world::ExplicitDependency, 1> explicitDependencies{{
-        {material, resources::DependencyKind::Soft}}};
+    const std::array<world::ActivationGroupBuildRecord, 1> groups{{{7, 0x7000, world::ActivationGroupFlags::DefaultActive}}};
+    const std::array<world::PlacementBuildRecord, 3> placements{{MakePlacement(300, world::InvalidEntityId, 7, propPrefab),
+                                                                 MakePlacement(100, world::InvalidEntityId, world::AlwaysActiveGroup, vehiclePrefab),
+                                                                 MakePlacement(200, 100, 7, propPrefab)}};
+    const std::array<world::ComponentOverrideBuildRecord, 2> overrides{
+        {{200, 0x2200, world::OverrideMode::Remove, nullptr, nullptr, world::OverrideFlags::None},
+         {100, 0x1100, world::OverrideMode::Replace, &VisualOverrideSchema, &visual, world::OverrideFlags::None}}};
+    const std::array<world::EntityReferenceBuildRecord, 2> references{
+        {{200, 0x2001, 300, world::EntityReferenceKind::RequiredLocal}, {100, 0x1001, 9999, world::EntityReferenceKind::OptionalWorld}}};
+    const std::array<world::ExplicitDependency, 1> explicitDependencies{{{material, resources::DependencyKind::Soft}}};
 
     world::CellBuildDescription description;
     description.cellId = 0xabc;
@@ -228,8 +222,7 @@ int main()
     description.placements = {placements.data(), static_cast<vanguard::u32>(placements.size())};
     description.overrides = {overrides.data(), static_cast<vanguard::u32>(overrides.size())};
     description.entityReferences = {references.data(), static_cast<vanguard::u32>(references.size())};
-    description.explicitDependencies = {explicitDependencies.data(),
-                                        static_cast<vanguard::u32>(explicitDependencies.size())};
+    description.explicitDependencies = {explicitDependencies.data(), static_cast<vanguard::u32>(explicitDependencies.size())};
     description.sourceFingerprint = vanguard::crypto::Sha256("cell source", 11);
 
     ByteArray first(memory::pools::World::GetInstance());
@@ -251,49 +244,42 @@ int main()
     filesystem::MemoryFileReader reader(first, 0);
     world::CellFile file;
     Check(file.Open(reader) == world::Result::Success, "open cooked vcell");
-    Check(file.CellId() == description.cellId && file.WorldId() == description.worldId, "cell and world identity");
-    Check(file.Origin()[0] == description.origin[0] && file.GridCoordinate()[1] == -4, "large-world origin and grid coordinate");
-    Check(file.ActivationGroups().Size() == 2 && file.ActivationGroups()[0].placementCount == 1 &&
-              file.ActivationGroups()[1].placementCount == 2,
+    Check(file.GetCellId() == description.cellId && file.GetWorldId() == description.worldId, "cell and world identity");
+    Check(file.GetOrigin()[0] == description.origin[0] && file.GetGridCoordinate()[1] == -4, "large-world origin and grid coordinate");
+    Check(file.GetActivationGroups().Size() == 2 && file.GetActivationGroups()[0].placementCount == 1 && file.GetActivationGroups()[1].placementCount == 2,
           "always-active and variant placement ranges");
-    Check(file.PlacementsInGroup(file.ActivationGroups()[1]).Size() == 2,
-          "direct contiguous activation-group placement view");
-    Check(file.FindPlacement(100) != nullptr && file.FindPlacement(200) != nullptr &&
-              file.FindPlacement(200)->parentEntityId == 100,
+    Check(file.GetPlacementsInGroup(file.GetActivationGroups()[1]).Size() == 2, "direct contiguous activation-group placement view");
+    Check(file.FindPlacement(100) != nullptr && file.FindPlacement(200) != nullptr && file.FindPlacement(200)->parentEntityId == 100,
           "stable placement lookup and hierarchy");
-    Check(file.FindPlacement(100)->firstOverride == 0 && file.FindPlacement(100)->overrideCount == 1 &&
-              file.FindPlacement(300)->overrideCount == 0 && file.FindPlacement(300)->firstOverride == 2,
+    Check(file.FindPlacement(100)->firstOverride == 0 && file.FindPlacement(100)->overrideCount == 1 && file.FindPlacement(300)->overrideCount == 0 &&
+              file.FindPlacement(300)->firstOverride == 2,
           "contiguous sparse override ranges including empty ranges");
-    Check(file.FindPlacement(100)->referenceCount == 1 && file.FindPlacement(200)->referenceCount == 1,
-          "contiguous entity-reference ranges");
-    Check(file.OverridesFor(*file.FindPlacement(100)).Size() == 1 &&
-              file.ReferencesFor(*file.FindPlacement(200)).Size() == 1,
+    Check(file.FindPlacement(100)->referenceCount == 1 && file.FindPlacement(200)->referenceCount == 1, "contiguous entity-reference ranges");
+    Check(file.GetOverridesFor(*file.FindPlacement(100)).Size() == 1 && file.GetReferencesFor(*file.FindPlacement(200)).Size() == 1,
           "direct placement override and reference views");
 
-    const world::ComponentOverrideRecord& visualRecord = file.Overrides()[0];
-    Check(visualRecord.mode == world::OverrideMode::Replace && visualRecord.schema == VisualOverrideType,
-          "typed replacement override");
-    const auto visualBytes = file.OverrideData(visualRecord);
+    const world::ComponentOverrideRecord& visualRecord = file.GetOverrides()[0];
+    Check(visualRecord.mode == world::OverrideMode::Replace && visualRecord.schema == VisualOverrideType, "typed replacement override");
+    const auto visualBytes = file.GetOverrideData(visualRecord);
     ByteArray serializedVisual(memory::pools::Serialization::GetInstance());
     serializedVisual.Resize(visualBytes.Size());
-    for (vanguard::u32 index = 0; index < visualBytes.Size(); ++index) serializedVisual[index] = visualBytes[index];
+    for (vanguard::u32 index = 0; index < visualBytes.Size(); ++index)
+        serializedVisual[index] = visualBytes[index];
     filesystem::MemoryFileReader visualFile(serializedVisual, 0);
     vanguard::serialization::BinaryReader visualReader(visualFile);
     VisualOverride decoded;
-    Check(schemas::ReadObject(visualReader, VisualOverrideSchema, &decoded) == schemas::Result::Success &&
-              decoded.material == material && decoded.tint[0] == 1.0f,
+    Check(schemas::ReadObject(visualReader, VisualOverrideSchema, &decoded) == schemas::Result::Success && decoded.material == material &&
+              decoded.tint[0] == 1.0f,
           "schema override round trip");
-    Check(file.Overrides()[1].mode == world::OverrideMode::Remove && file.OverrideData(file.Overrides()[1]).Empty(),
-          "component removal has no payload");
-    Check(file.Dependencies().Size() == 3, "prefab and override resources are deduplicated dependencies");
+    Check(file.GetOverrides()[1].mode == world::OverrideMode::Remove && file.GetOverrideData(file.GetOverrides()[1]).Empty(), "component removal has no payload");
+    Check(file.GetDependencies().Size() == 3, "prefab and override resources are deduplicated dependencies");
 
     std::array<packages::Dependency, 8> packageDependencies{};
     vanguard::u32 packageDependencyCount = 0;
-    for (const world::DependencyRecord& dependency : file.Dependencies())
-        packageDependencies[packageDependencyCount++] =
-            {dependency.resource.Path().Id(), dependency.resource.ExpectedType(), dependency.kind};
+    for (const world::DependencyRecord& dependency : file.GetDependencies())
+        packageDependencies[packageDependencyCount++] = {dependency.resource.GetPath().Id(), dependency.resource.ExpectedType(), dependency.kind};
     const packages::BuildSegment cellSegment{first.TypedData(), first.Size(), packages::Codec::Lz4, 4,
-                                              packages::SegmentFlags::Inline | packages::SegmentFlags::MemoryResident};
+                                             packages::SegmentFlags::Inline | packages::SegmentFlags::MemoryResident};
     packages::BuildResource packagedCell;
     packagedCell.path = "world/cells/12_-4_0.vcell";
     packagedCell.type = world::CellResourceType;
@@ -303,8 +289,7 @@ int main()
     ByteArray packageBytes(memory::pools::Assets::GetInstance());
     filesystem::MemoryFileWriter packageFile(packageBytes);
     packages::PackageWriter packageWriter;
-    Check(packageWriter.Begin(packageFile) == packages::Result::Success &&
-              packageWriter.Add(packagedCell) == packages::Result::Success &&
+    Check(packageWriter.Begin(packageFile) == packages::Result::Success && packageWriter.Add(packagedCell) == packages::Result::Success &&
               packageWriter.Finalize() == packages::Result::Success,
           "package vcell as an opaque VPAK resource");
     filesystem::MemoryFileReader packageReaderFile(packageBytes, 0);
@@ -312,16 +297,14 @@ int main()
     Check(packageReader.Open(packageReaderFile) == packages::Result::Success, "open VPAK containing vcell");
     const packages::Resource* packagedRecord = packageReader.Find("world/cells/12_-4_0.vcell");
     Check(packagedRecord != nullptr && packagedRecord->type == world::CellResourceType &&
-              packageReader.Dependencies(*packagedRecord).Size() == file.Dependencies().Size(),
+              packageReader.GetDependencies(*packagedRecord).Size() == file.GetDependencies().Size(),
           "VPAK preserves cell dependency metadata");
     if (packagedRecord != nullptr)
     {
         packages::ResourceFileReader packagedView;
-        Check(packagedView.Open(packageReader, *packagedRecord, packageReaderFile) == packages::Result::Success,
-              "open logical vcell over VPAK");
+        Check(packagedView.Open(packageReader, *packagedRecord, packageReaderFile) == packages::Result::Success, "open logical vcell over VPAK");
         world::CellFile packaged;
-        Check(packaged.Open(packagedView) == world::Result::Success &&
-                  packaged.ContentFingerprint() == file.ContentFingerprint(),
+        Check(packaged.Open(packagedView) == world::Result::Success && packaged.GetContentFingerprint() == file.GetContentFingerprint(),
               "package-backed vcell opens without translation");
     }
 
@@ -331,8 +314,7 @@ int main()
     invalid.placements = {invalidPlacements.data(), static_cast<vanguard::u32>(invalidPlacements.size())};
     ByteArray scratch(memory::pools::World::GetInstance());
     filesystem::MemoryFileWriter duplicateWriter(scratch);
-    Check(world::CookCell(invalid, duplicateWriter) == world::Result::DuplicateIdentifier,
-          "reject duplicate entity identity");
+    Check(world::CookCell(invalid, duplicateWriter) == world::Result::DuplicateIdentifier, "reject duplicate entity identity");
 
     invalidPlacements = placements;
     invalidPlacements[2].parentEntityId = 999;
@@ -355,26 +337,21 @@ int main()
     invalid.entityReferences = {invalidReferences.data(), static_cast<vanguard::u32>(invalidReferences.size())};
     scratch.Clear();
     filesystem::MemoryFileWriter referenceWriter(scratch);
-    Check(world::CookCell(invalid, referenceWriter) == world::Result::InvalidReference,
-          "reject unresolved local entity reference");
+    Check(world::CookCell(invalid, referenceWriter) == world::Result::InvalidReference, "reject unresolved local entity reference");
 
     ByteArray corrupted(memory::pools::World::GetInstance());
     corrupted = first;
-    if (corrupted.Size() > 80) corrupted[80] ^= 0x40u;
+    if (corrupted.Size() > 80)
+        corrupted[80] ^= 0x40u;
     filesystem::MemoryFileReader corruptedReader(corrupted, 0);
     world::CellFile corruptedFile;
     Check(corruptedFile.Open(corruptedReader) == world::Result::IntegrityFailure, "reject corrupted vcell");
 
-    const resources::ResourceReference coarseCellResource(
-        resources::ResourcePath::FromString("world/cells/city_coarse.vcell"), world::CellResourceType);
-    const resources::ResourceReference eastCellResource(
-        resources::ResourcePath::FromString("world/cells/city_east.vcell"), world::CellResourceType);
-    const resources::ResourceReference westCellResource(
-        resources::ResourcePath::FromString("world/cells/city_west.vcell"), world::CellResourceType);
-    const resources::ResourceReference skylineMesh(
-        resources::ResourcePath::FromString("world/proxies/city_skyline.vmesh"), vanguard::meshes::MeshResourceType);
-    const resources::ResourceReference towerMesh(
-        resources::ResourcePath::FromString("world/proxies/tower_mid.vmesh"), vanguard::meshes::MeshResourceType);
+    const resources::ResourceReference coarseCellResource(resources::ResourcePath::FromString("world/cells/city_coarse.vcell"), world::CellResourceType);
+    const resources::ResourceReference eastCellResource(resources::ResourcePath::FromString("world/cells/city_east.vcell"), world::CellResourceType);
+    const resources::ResourceReference westCellResource(resources::ResourcePath::FromString("world/cells/city_west.vcell"), world::CellResourceType);
+    const resources::ResourceReference skylineMesh(resources::ResourcePath::FromString("world/proxies/city_skyline.vmesh"), vanguard::meshes::MeshResourceType);
+    const resources::ResourceReference towerMesh(resources::ResourcePath::FromString("world/proxies/tower_mid.vmesh"), vanguard::meshes::MeshResourceType);
 
     std::array<world::WorldCellBuildRecord, 3> worldCells{};
     worldCells[0].cellId = 20;
@@ -421,10 +398,9 @@ int main()
     distantProxies[1].streamingPriority = world::StreamingPriority::Critical;
     distantProxies[1].flags = world::DistantProxyFlags::Building;
 
-    const std::array<world::ProxyChildBuildRecord, 3> proxyChildren{{
-        {200, 30, world::ProxyChildKind::Cell, world::ProxyChildFlags::RequiredForReplacement},
-        {100, 200, world::ProxyChildKind::Proxy, world::ProxyChildFlags::RequiredForReplacement},
-        {200, 20, world::ProxyChildKind::Cell, world::ProxyChildFlags::RequiredForReplacement}}};
+    const std::array<world::ProxyChildBuildRecord, 3> proxyChildren{{{200, 30, world::ProxyChildKind::Cell, world::ProxyChildFlags::RequiredForReplacement},
+                                                                     {100, 200, world::ProxyChildKind::Proxy, world::ProxyChildFlags::RequiredForReplacement},
+                                                                     {200, 20, world::ProxyChildKind::Cell, world::ProxyChildFlags::RequiredForReplacement}}};
     world::WorldBuildDescription worldDescription;
     worldDescription.worldId = description.worldId;
     worldDescription.bounds = MakeWorldBounds(-10000.0, 10000.0);
@@ -445,8 +421,7 @@ int main()
     reorderedWorld.proxyChildren = {reorderedChildren.data(), static_cast<vanguard::u32>(reorderedChildren.size())};
     ByteArray reorderedWorldBytes(memory::pools::World::GetInstance());
     filesystem::MemoryFileWriter reorderedWorldWriter(reorderedWorldBytes);
-    Check(world::CookWorld(reorderedWorld, reorderedWorldWriter) == world::Result::Success &&
-              Equal(worldBytes, reorderedWorldBytes),
+    Check(world::CookWorld(reorderedWorld, reorderedWorldWriter) == world::Result::Success && Equal(worldBytes, reorderedWorldBytes),
           "canonical world bytes are independent of cell, proxy and child order");
 
     filesystem::MemoryFileReader worldReader(worldBytes, 0);
@@ -454,13 +429,12 @@ int main()
     Check(worldFile.Open(worldReader) == world::Result::Success, "open cooked vworld");
     const world::DistantProxyRecord* skyline = worldFile.FindDistantProxy(100);
     const world::DistantProxyRecord* tower = worldFile.FindDistantProxy(200);
-    Check(worldFile.Cells().Size() == 3 && worldFile.FindCell(20) != nullptr &&
-              worldFile.FindCell(20)->parentCellId == 10,
+    Check(worldFile.GetCells().Size() == 3 && worldFile.FindCell(20) != nullptr && worldFile.FindCell(20)->parentCellId == 10,
           "stable world cell lookup and coarse-to-fine hierarchy");
-    Check(skyline != nullptr && tower != nullptr && tower->parentProxyId == skyline->proxyId &&
-              worldFile.ChildrenOf(*skyline).Size() == 1 && worldFile.ChildrenOf(*tower).Size() == 2,
+    Check(skyline != nullptr && tower != nullptr && tower->parentProxyId == skyline->proxyId && worldFile.GetChildrenOf(*skyline).Size() == 1 &&
+              worldFile.GetChildrenOf(*tower).Size() == 2,
           "nested distant proxies and contiguous readiness children");
-    Check(worldFile.Dependencies().Size() == 5, "vworld records streamable cell and proxy dependencies without eager ownership");
+    Check(worldFile.GetDependencies().Size() == 5, "vworld records streamable cell and proxy dependencies without eager ownership");
 
     world::WorldStreamingGrid streamingGrid;
     world::StreamingGridConfig streamingConfig;
@@ -483,22 +457,18 @@ int main()
     streamingInput.cameraPosition[0] = 1500.0;
     Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Size() == 1 &&
               streamingCommands[0].type == world::StreamingCommandType::StreamIn &&
-              streamingCommands[0].key == world::StreamingNodeKey{200, world::StreamingNodeKind::DistantProxy} &&
-              streamingGrid.IsAntiStreamingLocked(100),
+              streamingCommands[0].key == world::StreamingNodeKey{200, world::StreamingNodeKind::DistantProxy} && streamingGrid.IsAntiStreamingLocked(100),
           "coarse skyline remains anti-streaming locked while finer tower proxy loads");
-    Check(streamingGrid.NotifyStreamInComplete(streamingCommands[0].key, true, true),
-          "mark finer tower proxy render-ready");
+    Check(streamingGrid.NotifyStreamInComplete(streamingCommands[0].key, true, true), "mark finer tower proxy render-ready");
     Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Size() == 1 &&
               streamingCommands[0].type == world::StreamingCommandType::StreamOut &&
-              streamingCommands[0].key == world::StreamingNodeKey{100, world::StreamingNodeKind::DistantProxy} &&
-              !streamingGrid.IsAntiStreamingLocked(100),
+              streamingCommands[0].key == world::StreamingNodeKey{100, world::StreamingNodeKind::DistantProxy} && !streamingGrid.IsAntiStreamingLocked(100),
           "coarse skyline leaves only after required finer proxy is render-ready");
     Check(streamingGrid.NotifyStreamOutComplete(streamingCommands[0].key), "complete coarse proxy stream-out");
 
     streamingObserver.predictedPosition[0] = 0.0;
     streamingInput.cameraPosition[0] = 0.0;
-    Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Size() == 2 &&
-              streamingGrid.IsAntiStreamingLocked(200),
+    Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Size() == 2 && streamingGrid.IsAntiStreamingLocked(200),
           "near cells stream while tower proxy remains locked against premature removal");
     for (const world::StreamingCommand& command : streamingCommands)
         Check(streamingGrid.NotifyStreamInComplete(command.key, true, true), "mark detailed cell render-ready");
@@ -507,23 +477,19 @@ int main()
               streamingCommands[0].key == world::StreamingNodeKey{200, world::StreamingNodeKind::DistantProxy},
           "tower proxy leaves only after every required detailed cell is render-ready");
     Check(streamingGrid.NotifyStreamOutComplete(streamingCommands[0].key), "complete tower proxy stream-out");
-    Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Empty() &&
-              !streamingGrid.IsAntiStreamingLocked(100),
+    Check(streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Empty() && !streamingGrid.IsAntiStreamingLocked(100),
           "coarse proxy remains replaced through a ready descendant subtree without streaming back near camera");
 
-    Check(streamingGrid.RequestShutdown() && streamingGrid.IsShutdownRequested() &&
-              streamingGrid.Process(streamingInput, streamingCommands) && streamingCommands.Size() == 3,
+    Check(streamingGrid.RequestShutdown() && streamingGrid.IsShutdownRequested() && streamingGrid.Process(streamingInput, streamingCommands) &&
+              streamingCommands.Size() == 3,
           "explicit world shutdown drains every remaining node regardless of residency locks");
     for (const world::StreamingCommand& command : streamingCommands)
         Check(streamingGrid.NotifyStreamOutComplete(command.key), "complete cell stream-out");
     Check(streamingGrid.Shutdown(), "shutdown empty world streaming grid explicitly");
 
-    const resources::ResourceReference sharedStreamedCell(
-        resources::ResourcePath::FromString("world/executor/shared.vcell"), world::CellResourceType);
-    const resources::ResourceReference failedStreamedCell(
-        resources::ResourcePath::FromString("world/executor/failure.vcell"), world::CellResourceType);
-    const resources::ResourceReference slowStreamedCell(
-        resources::ResourcePath::FromString("world/executor/slow.vcell"), world::CellResourceType);
+    const resources::ResourceReference sharedStreamedCell(resources::ResourcePath::FromString("world/executor/shared.vcell"), world::CellResourceType);
+    const resources::ResourceReference failedStreamedCell(resources::ResourcePath::FromString("world/executor/failure.vcell"), world::CellResourceType);
+    const resources::ResourceReference slowStreamedCell(resources::ResourcePath::FromString("world/executor/slow.vcell"), world::CellResourceType);
     std::array<world::WorldCellBuildRecord, 4> executorCells{};
     for (vanguard::u32 index = 0; index < executorCells.size(); ++index)
     {
@@ -544,8 +510,7 @@ int main()
     executorDescription.cells = {executorCells.data(), static_cast<vanguard::u32>(executorCells.size())};
     ByteArray executorWorldBytes(memory::pools::World::GetInstance());
     filesystem::MemoryFileWriter executorWorldWriter(executorWorldBytes);
-    Check(world::CookWorld(executorDescription, executorWorldWriter) == world::Result::Success,
-          "cook resource-executor test world");
+    Check(world::CookWorld(executorDescription, executorWorldWriter) == world::Result::Success, "cook resource-executor test world");
     filesystem::MemoryFileReader executorWorldReader(executorWorldBytes, 0);
     world::WorldFile executorWorld;
     Check(executorWorld.Open(executorWorldReader) == world::Result::Success, "open resource-executor test world");
@@ -555,11 +520,10 @@ int main()
     resources::ResourcePipeline executorPipeline;
     Check(executorPipeline.Initialize(executorRegistry), "initialize Jobs-backed world resource pipeline");
     StreamingLoaderHarness streamingHarness;
-    streamingHarness.failure = failedStreamedCell.Path().Id();
-    streamingHarness.slow = slowStreamedCell.Path().Id();
-    const resources::AsyncLoaderDescriptor cellLoader{
-        world::CellResourceType, "world streaming test cell loader", &DiscoverStreamingDependencies,
-        &ConstructStreamingResource, &DestroyStreamingResource, &streamingHarness};
+    streamingHarness.failure = failedStreamedCell.GetPath().Id();
+    streamingHarness.slow = slowStreamedCell.GetPath().Id();
+    const resources::AsyncLoaderDescriptor cellLoader{world::CellResourceType,     "world streaming test cell loader", &DiscoverStreamingDependencies,
+                                                      &ConstructStreamingResource, &DestroyStreamingResource,          &streamingHarness};
     Check(executorPipeline.RegisterLoader(cellLoader), "register streamed-cell resource loader");
 
     world::WorldStreamingGrid executorGrid;
@@ -580,21 +544,20 @@ int main()
         for (const world::StreamingResourceEvent& event : streamingEvents)
             availableEvents += event.type == world::StreamingResourceEventType::ResourceAvailable;
     }
-    const resources::ResourceHandle* firstSharedHandle = executor.Resource({700, world::StreamingNodeKind::Cell});
-    const resources::ResourceHandle* secondSharedHandle = executor.Resource({701, world::StreamingNodeKind::Cell});
-    Check(availableEvents == 2 && firstSharedHandle != nullptr && secondSharedHandle != nullptr &&
-              firstSharedHandle->Get() == secondSharedHandle->Get() && streamingHarness.constructions.GetValue() == 1 &&
+    const resources::ResourceHandle* firstSharedHandle = executor.GetResource({700, world::StreamingNodeKind::Cell});
+    const resources::ResourceHandle* secondSharedHandle = executor.GetResource({701, world::StreamingNodeKind::Cell});
+    Check(availableEvents == 2 && firstSharedHandle != nullptr && secondSharedHandle != nullptr && firstSharedHandle->Get() == secondSharedHandle->Get() &&
+              streamingHarness.constructions.GetValue() == 1 &&
               streamingHarness.sharedPriority.GetValue() == static_cast<vanguard::u32>(resources::LoadPriority::Critical),
           "world requests coalesce, preserve critical priority and retain one generational resource object");
-    Check(executor.SetReady({700, world::StreamingNodeKind::Cell}, true) &&
-              executor.SetReady({701, world::StreamingNodeKind::Cell}, true),
+    Check(executor.SetReady({700, world::StreamingNodeKind::Cell}, true) && executor.SetReady({701, world::StreamingNodeKind::Cell}, true),
           "downstream activation explicitly marks streamed cells ready");
     executorObserver.predictedPosition[0] = 1000.0;
     executorInput.cameraPosition[0] = 1000.0;
     Check(executor.Process(executorInput, streamingEvents) && streamingEvents.Size() == 2 &&
               streamingEvents[0].type == world::StreamingResourceEventType::ReleaseRequested &&
               streamingEvents[1].type == world::StreamingResourceEventType::ReleaseRequested &&
-              executor.Resource({700, world::StreamingNodeKind::Cell}) != nullptr,
+              executor.GetResource({700, world::StreamingNodeKind::Cell}) != nullptr,
           "stream-out requests preserve handles until downstream detachment acknowledges release");
     for (const world::StreamingResourceEvent& event : streamingEvents)
         Check(executor.CompleteRelease(event.key), "complete explicit downstream resource release");
@@ -608,13 +571,11 @@ int main()
         vanguard::concurrency::SleepOnCurrentThread(1);
         Check(executor.Process(executorInput, streamingEvents), "poll failing streamed-cell request");
         for (const world::StreamingResourceEvent& event : streamingEvents)
-            observedFailure |= event.type == world::StreamingResourceEventType::ResourceFailed &&
-                               event.failure == resources::Failure::IoFailure;
+            observedFailure |= event.type == world::StreamingResourceEventType::ResourceFailed && event.failure == resources::Failure::IoFailure;
     }
     resources::FailureTrace executorFailureTrace;
-    Check(observedFailure && executor.LastFailure({702, world::StreamingNodeKind::Cell}) == resources::Failure::IoFailure &&
-              executor.GetFailureTrace({702, world::StreamingNodeKind::Cell}, executorFailureTrace) &&
-              executorFailureTrace.count != 0,
+    Check(observedFailure && executor.GetLastFailure({702, world::StreamingNodeKind::Cell}) == resources::Failure::IoFailure &&
+              executor.GetFailureTrace({702, world::StreamingNodeKind::Cell}, executorFailureTrace) && executorFailureTrace.count != 0,
           "resource failure and its dependency trace remain inspectable at the world boundary");
     executorObserver.predictedPosition[0] = 1000.0;
     executorInput.cameraPosition[0] = 1000.0;
@@ -628,15 +589,14 @@ int main()
     executorInput.cameraPosition[0] = 1000.0;
     Check(executor.Process(executorInput, streamingEvents) && streamingEvents.Size() == 1 &&
               streamingEvents[0].type == world::StreamingResourceEventType::RequestCancelled &&
-              executorGrid.State({703, world::StreamingNodeKind::Cell}) == world::StreamingNodeState::Unloaded,
+              executorGrid.GetState({703, world::StreamingNodeKind::Cell}) == world::StreamingNodeState::Unloaded,
           "leaving range explicitly cancels in-flight resource interest without waiting for I/O");
     streamingHarness.releaseSlow.Signal();
     for (vanguard::u32 attempt = 0; attempt < 500 && executorPipeline.GetStats().activeJobs != 0; ++attempt)
         vanguard::concurrency::SleepOnCurrentThread(1);
     const world::StreamingExecutorStats executorStats = executor.GetStats();
-    Check(executorStats.submittedRequests == 4 && executorStats.completedRequests == 2 &&
-              executorStats.failedRequests == 1 && executorStats.cancelledRequests == 1 &&
-              executorStats.releasedResources == 2,
+    Check(executorStats.submittedRequests == 4 && executorStats.completedRequests == 2 && executorStats.failedRequests == 1 &&
+              executorStats.cancelledRequests == 1 && executorStats.releasedResources == 2,
           "world executor exposes request, failure, cancellation and residency statistics");
     Check(executor.Shutdown(), "shutdown empty world streaming executor explicitly");
     Check(executorGrid.Shutdown(), "shutdown executor grid after every node unloads");
@@ -649,8 +609,7 @@ int main()
     for (vanguard::u32 index = 0; index < simdCells.size(); ++index)
     {
         simdCells[index].cellId = 1000u + index;
-        simdCells[index].cell = resources::ResourceReference(resources::ResourcePath::FromId(5000u + index),
-                                                              world::CellResourceType);
+        simdCells[index].cell = resources::ResourceReference(resources::ResourcePath::FromId(5000u + index), world::CellResourceType);
         simdCells[index].bounds = MakeWorldBounds(-100.0, 17000.0);
         simdCells[index].streamingReferencePoint[0] = static_cast<vanguard::f64>(index) * 1000.0;
         simdCells[index].activationDistance = 100.0f;
@@ -687,19 +646,17 @@ int main()
     simdObservers[0].predictedPosition[0] = 50000.0;
     simdObservers[1].predictedPosition[0] = 50000.0;
     simdInput.cameraPosition[0] = 50000.0;
-    Check(simdGrid.Process(simdInput, streamingCommands) && streamingCommands.Size() == 2,
-          "SIMD multi-observer cells leave their retention ranges");
+    Check(simdGrid.Process(simdInput, streamingCommands) && streamingCommands.Size() == 2, "SIMD multi-observer cells leave their retention ranges");
     for (const world::StreamingCommand& command : streamingCommands)
         Check(simdGrid.NotifyStreamOutComplete(command.key), "complete SIMD cell stream-out");
     Check(simdGrid.Shutdown(), "shutdown SIMD world streaming grid");
 
     std::array<packages::Dependency, 8> worldPackageDependencies{};
     vanguard::u32 worldPackageDependencyCount = 0;
-    for (const world::DependencyRecord& dependency : worldFile.Dependencies())
-        worldPackageDependencies[worldPackageDependencyCount++] =
-            {dependency.resource.Path().Id(), dependency.resource.ExpectedType(), dependency.kind};
+    for (const world::DependencyRecord& dependency : worldFile.GetDependencies())
+        worldPackageDependencies[worldPackageDependencyCount++] = {dependency.resource.GetPath().Id(), dependency.resource.ExpectedType(), dependency.kind};
     const packages::BuildSegment worldSegment{worldBytes.TypedData(), worldBytes.Size(), packages::Codec::Lz4, 4,
-                                               packages::SegmentFlags::Inline | packages::SegmentFlags::MemoryResident};
+                                              packages::SegmentFlags::Inline | packages::SegmentFlags::MemoryResident};
     packages::BuildResource packagedWorld;
     packagedWorld.path = "world/city.vworld";
     packagedWorld.type = world::WorldResourceType;
@@ -709,8 +666,7 @@ int main()
     ByteArray worldPackageBytes(memory::pools::Assets::GetInstance());
     filesystem::MemoryFileWriter worldPackageWriterFile(worldPackageBytes);
     packages::PackageWriter worldPackageWriter;
-    Check(worldPackageWriter.Begin(worldPackageWriterFile) == packages::Result::Success &&
-              worldPackageWriter.Add(packagedWorld) == packages::Result::Success &&
+    Check(worldPackageWriter.Begin(worldPackageWriterFile) == packages::Result::Success && worldPackageWriter.Add(packagedWorld) == packages::Result::Success &&
               worldPackageWriter.Finalize() == packages::Result::Success,
           "package vworld and its soft streaming dependencies in VPAK");
     filesystem::MemoryFileReader worldPackageReaderFile(worldPackageBytes, 0);
@@ -718,7 +674,7 @@ int main()
     Check(worldPackageReader.Open(worldPackageReaderFile) == packages::Result::Success, "open VPAK containing vworld");
     const packages::Resource* packagedWorldRecord = worldPackageReader.Find("world/city.vworld");
     Check(packagedWorldRecord != nullptr && packagedWorldRecord->type == world::WorldResourceType &&
-              worldPackageReader.Dependencies(*packagedWorldRecord).Size() == worldFile.Dependencies().Size(),
+              worldPackageReader.GetDependencies(*packagedWorldRecord).Size() == worldFile.GetDependencies().Size(),
           "VPAK preserves vworld cell and proxy dependency metadata");
     if (packagedWorldRecord != nullptr)
     {
@@ -726,8 +682,7 @@ int main()
         Check(packagedWorldView.Open(worldPackageReader, *packagedWorldRecord, worldPackageReaderFile) == packages::Result::Success,
               "open logical vworld over VPAK");
         world::WorldFile packageBackedWorld;
-        Check(packageBackedWorld.Open(packagedWorldView) == world::Result::Success &&
-                  packageBackedWorld.ContentFingerprint() == worldFile.ContentFingerprint(),
+        Check(packageBackedWorld.Open(packagedWorldView) == world::Result::Success && packageBackedWorld.GetContentFingerprint() == worldFile.GetContentFingerprint(),
               "package-backed vworld opens without reconstruction or translation");
     }
 
@@ -737,8 +692,7 @@ int main()
     invalidWorld.cells = {invalidWorldCells.data(), static_cast<vanguard::u32>(invalidWorldCells.size())};
     scratch.Clear();
     filesystem::MemoryFileWriter invalidWorldWriter(scratch);
-    Check(world::CookWorld(invalidWorld, invalidWorldWriter) == world::Result::MissingParent,
-          "reject missing vworld cell parent");
+    Check(world::CookWorld(invalidWorld, invalidWorldWriter) == world::Result::MissingParent, "reject missing vworld cell parent");
 
     auto invalidProxyChildren = proxyChildren;
     invalidProxyChildren[1].childId = 999;
@@ -746,12 +700,12 @@ int main()
     invalidWorld.proxyChildren = {invalidProxyChildren.data(), static_cast<vanguard::u32>(invalidProxyChildren.size())};
     scratch.Clear();
     filesystem::MemoryFileWriter invalidProxyWriter(scratch);
-    Check(world::CookWorld(invalidWorld, invalidProxyWriter) == world::Result::InvalidReference,
-          "reject unresolved proxy replacement child");
+    Check(world::CookWorld(invalidWorld, invalidProxyWriter) == world::Result::InvalidReference, "reject unresolved proxy replacement child");
 
     ByteArray corruptedWorld(memory::pools::World::GetInstance());
     corruptedWorld = worldBytes;
-    if (corruptedWorld.Size() > 96) corruptedWorld[96] ^= 0x20u;
+    if (corruptedWorld.Size() > 96)
+        corruptedWorld[96] ^= 0x20u;
     filesystem::MemoryFileReader corruptedWorldReader(corruptedWorld, 0);
     world::WorldFile corruptedWorldFile;
     Check(corruptedWorldFile.Open(corruptedWorldReader) == world::Result::IntegrityFailure, "reject corrupted vworld");

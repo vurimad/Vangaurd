@@ -130,8 +130,7 @@ namespace vanguard::math
     constexpr RectF RectF::EMPTY()
     {
         // return { 0.f, 0.f, 0.f, 0.f };
-        return {std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max(),
-                -std::numeric_limits<Float>::max()};
+        return {std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max()};
     }
 
 } // namespace vanguard::math

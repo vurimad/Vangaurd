@@ -53,8 +53,8 @@ namespace
             arguments[index] = utf8Bytes + offset;
             if (bytes - offset > static_cast<SIZE_T>(0x7fffffff))
                 return false;
-            const int written = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, source[index], -1, utf8Bytes + offset,
-                                                      static_cast<int>(bytes - offset), nullptr, nullptr);
+            const int written =
+                ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, source[index], -1, utf8Bytes + offset, static_cast<int>(bytes - offset), nullptr, nullptr);
             if (written <= 0)
                 return false;
             offset += static_cast<SIZE_T>(written);

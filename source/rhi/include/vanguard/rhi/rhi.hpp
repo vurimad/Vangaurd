@@ -13,22 +13,15 @@ namespace vanguard::rhi
     [[nodiscard]] bool RetireResources(Failure* failure = nullptr) noexcept;
     // Rare maintenance barrier for native ownership changes and shutdown; never part of normal frame pacing.
     [[nodiscard]] bool FlushRetiredResources(Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool QueryMemoryBudget(MemorySegment segment, MemoryBudgetSnapshot& budget,
-                                         Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool SetResidencyPriority(ResourceRef resource, ResidencyPriority priority,
-                                            Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool SetResidencyPinned(ResourceRef resource, bool pinned,
-                                          Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool MakeResident(containers::ArraySpan<const ResourceRef> resources,
-                                    Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool Evict(containers::ArraySpan<const ResourceRef> resources, const ResidencyFenceSet& safeAfter,
-                             Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool QueryMemoryBudget(MemorySegment segment, MemoryBudgetSnapshot& budget, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool SetResidencyPriority(ResourceRef resource, ResidencyPriority priority, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool SetResidencyPinned(ResourceRef resource, bool pinned, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool MakeResident(containers::ArraySpan<const ResourceRef> resources, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool Evict(containers::ArraySpan<const ResourceRef> resources, const ResidencyFenceSet& safeAfter, Failure* failure = nullptr) noexcept;
     [[nodiscard]] ResidencyStats GetResidencyStats() noexcept;
 
-    [[nodiscard]] TextureRef CreateTexture(const TextureDesc& desc, const TextureInitData& initialData = {},
-                                           Failure* failure = nullptr) noexcept;
-    [[nodiscard]] BufferRef CreateBuffer(const BufferDesc& desc, const BufferInitData& initialData = {},
-                                         Failure* failure = nullptr) noexcept;
+    [[nodiscard]] TextureRef CreateTexture(const TextureDesc& desc, const TextureInitData& initialData = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] BufferRef CreateBuffer(const BufferDesc& desc, const BufferInitData& initialData = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] HeapRef CreateHeap(const HeapDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] BindingLayoutRef RequestBindingLayout(const BindingLayoutDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] DescriptorDomainRef CreateDescriptorDomain(const DescriptorDomainDesc& desc, Failure* failure = nullptr) noexcept;
@@ -37,10 +30,8 @@ namespace vanguard::rhi
                                        const TextureViewDesc& view = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, BufferRef buffer, BindingType type,
                                        const BufferViewDesc& view = {}, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, SamplerStateRef sampler,
-                                       Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor,
-                                       AccelerationStructureRef accelerationStructure,
+    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, SamplerStateRef sampler, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, AccelerationStructureRef accelerationStructure,
                                        Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool RetireDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, const DescriptorRetirement& retirement,
                                         Failure* failure = nullptr) noexcept;
@@ -51,11 +42,9 @@ namespace vanguard::rhi
     [[nodiscard]] PipelineRef CreateGraphicsPipeline(const GraphicsPipelineDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] PipelineRef CreateComputePipeline(const ComputePipelineDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] PipelineRef CreateRayTracingPipeline(const RayTracingPipelineDesc& desc, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] AccelerationStructureRef CreateAccelerationStructure(const AccelerationStructureDesc& desc,
-                                                                        Failure* failure = nullptr) noexcept;
+    [[nodiscard]] AccelerationStructureRef CreateAccelerationStructure(const AccelerationStructureDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] ShaderTableRef CreateShaderTable(const ShaderTableDesc& desc, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] u64 GetAccelerationStructureDeviceAddress(AccelerationStructureRef accelerationStructure,
-                                                             Failure* failure = nullptr) noexcept;
+    [[nodiscard]] u64 GetAccelerationStructureDeviceAddress(AccelerationStructureRef accelerationStructure, Failure* failure = nullptr) noexcept;
     [[nodiscard]] QueryPoolRef CreateQueryPool(const QueryPoolDesc& desc, Failure* failure = nullptr) noexcept;
     void DestroyQueryPool(QueryPoolRef& queryPool) noexcept;
     [[nodiscard]] bool BeginQuery(QueryPoolRef queryPool, u32 index, Failure* failure = nullptr) noexcept;
@@ -65,11 +54,9 @@ namespace vanguard::rhi
     [[nodiscard]] bool AcquireQueries(QueryPoolRef queryPool, u32 start, u32 count, Failure* failure = nullptr) noexcept;
     void ReleaseQueries(QueryPoolRef queryPool) noexcept;
     [[nodiscard]] bool GetQueryResult(QueryPoolRef queryPool, u32 index, u64& result, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool GetQueryResult(QueryPoolRef queryPool, u32 index, PipelineStatistics& result,
-                                      Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetQueryResult(QueryPoolRef queryPool, u32 index, PipelineStatistics& result, Failure* failure = nullptr) noexcept;
     [[nodiscard]] u64 GetTimestampFrequency(QueueType queue, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool CalibrateTimestamps(QueueType queue, TimestampCalibration& calibration,
-                                           Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CalibrateTimestamps(QueueType queue, TimestampCalibration& calibration, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BindMemory(TextureRef texture, HeapRef heap, u64 offset, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BindMemory(BufferRef buffer, HeapRef heap, u64 offset, Failure* failure = nullptr) noexcept;
     [[nodiscard]] MemoryRequirements GetMemoryRequirements(TextureRef texture) noexcept;
@@ -145,8 +132,8 @@ namespace vanguard::rhi
     void UnbindCommandList() noexcept;
     [[nodiscard]] CommandListRef GetBoundCommandList() noexcept;
     [[nodiscard]] CommandListType GetBoundCommandListType() noexcept;
-    [[nodiscard]] bool CloseAndSubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists,
-                                                  CommandListSyncType sync, GpuFence& completion, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CloseAndSubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists, CommandListSyncType sync,
+                                                  GpuFence& completion, Failure* failure = nullptr) noexcept;
     [[nodiscard]] GpuFence GetGpuFence() noexcept;
     [[nodiscard]] bool IsGpuFenceComplete(GpuFence fence) noexcept;
     [[nodiscard]] bool WaitForGpuFence(GpuFence fence, u64 timeoutNanoseconds, Failure* failure = nullptr) noexcept;
@@ -156,31 +143,25 @@ namespace vanguard::rhi
     [[nodiscard]] bool AddToResidencyWorkingSet(ResourceRef resource, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetPipeline(PipelineRef pipeline, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetupRenderTargets(const RenderTargetSetup& setup, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool SetVariableRateShading(const VariableRateShadingState& state,
-                                              Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool SetVariableRateShading(const VariableRateShadingState& state, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetViewport(const ViewportDesc& viewport, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetScissors(const Rect& rect, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BindVertexBuffers(u32 startIndex, containers::ArraySpan<const VertexBufferBinding> bindings,
-                                         Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BindVertexBuffers(u32 startIndex, containers::ArraySpan<const VertexBufferBinding> bindings, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BindIndexBuffer(const IndexBufferBinding& binding, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BindIndirectArguments(BufferRef arguments, BufferRef count = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetPushConstants(const void* data, u32 size, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearColorTarget(TextureRef target, const ColorValue& value, const SubresourceRange& range = {},
-                                        const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearDepthTarget(TextureRef target, f32 depth, const SubresourceRange& range = {},
-                                        const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearStencilTarget(TextureRef target, u8 stencil, const SubresourceRange& range = {},
-                                          const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearDepthStencilTarget(TextureRef target, f32 depth, u8 stencil,
-                                               const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
+    [[nodiscard]] bool ClearColorTarget(TextureRef target, const ColorValue& value, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
+                                        Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearDepthTarget(TextureRef target, f32 depth, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
+                                        Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearStencilTarget(TextureRef target, u8 stencil, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
+                                          Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearDepthStencilTarget(TextureRef target, f32 depth, u8 stencil, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
                                                Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearTextureUav(TextureRef texture, const ColorValue& value,
-                                       const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearTextureUav(TextureRef texture, u32 value, const SubresourceRange& range = {},
-                                       Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearTextureUav(TextureRef texture, const ColorValue& value, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearTextureUav(TextureRef texture, u32 value, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool ClearBufferUav(BufferRef buffer, u32 value = 0, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool DiscardTexture(TextureRef texture, const SubresourceRange& range = {},
-                                      Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool DiscardTexture(TextureRef texture, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DiscardBuffer(BufferRef buffer, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetStencilRefValue(u8 value, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetBlendFactor(const ColorValue& value, Failure* failure = nullptr) noexcept;
@@ -191,47 +172,34 @@ namespace vanguard::rhi
     [[nodiscard]] bool DrawIndexedPrimitive(const DrawIndexedArguments& arguments, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DrawPrimitiveIndirect(u64 argumentsOffset, u32 commandCount = 1, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DrawIndexedPrimitiveIndirect(u64 argumentsOffset, u32 commandCount = 1, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool DrawIndexedPrimitiveIndirectCount(u64 argumentsOffset, u64 countOffset, u32 maximumCommandCount,
-                                                         Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool DrawIndexedPrimitiveIndirectCount(u64 argumentsOffset, u64 countOffset, u32 maximumCommandCount, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DispatchCompute(u32 groupCountX, u32 groupCountY = 1, u32 groupCountZ = 1, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DispatchIndirectCompute(u64 argumentsOffset, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BuildBottomLevelAccelerationStructure(
-        AccelerationStructureRef destination, containers::ArraySpan<const RayTracingGeometryDesc> geometries,
-        AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
-        Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BuildTopLevelAccelerationStructure(
-        AccelerationStructureRef destination, containers::ArraySpan<const RayTracingInstanceDesc> instances,
-        AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
-        Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BuildBottomLevelAccelerationStructure(AccelerationStructureRef destination,
+                                                             containers::ArraySpan<const RayTracingGeometryDesc> geometries,
+                                                             AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
+                                                             Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BuildTopLevelAccelerationStructure(AccelerationStructureRef destination, containers::ArraySpan<const RayTracingInstanceDesc> instances,
+                                                          AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
+                                                          Failure* failure = nullptr) noexcept;
     /// The source buffer contains tightly packed RayTracingGpuInstanceDesc records starting at offset.
-    [[nodiscard]] bool BuildTopLevelAccelerationStructureIndirect(
-        AccelerationStructureRef destination, BufferRef instanceBuffer, u64 offset, u32 instanceCount,
-        AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
-        Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool CopyAccelerationStructure(AccelerationStructureRef destination,
-                                                 AccelerationStructureRef source,
-                                                 AccelerationStructureCopyMode mode,
+    [[nodiscard]] bool BuildTopLevelAccelerationStructureIndirect(AccelerationStructureRef destination, BufferRef instanceBuffer, u64 offset, u32 instanceCount,
+                                                                  AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
+                                                                  Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CopyAccelerationStructure(AccelerationStructureRef destination, AccelerationStructureRef source, AccelerationStructureCopyMode mode,
                                                  Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteAccelerationStructureCompactedSize(AccelerationStructureRef accelerationStructure,
-                                                               QueryPoolRef queryPool, u32 queryIndex,
+    [[nodiscard]] bool WriteAccelerationStructureCompactedSize(AccelerationStructureRef accelerationStructure, QueryPoolRef queryPool, u32 queryIndex,
                                                                Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool DispatchRays(ShaderTableRef shaderTable, const DispatchRaysArguments& arguments,
-                                    Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteBuffer(BufferRef buffer, const void* data, u64 size, u64 destinationOffset = 0,
-                                   Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool DispatchRays(ShaderTableRef shaderTable, const DispatchRaysArguments& arguments, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool WriteBuffer(BufferRef buffer, const void* data, u64 size, u64 destinationOffset = 0, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool WriteTexture(TextureRef texture, const TextureSubresourceData& data, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool CopyBuffer(BufferRef destination, u64 destinationOffset, BufferRef source, u64 sourceOffset, u64 size,
                                   Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool CopyTexture(TextureRef destination, TextureRef source, const TextureCopyRegion& region = {},
-                                   Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ResolveTexture(TextureRef destination, TextureRef source, const TextureResolveRegion& region = {},
-                                       Failure* failure = nullptr) noexcept;
-    [[nodiscard]] TextureReadbackRef RequestTextureReadback(TextureRef source, const TextureReadbackRegion& region = {},
-                                                            Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool GetTextureReadbackInfo(TextureReadbackRef readback, TextureReadbackInfo& info,
-                                              Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool MapTextureReadback(TextureReadbackRef readback, TextureReadbackMapping& mapping,
-                                          Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CopyTexture(TextureRef destination, TextureRef source, const TextureCopyRegion& region = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ResolveTexture(TextureRef destination, TextureRef source, const TextureResolveRegion& region = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] TextureReadbackRef RequestTextureReadback(TextureRef source, const TextureReadbackRegion& region = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetTextureReadbackInfo(TextureReadbackRef readback, TextureReadbackInfo& info, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool MapTextureReadback(TextureReadbackRef readback, TextureReadbackMapping& mapping, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool UnmapTextureReadback(TextureReadbackRef readback, Failure* failure = nullptr) noexcept;
     [[nodiscard]] void* LockBuffer(BufferRef buffer, u64 offset, u64 size, Failure* failure = nullptr) noexcept;
     void UnlockBuffer(BufferRef buffer) noexcept;
@@ -242,20 +210,16 @@ namespace vanguard::rhi
     [[nodiscard]] bool TransitionBuffer(BufferRef buffer, ResourceState before, ResourceState after, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BarrierTextureUav(TextureRef texture, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BarrierBufferUav(BufferRef buffer, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BarrierTextureAliasing(bool discardAfter, TextureRef textureAfter, TextureRef textureBefore = {},
-                                              Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BarrierBufferAliasing(bool discardAfter, BufferRef bufferAfter, BufferRef bufferBefore = {},
-                                             Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BarrierTextureAliasing(bool discardAfter, TextureRef textureAfter, TextureRef textureBefore = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BarrierBufferAliasing(bool discardAfter, BufferRef bufferAfter, BufferRef bufferBefore = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool FlushPendingBarriers(Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool MakeStateSafeToRetire(TextureRef texture, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool MakeStateSafeToRetire(BufferRef buffer, Failure* failure = nullptr) noexcept;
 
     [[nodiscard]] SwapChainRef CreateSwapChainWithBackBuffer(const SwapChainDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool ResizeBackbuffer(u32 width, u32 height, SwapChainRef swapChain, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool SetSwapChainPresentParameters(SwapChainRef swapChain, const PresentParameters& parameters,
-                                                     Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool AcquireBackBuffer(SwapChainRef swapChain, AcquiredBackBuffer& acquisition,
-                                         Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool SetSwapChainPresentParameters(SwapChainRef swapChain, const PresentParameters& parameters, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool AcquireBackBuffer(SwapChainRef swapChain, AcquiredBackBuffer& acquisition, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool AbandonBackBuffer(const AcquiredBackBuffer& acquisition, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool TransitionSwapChainPresent(const AcquiredBackBuffer& acquisition, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool Present(const AcquiredBackBuffer& acquisition, Failure* failure = nullptr) noexcept;

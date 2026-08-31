@@ -112,12 +112,12 @@ namespace vanguard::resources
         {
         }
 
-        [[nodiscard]] constexpr const ResourceKey& Key() const noexcept
+        [[nodiscard]] constexpr const ResourceKey& GetKey() const noexcept
         {
             return m_key;
         }
 
-        [[nodiscard]] constexpr ResourcePath Path() const noexcept
+        [[nodiscard]] constexpr ResourcePath GetPath() const noexcept
         {
             return m_key.path;
         }
@@ -215,7 +215,7 @@ namespace vanguard::resources
         ResourceObject(ResourceObject&&) = delete;
         ResourceObject& operator=(ResourceObject&&) = delete;
 
-        [[nodiscard]] virtual ResourceTypeId Type() const noexcept = 0;
+        [[nodiscard]] virtual ResourceTypeId GetType() const noexcept = 0;
     };
 
     class ResourceHandle final
@@ -230,9 +230,9 @@ namespace vanguard::resources
         ResourceHandle& operator=(ResourceHandle&& other) noexcept;
 
         [[nodiscard]] ResourceObject* Get() const noexcept;
-        [[nodiscard]] ResourcePath Path() const noexcept;
-        [[nodiscard]] ResourceTypeId Type() const noexcept;
-        [[nodiscard]] u32 Generation() const noexcept;
+        [[nodiscard]] ResourcePath GetPath() const noexcept;
+        [[nodiscard]] ResourceTypeId GetType() const noexcept;
+        [[nodiscard]] u32 GetGeneration() const noexcept;
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] explicit operator bool() const noexcept;
 
@@ -267,9 +267,9 @@ namespace vanguard::resources
         WeakResourceHandle& operator=(WeakResourceHandle&& other) noexcept;
 
         [[nodiscard]] ResourceHandle Lock() const noexcept;
-        [[nodiscard]] ResourcePath Path() const noexcept;
-        [[nodiscard]] ResourceTypeId Type() const noexcept;
-        [[nodiscard]] u32 Generation() const noexcept;
+        [[nodiscard]] ResourcePath GetPath() const noexcept;
+        [[nodiscard]] ResourceTypeId GetType() const noexcept;
+        [[nodiscard]] u32 GetGeneration() const noexcept;
         [[nodiscard]] bool IsStale() const noexcept;
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] explicit operator bool() const noexcept;
@@ -308,8 +308,8 @@ namespace vanguard::resources
         ResourceRequest& operator=(ResourceRequest&& other) noexcept;
 
         [[nodiscard]] ResourceReference Reference() const noexcept;
-        [[nodiscard]] State Status() const noexcept;
-        [[nodiscard]] Failure Error() const noexcept;
+        [[nodiscard]] State GetStatus() const noexcept;
+        [[nodiscard]] Failure GetError() const noexcept;
         [[nodiscard]] bool HasFinished() const noexcept;
         [[nodiscard]] bool HasLoaded() const noexcept;
         [[nodiscard]] bool HasFailed() const noexcept;
@@ -348,8 +348,7 @@ namespace vanguard::resources
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return type != InvalidResourceTypeId && name != nullptr && name[0] != '\0' && beginLoad != nullptr &&
-                   destroyResource != nullptr;
+            return type != InvalidResourceTypeId && name != nullptr && name[0] != '\0' && beginLoad != nullptr && destroyResource != nullptr;
         }
     };
 

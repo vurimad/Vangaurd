@@ -73,8 +73,7 @@ namespace vanguard::math
 
         Vector4 ComputeBaryCentric(const Vector3& p, const Vector3& a, const Vector3& b, const Vector3& c, const Vector3& d)
         {
-            const auto _scalar_triple_product = [](const Vector3& a, const Vector3& b, const Vector3& c) -> Float
-            { return a.Dot(b.Cross(c)); };
+            const auto _scalar_triple_product = [](const Vector3& a, const Vector3& b, const Vector3& c) -> Float { return a.Dot(b.Cross(c)); };
 
             const auto vap = p - a;
             const auto vbp = p - b;

@@ -21,7 +21,10 @@ namespace vanguard::application
         StateOperationResult result = StateOperationResult::Complete;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr StateOperationStatus Complete() noexcept { return {}; }
+        [[nodiscard]] static constexpr StateOperationStatus Complete() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr StateOperationStatus Pending() noexcept
         {
             return {StateOperationResult::Pending, nullptr};
@@ -37,12 +40,18 @@ namespace vanguard::application
         bool succeeded = true;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr StateTickStatus Success() noexcept { return {}; }
+        [[nodiscard]] static constexpr StateTickStatus Success() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr StateTickStatus Failure(const char* const message) noexcept
         {
             return {false, message};
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return succeeded; }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return succeeded;
+        }
     };
 
     enum class StateMachinePhase : u8
@@ -82,15 +91,14 @@ namespace vanguard::application
     class StateContext final
     {
     public:
-        [[nodiscard]] EngineHost& Services() const noexcept;
-        [[nodiscard]] IPlatformHost& Platform() const noexcept;
-        [[nodiscard]] StateId CurrentState() const noexcept;
+        [[nodiscard]] EngineHost& GetServices() const noexcept;
+        [[nodiscard]] IPlatformHost& GetPlatform() const noexcept;
+        [[nodiscard]] StateId GetCurrentState() const noexcept;
         [[nodiscard]] bool RequestTransition(StateId state, StateMachineFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool RequestExit(i32 exitCode = 0, StateMachineFailure* failure = nullptr) noexcept;
 
     private:
-        StateContext(ApplicationStateMachine& machine, EngineHost& services, IPlatformHost& platform,
-                     StateId currentState) noexcept;
+        StateContext(ApplicationStateMachine& machine, EngineHost& services, IPlatformHost& platform, StateId currentState) noexcept;
 
         ApplicationStateMachine* m_machine = nullptr;
         EngineHost* m_services = nullptr;
@@ -143,19 +151,17 @@ namespace vanguard::application
         ApplicationStateMachine(const ApplicationStateMachine&) = delete;
         ApplicationStateMachine& operator=(const ApplicationStateMachine&) = delete;
 
-        [[nodiscard]] bool RegisterState(const ApplicationStateDescriptor& descriptor,
-                                         StateMachineFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RegisterState(const ApplicationStateDescriptor& descriptor, StateMachineFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool SetInitialState(StateId state, StateMachineFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Start(StateMachineFailure* failure = nullptr) noexcept;
-        [[nodiscard]] StateMachineTickResult Tick(EngineHost& services, IPlatformHost& platform,
-                                                  StateMachineFailure* failure = nullptr) noexcept;
+        [[nodiscard]] StateMachineTickResult Tick(EngineHost& services, IPlatformHost& platform, StateMachineFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool RequestTransition(StateId state, StateMachineFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool RequestExit(i32 exitCode = 0, StateMachineFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] StateMachinePhase Phase() const noexcept;
-        [[nodiscard]] StateId CurrentState() const noexcept;
-        [[nodiscard]] StateId PendingState() const noexcept;
-        [[nodiscard]] bool ExitRequested() const noexcept;
+        [[nodiscard]] StateMachinePhase GetPhase() const noexcept;
+        [[nodiscard]] StateId GetCurrentState() const noexcept;
+        [[nodiscard]] StateId GetPendingState() const noexcept;
+        [[nodiscard]] bool IsExitRequested() const noexcept;
         [[nodiscard]] i32 ExitCode() const noexcept;
 
     private:

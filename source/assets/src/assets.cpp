@@ -1,4 +1,7 @@
 #include <vanguard/assets/assets.hpp>
+#include <vanguard/assets/derived_data_artifact_source.hpp>
+
+#include <vanguard/assets/derived_data_artifact_source_internal.hpp>
 
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
@@ -18,24 +21,16 @@ namespace
         static_cast<void>(hash.Update(&value, sizeof(value)));
     }
 
-    void HashU16(crypto::Sha256Builder& hash, const u16 value) noexcept
-    {
-        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u)};
-        static_cast<void>(hash.Update(bytes, sizeof(bytes)));
-    }
-
     void HashU32(crypto::Sha256Builder& hash, const u32 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u)};
+        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
     void HashU64(crypto::Sha256Builder& hash, const u64 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                            static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                            static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
@@ -50,9 +45,9 @@ namespace
         {
             return left.role < right.role;
         }
-        if (left.identity.Path() != right.identity.Path())
+        if (left.identity.GetPath() != right.identity.GetPath())
         {
-            return left.identity.Path() < right.identity.Path();
+            return left.identity.GetPath() < right.identity.GetPath();
         }
         if (left.identity.ExpectedType() != right.identity.ExpectedType())
         {
@@ -76,8 +71,7 @@ namespace
         }
     }
 
-    [[nodiscard]] bool CopyArtifacts(const containers::ArraySpan<const Artifact> source,
-                                     containers::DynamicArray<Artifact>& destination) noexcept
+    [[nodiscard]] bool CopyArtifacts(const containers::ArraySpan<const Artifact> source, containers::DynamicArray<Artifact>& destination) noexcept
     {
         destination.Clear();
         destination.Reserve(source.Count());
@@ -114,9 +108,9 @@ namespace
         constexpr char Domain[] = "vanguard.asset-build.v1";
         crypto::Sha256Builder hash;
         static_cast<void>(hash.Update(Domain, sizeof(Domain) - 1u));
-        HashU64(hash, request.source.identity.Path().Id());
+        HashU64(hash, request.source.identity.GetPath().Id());
         HashU32(hash, request.source.identity.ExpectedType());
-        HashU64(hash, request.output.Path().Id());
+        HashU64(hash, request.output.GetPath().Id());
         HashU32(hash, request.output.ExpectedType());
         HashU64(hash, compiler.id);
         HashU32(hash, compiler.version);
@@ -129,7 +123,7 @@ namespace
         {
             HashU8(hash, static_cast<u8>(dependency.role));
             HashU8(hash, static_cast<u8>(dependency.requirement));
-            HashU64(hash, dependency.identity.Path().Id());
+            HashU64(hash, dependency.identity.GetPath().Id());
             HashU32(hash, dependency.identity.ExpectedType());
             HashDigest(hash, dependency.content);
         }
@@ -140,84 +134,16 @@ namespace
 
     [[nodiscard]] BuildFingerprint ComputeArtifactFingerprint(const containers::ArraySpan<const Artifact> artifacts) noexcept
     {
-        constexpr char Domain[] = "vanguard.artifact-set.v1";
-        crypto::Sha256Builder hash;
-        static_cast<void>(hash.Update(Domain, sizeof(Domain) - 1u));
-        HashU32(hash, artifacts.Count());
+        detail::ArtifactSetFingerprintBuilder fingerprint(artifacts.Count());
         for (const Artifact& artifact : artifacts)
         {
-            HashU64(hash, artifact.resource.Path().Id());
-            HashU32(hash, artifact.resource.ExpectedType());
-            HashU32(hash, artifact.segment);
-            HashU16(hash, static_cast<u16>(artifact.flags));
-            HashU8(hash, artifact.alignmentLog2);
-            HashU64(hash, artifact.bytes.Size());
-            static_cast<void>(hash.Update(artifact.bytes.Data(), artifact.bytes.Size()));
+            static_cast<void>(fingerprint.AddDescriptor(artifact.resource, artifact.segment, artifact.flags,
+                                                        artifact.alignmentLog2, artifact.bytes.Size()));
+            static_cast<void>(fingerprint.AddBytes(artifact.bytes.Data(), artifact.bytes.Size()));
         }
         BuildFingerprint result;
-        static_cast<void>(hash.Finalize(result));
+        static_cast<void>(fingerprint.Finalize(result));
         return result;
-    }
-
-    constexpr u32 PersistentCacheMagic = vanguard::serialization::MakeFourCC('V', 'D', 'D', 'C');
-    constexpr u16 PersistentCacheMajorVersion = 1;
-    constexpr u16 PersistentCacheMinorVersion = 0;
-    constexpr u32 PersistentCacheHeaderSize = 96;
-    constexpr u32 PersistentArtifactDescriptorSize = 32;
-
-    enum class PersistentLookupResult : u8
-    {
-        Hit,
-        Miss,
-        Corrupt,
-        IoFailure,
-        OutOfMemory
-    };
-
-    struct PersistentArtifactDescriptor
-    {
-        u64 path = 0;
-        u32 type = 0;
-        u32 segment = 0;
-        u16 flags = 0;
-        u8 alignmentLog2 = 0;
-        u64 size = 0;
-    };
-
-    [[nodiscard]] char HexDigit(const u8 value) noexcept
-    {
-        return value < 10 ? static_cast<char>('0' + value) : static_cast<char>('a' + value - 10);
-    }
-
-    void EncodeDigest(const BuildFingerprint& fingerprint, char* const destination) noexcept
-    {
-        for (u32 index = 0; index < BuildFingerprint::ByteCount; ++index)
-        {
-            destination[index * 2u] = HexDigit(fingerprint.bytes[index] >> 4u);
-            destination[index * 2u + 1u] = HexDigit(fingerprint.bytes[index] & 0x0fu);
-        }
-    }
-
-    [[nodiscard]] filesystem::AbsolutePath PersistentRecordDirectory(const filesystem::AbsolutePath& root,
-                                                                     const BuildFingerprint& fingerprint) noexcept
-    {
-        char first[3] = {HexDigit(fingerprint.bytes[0] >> 4u), HexDigit(fingerprint.bytes[0] & 0x0fu), '\0'};
-        char second[3] = {HexDigit(fingerprint.bytes[1] >> 4u), HexDigit(fingerprint.bytes[1] & 0x0fu), '\0'};
-        return root.AddDirPath(first).AddDirPath(second);
-    }
-
-    [[nodiscard]] filesystem::AbsolutePath PersistentRecordPath(const filesystem::AbsolutePath& root,
-                                                                const BuildFingerprint& fingerprint) noexcept
-    {
-        char fileName[70];
-        EncodeDigest(fingerprint, fileName);
-        fileName[64] = '.';
-        fileName[65] = 'v';
-        fileName[66] = 'd';
-        fileName[67] = 'd';
-        fileName[68] = 'c';
-        fileName[69] = '\0';
-        return PersistentRecordDirectory(root, fingerprint).AddFilePath(fileName);
     }
 
     [[nodiscard]] bool WritePersistentRecord(const filesystem::AbsolutePath& path, const BuildOutput& output) noexcept
@@ -231,12 +157,12 @@ namespace
             }
             payloadBytes += artifact.bytes.Size();
         }
-        const u64 descriptorBytes = static_cast<u64>(output.artifacts.Size()) * PersistentArtifactDescriptorSize;
-        if (payloadBytes > ~u64{0} - PersistentCacheHeaderSize - descriptorBytes)
+        const u64 descriptorBytes = static_cast<u64>(output.artifacts.Size()) * detail::PersistentArtifactDescriptorSize;
+        if (payloadBytes > ~u64{0} - detail::PersistentCacheHeaderSize - descriptorBytes)
         {
             return false;
         }
-        const u64 fileSize = PersistentCacheHeaderSize + descriptorBytes + payloadBytes;
+        const u64 fileSize = detail::PersistentCacheHeaderSize + descriptorBytes + payloadBytes;
 
         auto file = filesystem::GetManager().CreateFileWriter(path, filesystem::FOF_Buffered);
         if (!file)
@@ -244,18 +170,17 @@ namespace
             return false;
         }
         vanguard::serialization::BinaryWriter writer(*file);
-        bool written = writer.WriteU32(PersistentCacheMagic) && writer.WriteU16(PersistentCacheMajorVersion) &&
-                       writer.WriteU16(PersistentCacheMinorVersion) && writer.WriteU32(PersistentCacheHeaderSize) &&
+        bool written = writer.WriteU32(detail::PersistentCacheMagic) && writer.WriteU16(detail::PersistentCacheMajorVersion) &&
+                       writer.WriteU16(detail::PersistentCacheMinorVersion) && writer.WriteU32(detail::PersistentCacheHeaderSize) &&
                        writer.WriteU32(output.artifacts.Size()) && writer.WriteU64(fileSize) &&
                        writer.WriteBytes(output.buildFingerprint.bytes, BuildFingerprint::ByteCount) &&
                        writer.WriteBytes(output.contentFingerprint.bytes, BuildFingerprint::ByteCount) && writer.WriteU64(payloadBytes);
 
         for (const Artifact& artifact : output.artifacts)
         {
-            written = written && writer.WriteU64(artifact.resource.Path().Id()) && writer.WriteU32(artifact.resource.ExpectedType()) &&
-                      writer.WriteU32(artifact.segment) && writer.WriteU16(static_cast<u16>(artifact.flags)) &&
-                      writer.WriteU8(artifact.alignmentLog2) && writer.WriteU8(0) && writer.WriteU64(artifact.bytes.Size()) &&
-                      writer.WriteU32(0);
+            written = written && writer.WriteU64(artifact.resource.GetPath().Id()) && writer.WriteU32(artifact.resource.ExpectedType()) &&
+                      writer.WriteU32(artifact.segment) && writer.WriteU16(static_cast<u16>(artifact.flags)) && writer.WriteU8(artifact.alignmentLog2) &&
+                      writer.WriteU8(0) && writer.WriteU64(artifact.bytes.Size()) && writer.WriteU32(0);
         }
         for (const Artifact& artifact : output.artifacts)
         {
@@ -266,114 +191,6 @@ namespace
         return written;
     }
 
-    [[nodiscard]] PersistentLookupResult ReadPersistentRecord(const filesystem::AbsolutePath& path, const BuildFingerprint& expectedBuild,
-                                                              const Config& config, BuildOutput& output) noexcept
-    {
-        filesystem::Manager& manager = filesystem::GetManager();
-        if (!manager.FileExist(path))
-        {
-            return PersistentLookupResult::Miss;
-        }
-        auto file = manager.CreateFileReader(path, filesystem::FOF_Buffered);
-        if (!file)
-        {
-            return PersistentLookupResult::IoFailure;
-        }
-        vanguard::serialization::BinaryReader reader(*file);
-        u32 magic = 0;
-        u16 major = 0;
-        u16 minor = 0;
-        u32 headerSize = 0;
-        u32 artifactCount = 0;
-        u64 fileSize = 0;
-        BuildFingerprint build;
-        BuildFingerprint content;
-        u64 payloadBytes = 0;
-        if (!reader.ReadU32(magic) || !reader.ReadU16(major) || !reader.ReadU16(minor) || !reader.ReadU32(headerSize) ||
-            !reader.ReadU32(artifactCount) || !reader.ReadU64(fileSize) || !reader.ReadBytes(build.bytes, BuildFingerprint::ByteCount) ||
-            !reader.ReadBytes(content.bytes, BuildFingerprint::ByteCount) || !reader.ReadU64(payloadBytes))
-        {
-            return PersistentLookupResult::Corrupt;
-        }
-        const u64 descriptorBytes = static_cast<u64>(artifactCount) * PersistentArtifactDescriptorSize;
-        if (magic != PersistentCacheMagic || major != PersistentCacheMajorVersion || minor > PersistentCacheMinorVersion ||
-            headerSize != PersistentCacheHeaderSize || build != expectedBuild || artifactCount == 0 ||
-            artifactCount > config.maximumArtifactsPerBuild || payloadBytes > config.maximumArtifactBytesPerBuild ||
-            fileSize != reader.Size() || fileSize < PersistentCacheHeaderSize || descriptorBytes > fileSize - PersistentCacheHeaderSize ||
-            payloadBytes != fileSize - PersistentCacheHeaderSize - descriptorBytes)
-        {
-            return PersistentLookupResult::Corrupt;
-        }
-
-        containers::DynamicArray<PersistentArtifactDescriptor> descriptors(memory::pools::Assets::GetInstance());
-        descriptors.Resize(artifactCount);
-        if (descriptors.Size() != artifactCount)
-        {
-            return PersistentLookupResult::OutOfMemory;
-        }
-        u64 describedPayloadBytes = 0;
-        bool hasPrimary = false;
-        for (u32 index = 0; index < artifactCount; ++index)
-        {
-            PersistentArtifactDescriptor& descriptor = descriptors[index];
-            u8 reserved8 = 0;
-            u32 reserved32 = 0;
-            if (!reader.ReadU64(descriptor.path) || !reader.ReadU32(descriptor.type) || !reader.ReadU32(descriptor.segment) ||
-                !reader.ReadU16(descriptor.flags) || !reader.ReadU8(descriptor.alignmentLog2) || !reader.ReadU8(reserved8) ||
-                !reader.ReadU64(descriptor.size) || !reader.ReadU32(reserved32) || descriptor.path == resources::InvalidResourceId ||
-                descriptor.type == resources::InvalidResourceTypeId || descriptor.size == 0 || descriptor.alignmentLog2 > 20 ||
-                reserved8 != 0 || reserved32 != 0 || (descriptor.flags & ~KnownArtifactFlags) != 0 ||
-                descriptor.size > payloadBytes - describedPayloadBytes)
-            {
-                return PersistentLookupResult::Corrupt;
-            }
-            describedPayloadBytes += descriptor.size;
-            hasPrimary = hasPrimary || (descriptor.flags & static_cast<u16>(ArtifactFlags::Primary)) != 0;
-            for (u32 previous = 0; previous < index; ++previous)
-            {
-                if (descriptors[previous].path == descriptor.path && descriptors[previous].type == descriptor.type &&
-                    descriptors[previous].segment == descriptor.segment)
-                {
-                    return PersistentLookupResult::Corrupt;
-                }
-            }
-        }
-        if (!hasPrimary || describedPayloadBytes != payloadBytes)
-        {
-            return PersistentLookupResult::Corrupt;
-        }
-
-        output.Reset();
-        output.artifacts.Resize(artifactCount);
-        if (output.artifacts.Size() != artifactCount)
-        {
-            return PersistentLookupResult::OutOfMemory;
-        }
-        for (u32 index = 0; index < artifactCount; ++index)
-        {
-            const PersistentArtifactDescriptor& descriptor = descriptors[index];
-            Artifact& artifact = output.artifacts[index];
-            artifact.resource = resources::ResourceReference(resources::ResourcePath::FromId(descriptor.path), descriptor.type);
-            artifact.segment = descriptor.segment;
-            artifact.flags = static_cast<ArtifactFlags>(descriptor.flags);
-            artifact.alignmentLog2 = descriptor.alignmentLog2;
-            artifact.bytes.Resize(static_cast<u32>(descriptor.size));
-            if (artifact.bytes.Size() != descriptor.size || !reader.ReadBytes(artifact.bytes.Data(), artifact.bytes.Size()))
-            {
-                output.Reset();
-                return artifact.bytes.Size() != descriptor.size ? PersistentLookupResult::OutOfMemory : PersistentLookupResult::Corrupt;
-            }
-        }
-        if (reader.Position() != fileSize || ComputeArtifactFingerprint({output.artifacts.TypedData(), output.artifacts.Size()}) != content)
-        {
-            output.Reset();
-            return PersistentLookupResult::Corrupt;
-        }
-        output.disposition = BuildDisposition::CacheHit;
-        output.buildFingerprint = build;
-        output.contentFingerprint = content;
-        return PersistentLookupResult::Hit;
-    }
 } // namespace
 
 namespace vanguard::assets
@@ -396,6 +213,8 @@ namespace vanguard::assets
             return "CompilerBusy";
         case Result::DependencyDiscoveryFailed:
             return "DependencyDiscoveryFailed";
+        case Result::ResourceEstimationFailed:
+            return "ResourceEstimationFailed";
         case Result::DuplicateDependency:
             return "DuplicateDependency";
         case Result::CompileFailed:
@@ -420,6 +239,8 @@ namespace vanguard::assets
         m_compilerVersion = 0;
         m_sourceType = resources::InvalidResourceTypeId;
         m_outputType = resources::InvalidResourceTypeId;
+        m_resourceEstimate = {};
+        m_hasResourceEstimate = false;
         m_dependencies.Clear();
     }
 
@@ -439,19 +260,29 @@ namespace vanguard::assets
         return m_compilerVersion;
     }
 
-    resources::ResourceTypeId BuildPlan::SourceType() const noexcept
+    resources::ResourceTypeId BuildPlan::GetSourceType() const noexcept
     {
         return m_sourceType;
     }
 
-    resources::ResourceTypeId BuildPlan::OutputType() const noexcept
+    resources::ResourceTypeId BuildPlan::GetOutputType() const noexcept
     {
         return m_outputType;
     }
 
-    containers::ArraySpan<const BuildDependency> BuildPlan::Dependencies() const noexcept
+    containers::ArraySpan<const BuildDependency> BuildPlan::GetDependencies() const noexcept
     {
         return {m_dependencies.TypedData(), m_dependencies.Size()};
+    }
+
+    bool BuildPlan::HasResourceEstimate() const noexcept
+    {
+        return m_hasResourceEstimate;
+    }
+
+    const BuildResourceEstimate& BuildPlan::GetResourceEstimate() const noexcept
+    {
+        return m_resourceEstimate;
     }
 
     Result BuildPlan::SetGeneratedDependencyContent(const resources::ResourceReference dependency, const BuildFingerprint& content) noexcept
@@ -506,35 +337,33 @@ namespace vanguard::assets
         return m_dependencies.Size();
     }
 
-    containers::ArraySpan<const BuildDependency> DependencyCollector::Dependencies() const noexcept
+    containers::ArraySpan<const BuildDependency> DependencyCollector::GetDependencies() const noexcept
     {
         return {m_dependencies.TypedData(), m_dependencies.Size()};
     }
 
-    Result DependencyCollector::Status() const noexcept
+    Result DependencyCollector::GetStatus() const noexcept
     {
         return m_status;
     }
 
     Artifact::Artifact() noexcept : bytes(memory::pools::Assets::GetInstance()) {}
 
-    ArtifactWriter::ArtifactWriter(const resources::ResourceReference primaryOutput, const u32 maximumArtifacts,
-                                   const u64 maximumBytes) noexcept
-        : m_primaryOutput(primaryOutput), m_artifacts(memory::pools::Assets::GetInstance()), m_maximumArtifacts(maximumArtifacts),
-          m_maximumBytes(maximumBytes)
+    ArtifactWriter::ArtifactWriter(const resources::ResourceReference primaryOutput, const u32 maximumArtifacts, const u64 maximumBytes) noexcept
+        : m_primaryOutput(primaryOutput), m_artifacts(memory::pools::Assets::GetInstance()), m_maximumArtifacts(maximumArtifacts), m_maximumBytes(maximumBytes)
     {
     }
 
-    Result ArtifactWriter::Add(const resources::ResourceReference resource, const u32 segment, const ArtifactFlags flags,
-                               const u8 alignmentLog2, const void* const data, const usize size) noexcept
+    Result ArtifactWriter::Add(const resources::ResourceReference resource, const u32 segment, const ArtifactFlags flags, const u8 alignmentLog2,
+                               const void* const data, const usize size) noexcept
     {
         if (m_status != Result::Success)
         {
             return m_status;
         }
         const bool primary = HasFlag(flags, ArtifactFlags::Primary);
-        if (!resource.IsValid() || !resource.IsTyped() || size == 0 || data == nullptr || size > static_cast<usize>(~u32{0}) ||
-            alignmentLog2 > 20 || (static_cast<u16>(flags) & ~KnownArtifactFlags) != 0 || (primary && resource != m_primaryOutput))
+        if (!resource.IsValid() || !resource.IsTyped() || size == 0 || data == nullptr || size > static_cast<usize>(~u32{0}) || alignmentLog2 > 20 ||
+            (static_cast<u16>(flags) & ~KnownArtifactFlags) != 0 || (primary && resource != m_primaryOutput))
         {
             m_status = Result::InvalidArtifact;
             return m_status;
@@ -587,17 +416,37 @@ namespace vanguard::assets
         return m_artifacts.Size();
     }
 
-    u64 ArtifactWriter::ByteCount() const noexcept
+    u64 ArtifactWriter::GetByteCount() const noexcept
     {
         return m_bytes;
     }
 
-    containers::ArraySpan<const Artifact> ArtifactWriter::Artifacts() const noexcept
+    u32 ArtifactWriter::GetMaximumArtifactCount() const noexcept
+    {
+        return m_maximumArtifacts;
+    }
+
+    u32 ArtifactWriter::GetRemainingArtifactCount() const noexcept
+    {
+        return m_artifacts.Size() < m_maximumArtifacts ? m_maximumArtifacts - m_artifacts.Size() : 0;
+    }
+
+    u64 ArtifactWriter::GetMaximumByteCount() const noexcept
+    {
+        return m_maximumBytes;
+    }
+
+    u64 ArtifactWriter::GetRemainingByteCount() const noexcept
+    {
+        return m_bytes < m_maximumBytes ? m_maximumBytes - m_bytes : 0;
+    }
+
+    containers::ArraySpan<const Artifact> ArtifactWriter::GetArtifacts() const noexcept
     {
         return {m_artifacts.TypedData(), m_artifacts.Size()};
     }
 
-    Result ArtifactWriter::Status() const noexcept
+    Result ArtifactWriter::GetStatus() const noexcept
     {
         return m_status;
     }
@@ -669,6 +518,7 @@ namespace vanguard::assets
 
         Config config;
         filesystem::AbsolutePath persistentRoot;
+        DerivedDataArtifactSource persistentArtifacts;
         mutable concurrency::RWSpinLock lock;
         containers::DynamicArray<CompilerRecord> compilers;
         containers::DynamicArray<CacheEntry> cache;
@@ -685,6 +535,14 @@ namespace vanguard::assets
             config.persistentCacheRoot = nullptr;
             filesystem::Manager& manager = filesystem::GetManager();
             if (persistentRoot.Empty() || !manager.CreatePath(persistentRoot))
+            {
+                return false;
+            }
+            DerivedDataArtifactSourceConfig sourceConfig;
+            sourceConfig.root = persistentRoot.AsChar();
+            sourceConfig.limits.maximumArtifacts = config.maximumArtifactsPerBuild;
+            sourceConfig.limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
+            if (!persistentArtifacts.Initialize(sourceConfig))
             {
                 return false;
             }
@@ -710,9 +568,12 @@ namespace vanguard::assets
                 return false;
             }
             const BuildFingerprint requestedKey = key;
-            const filesystem::AbsolutePath path = PersistentRecordPath(persistentRoot, requestedKey);
-            const PersistentLookupResult result = ReadPersistentRecord(path, requestedKey, config, output);
-            if (result != PersistentLookupResult::Hit)
+            const filesystem::AbsolutePath path = detail::PersistentRecordPath(persistentRoot, requestedKey);
+            ArtifactSetReader reader;
+            DerivedDataArtifactResult result = persistentArtifacts.Open({requestedKey, {}}, reader);
+            if (result == DerivedDataArtifactResult::Success)
+                result = reader.ReadAll(output);
+            if (result != DerivedDataArtifactResult::Success)
             {
                 output.Reset();
                 output.buildFingerprint = requestedKey;
@@ -721,27 +582,32 @@ namespace vanguard::assets
             lock.Acquire();
             switch (result)
             {
-            case PersistentLookupResult::Hit:
+            case DerivedDataArtifactResult::Success:
                 ++stats.persistentCacheHits;
                 break;
-            case PersistentLookupResult::Miss:
+            case DerivedDataArtifactResult::NotFound:
                 ++stats.persistentCacheMisses;
                 break;
-            case PersistentLookupResult::Corrupt:
+            case DerivedDataArtifactResult::Corrupt:
+            case DerivedDataArtifactResult::ContentMismatch:
                 ++stats.persistentCacheCorruptions;
                 break;
-            case PersistentLookupResult::IoFailure:
-            case PersistentLookupResult::OutOfMemory:
+            case DerivedDataArtifactResult::InvalidArgument:
+            case DerivedDataArtifactResult::InvalidState:
+            case DerivedDataArtifactResult::DescriptorMismatch:
+            case DerivedDataArtifactResult::IoFailure:
+            case DerivedDataArtifactResult::OutOfMemory:
+            case DerivedDataArtifactResult::LimitExceeded:
                 ++stats.persistentCacheIoFailures;
                 break;
             }
             lock.Release();
 
-            if (result == PersistentLookupResult::Corrupt)
+            if (result == DerivedDataArtifactResult::Corrupt || result == DerivedDataArtifactResult::ContentMismatch)
             {
                 static_cast<void>(filesystem::GetManager().DeleteFile(path));
             }
-            return result == PersistentLookupResult::Hit;
+            return result == DerivedDataArtifactResult::Success;
         }
 
         void StorePersistentCache(const BuildOutput& output) noexcept
@@ -751,8 +617,8 @@ namespace vanguard::assets
                 return;
             }
             filesystem::Manager& manager = filesystem::GetManager();
-            const filesystem::AbsolutePath directory = PersistentRecordDirectory(persistentRoot, output.buildFingerprint);
-            const filesystem::AbsolutePath target = PersistentRecordPath(persistentRoot, output.buildFingerprint);
+            const filesystem::AbsolutePath directory = detail::PersistentRecordDirectory(persistentRoot, output.buildFingerprint);
+            const filesystem::AbsolutePath target = detail::PersistentRecordPath(persistentRoot, output.buildFingerprint);
             if (!manager.CreatePath(directory))
             {
                 RecordPersistentStore(false);
@@ -761,10 +627,17 @@ namespace vanguard::assets
 
             if (manager.FileExist(target))
             {
-                BuildOutput existing;
-                const PersistentLookupResult existingResult = ReadPersistentRecord(target, output.buildFingerprint, config, existing);
-                if (existingResult == PersistentLookupResult::Hit && existing.contentFingerprint == output.contentFingerprint)
+                ArtifactSetReader existing;
+                const DerivedDataArtifactResult existingResult =
+                    persistentArtifacts.Open({output.buildFingerprint, output.contentFingerprint}, existing);
+                if (existingResult == DerivedDataArtifactResult::Success)
                 {
+                    return;
+                }
+                if (existingResult != DerivedDataArtifactResult::Corrupt &&
+                    existingResult != DerivedDataArtifactResult::ContentMismatch)
+                {
+                    RecordPersistentStore(false);
                     return;
                 }
                 if (!manager.DeleteFile(target))
@@ -783,9 +656,12 @@ namespace vanguard::assets
                 return;
             }
 
-            BuildOutput validation;
-            const PersistentLookupResult validationResult = ReadPersistentRecord(temporary, output.buildFingerprint, config, validation);
-            if (validationResult != PersistentLookupResult::Hit || validation.contentFingerprint != output.contentFingerprint)
+            DerivedDataArtifactLimits limits;
+            limits.maximumArtifacts = config.maximumArtifactsPerBuild;
+            limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
+            const DerivedDataArtifactResult validationResult = detail::ValidatePersistentRecord(
+                temporary, {output.buildFingerprint, output.contentFingerprint}, limits);
+            if (validationResult != DerivedDataArtifactResult::Success)
             {
                 static_cast<void>(manager.DeleteFile(temporary));
                 RecordPersistentStore(false);
@@ -796,9 +672,9 @@ namespace vanguard::assets
             bool published = moved;
             if (!moved && manager.FileExist(target))
             {
-                BuildOutput raced;
-                published = ReadPersistentRecord(target, output.buildFingerprint, config, raced) == PersistentLookupResult::Hit &&
-                            raced.contentFingerprint == output.contentFingerprint;
+                ArtifactSetReader raced;
+                published = persistentArtifacts.Open({output.buildFingerprint, output.contentFingerprint}, raced) ==
+                            DerivedDataArtifactResult::Success;
             }
             if (!moved)
             {
@@ -826,8 +702,7 @@ namespace vanguard::assets
             lock.Acquire();
             for (CompilerRecord& compiler : compilers)
             {
-                if (compiler.descriptor.sourceType == request.source.identity.ExpectedType() &&
-                    compiler.descriptor.outputType == request.output.ExpectedType())
+                if (compiler.descriptor.sourceType == request.source.identity.ExpectedType() && compiler.descriptor.outputType == request.output.ExpectedType())
                 {
                     ++compiler.activeBuilds;
                     ++stats.activeBuilds;
@@ -971,10 +846,7 @@ namespace vanguard::assets
         class CompilerLease final
         {
         public:
-            CompilerLease(BuildSystem::Impl& implementation, const CompilerId compiler) noexcept
-                : m_implementation(&implementation), m_compiler(compiler)
-            {
-            }
+            CompilerLease(BuildSystem::Impl& implementation, const CompilerId compiler) noexcept : m_implementation(&implementation), m_compiler(compiler) {}
 
             ~CompilerLease()
             {
@@ -1001,12 +873,11 @@ namespace vanguard::assets
         {
             return true;
         }
-        if (!memory::IsInitialized() || config.maximumCompilers == 0 || config.maximumDependenciesPerBuild == 0 ||
-            config.maximumArtifactsPerBuild == 0 || config.maximumArtifactBytesPerBuild == 0 ||
-            (config.maximumCacheEntries != 0 && config.maximumCacheBytes == 0) ||
-            (config.persistentCacheRoot != nullptr && (!filesystem::IsInitialized() || config.persistentCacheRoot[0] == '\0' ||
-                                                       !filesystem::AbsolutePath::IsValidPath(config.persistentCacheRoot) ||
-                                                       !filesystem::paths::IsAbsolutePath(config.persistentCacheRoot))))
+        if (!memory::IsInitialized() || config.maximumCompilers == 0 || config.maximumDependenciesPerBuild == 0 || config.maximumArtifactsPerBuild == 0 ||
+            config.maximumArtifactBytesPerBuild == 0 || (config.maximumCacheEntries != 0 && config.maximumCacheBytes == 0) ||
+            (config.persistentCacheRoot != nullptr &&
+             (!filesystem::IsInitialized() || config.persistentCacheRoot[0] == '\0' || !filesystem::AbsolutePath::IsValidPath(config.persistentCacheRoot) ||
+              !filesystem::paths::IsAbsolutePath(config.persistentCacheRoot))))
         {
             return false;
         }
@@ -1153,9 +1024,9 @@ namespace vanguard::assets
         {
             return Result::DependencyDiscoveryFailed;
         }
-        if (collector.Status() != Result::Success)
+        if (collector.GetStatus() != Result::Success)
         {
-            return collector.Status();
+            return collector.GetStatus();
         }
         if (collector.Count() > m_impl->config.maximumDependenciesPerBuild)
         {
@@ -1167,11 +1038,23 @@ namespace vanguard::assets
         {
             return Result::OutOfMemory;
         }
-        for (const BuildDependency& dependency : collector.Dependencies())
+        for (const BuildDependency& dependency : collector.GetDependencies())
         {
             plan.m_dependencies.PushBack(dependency);
         }
         SortDependencies(plan.m_dependencies);
+        const containers::ArraySpan<const BuildDependency> sortedDependencies{plan.m_dependencies.TypedData(), plan.m_dependencies.Size()};
+        if (compiler.estimateResources != nullptr)
+        {
+            BuildResourceEstimate estimate;
+            if (!compiler.estimateResources(request, sortedDependencies, estimate, compiler.userData) || !estimate.IsValid())
+            {
+                plan.Reset();
+                return Result::ResourceEstimationFailed;
+            }
+            plan.m_resourceEstimate = estimate;
+            plan.m_hasResourceEstimate = true;
+        }
         plan.m_compiler = compiler.id;
         plan.m_compilerVersion = compiler.version;
         plan.m_sourceType = compiler.sourceType;
@@ -1179,8 +1062,8 @@ namespace vanguard::assets
         return Result::Success;
     }
 
-    Result BuildSystem::Execute(const BuildRequest& request, const BuildPlan& plan, BuildOutput& output,
-                                const IsCancellationRequestedFunction cancellation, void* const cancellationUserData) noexcept
+    Result BuildSystem::Execute(const BuildRequest& request, const BuildPlan& plan, BuildOutput& output, const IsCancellationRequestedFunction cancellation,
+                                void* const cancellationUserData) noexcept
     {
         output.Reset();
         if (m_impl == nullptr)
@@ -1195,8 +1078,8 @@ namespace vanguard::assets
         }
         for (const BuildDependency& dependency : plan.m_dependencies)
         {
-            if (!dependency.IsValid() || (dependency.role == DependencyRole::Generated &&
-                                          dependency.requirement == DependencyRequirement::Required && dependency.content.IsEmpty()))
+            if (!dependency.IsValid() ||
+                (dependency.role == DependencyRole::Generated && dependency.requirement == DependencyRequirement::Required && dependency.content.IsEmpty()))
             {
                 m_impl->RecordResult(false, false);
                 return Result::InvalidState;
@@ -1242,6 +1125,10 @@ namespace vanguard::assets
         if (!compiler.compile(context, writer, compiler.userData))
         {
             m_impl->RecordResult(false, false);
+            if (writer.GetStatus() != Result::Success)
+            {
+                return writer.GetStatus();
+            }
             return cancellation != nullptr && cancellation(cancellationUserData) ? Result::Cancelled : Result::CompileFailed;
         }
         if (cancellation != nullptr && cancellation(cancellationUserData))
@@ -1249,17 +1136,17 @@ namespace vanguard::assets
             m_impl->RecordResult(false, false);
             return Result::Cancelled;
         }
-        if (writer.Status() != Result::Success)
+        if (writer.GetStatus() != Result::Success)
         {
             m_impl->RecordResult(false, false);
-            return writer.Status();
+            return writer.GetStatus();
         }
         if (writer.Count() == 0 || !writer.HasPrimaryOutput())
         {
             m_impl->RecordResult(false, false);
             return Result::InvalidArtifact;
         }
-        if (!CopyArtifacts(writer.Artifacts(), output.artifacts))
+        if (!CopyArtifacts(writer.GetArtifacts(), output.artifacts))
         {
             m_impl->RecordResult(false, false);
             return Result::OutOfMemory;

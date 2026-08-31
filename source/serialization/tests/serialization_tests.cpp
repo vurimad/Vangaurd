@@ -19,13 +19,11 @@ namespace
 
     constexpr vanguard::u32 TestMagic = vanguard::serialization::MakeFourCC('V', 'G', 'T', 'S');
     constexpr vanguard::u32 DataSection = vanguard::serialization::MakeFourCC('D', 'A', 'T', 'A');
-    constexpr std::array<vanguard::u8, 16> Payload{0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
-                                                   0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+    constexpr std::array<vanguard::u8, 16> Payload{0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
 
     using ByteArray = vanguard::containers::DynamicArray<vanguard::u8>;
 
-    bool BuildDocument(ByteArray& bytes, vanguard::serialization::DocumentHeader& header,
-                       vanguard::serialization::SectionDescriptor& section)
+    bool BuildDocument(ByteArray& bytes, vanguard::serialization::DocumentHeader& header, vanguard::serialization::SectionDescriptor& section)
     {
         namespace filesystem = vanguard::filesystem;
         namespace serialization = vanguard::serialization;
@@ -139,7 +137,7 @@ int main()
         Check(reader.ReadVarInt(signedVariable) && signedVariable == -1, "negative varint");
         Check(reader.ReadVarInt(signedVariable) && signedVariable == static_cast<vanguard::i64>(0x7fffffffffffffffll), "maximum varint");
         Check(reader.Align(64), "read canonical alignment");
-        Check(reader.Remaining() == 0, "primitive stream consumed");
+        Check(reader.GetRemaining() == 0, "primitive stream consumed");
 
         Check(bytes[1] == 0x34 && bytes[2] == 0x12, "canonical little-endian bytes");
     }
@@ -148,18 +146,18 @@ int main()
         ByteArray bytes(memory::pools::Serialization::GetInstance());
         filesystem::MemoryFileWriter writerFile(bytes);
         serialization::BinaryReader wrongReader(writerFile);
-        Check(wrongReader.Status() == serialization::Result::WrongStreamMode, "reader rejects writer stream");
+        Check(wrongReader.GetStatus() == serialization::Result::WrongStreamMode, "reader rejects writer stream");
 
         filesystem::MemoryFileReader readerFile(bytes, 0);
         serialization::BinaryWriter wrongWriter(readerFile);
-        Check(wrongWriter.Status() == serialization::Result::WrongStreamMode, "writer rejects reader stream");
+        Check(wrongWriter.GetStatus() == serialization::Result::WrongStreamMode, "writer rejects reader stream");
     }
 
     {
         ByteArray bytes(memory::pools::Serialization::GetInstance());
         filesystem::MemoryFileWriter writerFile(bytes);
         serialization::BinaryWriter writer(writerFile);
-        Check(!writer.Seek(1) && writer.Status() == serialization::Result::InvalidLayout, "writer rejects sparse seek");
+        Check(!writer.Seek(1) && writer.GetStatus() == serialization::Result::InvalidLayout, "writer rejects sparse seek");
     }
 
     {
@@ -173,7 +171,7 @@ int main()
         serialization::BinaryReader reader(readerFile);
         vanguard::u8 value = 0;
         Check(reader.ReadU8(value), "read padding fixture");
-        Check(!reader.Align(4) && reader.Status() == serialization::Result::InvalidEncoding, "nonzero padding rejection");
+        Check(!reader.Align(4) && reader.GetStatus() == serialization::Result::InvalidEncoding, "nonzero padding rejection");
     }
 
     ByteArray document(memory::pools::Serialization::GetInstance());
@@ -181,19 +179,17 @@ int main()
     serialization::SectionDescriptor expectedSection;
     Check(BuildDocument(document, expectedHeader, expectedSection), "build Vanguard document");
     Check(document[0] == 'V' && document[1] == 'G' && document[2] == 'T' && document[3] == 'S', "Vanguard format-specific magic");
-    Check(document[4] == serialization::DocumentHeader::LittleEndian && document[5] == serialization::DocumentHeader::EncodingVersion &&
-              document[6] == 40 && document[7] == 0,
+    Check(document[4] == serialization::DocumentHeader::LittleEndian && document[5] == serialization::DocumentHeader::EncodingVersion && document[6] == 40 &&
+              document[7] == 0,
           "stable document prefix");
 
     {
         filesystem::MemoryFileReader memoryReader(document, 0);
         serialization::BinaryReader reader(memoryReader);
         serialization::DocumentHeader header;
-        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::Success,
-              "read valid header");
-        Check(header.magic == expectedHeader.magic && header.version == expectedHeader.version &&
-                  header.fileSize == expectedHeader.fileSize && header.sectionTableOffset == expectedHeader.sectionTableOffset &&
-                  header.sectionCount == 1,
+        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::Success, "read valid header");
+        Check(header.magic == expectedHeader.magic && header.version == expectedHeader.version && header.fileSize == expectedHeader.fileSize &&
+                  header.sectionTableOffset == expectedHeader.sectionTableOffset && header.sectionCount == 1,
               "header values");
 
         containers::DynamicArray<serialization::SectionDescriptor> sections(memory::pools::Serialization::GetInstance());
@@ -222,21 +218,18 @@ int main()
         serialization::DocumentHeader header;
         serialization::ReadLimits limits;
         limits.maximumFileSize = document.Size() - 1;
-        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, limits, header) == serialization::Result::LimitExceeded,
-              "file-size limit");
+        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, limits, header) == serialization::Result::LimitExceeded, "file-size limit");
     }
 
     {
         filesystem::MemoryFileReader memoryReader(document, 0);
         serialization::BinaryReader reader(memoryReader);
         serialization::DocumentHeader header;
-        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::Success,
-              "header for section limit");
+        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::Success, "header for section limit");
         containers::DynamicArray<serialization::SectionDescriptor> sections(memory::pools::Serialization::GetInstance());
         serialization::ReadLimits limits;
         limits.maximumSections = 0;
-        Check(serialization::ReadSectionTable(reader, header, limits, sections) == serialization::Result::LimitExceeded,
-              "section-count limit");
+        Check(serialization::ReadSectionTable(reader, header, limits, sections) == serialization::Result::LimitExceeded, "section-count limit");
     }
 
     {
@@ -298,11 +291,9 @@ int main()
         filesystem::MemoryFileReader memoryReader(document, 0);
         serialization::BinaryReader reader(memoryReader);
         serialization::DocumentHeader header;
-        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::Success,
-              "header survives invalid section");
+        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::Success, "header survives invalid section");
         containers::DynamicArray<serialization::SectionDescriptor> sections(memory::pools::Serialization::GetInstance());
-        Check(serialization::ReadSectionTable(reader, header, {}, sections) == serialization::Result::InvalidLayout,
-              "out-of-bounds section rejection");
+        Check(serialization::ReadSectionTable(reader, header, {}, sections) == serialization::Result::InvalidLayout, "out-of-bounds section rejection");
 
         Check(writer.Seek(expectedHeader.sectionTableOffset + 16), "seek valid section");
         Check(writer.WriteU64(expectedSection.offset), "restore valid section offset");
@@ -314,8 +305,7 @@ int main()
         filesystem::MemoryFileReader memoryReader(document, 0);
         serialization::BinaryReader reader(memoryReader);
         vanguard::u8 scratch[16];
-        Check(serialization::ValidateSectionChecksum(reader, expectedSection, scratch, sizeof(scratch)) ==
-                  serialization::Result::IntegrityFailure,
+        Check(serialization::ValidateSectionChecksum(reader, expectedSection, scratch, sizeof(scratch)) == serialization::Result::IntegrityFailure,
               "payload corruption rejection");
         document[payloadOffset] ^= 1u;
     }
@@ -325,7 +315,7 @@ int main()
         filesystem::MemoryFileReader readerFile(malformedVarUInt, sizeof(malformedVarUInt), 0);
         serialization::BinaryReader reader(readerFile);
         vanguard::u64 value = 0;
-        Check(!reader.ReadVarUInt(value) && reader.Status() == serialization::Result::InvalidEncoding, "non-canonical varuint rejection");
+        Check(!reader.ReadVarUInt(value) && reader.GetStatus() == serialization::Result::InvalidEncoding, "non-canonical varuint rejection");
     }
 
     {
@@ -333,15 +323,14 @@ int main()
         filesystem::MemoryFileReader readerFile(overflowingVarUInt, sizeof(overflowingVarUInt), 0);
         serialization::BinaryReader reader(readerFile);
         vanguard::u64 value = 0;
-        Check(!reader.ReadVarUInt(value) && reader.Status() == serialization::Result::Overflow, "overflowing varuint rejection");
+        Check(!reader.ReadVarUInt(value) && reader.GetStatus() == serialization::Result::Overflow, "overflowing varuint rejection");
     }
 
     {
         filesystem::MemoryFileReader shortFile(static_cast<const vanguard::u8*>(document.Data()), 12, 0);
         serialization::BinaryReader reader(shortFile);
         serialization::DocumentHeader header;
-        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::EndOfStream,
-              "truncated header rejection");
+        Check(serialization::ReadDocumentHeader(reader, TestMagic, {1, 0, 3}, {}, header) == serialization::Result::EndOfStream, "truncated header rejection");
     }
 
     filesystem::Shutdown();

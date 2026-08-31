@@ -21,6 +21,7 @@ namespace vanguard::engine
         Simulation,
         WorldStreaming,
         PostSimulation,
+        RenderUpdate,
         Presentation,
         Render,
         EndFrame,
@@ -89,7 +90,10 @@ namespace vanguard::engine
         FrameParticipantResult result = FrameParticipantResult::Success;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr FrameParticipantStatus Success() noexcept { return {}; }
+        [[nodiscard]] static constexpr FrameParticipantStatus Success() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr FrameParticipantStatus Failure(const char* const message) noexcept
         {
             return {FrameParticipantResult::Failure, message};
@@ -182,19 +186,17 @@ namespace vanguard::engine
     public:
         ~FramePipelineService() override = default;
 
-        [[nodiscard]] virtual bool Configure(const FramePipelineConfig& config,
-                                             FrameFailure* failure = nullptr) noexcept = 0;
-        [[nodiscard]] virtual bool RegisterParticipant(const FrameParticipantDescriptor& descriptor,
-                                                       FrameFailure* failure = nullptr) noexcept = 0;
+        [[nodiscard]] virtual bool Configure(const FramePipelineConfig& config, FrameFailure* failure = nullptr) noexcept = 0;
+        [[nodiscard]] virtual bool RegisterParticipant(const FrameParticipantDescriptor& descriptor, FrameFailure* failure = nullptr) noexcept = 0;
         [[nodiscard]] virtual bool Compile(FrameFailure* failure = nullptr) noexcept = 0;
         [[nodiscard]] virtual bool RunFrame(FrameFailure* failure = nullptr) noexcept = 0;
 
         [[nodiscard]] virtual bool SetPaused(bool paused) noexcept = 0;
         [[nodiscard]] virtual bool SetTimeScale(f32 scale) noexcept = 0;
-        [[nodiscard]] virtual FramePipelineState State() const noexcept = 0;
+        [[nodiscard]] virtual FramePipelineState GetState() const noexcept = 0;
         [[nodiscard]] virtual FramePipelineStats GetStats() const noexcept = 0;
         virtual void VisitParticipantStats(FrameParticipantVisitor visitor, void* userData = nullptr) const noexcept = 0;
-        [[nodiscard]] virtual const FrameFailure& LastFailure() const noexcept = 0;
+        [[nodiscard]] virtual const FrameFailure& GetLastFailure() const noexcept = 0;
 
     protected:
         FramePipelineService() noexcept = default;
@@ -202,4 +204,4 @@ namespace vanguard::engine
 
     [[nodiscard]] FramePipelineService* FindFramePipelineService(application::EngineHost& host) noexcept;
     [[nodiscard]] FramePipelineService* FindFramePipelineService(application::ServiceContext& context) noexcept;
-}
+} // namespace vanguard::engine

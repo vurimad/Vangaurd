@@ -40,7 +40,7 @@ namespace vanguard::nanovanguard
 
         [[nodiscard]] bool Write(const char* text) noexcept;
         [[nodiscard]] bool Write(const char* text, u32 length) noexcept;
-        [[nodiscard]] bool Good() const noexcept
+        [[nodiscard]] bool IsGood() const noexcept
         {
             return m_good;
         }

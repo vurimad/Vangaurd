@@ -16,23 +16,16 @@ namespace
 {
     bool g_initialized = false;
 
-    vanguard::reflection::TypeDescriptor Describe(
-        const rtti::IType* type) noexcept
+    vanguard::reflection::TypeDescriptor Describe(const rtti::IType* type) noexcept
     {
         if (type == nullptr)
         {
             return {};
         }
 
-        return {
-            type,
-            type->GetName().AsChar(),
-            type->GetSize(),
-            type->GetAlignment(),
-            static_cast<vanguard::reflection::TypeKind>(type->GetType())
-        };
+        return {type, type->GetName().AsChar(), type->GetSize(), type->GetAlignment(), static_cast<vanguard::reflection::TypeKind>(type->GetType())};
     }
-}
+} // namespace
 
 namespace vanguard::reflection::backend
 {
@@ -80,4 +73,4 @@ namespace vanguard::reflection::backend
 
         return Describe(GetRttiSystem().FindType(CName(nameHash)));
     }
-}
+} // namespace vanguard::reflection::backend

@@ -114,8 +114,7 @@ namespace vanguard::math
 
     RED_INLINE Bool Box::Contains(const Box& box) const
     {
-        return box.Min.X >= Min.X && box.Min.Y >= Min.Y && box.Min.Z >= Min.Z && box.Max.X <= Max.X && box.Max.Y <= Max.Y &&
-               box.Max.Z <= Max.Z;
+        return box.Min.X >= Min.X && box.Min.Y >= Min.Y && box.Min.Z >= Min.Z && box.Max.X <= Max.X && box.Max.Y <= Max.Y && box.Max.Z <= Max.Z;
     }
 
     RED_INLINE Bool Box::ContainsExcludeEdges(const Box& box) const
@@ -140,8 +139,7 @@ namespace vanguard::math
 
     RED_INLINE Bool Box::Touches(const Box& box) const
     {
-        return box.Max.X >= Min.X && box.Max.Y >= Min.Y && box.Max.Z >= Min.Z && box.Min.X <= Max.X && box.Min.Y <= Max.Y &&
-               box.Min.Z <= Max.Z;
+        return box.Max.X >= Min.X && box.Max.Y >= Min.Y && box.Max.Z >= Min.Z && box.Min.X <= Max.X && box.Min.Y <= Max.Y && box.Min.Z <= Max.Z;
     }
 
     RED_INLINE Bool Box::Touches(const Vector3& bMin, const Vector3& bMax) const

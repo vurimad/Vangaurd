@@ -12,6 +12,8 @@ No Assimp type, enum, material convention, index ordering, allocator, filesystem
 
 ## Runtime contract
 
-`MeshFile::Open` loads and validates only the checksummed metadata section. Packed geometry remains in the streamable `GEOM` section. `ReadPage` performs a bounded range read and validates the page's SHA-256 digest before the bytes may be uploaded. The caller owns page storage, scheduling, cancellation, residency, GPU allocation, and NVRHI translation.
+`MeshFile::Open` loads and validates only the checksummed metadata section. Packed geometry remains in the streamable `GEOM` section. `ReadPage` performs a bounded range read and validates the page's SHA-256 digest before the bytes may be uploaded. `MeshPageSource::ReadPageAsync` provides the same validation over an owned asynchronous loose/VPAK range request and never exposes bytes before validation succeeds. The caller still owns page-demand coalescing, residency, GPU allocation, and NVRHI translation.
+
+`MeshResourceLoader` is the production `VMSH` pipeline adapter. It resolves the ordinary `ResourceStreamer` winner, starts material/skeleton dependencies from the loose/VPAK dependency table, asynchronously reads only the document prefix and `META` section, validates META against those dependencies, and publishes `MeshResourceObject`. The published object retains immutable metadata, dependency handles, and the same owned source for later page reads; it never retains optional geometry bytes.
 
 Metadata is immutable after opening. Separate `MeshFile` instances may be used concurrently. Calls operating on the same `IFile` require external serialization because the current filesystem contract is seek based.

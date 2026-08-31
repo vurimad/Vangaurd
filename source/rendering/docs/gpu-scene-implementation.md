@@ -38,6 +38,68 @@ Shared data is normalized into `GpuRenderable`, `GpuLod`, `GpuPrimitive`, and `G
 
 `GpuMaterial` is populated by the runtime material resolver. It points to raw parameter bytes and `GpuMaterialResource` entries containing resolved bindless descriptor indices. The cooked material format remains unaware of descriptor heaps, binding slots, or draw submission. An optional `GpuMaterialSet` is a compact primitive-local override span; instances without overrides continue to use primitive defaults without allocating one. Lights and decals have dedicated persistent layouts because they do not share ordinary mesh-instance consumption patterns.
 
+### Provisional material-interface direction
+
+This section records a design discussion, not an accepted or implemented contract. `GpuMaterial::materialInterface` currently reserves a stable identity connecting a GPU material instance to some future shader-derived material ABI. The engine does not yet declare, reflect, cook, register, validate, or generate accessors for such an ABI, and the field must not be treated as evidence that those systems already exist.
+
+Shader reflection cannot reliably infer which declarations in an arbitrary bindless shader constitute material state. A shader may expose global GPU Scene tables, view data, pass resources, render targets, helper structures, and several entry points alongside actual material parameters. If Vanguard pursues this model, material participation must therefore be explicit rather than guessed. A shader module or entry point would declare or reference a designated material interface, while shaders such as culling, depth-pyramid construction, bloom, or tone mapping may declare none.
+
+A reflected interface could describe parameter byte offsets and logical resource roles for one material family. A material instance would continue to store only its parameter range, resolved bindless-resource range, and interface identity. The preferred hot shading path would use reflection-generated constants or accessors compiled into the compatible shader variant:
+
+StandardSurfaceMaterial loadMaterial(uint materialIndex)
+{
+    GpuMaterial material = materials[materialIndex];
+
+    StandardSurfaceMaterial result;
+    result.baseColor = loadParameterFloat4(material.parameterByteOffset + 0);
+    result.roughness = loadParameterFloat(material.parameterByteOffset + 16);
+    result.metallic = loadParameterFloat(material.parameterByteOffset + 20);
+
+    result.baseColorTexture =
+        materialResources[material.firstResource + 0];
+
+    result.normalTexture =
+        materialResources[material.firstResource + 1];
+
+    result.sampler =
+        materialResources[material.firstResource + 2];
+
+    return result;
+}
+
+
+A shader that is not material-driven simply declares no material interface:
+Depth-pyramid compute shader → no material interface
+Bloom shader                 → no material interface
+Tonemapper                    → no material interface
+GPU culling shader            → no material interface
+
+materialInterface = InvalidMaterialInterface;
+
+```text
+GpuPrimitive.material
+    -> GpuMaterial.parameterByteOffset / firstResource
+    -> shader-generated parameter offset or resource slot
+    -> material parameter storage or bindless descriptor index
+    -> global resource descriptor domain
+```
+
+For example, a reflected `normalTexture` role might become resource slot 1. The shader would read `materialResources[material.firstResource + 1]` and use the resulting descriptor index with the global bindless resource domain. `GpuMaterial` itself remains layout-agnostic and contains no hardcoded normal-map, base-color, or roughness fields.
+
+The primary draw path should not necessarily perform a dynamic `MaterialInterfaces[material.materialInterface]` lookup for every parameter or texture. Pipeline and GPU batching work can already group compatible primitives by pipeline/material-interface bucket, allowing the compiled shader to know its generated layout. A runtime interface table may still be useful for genuinely generic evaluation, validation, editor inspection, debugging, or future ray-tracing paths, but its cost and purpose must be demonstrated before adoption.
+
+If implemented, the missing work includes:
+
+- explicit material-interface declarations or metadata in the Slang authoring model;
+- entry-point-specific reflection that filters unrelated shader declarations;
+- stable interface identity, layout hashing, and compatibility rules;
+- generated shader-side material accessors;
+- cooked `vshader` interface metadata and `vmat` validation;
+- runtime interface registration and pipeline compatibility checks;
+- resolution of material resource roles into real bindless descriptor indices.
+
+This direction may be revised or discarded if a simpler pipeline-specialized ABI, a fixed renderer material model, or another measured design provides better scalability. Until that decision is made, Render Scene and GPU Scene code should treat material and interface indices as externally resolved stable identities and must not invent material-layout interpretation locally.
+
 `GpuView` is frame-scoped rather than persistent scene state. It mirrors the validated CPU view with exact matrices, camera-relative origins, frustum planes, view masks, render-phase bits, temporal identity, and jitter. Views therefore select and classify stable scene indices without duplicating persistent instance, primitive, geometry, or material data.
 
 ## Phase 3: paged persistent GPU tables
@@ -96,12 +158,50 @@ Renderable primitives retain generational geometry and material handles on the C
 
 No definition payload mirror is retained. CPU records contain keys, handles, reference counts, allocation identities, and renderable dependency edges only. The resolved GPU structures are written directly into mapped upload memory and remain exclusively in persistent GPU tables.
 
+## Phase 7: candidate ingestion and GPU visibility contracts
+
+Status: implemented as contracts, planning, and shaders. Production execution intentionally waits for the Render Graph.
+
+`GpuVisibilityPlanBuilder` divides each view's broad-phase candidates into fixed 128-candidate work ranges. It operates entirely over caller-owned storage and returns direct candidate reservations, allowing future Render Scene producer jobs to write compact `GpuInstanceIndex` values into mapped graph upload memory without an intermediate payload array. Views complete in reservation order so the resulting workload is deterministic even when the disjoint candidate spans were filled concurrently.
+
+Every view owns a disjoint visible-index partition and one counter entry. Visibility requests that exceed the partition never write out of bounds: `visibleCount` preserves the requested count, consumers clamp it to the declared capacity, and `overflowCount` records the exact loss. Work, candidate, result, view, visible-index, and counter structures contain explicit 32-bit lanes and have CPU/shader size contracts.
+
+`gpu_scene_visibility.slang` validates instance activation, visibility masks, renderable residency, requested render-phase intersection, and view-relative bounding spheres. Each workgroup performs group-local prefix compaction and reserves its output with one global atomic rather than one atomic per visible instance. Persistent instance and renderable pages are reached through the global bindless table/page directories; frame-local buffers are also named by descriptor indices supplied through a compact push-constant structure.
+
+The shader compiles to DXIL and SPIR-V through the Vanguard Slang toolchain. No rendering service currently binds these resources, records commands, dispatches the kernel, or submits it. The future rendering/GPU-visibility service owns counter clearing, descriptor materialization, constants, and dispatch policy. It contributes opaque passes and their resource accesses to the Render Graph; the graph owns placement, transitions, queue synchronization, and execution ordering without interpreting visibility semantics.
+
+`GpuInstance::deformation` is an optional index reserved for a future renderer deformation table. Visibility continues to use conservative instance bounds, so static, skinned, morphing, and cloth-driven objects share the same candidate path without making immutable source geometry an architectural assumption.
+
+## Phase 8: RenderScene sparse publication boundary
+
+Status: implemented for stable identities, mutation coalescing, direct staging writes, deferred retirement, and direct candidate-index emission.
+
+`RenderSceneGpuPublisher` attaches before scenes are created and assigns every mesh, light, and decal proxy one allocation from `GpuSceneLifetime`. A proxy therefore keeps the same GPU table index throughout its CPU lifetime. Destroyed allocations are not reused by CPU creation: unpublished allocations are cancelled, published allocations enter the existing fence-deferred retirement epochs, and a reused slot receives a new generation.
+
+RenderScene mutations mark compact dirty metadata against that identity. Tracking is stored in lazily materialized 4096-slot pages, so growing the CPU identity directory never relocates existing entries. Repeated transform, visibility, binding, and property changes coalesce into one 32-bit proxy index per mutation epoch. Creation followed by destruction before publication collapses to retirement without uploading a dead object. The publisher does not retain a complete CPU image of `GpuInstance`, `GpuLight`, or `GpuDecal`.
+
+Transform relinking uses an explicit `Serial -> Parallel -> Sealed -> Publishing` phase contract. Before dispatch, the scene owner assigns every Jobs group a disjoint slice of a persistent dirty-index arena. Workers update their proxy state and append directly to their own slice without taking the publisher lock, allocating memory, copying request objects, or concatenating worker results. The parallel-job epilogue seals all slices once and folds their counters into scene-local statistics. Structural creation, destruction, visibility, and resource mutations remain on the serial owner path.
+
+After the exact RenderScene mutation epoch completes, `Prepare` freezes the existing index slices and retirement storage in place; it does not reconstruct a contiguous array of change records. While that publication is open, GPU-relevant proxy mutations are rejected explicitly. `BuildUploadRequests` walks the frozen indices to describe one final-table element per changed identity.
+
+GPU conversion is range-oriented rather than one monolithic serial loop. The serial dirty-index stream is subdivided into bounded ranges, while every preassigned parallel dirty slice remains its own range. Retained prefix metadata gives every range a stable reservation offset without copying dirty indices into another queue. The future Render Graph can schedule non-empty ranges as Jobs without a shared output cursor, lock, concatenation pass, or temporary change array. `FinishWrites` runs only after their dependency joins and verifies that every non-empty range completed before publication may close.
+
+Each range obtains non-owning pointers to the narrow authoritative fields in sealed RenderScene storage. No complete proxy or typed payload object is copied. Final `GpuInstance`, `GpuLight`, and `GpuDecal` objects are constructed directly at their mapped upload reservation, eliminating both the broad source copy and the previous stack-object-to-upload-memory copy. The publisher records no command list and performs no submission. Cancelling a publication preserves the sealed index storage for retry, while completing it clears dirty metadata and advances the mutation epoch.
+
+Mesh definitions remain externally resolved. `BindMesh` connects a proxy identity to stable `GpuRenderable` and optional `GpuMaterialSet` handles, while `BindDecalMaterial` supplies the resolved material identity for decals. Missing bindings produce inactive GPU objects rather than exposing incomplete data to visibility work.
+
+The instance ABI now carries both `visibilityMask` and the complete 64-bit `layerMask`; GPU visibility intersects both against the view. This advanced the CPU/shader GPU Scene layout contract to version 4.
+
+The future rendering and GPU-visibility services own the policy and sequence around this boundary: begin the uploader batch, dispatch the disjoint range writers, join them, call `FinishWrites`, complete reservations, and close the publication. They declare opaque copy and visibility passes to the Render Graph, which owns transient resource placement, access transitions, queue synchronization, and execution ordering without understanding candidate or visibility semantics. No renderer service currently performs that sequence.
+
+RenderScene visibility planning now walks a dense active-cell directory rather than the spatial cell-slot high-water mark. Candidate batches are balanced by raw proxy count and may split a highly populated cell. Every batch receives a permanent disjoint prefix in visibility-system-owned staging memory and writes stable `GpuInstanceIndex` values directly from exact live proxy generations. Filled prefixes remain sparse; `GpuVisibilityPlanBuilder::CompleteViewRanges` emits work only for those prefixes, so no shared append counter, temporary proxy array, gather copy, or count-and-refilter pass is required. One explicit scene read seal protects the completed mutation epoch across the caller's Jobs fan-out and join.
+
 ## Remaining phases
 
 1. Compute-scatter selection for highly fragmented sparse updates.
-2. Candidate ingestion and GPU visibility.
-3. GPU phase expansion, sorting, compaction, and batching.
-4. Indirect command and count generation.
+2. GPU LOD selection, phase expansion, sorting, compaction, and batching.
+3. Indirect command and count generation.
+4. Render Graph integration and execution.
 5. Conformance, stress, overflow, and lifetime hardening.
 
-After the GPU side is complete, Render Scene publication will be adapted to emit persistent changes and compact candidate indices directly. Existing spatial indexing and lifecycle rules remain inputs; full published-scene and collector-payload copies are removed from the runtime render path.
+RenderScene now emits persistent changes through the sparse publication boundary and compact candidate indices directly into frame-scoped GPU visibility reservations. Full published-scene and collector-payload copies remain absent from the runtime path. Conservative visibility feedback is separated into its own scene-relative, non-renderable service with explicit view inputs. The next RenderScene increment is the revised frame-service shell; broader renderer work then moves to residency, camera storage, and Render Graph execution.

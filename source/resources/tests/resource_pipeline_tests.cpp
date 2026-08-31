@@ -31,12 +31,12 @@ namespace
 
         GraphResource(const ResourceTypeId type, const ResourceId identity) noexcept : m_type(type), m_identity(identity) {}
 
-        [[nodiscard]] ResourceTypeId Type() const noexcept override
+        [[nodiscard]] ResourceTypeId GetType() const noexcept override
         {
             return m_type;
         }
 
-        [[nodiscard]] ResourceId Identity() const noexcept
+        [[nodiscard]] ResourceId GetIdentity() const noexcept
         {
             return m_identity;
         }
@@ -160,9 +160,9 @@ namespace
             }
         }
 
-        for (u32 index = 0; index < context.DependencyCount(); ++index)
+        for (u32 index = 0; index < context.GetDependencyCount(); ++index)
         {
-            if (context.DependencyRequirementAt(index) == DependencyRequirement::Required && !context.Dependency(index))
+            if (context.GetDependencyRequirementAt(index) == DependencyRequirement::Required && !context.GetDependency(index))
             {
                 failure = Failure::DependencyFailure;
                 return nullptr;
@@ -171,7 +171,7 @@ namespace
 
         if (reference == graph.optionalRoot)
         {
-            if (context.DependencyCount() == 1 && !context.Dependency(0) && context.DependencyError(0) == Failure::IoFailure)
+            if (context.GetDependencyCount() == 1 && !context.GetDependency(0) && context.GetDependencyError(0) == Failure::IoFailure)
             {
                 graph.optionalObserved.SetValue(1);
             }
@@ -181,7 +181,7 @@ namespace
             static_cast<void>(graph.sharedConstructions.Increment());
         }
         static_cast<void>(graph.constructions.Increment());
-        return VANGUARD_NEW(GraphResource)(graph.type, reference.Path().Id());
+        return VANGUARD_NEW(GraphResource)(graph.type, reference.GetPath().Id());
     }
 
     void DestroyGraphResource(ResourceObject* const resource, void* const userData) noexcept
@@ -220,22 +220,20 @@ int main()
     graph.slowShared = MakeReference("graph/slow-shared.vgraph", graph.type);
     graph.soloSlow = MakeReference("graph/solo-slow.vgraph", graph.type);
 
-    const AsyncLoaderDescriptor loader{
-        graph.type, "graph test loader", &DiscoverGraphDependencies, &ConstructGraphResource, &DestroyGraphResource, &graph};
+    const AsyncLoaderDescriptor loader{graph.type, "graph test loader", &DiscoverGraphDependencies, &ConstructGraphResource, &DestroyGraphResource, &graph};
     Check(pipeline.RegisterLoader(loader), "asynchronous graph loader registers");
     Check(!pipeline.RegisterLoader(loader), "duplicate asynchronous loader is rejected");
 
     PipelineRequest first = pipeline.Request(graph.root, LoadPriority::Background);
     PipelineRequest second = pipeline.Request(graph.root, LoadPriority::Critical);
     Check(first.IsSameOperation(second), "root requests coalesce into one graph operation");
-    Check(first.Priority() == LoadPriority::Critical && second.Priority() == LoadPriority::Critical,
-          "higher caller priority promotes the shared operation");
+    Check(first.Priority() == LoadPriority::Critical && second.Priority() == LoadPriority::Critical, "higher caller priority promotes the shared operation");
     Check(first.TryWait(5000), "dependency fan-in completes without blocking a worker");
     second.Wait();
     Check(first.HasLoaded() && second.HasLoaded(), "all root observers see successful graph completion");
     Check(graph.sharedConstructions.GetValue() == 1, "diamond graph constructs its shared dependency once");
     ResourceHandle rootHandle = first.Acquire();
-    Check(rootHandle.IsValid() && static_cast<GraphResource*>(rootHandle.Get())->Identity() == graph.root.Path().Id(),
+    Check(rootHandle.IsValid() && static_cast<GraphResource*>(rootHandle.Get())->GetIdentity() == graph.root.GetPath().Id(),
           "completed graph publishes the requested root");
 
     constexpr usize simultaneousRequestCount = 16;
@@ -261,12 +259,12 @@ int main()
     ResourceHandle optionalHandle = optional.Acquire();
 
     PipelineRequest required = pipeline.Request(graph.requiredRoot);
-    Check(required.TryWait(5000) && required.HasFailed() && required.Error() == Failure::DependencyFailure,
+    Check(required.TryWait(5000) && required.HasFailed() && required.GetError() == Failure::DependencyFailure,
           "required dependency failure propagates to its parent");
     FailureTrace requiredTrace;
     Check(required.GetFailureTrace(requiredTrace) && requiredTrace.count == 2 && requiredTrace.entries[0].resource == graph.requiredRoot &&
-              requiredTrace.entries[0].failure == Failure::DependencyFailure &&
-              requiredTrace.entries[1].resource == graph.requiredFailure && requiredTrace.entries[1].failure == Failure::IoFailure,
+              requiredTrace.entries[0].failure == Failure::DependencyFailure && requiredTrace.entries[1].resource == graph.requiredFailure &&
+              requiredTrace.entries[1].failure == Failure::IoFailure,
           "failure trace preserves the causal dependency chain");
 
     PipelineRequest cycle = pipeline.Request(graph.cycleA);
@@ -277,7 +275,7 @@ int main()
     PipelineRequest cancelFirst = pipeline.Request(graph.cancelA, LoadPriority::Low);
     PipelineRequest cancelSecond = pipeline.Request(graph.cancelB, LoadPriority::High);
     Check(graph.slowEntered.TryWait(5000), "shared slow dependency begins construction");
-    Check(cancelFirst.Cancel() && cancelFirst.Status() == State::Cancelled, "one parent can explicitly cancel its interest");
+    Check(cancelFirst.Cancel() && cancelFirst.GetStatus() == State::Cancelled, "one parent can explicitly cancel its interest");
     Check(!cancelSecond.HasFinished(), "shared dependency continues for its remaining parent");
     graph.releaseSlow.Signal();
     Check(cancelSecond.TryWait(5000) && cancelSecond.HasLoaded(), "remaining parent completes after shared cancellation");
@@ -290,13 +288,11 @@ int main()
     Check(graph.slowEntered.TryWait(5000), "single-interest construction begins");
     Check(soloCancellation.Cancel(), "last caller explicitly cancels running construction");
     graph.releaseSlow.Signal();
-    Check(soloCancellation.HasFailed() && soloCancellation.Error() == Failure::Cancelled,
-          "running loader observes last-interest cancellation");
+    Check(soloCancellation.HasFailed() && soloCancellation.GetError() == Failure::Cancelled, "running loader observes last-interest cancellation");
 
     const ResourceTypeId unknownType = HashTypeName("vanguard.pipeline-unknown");
     PipelineRequest unknown = pipeline.Request(MakeReference("graph/unknown.vgraph", unknownType));
-    Check(unknown.TryWait(5000) && unknown.HasFailed() && unknown.Error() == Failure::UnknownType,
-          "unregistered dependency type fails asynchronously");
+    Check(unknown.TryWait(5000) && unknown.HasFailed() && unknown.GetError() == Failure::UnknownType, "unregistered dependency type fails asynchronously");
 
     const PipelineStats stats = pipeline.GetStats();
     Check(stats.registeredLoaders == 1 && stats.coalescedRequests >= 1 && stats.priorityPromotions >= 1 && stats.dependencyEdges >= 9,

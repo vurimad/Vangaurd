@@ -83,7 +83,7 @@ namespace
     {
         std::puts("[jobsSoak] queue gauges: pinning workers");
         std::fflush(stdout);
-        const u32 workerCount = vanguard::jobs::WorkerCount();
+        const u32 workerCount = vanguard::jobs::GetWorkerCount();
         ManualResetEvent releaseWorkers{false};
         Atomic<u32> enteredWorkers{0};
         Atomic<u32> executed{0};
@@ -131,12 +131,11 @@ namespace
                                 DispatchQueuedPriority(Priority::Immediate, queuedName, executed, queuedCounters[3]);
 
         const SchedulerStats blockedStats = GetSchedulerStats();
-        const bool gaugesValid =
-            blockedStats.queued.latent >= QueuedJobsPerPriority && blockedStats.queued.renderPath >= QueuedJobsPerPriority &&
-            blockedStats.queued.criticalPath >= QueuedJobsPerPriority && blockedStats.queued.immediate >= QueuedJobsPerPriority;
+        const bool gaugesValid = blockedStats.queued.latent >= QueuedJobsPerPriority && blockedStats.queued.renderPath >= QueuedJobsPerPriority &&
+                                 blockedStats.queued.criticalPath >= QueuedJobsPerPriority && blockedStats.queued.immediate >= QueuedJobsPerPriority;
 
-        std::printf("[jobsSoak] queue depths: %u/%u/%u/%u\n", blockedStats.queued.latent, blockedStats.queued.renderPath,
-                    blockedStats.queued.criticalPath, blockedStats.queued.immediate);
+        std::printf("[jobsSoak] queue depths: %u/%u/%u/%u\n", blockedStats.queued.latent, blockedStats.queued.renderPath, blockedStats.queued.criticalPath,
+                    blockedStats.queued.immediate);
         std::fflush(stdout);
         releaseWorkers.Signal();
         std::puts("[jobsSoak] queue gauges: draining");
@@ -312,8 +311,7 @@ int main()
 
     const SchedulerStats stats = GetSchedulerStats();
     if (!Check(stats.outstandingJobs == 0, "Jobs remained outstanding") ||
-        !Check(stats.submittedJobs == stats.completedJobs, "Submission/completion totals diverged") ||
-        !Check(Shutdown(), "Clean shutdown failed"))
+        !Check(stats.submittedJobs == stats.completedJobs, "Submission/completion totals diverged") || !Check(Shutdown(), "Clean shutdown failed"))
     {
         return 4;
     }

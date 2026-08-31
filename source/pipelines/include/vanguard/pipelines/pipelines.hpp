@@ -13,17 +13,56 @@ namespace vanguard::pipelines
     enum class Format : u16
     {
         Unknown,
-        R8UNorm, R8SNorm, R8UInt, R8G8UNorm, R8G8SNorm, R8G8UInt,
-        R8G8B8A8UNorm, R8G8B8A8UNormSrgb, R8G8B8A8SNorm, R8G8B8A8UInt,
-        B8G8R8A8UNorm, B8G8R8A8UNormSrgb,
-        R16UNorm, R16SNorm, R16UInt, R16Float,
-        R16G16UNorm, R16G16SNorm, R16G16UInt, R16G16Float,
-        R16G16B16A16UNorm, R16G16B16A16SNorm, R16G16B16A16UInt, R16G16B16A16Float,
-        R32UInt, R32Float, R32G32UInt, R32G32Float, R32G32B32Float, R32G32B32A32Float,
-        R10G10B10A2UNorm, R11G11B10Float,
-        D16UNorm, D24UNormS8UInt, D32Float, D32FloatS8UInt,
-        BC1UNorm, BC1UNormSrgb, BC2UNorm, BC2UNormSrgb, BC3UNorm, BC3UNormSrgb,
-        BC4UNorm, BC4SNorm, BC5UNorm, BC5SNorm, BC6HUFloat, BC6HSFloat, BC7UNorm, BC7UNormSrgb,
+        R8UNorm,
+        R8SNorm,
+        R8UInt,
+        R8G8UNorm,
+        R8G8SNorm,
+        R8G8UInt,
+        R8G8B8A8UNorm,
+        R8G8B8A8UNormSrgb,
+        R8G8B8A8SNorm,
+        R8G8B8A8UInt,
+        B8G8R8A8UNorm,
+        B8G8R8A8UNormSrgb,
+        R16UNorm,
+        R16SNorm,
+        R16UInt,
+        R16Float,
+        R16G16UNorm,
+        R16G16SNorm,
+        R16G16UInt,
+        R16G16Float,
+        R16G16B16A16UNorm,
+        R16G16B16A16SNorm,
+        R16G16B16A16UInt,
+        R16G16B16A16Float,
+        R32UInt,
+        R32Float,
+        R32G32UInt,
+        R32G32Float,
+        R32G32B32Float,
+        R32G32B32A32Float,
+        R10G10B10A2UNorm,
+        R11G11B10Float,
+        D16UNorm,
+        D24UNormS8UInt,
+        D32Float,
+        D32FloatS8UInt,
+        BC1UNorm,
+        BC1UNormSrgb,
+        BC2UNorm,
+        BC2UNormSrgb,
+        BC3UNorm,
+        BC3UNormSrgb,
+        BC4UNorm,
+        BC4SNorm,
+        BC5UNorm,
+        BC5SNorm,
+        BC6HUFloat,
+        BC6HSFloat,
+        BC7UNorm,
+        BC7UNormSrgb,
         Count
     };
 
@@ -357,8 +396,7 @@ namespace vanguard::pipelines
     {
         PipelineKind kind = PipelineKind::Graphics;
         u64 name = 0;
-        DynamicState dynamicStates =
-            DynamicState::Viewport | DynamicState::Scissor | DynamicState::BlendConstants | DynamicState::StencilReference;
+        DynamicState dynamicStates = DynamicState::Viewport | DynamicState::Scissor | DynamicState::BlendConstants | DynamicState::StencilReference;
         containers::ArraySpan<const ShaderReference> shaders;
         GraphicsState graphics;
         containers::ArraySpan<const VertexStream> vertexStreams;
@@ -389,16 +427,16 @@ namespace vanguard::pipelines
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] PipelineKind Kind() const noexcept;
-        [[nodiscard]] u64 Name() const noexcept;
-        [[nodiscard]] DynamicState DynamicStates() const noexcept;
-        [[nodiscard]] const crypto::Digest256& TemplateFingerprint() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ShaderReference> Shaders() const noexcept;
-        [[nodiscard]] const GraphicsState& Graphics() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const VertexStream> VertexStreams() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const VertexAttribute> VertexAttributes() const noexcept;
-        [[nodiscard]] const RayTracingState& RayTracing() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const RayTracingGroup> RayTracingGroups() const noexcept;
+        [[nodiscard]] PipelineKind GetKind() const noexcept;
+        [[nodiscard]] u64 GetName() const noexcept;
+        [[nodiscard]] DynamicState GetDynamicStates() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetTemplateFingerprint() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ShaderReference> GetShaders() const noexcept;
+        [[nodiscard]] const GraphicsState& GetGraphics() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const VertexStream> GetVertexStreams() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const VertexAttribute> GetVertexAttributes() const noexcept;
+        [[nodiscard]] const RayTracingState& GetRayTracing() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const RayTracingGroup> GetRayTracingGroups() const noexcept;
 
     private:
         PipelineKind m_kind = PipelineKind::Graphics;
@@ -416,8 +454,7 @@ namespace vanguard::pipelines
 
     [[nodiscard]] Result WritePipeline(filesystem::IFile& writer, const BuildDescription& description) noexcept;
     [[nodiscard]] Result CalculateTemplateFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
-    [[nodiscard]] Result CalculateConcretePipelineKey(const PipelineFile& pipeline, const AttachmentSignature* attachments,
-                                                      crypto::Digest256& key) noexcept;
+    [[nodiscard]] Result CalculateConcretePipelineKey(const PipelineFile& pipeline, const AttachmentSignature* attachments, crypto::Digest256& key) noexcept;
     [[nodiscard]] Result ValidateShaderCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader,
                                                      const AttachmentSignature* attachments = nullptr) noexcept;
 } // namespace vanguard::pipelines

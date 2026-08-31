@@ -1,4 +1,6 @@
 #include <vanguard/assets/assets.hpp>
+#include <vanguard/assets/derived_data_artifact_source.hpp>
+#include <vanguard/assets/loose_resource_materializer.hpp>
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
@@ -33,8 +35,7 @@ namespace
         return value < 10 ? static_cast<char>('0' + value) : static_cast<char>('a' + value - 10);
     }
 
-    [[nodiscard]] filesystem::AbsolutePath RecordPath(const filesystem::AbsolutePath& root,
-                                                      const assets::BuildFingerprint& fingerprint) noexcept
+    [[nodiscard]] filesystem::AbsolutePath RecordPath(const filesystem::AbsolutePath& root, const assets::BuildFingerprint& fingerprint) noexcept
     {
         char first[3] = {HexDigit(fingerprint.bytes[0] >> 4u), HexDigit(fingerprint.bytes[0] & 0x0fu), '\0'};
         char second[3] = {HexDigit(fingerprint.bytes[1] >> 4u), HexDigit(fingerprint.bytes[1] & 0x0fu), '\0'};
@@ -103,9 +104,12 @@ namespace
                 concurrency::YieldCurrentThread();
             }
         }
-        const u8 payload[] = {0x56, 0x44, 0x44, 0x43, context.request.source.content[0]};
-        return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, payload,
-                          sizeof(payload)) == assets::Result::Success;
+        const u8 primary[] = {0x56, 0x44, 0x44, 0x43, context.request.source.content[0]};
+        const u8 streamable[] = {0xa1, 0xb2, context.request.source.content[0]};
+        return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, primary,
+                          sizeof(primary)) == assets::Result::Success &&
+               writer.Add(context.request.output, 1, assets::ArtifactFlags::Streamable, 4, streamable, sizeof(streamable)) ==
+                   assets::Result::Success;
     }
 
     class BuildThread final : public concurrency::Thread
@@ -129,8 +133,7 @@ namespace
         const assets::BuildRequest* m_request;
     };
 
-    [[nodiscard]] bool InitializeBuildSystem(assets::BuildSystem& system, const assets::Config& config,
-                                             const assets::CompilerDescriptor& compiler) noexcept
+    [[nodiscard]] bool InitializeBuildSystem(assets::BuildSystem& system, const assets::Config& config, const assets::CompilerDescriptor& compiler) noexcept
     {
         return system.Initialize(config) && system.RegisterCompiler(compiler) == assets::Result::Success;
     }
@@ -166,6 +169,8 @@ int main()
     const assets::BuildRequest request{{source, {sourceBytes, sizeof(sourceBytes)}, {}}, output, assets::TargetPlatform::WindowsD3D12, {}};
 
     assets::BuildFingerprint fingerprint;
+    assets::BuildFingerprint contentFingerprint;
+    assets::DependencyRecord materializationRecord;
     {
         assets::BuildSystem system;
         Check(InitializeBuildSystem(system, config, compiler), "first persistent build-system initialization");
@@ -174,6 +179,17 @@ int main()
                   state.compileCalls.GetValue() == 1,
               "cache miss compiles and publishes");
         fingerprint = built.buildFingerprint;
+        contentFingerprint = built.contentFingerprint;
+        materializationRecord.output = output;
+        materializationRecord.buildFingerprint = built.buildFingerprint;
+        materializationRecord.contentFingerprint = built.contentFingerprint;
+        materializationRecord.artifacts.Resize(built.artifacts.Size());
+        for (u32 index = 0; index < built.artifacts.Size(); ++index)
+        {
+            const assets::Artifact& artifact = built.artifacts[index];
+            materializationRecord.artifacts[index] =
+                {artifact.resource, artifact.segment, artifact.flags, artifact.alignmentLog2, artifact.bytes.Size()};
+        }
         const assets::Stats stats = system.GetStats();
         Check(stats.persistentCacheMisses == 1 && stats.persistentCacheStores == 1, "persistent miss and store telemetry");
         Check(system.Shutdown(), "first shutdown");
@@ -188,12 +204,154 @@ int main()
     }
 
     {
+        assets::DerivedDataArtifactSource sourceReader;
+        assets::DerivedDataArtifactSourceConfig sourceConfig;
+        sourceConfig.root = root.AsChar();
+        sourceConfig.limits.validationScratchBytes = 2;
+        Check(sourceReader.Initialize(sourceConfig), "derived-data artifact source initialization");
+
+        assets::ArtifactSetReader artifactSet;
+        Check(sourceReader.Open({fingerprint, contentFingerprint}, artifactSet) == assets::DerivedDataArtifactResult::Success &&
+                  artifactSet.IsOpen() && artifactSet.Key().build == fingerprint && artifactSet.Key().content == contentFingerprint &&
+                  artifactSet.Artifacts().Count() == 2,
+              "bounded canonical reader opens and validates artifact set");
+        const assets::CachedArtifactDescriptor* const streamable = artifactSet.Find(output, 1);
+        Check(streamable != nullptr && streamable->flags == assets::ArtifactFlags::Streamable && streamable->byteCount == 3,
+              "artifact lookup uses resource and segment identity");
+        if (streamable != nullptr)
+        {
+            containers::DynamicArray<u8> bytes(memory::pools::Assets::GetInstance());
+            Check(artifactSet.Read(*streamable, bytes) == assets::DerivedDataArtifactResult::Success && bytes.Size() == 3 &&
+                      bytes[0] == 0xa1 && bytes[1] == 0xb2 && bytes[2] == sourceBytes[0],
+                  "selective artifact read returns byte-exact segment");
+
+            const filesystem::AbsolutePath copiedPath = root.AddFilePath("copied-segment.bin");
+            auto copiedFile = manager.CreateFileWriter(copiedPath, filesystem::FOF_Buffered);
+            u8 scratch[2] = {};
+            Check(copiedFile && artifactSet.CopyTo(*streamable, *copiedFile, scratch) ==
+                                    assets::DerivedDataArtifactResult::Success,
+                  "bounded artifact copy streams into caller-owned file");
+            if (copiedFile)
+                copiedFile->Flush();
+            copiedFile.Reset();
+            Check(manager.GetFileSize(copiedPath) == 3, "bounded artifact copy writes exact extent");
+            static_cast<void>(manager.DeleteFile(copiedPath));
+
+            assets::CachedArtifactDescriptor mismatch = *streamable;
+            ++mismatch.byteCount;
+            Check(artifactSet.Read(mismatch, bytes) == assets::DerivedDataArtifactResult::DescriptorMismatch && bytes.Empty(),
+                  "descriptor mismatch is rejected before payload delivery");
+            mismatch = *streamable;
+            mismatch.flags = assets::ArtifactFlags::MemoryResident;
+            Check(artifactSet.Read(mismatch, bytes) == assets::DerivedDataArtifactResult::DescriptorMismatch && bytes.Empty(),
+                  "artifact flag mismatch is rejected before payload delivery");
+            mismatch = *streamable;
+            --mismatch.alignmentLog2;
+            Check(artifactSet.Read(mismatch, bytes) == assets::DerivedDataArtifactResult::DescriptorMismatch && bytes.Empty(),
+                  "artifact alignment mismatch is rejected before payload delivery");
+        }
+
+        assets::BuildOutput reconstructed;
+        Check(artifactSet.ReadAll(reconstructed) == assets::DerivedDataArtifactResult::Success && reconstructed.artifacts.Size() == 2 &&
+                  reconstructed.contentFingerprint == contentFingerprint && reconstructed.artifacts[0].bytes.Size() == 5 &&
+                  reconstructed.artifacts[1].bytes.Size() == 3,
+              "shared reader reconstructs complete BuildOutput");
+
+        const filesystem::AbsolutePath looseTarget = root.AddFilePath("materialized.asset");
+        const filesystem::AbsolutePath looseTemporary = root.AddFilePath("materialized.asset.tmp");
+        const u8 previousTarget[] = {0xde, 0xad, 0xfa, 0xce};
+        {
+            auto previous = manager.CreateFileWriter(looseTarget, filesystem::FOF_Buffered);
+            Check(static_cast<bool>(previous), "existing loose target fixture");
+            if (previous)
+            {
+                previous->Serialize(const_cast<u8*>(previousTarget), sizeof(previousTarget));
+                previous->Flush();
+            }
+        }
+        assets::LooseMaterializationLimits looseLimits;
+        looseLimits.scratchBytes = 2;
+        assets::LooseResourceMaterializer materializer;
+        Check(materializer.Materialize(materializationRecord, output, sourceReader, looseTarget, looseTemporary, looseLimits) ==
+                  assets::LooseMaterializationResult::Success &&
+                  manager.FileExist(looseTarget) && !manager.FileExist(looseTemporary) && manager.GetFileSize(looseTarget) == 8,
+              "generic materializer reconstructs and safely replaces loose resource");
+        {
+            const u8 expected[] = {0x56, 0x44, 0x44, 0x43, sourceBytes[0], 0xa1, 0xb2, sourceBytes[0]};
+            u8 actual[sizeof(expected)] = {};
+            auto loose = manager.CreateFileReader(looseTarget, filesystem::FOF_Buffered);
+            Check(static_cast<bool>(loose), "open reconstructed loose resource");
+            if (loose)
+                loose->Serialize(actual, sizeof(actual));
+            bool equal = true;
+            for (u32 index = 0; index < static_cast<u32>(sizeof(expected)); ++index)
+                equal = equal && actual[index] == expected[index];
+            Check(equal, "loose resource is byte-exact descriptor-order concatenation");
+        }
+
+        {
+            auto previous = manager.CreateFileWriter(looseTarget, filesystem::FOF_Buffered);
+            if (previous)
+            {
+                previous->Serialize(const_cast<u8*>(previousTarget), sizeof(previousTarget));
+                previous->Flush();
+            }
+        }
+        assets::DependencyRecord missingSegment;
+        missingSegment.output = materializationRecord.output;
+        missingSegment.buildFingerprint = materializationRecord.buildFingerprint;
+        missingSegment.contentFingerprint = materializationRecord.contentFingerprint;
+        missingSegment.artifacts = materializationRecord.artifacts;
+        missingSegment.artifacts[1].segment = 2;
+        Check(materializer.Materialize(missingSegment, output, sourceReader, looseTarget, looseTemporary, looseLimits) ==
+                  assets::LooseMaterializationResult::MissingSegment &&
+                  manager.FileExist(looseTarget) && manager.GetFileSize(looseTarget) == sizeof(previousTarget) &&
+                  !manager.FileExist(looseTemporary),
+              "missing segment fails before staging and preserves previous target");
+        static_cast<void>(manager.DeleteFile(looseTarget));
+
+        assets::BuildFingerprint wrongContent = contentFingerprint;
+        wrongContent.bytes[0] ^= 0xffu;
+        Check(sourceReader.Open({fingerprint, wrongContent}, artifactSet) == assets::DerivedDataArtifactResult::ContentMismatch &&
+                  !artifactSet.IsOpen(),
+              "content identity mismatch is explicit");
+        assets::BuildFingerprint missing = fingerprint;
+        missing.bytes[0] ^= 0xffu;
+        Check(sourceReader.Open({missing, {}}, artifactSet) == assets::DerivedDataArtifactResult::NotFound && !artifactSet.IsOpen(),
+              "missing artifact set is distinct from corruption");
+
+        const filesystem::AbsolutePath wrongBuildRecord = RecordPath(root, missing);
+        const u64 validRecordSize = manager.GetFileSize(record);
+        containers::DynamicArray<u8> recordBytes(memory::pools::Assets::GetInstance());
+        recordBytes.Resize(static_cast<u32>(validRecordSize));
+        auto validRecord = manager.CreateFileReader(record, filesystem::FOF_Buffered);
+        Check(validRecord && recordBytes.Size() == validRecordSize, "read valid record for wrong-build proof");
+        if (validRecord && recordBytes.Size() == validRecordSize)
+            validRecord->Serialize(recordBytes.Data(), recordBytes.Size());
+        validRecord.Reset();
+        Check(manager.CreatePath(filesystem::paths::ParentAbsolutePath(wrongBuildRecord)),
+              "create wrong-build record directory");
+        auto wrongRecord = manager.CreateFileWriter(wrongBuildRecord, filesystem::FOF_Buffered);
+        Check(static_cast<bool>(wrongRecord), "stage record under mismatched build key");
+        if (wrongRecord)
+        {
+            wrongRecord->Serialize(recordBytes.Data(), recordBytes.Size());
+            wrongRecord->Flush();
+        }
+        wrongRecord.Reset();
+        Check(sourceReader.Open({missing, {}}, artifactSet) == assets::DerivedDataArtifactResult::Corrupt && !artifactSet.IsOpen(),
+              "record stored under the wrong build identity is corrupt");
+        static_cast<void>(manager.DeleteFile(wrongBuildRecord));
+        Check(sourceReader.Shutdown(), "derived-data artifact source shutdown");
+    }
+
+    {
         assets::BuildSystem system;
         Check(InitializeBuildSystem(system, config, compiler), "second persistent build-system initialization");
         assets::BuildOutput cached;
         Check(system.Build(request, cached) == assets::Result::Success && cached.disposition == assets::BuildDisposition::CacheHit &&
-                  cached.buildFingerprint == fingerprint && cached.artifacts.Size() == 1 &&
-                  cached.artifacts[0].bytes[4] == sourceBytes[0] && state.compileCalls.GetValue() == 1,
+                  cached.buildFingerprint == fingerprint && cached.artifacts.Size() == 2 && cached.artifacts[0].bytes[4] == sourceBytes[0] &&
+                  state.compileCalls.GetValue() == 1,
               "record survives process-lifetime restart");
         Check(system.GetStats().persistentCacheHits == 1, "persistent hit telemetry");
         Check(system.Shutdown(), "second shutdown");
@@ -280,8 +438,7 @@ int main()
 
         Check(firstThread.result == assets::Result::Success && secondThread.result == assets::Result::Success &&
                   firstThread.output.buildFingerprint == secondThread.output.buildFingerprint &&
-                  firstThread.output.contentFingerprint == secondThread.output.contentFingerprint &&
-                  state.compileCalls.GetValue() == callsBefore + 2,
+                  firstThread.output.contentFingerprint == secondThread.output.contentFingerprint && state.compileCalls.GetValue() == callsBefore + 2,
               "concurrent identical publishers converge");
         Check(firstSystem.Shutdown() && secondSystem.Shutdown(), "concurrent publisher shutdown");
 
@@ -292,8 +449,8 @@ int main()
         assets::BuildSystem verificationSystem;
         Check(InitializeBuildSystem(verificationSystem, config, compiler), "publication-race verification initialization");
         assets::BuildOutput verified;
-        Check(verificationSystem.Build(concurrentRequest, verified) == assets::Result::Success &&
-                  verified.disposition == assets::BuildDisposition::CacheHit && state.compileCalls.GetValue() == callsBefore + 2,
+        Check(verificationSystem.Build(concurrentRequest, verified) == assets::Result::Success && verified.disposition == assets::BuildDisposition::CacheHit &&
+                  state.compileCalls.GetValue() == callsBefore + 2,
               "publication-race result is durable");
         Check(verificationSystem.Shutdown(), "publication-race verification shutdown");
     }

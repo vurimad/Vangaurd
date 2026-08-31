@@ -1,7 +1,7 @@
 #ifndef VANGUARD_GPU_SCENE_TYPES_HLSLI
 #define VANGUARD_GPU_SCENE_TYPES_HLSLI
 
-static const uint VG_GPU_SCENE_LAYOUT_VERSION = 2;
+static const uint VG_GPU_SCENE_LAYOUT_VERSION = 6;
 static const uint VG_GPU_SCENE_INVALID_INDEX = 0xffffffffu;
 static const uint VG_GPU_SCENE_MAXIMUM_FRUSTUM_PLANES = 8u;
 static const uint VG_GPU_SCENE_MAXIMUM_PAGES_PER_TABLE = 64u;
@@ -9,18 +9,27 @@ static const uint VG_GPU_SCENE_MAXIMUM_PAGES_PER_TABLE = 64u;
 static const uint VG_GPU_SCENE_TABLE_INSTANCE = 0u;
 static const uint VG_GPU_SCENE_TABLE_MOTION = 1u;
 static const uint VG_GPU_SCENE_TABLE_RENDERABLE = 2u;
-static const uint VG_GPU_SCENE_TABLE_LOD = 3u;
-static const uint VG_GPU_SCENE_TABLE_PRIMITIVE = 4u;
-static const uint VG_GPU_SCENE_TABLE_PHASE_PARTICIPATION = 5u;
-static const uint VG_GPU_SCENE_TABLE_GEOMETRY_RANGE = 6u;
-static const uint VG_GPU_SCENE_TABLE_VERTEX_STREAM = 7u;
-static const uint VG_GPU_SCENE_TABLE_POSITION_DECODE = 8u;
-static const uint VG_GPU_SCENE_TABLE_MATERIAL = 9u;
-static const uint VG_GPU_SCENE_TABLE_MATERIAL_RESOURCE = 10u;
-static const uint VG_GPU_SCENE_TABLE_MATERIAL_SET = 11u;
-static const uint VG_GPU_SCENE_TABLE_MATERIAL_INDEX = 12u;
-static const uint VG_GPU_SCENE_TABLE_LIGHT = 13u;
-static const uint VG_GPU_SCENE_TABLE_DECAL = 14u;
+static const uint VG_GPU_SCENE_TABLE_RENDERABLE_RESIDENCY = 3u;
+static const uint VG_GPU_SCENE_TABLE_LOD = 4u;
+static const uint VG_GPU_SCENE_TABLE_PRIMITIVE = 5u;
+static const uint VG_GPU_SCENE_TABLE_PRIMITIVE_PLACEMENT = 6u;
+static const uint VG_GPU_SCENE_TABLE_PHASE_PARTICIPATION = 7u;
+static const uint VG_GPU_SCENE_TABLE_PHASE_PLACEMENT = 8u;
+static const uint VG_GPU_SCENE_TABLE_GEOMETRY_RANGE = 9u;
+static const uint VG_GPU_SCENE_TABLE_VERTEX_STREAM = 10u;
+static const uint VG_GPU_SCENE_TABLE_POSITION_DECODE = 11u;
+static const uint VG_GPU_SCENE_TABLE_MATERIAL = 12u;
+static const uint VG_GPU_SCENE_TABLE_MATERIAL_RESOURCE = 13u;
+static const uint VG_GPU_SCENE_TABLE_MATERIAL_SET = 14u;
+static const uint VG_GPU_SCENE_TABLE_MATERIAL_INDEX = 15u;
+static const uint VG_GPU_SCENE_TABLE_LIGHT = 16u;
+static const uint VG_GPU_SCENE_TABLE_DECAL = 17u;
+static const uint VG_GPU_SCENE_TABLE_TEXTURE_RESIDENCY = 18u;
+
+static const uint VG_GPU_MATERIAL_RESOURCE_TEXTURE = 0u;
+static const uint VG_GPU_MATERIAL_RESOURCE_BUFFER = 1u;
+static const uint VG_GPU_MATERIAL_RESOURCE_SAMPLER = 2u;
+static const uint VG_GPU_MATERIAL_RESOURCE_ACCELERATION_STRUCTURE = 3u;
 
 struct GpuScenePageDirectoryEntry
 {
@@ -53,9 +62,10 @@ struct GpuInstance
     int3 worldCell; uint flags;
     float3 localPosition; float boundsRadius;
     float3 boundsCenterOffset; uint renderable;
-    uint materialSet; uint generation; uint visibilityMask; uint motion;
+    uint materialSet; uint generation; uint visibilityMask; uint layerMaskLow;
+    uint layerMaskHigh; uint motion; uint deformation; uint reserved;
     float4 rotation;
-    float3 scale; uint userData;
+    float3 scale; uint reservedTransform;
 };
 
 struct GpuMotion
@@ -72,6 +82,12 @@ struct GpuRenderable
     uint generation; uint flags; uint reserved0; uint reserved1;
 };
 
+struct GpuRenderableResidency
+{
+    uint generation; uint placementRevision; uint residentLodMaskLow; uint residentLodMaskHigh;
+    uint anchorLod; uint flags; uint reserved0; uint reserved1;
+};
+
 struct GpuLod
 {
     uint firstPrimitive; uint primitiveCount; float minimumScreenCoverage; float maximumNormalizedError;
@@ -79,25 +95,38 @@ struct GpuLod
 
 struct GpuPrimitive
 {
-    uint geometry; uint material; uint firstPhaseParticipation; uint phaseParticipationCount;
-    uint stableSubmesh; uint flags; uint reserved0; uint reserved1;
+    uint material; uint firstPhaseParticipation; uint phaseParticipationCount; uint stableSubmesh;
+    uint flags; uint reserved0; uint reserved1; uint reserved2;
+};
+
+struct GpuPrimitivePlacement
+{
+    uint geometry; uint geometryGeneration; uint placementRevision; uint flags;
 };
 
 struct GpuPhaseParticipation
 {
-    uint phase; uint pipelineBucket; uint flags; int sortBias;
+    uint phase; uint flags; int sortBias; uint reserved;
+};
+
+struct GpuPhasePlacement
+{
+    uint normalShell; uint normalShellGeneration; uint normalBin; uint normalBinGeneration;
+    uint mirroredShell; uint mirroredShellGeneration; uint mirroredBin; uint mirroredBinGeneration;
+    uint placementRevision; uint flags; uint reserved0; uint reserved1;
 };
 
 struct GpuGeometryRange
 {
-    uint firstVertexStream; uint vertexStreamCount; uint indexArena; uint indexByteOffset;
-    uint indexCount; int baseVertex; uint vertexCount; uint indexFormat;
-    uint positionDecode; uint flags; uint generation; uint reserved;
+    uint firstVertexStream; uint vertexStreamCount; uint vertexArenaSet; uint vertexArenaGeneration;
+    uint indexArena; uint indexArenaGeneration; uint firstIndex; uint indexCount;
+    int baseVertex; uint vertexCount; uint indexFormat; uint positionDecode;
+    uint flags; uint generation; uint reserved0; uint reserved1;
 };
 
 struct GpuVertexStream
 {
-    uint arena; uint byteOffset; uint stride; uint formatLayout;
+    uint binding; uint stride; uint formatLayout; uint reserved;
 };
 
 struct GpuPositionDecode
@@ -114,7 +143,12 @@ struct GpuMaterial
 
 struct GpuMaterialResource
 {
-    uint descriptor; uint samplerDescriptor; uint type; uint flags;
+    uint resource; uint samplerDescriptor; uint type; uint flags;
+};
+
+struct GpuTextureResidency
+{
+    uint descriptor; uint firstResidentMip; uint residentMipCount; uint generationAndFlags;
 };
 
 struct GpuMaterialSet

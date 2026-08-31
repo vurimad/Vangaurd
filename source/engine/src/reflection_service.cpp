@@ -14,49 +14,44 @@ namespace
     protected:
         app::LifecycleStatus OnInitialize(app::ServiceContext&) noexcept override
         {
-            return vanguard::reflection::Initialize()
-                ? app::LifecycleStatus::Success()
-                : app::LifecycleStatus::Failure("Reflection initialization failed");
+            return vanguard::reflection::Initialize() ? app::LifecycleStatus::Success() : app::LifecycleStatus::Failure("Reflection initialization failed");
         }
 
         app::LifecycleStatus OnStart(app::ServiceContext&) noexcept override
         {
-            return vanguard::reflection::IsInitialized()
-                ? app::LifecycleStatus::Success()
-                : app::LifecycleStatus::Failure("Reflection did not enter a running state");
+            return vanguard::reflection::IsInitialized() ? app::LifecycleStatus::Success()
+                                                         : app::LifecycleStatus::Failure("Reflection did not enter a running state");
         }
 
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
         {
             // The imported reflection backend currently owns process-lifetime static type metadata and has no reversible
             // shutdown operation. The managed service still establishes explicit startup ordering and capability ownership.
-            return vanguard::reflection::IsInitialized()
-                ? app::LifecycleStatus::Success()
-                : app::LifecycleStatus::Failure("Reflection became unavailable before engine shutdown");
+            return vanguard::reflection::IsInitialized() ? app::LifecycleStatus::Success()
+                                                         : app::LifecycleStatus::Failure("Reflection became unavailable before engine shutdown");
         }
     };
 
     app::Service* CreateReflectionService(void*) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Reflection, sizeof(ManagedReflectionService), alignof(ManagedReflectionService));
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Reflection, sizeof(ManagedReflectionService), alignof(ManagedReflectionService));
         return block ? ::new (block.address) ManagedReflectionService() : nullptr;
     }
 
     void DestroyReflectionService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<ManagedReflectionService*>(service)->~ManagedReflectionService();
-        vanguard::memory::MemoryBlock block{
-            service, sizeof(ManagedReflectionService), vanguard::memory::PoolId::Reflection};
+        vanguard::memory::MemoryBlock block{service, sizeof(ManagedReflectionService), vanguard::memory::PoolId::Reflection};
         vanguard::memory::Free(block);
     }
-}
+} // namespace
 
 namespace vanguard::engine
 {
-    bool RegisterReflectionService(application::EngineHost& host,
-                                   application::HostFailure* const failure) noexcept
+    bool RegisterReflectionService(application::EngineHost& host, application::HostFailure* const failure) noexcept
     {
         constexpr application::CapabilityId capabilities[]{ReflectionCapabilityId};
         application::ServiceDescriptor descriptor;

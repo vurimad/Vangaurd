@@ -9,6 +9,7 @@
 #include <rgbcx.h>
 
 #include <cmath>
+#include <cstring>
 
 namespace
 {
@@ -20,10 +21,10 @@ namespace
     namespace textures = vanguard::textures;
     namespace tools = vanguard::texture_tools;
     using vanguard::f32;
-    using vanguard::u8;
     using vanguard::u16;
     using vanguard::u32;
     using vanguard::u64;
+    using vanguard::u8;
     using vanguard::usize;
 
     constexpr u32 MaximumProfiles = 32;
@@ -31,6 +32,29 @@ namespace
     u32 g_profileCount = 0;
     bool g_initialized = false;
     bool g_registrySealed = false;
+    crypto::Digest256 g_profileRegistryFingerprint;
+
+    [[nodiscard]] bool HashU8(crypto::Sha256Builder& builder, const u8 value) noexcept
+    {
+        return builder.Update(&value, sizeof(value));
+    }
+
+    [[nodiscard]] bool HashU16(crypto::Sha256Builder& builder, const u16 value) noexcept
+    {
+        const u8 bytes[2] = {static_cast<u8>(value), static_cast<u8>(value >> 8u)};
+        return builder.Update(bytes, sizeof(bytes));
+    }
+
+    [[nodiscard]] bool HashU32(crypto::Sha256Builder& builder, const u32 value) noexcept
+    {
+        const u8 bytes[4] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
+        return builder.Update(bytes, sizeof(bytes));
+    }
+
+    [[nodiscard]] bool HashU64(crypto::Sha256Builder& builder, const u64 value) noexcept
+    {
+        return HashU32(builder, static_cast<u32>(value)) && HashU32(builder, static_cast<u32>(value >> 32u));
+    }
 
     struct Float4
     {
@@ -127,7 +151,11 @@ namespace
         {
             bits = sign | (static_cast<u32>(exponent + 112) << 23u) | (mantissa << 13u);
         }
-        union { u32 integer; f32 floating; } conversion{bits};
+        union
+        {
+            u32 integer;
+            f32 floating;
+        } conversion{bits};
         return conversion.floating;
     }
 
@@ -142,8 +170,7 @@ namespace
         {
             u32 integer;
             f32 floating;
-        } conversion{static_cast<u32>(data[0]) | (static_cast<u32>(data[1]) << 8u) |
-                     (static_cast<u32>(data[2]) << 16u) | (static_cast<u32>(data[3]) << 24u)};
+        } conversion{static_cast<u32>(data[0]) | (static_cast<u32>(data[1]) << 8u) | (static_cast<u32>(data[2]) << 16u) | (static_cast<u32>(data[3]) << 24u)};
         return conversion.floating;
     }
 
@@ -159,13 +186,18 @@ namespace
 
     [[nodiscard]] u16 FloatToHalf(const f32 value) noexcept
     {
-        union { f32 floating; u32 integer; } conversion{value};
+        union
+        {
+            f32 floating;
+            u32 integer;
+        } conversion{value};
         const u32 sign = (conversion.integer >> 16u) & 0x8000u;
         vanguard::i32 exponent = static_cast<vanguard::i32>((conversion.integer >> 23u) & 0xffu) - 127 + 15;
         u32 mantissa = conversion.integer & 0x7fffffu;
         if (exponent <= 0)
         {
-            if (exponent < -10) return static_cast<u16>(sign);
+            if (exponent < -10)
+                return static_cast<u16>(sign);
             mantissa = (mantissa | 0x800000u) >> static_cast<u32>(1 - exponent);
             return static_cast<u16>(sign | ((mantissa + 0xfffu + ((mantissa >> 13u) & 1u)) >> 13u));
         }
@@ -179,7 +211,8 @@ namespace
         {
             mantissa = 0;
             ++exponent;
-            if (exponent >= 31) return static_cast<u16>(sign | 0x7c00u);
+            if (exponent >= 31)
+                return static_cast<u16>(sign | 0x7c00u);
         }
         return static_cast<u16>(sign | (static_cast<u32>(exponent) << 10u) | (mantissa >> 13u));
     }
@@ -188,12 +221,18 @@ namespace
     {
         switch (format)
         {
-        case tools::SourcePixelFormat::R8UNorm: return 1;
-        case tools::SourcePixelFormat::R8G8UNorm: return 2;
-        case tools::SourcePixelFormat::R8G8B8A8UNorm: return 4;
-        case tools::SourcePixelFormat::R16G16B16A16UNorm: return 8;
-        case tools::SourcePixelFormat::R16G16B16A16Float: return 8;
-        case tools::SourcePixelFormat::R32G32B32A32Float: return 16;
+        case tools::SourcePixelFormat::R8UNorm:
+            return 1;
+        case tools::SourcePixelFormat::R8G8UNorm:
+            return 2;
+        case tools::SourcePixelFormat::R8G8B8A8UNorm:
+            return 4;
+        case tools::SourcePixelFormat::R16G16B16A16UNorm:
+            return 8;
+        case tools::SourcePixelFormat::R16G16B16A16Float:
+            return 8;
+        case tools::SourcePixelFormat::R32G32B32A32Float:
+            return 16;
         }
         return 0;
     }
@@ -202,17 +241,17 @@ namespace
     {
         switch (format)
         {
-        case tools::SourcePixelFormat::R8UNorm: return {data[0] / 255.0f, 0.0f, 0.0f, 1.0f};
-        case tools::SourcePixelFormat::R8G8UNorm: return {data[0] / 255.0f, data[1] / 255.0f, 0.0f, 1.0f};
+        case tools::SourcePixelFormat::R8UNorm:
+            return {data[0] / 255.0f, 0.0f, 0.0f, 1.0f};
+        case tools::SourcePixelFormat::R8G8UNorm:
+            return {data[0] / 255.0f, data[1] / 255.0f, 0.0f, 1.0f};
         case tools::SourcePixelFormat::R8G8B8A8UNorm:
             return {data[0] / 255.0f, data[1] / 255.0f, data[2] / 255.0f, data[3] / 255.0f};
         case tools::SourcePixelFormat::R16G16B16A16UNorm:
-            return {ReadU16(data + 0) / 65535.0f, ReadU16(data + 2) / 65535.0f,
-                    ReadU16(data + 4) / 65535.0f, ReadU16(data + 6) / 65535.0f};
+            return {ReadU16(data + 0) / 65535.0f, ReadU16(data + 2) / 65535.0f, ReadU16(data + 4) / 65535.0f, ReadU16(data + 6) / 65535.0f};
         case tools::SourcePixelFormat::R16G16B16A16Float:
         {
-            return {HalfToFloat(ReadU16(data + 0)), HalfToFloat(ReadU16(data + 2)),
-                    HalfToFloat(ReadU16(data + 4)), HalfToFloat(ReadU16(data + 6))};
+            return {HalfToFloat(ReadU16(data + 0)), HalfToFloat(ReadU16(data + 2)), HalfToFloat(ReadU16(data + 4)), HalfToFloat(ReadU16(data + 6))};
         }
         case tools::SourcePixelFormat::R32G32B32A32Float:
         {
@@ -222,8 +261,8 @@ namespace
         return {};
     }
 
-    [[nodiscard]] DecodeResult DecodeSourceImage(const tools::SourceTexture& source, const tools::SourceImage& input,
-                                                 const bool decodeSrgb, Image& output) noexcept
+    [[nodiscard]] DecodeResult DecodeSourceImage(const tools::SourceTexture& source, const tools::SourceImage& input, const bool decodeSrgb,
+                                                 Image& output) noexcept
     {
         const u32 pixelSize = SourceBytesPerPixel(source.format);
         const u64 minimumRow = static_cast<u64>(source.width) * pixelSize;
@@ -370,9 +409,7 @@ namespace
 
     [[nodiscard]] Float3 Cross(const Float3 left, const Float3 right) noexcept
     {
-        return {left.y * right.z - left.z * right.y,
-                left.z * right.x - left.x * right.z,
-                left.x * right.y - left.y * right.x};
+        return {left.y * right.z - left.z * right.y, left.z * right.x - left.x * right.z, left.x * right.y - left.y * right.x};
     }
 
     /// Direct3D/NVRHI cube convention: +X, -X, +Y, -Y, +Z, -Z, with image Y growing downward.
@@ -383,12 +420,18 @@ namespace
         const f32 v = y * (2.0f / static_cast<f32>(extent)) - 1.0f;
         switch (face)
         {
-        case 0: return Normalize({1.0f, -v, -u});
-        case 1: return Normalize({-1.0f, -v, u});
-        case 2: return Normalize({u, 1.0f, v});
-        case 3: return Normalize({u, -1.0f, -v});
-        case 4: return Normalize({u, -v, 1.0f});
-        default: return Normalize({-u, -v, -1.0f});
+        case 0:
+            return Normalize({1.0f, -v, -u});
+        case 1:
+            return Normalize({-1.0f, -v, u});
+        case 2:
+            return Normalize({u, 1.0f, v});
+        case 3:
+            return Normalize({u, -1.0f, -v});
+        case 4:
+            return Normalize({u, -v, 1.0f});
+        default:
+            return Normalize({-u, -v, -1.0f});
         }
     }
 
@@ -423,14 +466,12 @@ namespace
         return coordinate < 0 ? 0u : (static_cast<u32>(coordinate) >= extent ? extent - 1u : static_cast<u32>(coordinate));
     }
 
-    [[nodiscard]] Float4 CubeTap(const Image faces[6], const u32 primaryFace, const vanguard::i32 x,
-                                 const vanguard::i32 y, const u32 extent) noexcept
+    [[nodiscard]] Float4 CubeTap(const Image faces[6], const u32 primaryFace, const vanguard::i32 x, const vanguard::i32 y, const u32 extent) noexcept
     {
         if (x >= 0 && y >= 0 && static_cast<u32>(x) < extent && static_cast<u32>(y) < extent)
             return faces[primaryFace].pixels[static_cast<u32>(y) * extent + static_cast<u32>(x)];
 
-        const CubeProjection projection = ProjectCubeDirection(
-            CubeDirection(primaryFace, static_cast<f32>(x) + 0.5f, static_cast<f32>(y) + 0.5f, extent));
+        const CubeProjection projection = ProjectCubeDirection(CubeDirection(primaryFace, static_cast<f32>(x) + 0.5f, static_cast<f32>(y) + 0.5f, extent));
         const vanguard::i32 projectedX = static_cast<vanguard::i32>(::floorf((projection.u + 1.0f) * 0.5f * extent));
         const vanguard::i32 projectedY = static_cast<vanguard::i32>(::floorf((projection.v + 1.0f) * 0.5f * extent));
         return faces[projection.face].pixels[ClampTexel(projectedY, extent) * extent + ClampTexel(projectedX, extent)];
@@ -445,12 +486,9 @@ namespace
         const vanguard::i32 firstY = static_cast<vanguard::i32>(::floorf(y));
         const f32 fractionX = x - static_cast<f32>(firstX);
         const f32 fractionY = y - static_cast<f32>(firstY);
-        const Float4 taps[4] = {CubeTap(faces, projection.face, firstX, firstY, extent),
-                                CubeTap(faces, projection.face, firstX + 1, firstY, extent),
-                                CubeTap(faces, projection.face, firstX, firstY + 1, extent),
-                                CubeTap(faces, projection.face, firstX + 1, firstY + 1, extent)};
-        const f32 weights[4] = {(1.0f - fractionX) * (1.0f - fractionY), fractionX * (1.0f - fractionY),
-                                (1.0f - fractionX) * fractionY, fractionX * fractionY};
+        const Float4 taps[4] = {CubeTap(faces, projection.face, firstX, firstY, extent), CubeTap(faces, projection.face, firstX + 1, firstY, extent),
+                                CubeTap(faces, projection.face, firstX, firstY + 1, extent), CubeTap(faces, projection.face, firstX + 1, firstY + 1, extent)};
+        const f32 weights[4] = {(1.0f - fractionX) * (1.0f - fractionY), fractionX * (1.0f - fractionY), (1.0f - fractionX) * fractionY, fractionX * fractionY};
         Float4 result{0.0f, 0.0f, 0.0f, 0.0f};
         for (u32 tap = 0; tap < 4; ++tap)
         {
@@ -464,13 +502,11 @@ namespace
 
     /// Angular-domain quadrature gives every destination texel a comparable spherical footprint, independent of which
     /// cube face contains a tap. Cross-face bilinear taps are remapped instead of clamped.
-    [[nodiscard]] Float4 FilterCubeDirection(const Image faces[6], const Float3 center, const u32 sourceExtent,
-                                              const u32 destinationExtent) noexcept
+    [[nodiscard]] Float4 FilterCubeDirection(const Image faces[6], const Float3 center, const u32 sourceExtent, const u32 destinationExtent) noexcept
     {
         const Float3 reference = ::fabsf(center.x) <= ::fabsf(center.y) && ::fabsf(center.x) <= ::fabsf(center.z)
                                      ? Float3{1.0f, 0.0f, 0.0f}
-                                     : (::fabsf(center.y) <= ::fabsf(center.z) ? Float3{0.0f, 1.0f, 0.0f}
-                                                                              : Float3{0.0f, 0.0f, 1.0f});
+                                     : (::fabsf(center.y) <= ::fabsf(center.z) ? Float3{0.0f, 1.0f, 0.0f} : Float3{0.0f, 0.0f, 1.0f});
         const Float3 tangent = Normalize(Cross(reference, center));
         const Float3 bitangent = Cross(center, tangent);
         constexpr f32 Offsets[4] = {-0.75f, -0.25f, 0.25f, 0.75f};
@@ -482,12 +518,10 @@ namespace
         {
             for (u32 sampleX = 0; sampleX < 4; ++sampleX)
             {
-                const Float3 direction = Normalize({center.x + tangent.x * Offsets[sampleX] * angularTexelRadius +
-                                                               bitangent.x * Offsets[sampleY] * angularTexelRadius,
-                                                    center.y + tangent.y * Offsets[sampleX] * angularTexelRadius +
-                                                               bitangent.y * Offsets[sampleY] * angularTexelRadius,
-                                                    center.z + tangent.z * Offsets[sampleX] * angularTexelRadius +
-                                                               bitangent.z * Offsets[sampleY] * angularTexelRadius});
+                const Float3 direction =
+                    Normalize({center.x + tangent.x * Offsets[sampleX] * angularTexelRadius + bitangent.x * Offsets[sampleY] * angularTexelRadius,
+                               center.y + tangent.y * Offsets[sampleX] * angularTexelRadius + bitangent.y * Offsets[sampleY] * angularTexelRadius,
+                               center.z + tangent.z * Offsets[sampleX] * angularTexelRadius + bitangent.z * Offsets[sampleY] * angularTexelRadius});
                 const Float4 sample = SampleCube(faces, direction, sourceExtent);
                 const f32 weight = Weights[sampleX] * Weights[sampleY];
                 result.x += sample.x * weight;
@@ -515,7 +549,8 @@ namespace
                 average.w += faces[face].pixels[0].w;
             }
             average = {average.x / 6.0f, average.y / 6.0f, average.z / 6.0f, average.w / 6.0f};
-            for (u32 face = 0; face < 6; ++face) faces[face].pixels[0] = average;
+            for (u32 face = 0; face < 6; ++face)
+                faces[face].pixels[0] = average;
             return;
         }
 
@@ -528,20 +563,18 @@ namespace
                 {
                     const u32 x = edge == 0 ? 0u : (edge == 1 ? extent - 1u : coordinate);
                     const u32 y = edge == 2 ? 0u : (edge == 3 ? extent - 1u : coordinate);
-                    const f32 outsideX = edge == 0 ? -Outside : (edge == 1 ? static_cast<f32>(extent) + Outside
-                                                                          : static_cast<f32>(coordinate) + 0.5f);
-                    const f32 outsideY = edge == 2 ? -Outside : (edge == 3 ? static_cast<f32>(extent) + Outside
-                                                                          : static_cast<f32>(coordinate) + 0.5f);
+                    const f32 outsideX = edge == 0 ? -Outside : (edge == 1 ? static_cast<f32>(extent) + Outside : static_cast<f32>(coordinate) + 0.5f);
+                    const f32 outsideY = edge == 2 ? -Outside : (edge == 3 ? static_cast<f32>(extent) + Outside : static_cast<f32>(coordinate) + 0.5f);
                     const CubeProjection neighbor = ProjectCubeDirection(CubeDirection(face, outsideX, outsideY, extent));
                     const u32 neighborX = ClampTexel(static_cast<vanguard::i32>(::floorf((neighbor.u + 1.0f) * 0.5f * extent)), extent);
                     const u32 neighborY = ClampTexel(static_cast<vanguard::i32>(::floorf((neighbor.v + 1.0f) * 0.5f * extent)), extent);
                     const u32 address = face * extent * extent + y * extent + x;
                     const u32 neighborAddress = neighbor.face * extent * extent + neighborY * extent + neighborX;
-                    if (address >= neighborAddress) continue;
+                    if (address >= neighborAddress)
+                        continue;
                     Float4& first = faces[face].pixels[y * extent + x];
                     Float4& second = faces[neighbor.face].pixels[neighborY * extent + neighborX];
-                    const Float4 average{(first.x + second.x) * 0.5f, (first.y + second.y) * 0.5f,
-                                         (first.z + second.z) * 0.5f, (first.w + second.w) * 0.5f};
+                    const Float4 average{(first.x + second.x) * 0.5f, (first.y + second.y) * 0.5f, (first.z + second.z) * 0.5f, (first.w + second.w) * 0.5f};
                     first = average;
                     second = average;
                 }
@@ -567,8 +600,7 @@ namespace
                             const u32 y = (corner & 2u) != 0 ? extent - 1u : 0u;
                             const Float3 direction = CubeDirection(face, (corner & 1u) != 0 ? static_cast<f32>(extent) : 0.0f,
                                                                    (corner & 2u) != 0 ? static_cast<f32>(extent) : 0.0f, extent);
-                            if ((direction.x > 0.0f ? 1 : -1) != signX || (direction.y > 0.0f ? 1 : -1) != signY ||
-                                (direction.z > 0.0f ? 1 : -1) != signZ)
+                            if ((direction.x > 0.0f ? 1 : -1) != signX || (direction.y > 0.0f ? 1 : -1) != signY || (direction.z > 0.0f ? 1 : -1) != signZ)
                                 continue;
                             if (matchCount < 3)
                             {
@@ -594,8 +626,8 @@ namespace
         }
     }
 
-    [[nodiscard]] bool DownsampleCube(const Image source[6], Image destination[6], const bool useJobs,
-                                      const u32 maximumBatchSize, bool& jobFailure, bool& usedJobs) noexcept
+    [[nodiscard]] bool DownsampleCube(const Image source[6], Image destination[6], const bool useJobs, const u32 maximumBatchSize, bool& jobFailure,
+                                      bool& usedJobs) noexcept
     {
         const u32 sourceExtent = source[0].width;
         const u32 destinationExtent = sourceExtent > 1 ? sourceExtent / 2u : 1u;
@@ -605,7 +637,8 @@ namespace
             destination[face].height = destinationExtent;
             destination[face].depth = 1;
             destination[face].pixels.Resize(destinationExtent * destinationExtent);
-            if (destination[face].pixels.Size() != destinationExtent * destinationExtent) return false;
+            if (destination[face].pixels.Size() != destinationExtent * destinationExtent)
+                return false;
         }
         const u32 workItemCount = 6u * destinationExtent * destinationExtent;
         const auto filter = [&source, &destination, sourceExtent, destinationExtent](const u32 workIndex) noexcept
@@ -615,18 +648,15 @@ namespace
             const u32 pixel = workIndex % pixelsPerFace;
             const u32 x = pixel % destinationExtent;
             const u32 y = pixel / destinationExtent;
-            const Float3 direction = CubeDirection(face, static_cast<f32>(x) + 0.5f, static_cast<f32>(y) + 0.5f,
-                                                   destinationExtent);
+            const Float3 direction = CubeDirection(face, static_cast<f32>(x) + 0.5f, static_cast<f32>(y) + 0.5f, destinationExtent);
             destination[face].pixels[pixel] = FilterCubeDirection(source, direction, sourceExtent, destinationExtent);
         };
         if (useJobs && workItemCount > 1)
         {
             jobs::Builder builder({jobs::Priority::CriticalPath, jobs::Affinity::AnyWorker});
             jobs::JobName name{"Vanguard.TextureTools.FilterCubeMip"};
-            jobs::ParallelTask task = jobs::ParallelTask::Create(
-                [&filter](const u32 workIndex, const jobs::JobContext&) noexcept { filter(workIndex); });
-            if (!builder.IsValid() || !task ||
-                !builder.DispatchParallel(name, workItemCount, static_cast<jobs::ParallelTask&&>(task), {}, maximumBatchSize))
+            jobs::ParallelTask task = jobs::ParallelTask::Create([&filter](const u32 workIndex, const jobs::JobContext&) noexcept { filter(workIndex); });
+            if (!builder.IsValid() || !task || !builder.DispatchParallel(name, workItemCount, static_cast<jobs::ParallelTask&&>(task), {}, maximumBatchSize))
             {
                 jobFailure = true;
                 return false;
@@ -641,7 +671,8 @@ namespace
         }
         else
         {
-            for (u32 workIndex = 0; workIndex < workItemCount; ++workIndex) filter(workIndex);
+            for (u32 workIndex = 0; workIndex < workItemCount; ++workIndex)
+                filter(workIndex);
         }
         FixCubeEdges(destination);
         return true;
@@ -672,7 +703,10 @@ namespace
                 covered += Clamp01(values[channel] * scale) >= threshold ? 1u : 0u;
             }
             const f32 coverage = static_cast<f32>(covered) / static_cast<f32>(image.pixels.Size());
-            if (coverage < targetCoverage) lower = scale; else upper = scale;
+            if (coverage < targetCoverage)
+                lower = scale;
+            else
+                upper = scale;
         }
         const f32 scale = (lower + upper) * 0.5f;
         for (Float4& pixel : image.pixels)
@@ -700,8 +734,7 @@ namespace
         return texels != 0 ? static_cast<f32>(covered) / static_cast<f32>(texels) : 0.0f;
     }
 
-    [[nodiscard]] f32 PreserveCubeCoverage(Image faces[6], const u8 channel, const f32 threshold,
-                                           const f32 targetCoverage) noexcept
+    [[nodiscard]] f32 PreserveCubeCoverage(Image faces[6], const u8 channel, const f32 threshold, const f32 targetCoverage) noexcept
     {
         f32 lower = 0.0f;
         f32 upper = 8.0f;
@@ -720,7 +753,10 @@ namespace
                 texels += faces[face].pixels.Size();
             }
             const f32 coverage = static_cast<f32>(covered) / static_cast<f32>(texels);
-            if (coverage < targetCoverage) lower = scale; else upper = scale;
+            if (coverage < targetCoverage)
+                lower = scale;
+            else
+                upper = scale;
         }
         const f32 scale = (lower + upper) * 0.5f;
         for (u32 face = 0; face < 6; ++face)
@@ -735,8 +771,7 @@ namespace
         return achievedCoverage > targetCoverage ? achievedCoverage - targetCoverage : targetCoverage - achievedCoverage;
     }
 
-    void GatherBlock(const Image& image, const u32 blockX, const u32 blockY, const u32 z, const bool encodeSrgb,
-                     u8 block[64]) noexcept
+    void GatherBlock(const Image& image, const u32 blockX, const u32 blockY, const u32 z, const bool encodeSrgb, u8 block[64]) noexcept
     {
         for (u32 y = 0; y < 4; ++y)
         {
@@ -778,8 +813,7 @@ namespace
         }
     }
 
-    void GatherSignedBlock(const Image& image, const u32 blockX, const u32 blockY, const u32 z,
-                           char channelX[16], char channelY[16]) noexcept
+    void GatherSignedBlock(const Image& image, const u32 blockX, const u32 blockY, const u32 z, char channelX[16], char channelY[16]) noexcept
     {
         for (u32 y = 0; y < 4; ++y)
         {
@@ -796,9 +830,8 @@ namespace
         }
     }
 
-    [[nodiscard]] bool EncodeBlock(const Image& image, const tools::TextureCookingProfile& profile,
-                                   const textures::FormatInfo& format, const u32 blockColumns, const u32 blockRows,
-                                   const u32 workIndex, const bool encodeSrgb, const bc7enc_compress_block_params& bc7Parameters,
+    [[nodiscard]] bool EncodeBlock(const Image& image, const tools::TextureCookingProfile& profile, const textures::FormatInfo& format, const u32 blockColumns,
+                                   const u32 blockRows, const u32 workIndex, const bool encodeSrgb, const bc7enc_compress_block_params& bc7Parameters,
                                    void* bc6Options, EncodedImage& output) noexcept
     {
         const u32 blocksPerSlice = blockColumns * blockRows;
@@ -806,8 +839,8 @@ namespace
         const u32 sliceBlock = workIndex % blocksPerSlice;
         const u32 blockY = sliceBlock / blockColumns;
         const u32 blockX = sliceBlock % blockColumns;
-        u8* destination = output.bytes.TypedData() + static_cast<usize>(z) * output.slicePitch +
-                          static_cast<usize>(blockY) * output.rowPitch + blockX * format.bytesPerBlock;
+        u8* destination =
+            output.bytes.TypedData() + static_cast<usize>(z) * output.slicePitch + static_cast<usize>(blockY) * output.rowPitch + blockX * format.bytesPerBlock;
         if (profile.targetFormat == textures::PixelFormat::BC6HUFloat || profile.targetFormat == textures::PixelFormat::BC6HSFloat)
         {
             u16 sourceBlock[64]{};
@@ -819,33 +852,38 @@ namespace
             char channelX[16]{};
             char channelY[16]{};
             GatherSignedBlock(image, blockX, blockY, z, channelX, channelY);
-            return profile.targetFormat == textures::PixelFormat::BC4SNorm
-                ? CompressBlockBC4S(channelX, 4, destination, nullptr) == 0
-                : CompressBlockBC5S(channelX, 4, channelY, 4, destination, nullptr) == 0;
+            return profile.targetFormat == textures::PixelFormat::BC4SNorm ? CompressBlockBC4S(channelX, 4, destination, nullptr) == 0
+                                                                           : CompressBlockBC5S(channelX, 4, channelY, 4, destination, nullptr) == 0;
         }
         u8 sourceBlock[64]{};
         GatherBlock(image, blockX, blockY, z, encodeSrgb, sourceBlock);
         switch (profile.targetFormat)
         {
         case textures::PixelFormat::BC1UNorm:
-            rgbcx::encode_bc1(profile.compressionQuality > rgbcx::MAX_LEVEL ? rgbcx::MAX_LEVEL : profile.compressionQuality,
-                              destination, sourceBlock, true, false);
+            rgbcx::encode_bc1(profile.compressionQuality > rgbcx::MAX_LEVEL ? rgbcx::MAX_LEVEL : profile.compressionQuality, destination, sourceBlock, true,
+                              false);
             return true;
-        case textures::PixelFormat::BC2UNorm: return CompressBlockBC2(sourceBlock, 16, destination, nullptr) == 0;
+        case textures::PixelFormat::BC2UNorm:
+            return CompressBlockBC2(sourceBlock, 16, destination, nullptr) == 0;
         case textures::PixelFormat::BC3UNorm:
-            rgbcx::encode_bc3(profile.compressionQuality > rgbcx::MAX_LEVEL ? rgbcx::MAX_LEVEL : profile.compressionQuality,
-                              destination, sourceBlock);
+            rgbcx::encode_bc3(profile.compressionQuality > rgbcx::MAX_LEVEL ? rgbcx::MAX_LEVEL : profile.compressionQuality, destination, sourceBlock);
             return true;
-        case textures::PixelFormat::BC4UNorm: rgbcx::encode_bc4(destination, sourceBlock, 4); return true;
-        case textures::PixelFormat::BC5UNorm: rgbcx::encode_bc5(destination, sourceBlock, 0, 1, 4); return true;
-        case textures::PixelFormat::BC7UNorm: bc7enc_compress_block(destination, sourceBlock, &bc7Parameters); return true;
-        default: return false;
+        case textures::PixelFormat::BC4UNorm:
+            rgbcx::encode_bc4(destination, sourceBlock, 4);
+            return true;
+        case textures::PixelFormat::BC5UNorm:
+            rgbcx::encode_bc5(destination, sourceBlock, 0, 1, 4);
+            return true;
+        case textures::PixelFormat::BC7UNorm:
+            bc7enc_compress_block(destination, sourceBlock, &bc7Parameters);
+            return true;
+        default:
+            return false;
         }
     }
 
-    [[nodiscard]] bool EncodeImage(const Image& image, const tools::TextureCookingProfile& profile, EncodedImage& output,
-                                   const bool useJobs, const u32 maximumBatchSize, bool& jobFailure,
-                                   u64& encodedBlockCount, bool& usedJobs) noexcept
+    [[nodiscard]] bool EncodeImage(const Image& image, const tools::TextureCookingProfile& profile, EncodedImage& output, const bool useJobs,
+                                   const u32 maximumBatchSize, bool& jobFailure, u64& encodedBlockCount, bool& usedJobs) noexcept
     {
         const textures::FormatInfo format = textures::GetFormatInfo(profile.targetFormat);
         output.rowPitch = textures::CalculateMinimumRowPitch(profile.targetFormat, image.width);
@@ -868,10 +906,10 @@ namespace
             const u32 workItemCount = blockColumns * blockRows * image.depth;
             encodedBlockCount += workItemCount;
             void* bc6Options = nullptr;
-            if (profile.targetFormat == textures::PixelFormat::BC6HSFloat &&
-                (CreateOptionsBC6(&bc6Options) != 0 || SetSignedBC6(bc6Options, true) != 0))
+            if (profile.targetFormat == textures::PixelFormat::BC6HSFloat && (CreateOptionsBC6(&bc6Options) != 0 || SetSignedBC6(bc6Options, true) != 0))
             {
-                if (bc6Options != nullptr) DestroyOptionsBC6(bc6Options);
+                if (bc6Options != nullptr)
+                    DestroyOptionsBC6(bc6Options);
                 return false;
             }
             bc7enc_compress_block_params bc7Parameters;
@@ -884,11 +922,10 @@ namespace
                 jobs::Builder builder({jobs::Priority::CriticalPath, jobs::Affinity::AnyWorker});
                 jobs::JobName name{"Vanguard.TextureTools.EncodeBlocks"};
                 jobs::ParallelTask task = jobs::ParallelTask::Create(
-                    [&image, &profile, &format, blockColumns, blockRows, encodeSrgb, &bc7Parameters, bc6Options, &output, &failures]
-                    (const u32 workIndex, const jobs::JobContext&) noexcept
+                    [&image, &profile, &format, blockColumns, blockRows, encodeSrgb, &bc7Parameters, bc6Options, &output,
+                     &failures](const u32 workIndex, const jobs::JobContext&) noexcept
                     {
-                        if (!EncodeBlock(image, profile, format, blockColumns, blockRows, workIndex, encodeSrgb,
-                                         bc7Parameters, bc6Options, output))
+                        if (!EncodeBlock(image, profile, format, blockColumns, blockRows, workIndex, encodeSrgb, bc7Parameters, bc6Options, output))
                         {
                             failures.SetValue(1);
                         }
@@ -897,7 +934,8 @@ namespace
                     !builder.DispatchParallel(name, workItemCount, static_cast<jobs::ParallelTask&&>(task), {}, maximumBatchSize))
                 {
                     jobFailure = true;
-                    if (bc6Options != nullptr) DestroyOptionsBC6(bc6Options);
+                    if (bc6Options != nullptr)
+                        DestroyOptionsBC6(bc6Options);
                     return false;
                 }
                 usedJobs = true;
@@ -905,12 +943,14 @@ namespace
                 if (!counter.IsValid() || !counter.Wait())
                 {
                     jobFailure = true;
-                    if (bc6Options != nullptr) DestroyOptionsBC6(bc6Options);
+                    if (bc6Options != nullptr)
+                        DestroyOptionsBC6(bc6Options);
                     return false;
                 }
                 if (failures.GetValue() != 0)
                 {
-                    if (bc6Options != nullptr) DestroyOptionsBC6(bc6Options);
+                    if (bc6Options != nullptr)
+                        DestroyOptionsBC6(bc6Options);
                     return false;
                 }
             }
@@ -918,15 +958,16 @@ namespace
             {
                 for (u32 workIndex = 0; workIndex < workItemCount; ++workIndex)
                 {
-                    if (!EncodeBlock(image, profile, format, blockColumns, blockRows, workIndex, encodeSrgb,
-                                     bc7Parameters, bc6Options, output))
+                    if (!EncodeBlock(image, profile, format, blockColumns, blockRows, workIndex, encodeSrgb, bc7Parameters, bc6Options, output))
                     {
-                        if (bc6Options != nullptr) DestroyOptionsBC6(bc6Options);
+                        if (bc6Options != nullptr)
+                            DestroyOptionsBC6(bc6Options);
                         return false;
                     }
                 }
             }
-            if (bc6Options != nullptr) DestroyOptionsBC6(bc6Options);
+            if (bc6Options != nullptr)
+                DestroyOptionsBC6(bc6Options);
             return true;
         }
         for (u32 z = 0; z < image.depth; ++z)
@@ -945,7 +986,9 @@ namespace
                     }
                     switch (profile.targetFormat)
                     {
-                    case textures::PixelFormat::R8UNorm: destination[x] = ToByte(pixel.x); break;
+                    case textures::PixelFormat::R8UNorm:
+                        destination[x] = ToByte(pixel.x);
+                        break;
                     case textures::PixelFormat::R8G8UNorm:
                         destination[x * 2u + 0u] = ToByte(pixel.x);
                         destination[x * 2u + 1u] = ToByte(pixel.y);
@@ -965,7 +1008,8 @@ namespace
                         half[3] = FloatToHalf(pixel.w);
                         break;
                     }
-                    default: return false;
+                    default:
+                        return false;
                     }
                 }
             }
@@ -975,87 +1019,145 @@ namespace
 
     [[nodiscard]] bool IsSupportedTarget(const textures::PixelFormat format) noexcept
     {
-        return format == textures::PixelFormat::R8UNorm || format == textures::PixelFormat::R8G8UNorm ||
-               format == textures::PixelFormat::R8G8B8A8UNorm || format == textures::PixelFormat::R16G16B16A16Float ||
-               format == textures::PixelFormat::BC1UNorm || format == textures::PixelFormat::BC3UNorm ||
-               format == textures::PixelFormat::BC2UNorm || format == textures::PixelFormat::BC6HUFloat ||
-               format == textures::PixelFormat::BC6HSFloat || format == textures::PixelFormat::BC4SNorm ||
-               format == textures::PixelFormat::BC5SNorm ||
-               format == textures::PixelFormat::BC4UNorm || format == textures::PixelFormat::BC5UNorm ||
-               format == textures::PixelFormat::BC7UNorm;
+        return format == textures::PixelFormat::R8UNorm || format == textures::PixelFormat::R8G8UNorm || format == textures::PixelFormat::R8G8B8A8UNorm ||
+               format == textures::PixelFormat::R16G16B16A16Float || format == textures::PixelFormat::BC1UNorm || format == textures::PixelFormat::BC3UNorm ||
+               format == textures::PixelFormat::BC2UNorm || format == textures::PixelFormat::BC6HUFloat || format == textures::PixelFormat::BC6HSFloat ||
+               format == textures::PixelFormat::BC4SNorm || format == textures::PixelFormat::BC5SNorm || format == textures::PixelFormat::BC4UNorm ||
+               format == textures::PixelFormat::BC5UNorm || format == textures::PixelFormat::BC7UNorm;
     }
 
     [[nodiscard]] tools::ProfileRegistrationResult RegisterInternal(const tools::TextureCookingProfile& profile) noexcept
     {
-        if (g_registrySealed) return tools::ProfileRegistrationResult::RegistrySealed;
-        const u16 knownFlags = static_cast<u16>(tools::TextureCookingFlags::GenerateFullMipChain) |
-                               static_cast<u16>(tools::TextureCookingFlags::Streamable) |
+        if (g_registrySealed)
+            return tools::ProfileRegistrationResult::RegistrySealed;
+        const u16 knownFlags = static_cast<u16>(tools::TextureCookingFlags::GenerateFullMipChain) | static_cast<u16>(tools::TextureCookingFlags::Streamable) |
                                static_cast<u16>(tools::TextureCookingFlags::RenormalizeNormals) |
                                static_cast<u16>(tools::TextureCookingFlags::PreserveAlphaCoverage);
         const textures::FormatInfo formatInfo = textures::GetFormatInfo(profile.targetFormat);
         if (profile.id == 0 || profile.version == 0 || !IsSupportedTarget(profile.targetFormat) || profile.mipTailCount == 0 ||
-            profile.targetColorSpace > textures::ColorSpace::SRgb ||
-            (profile.targetColorSpace == textures::ColorSpace::SRgb && !formatInfo.supportsSRgb) ||
+            profile.targetColorSpace > textures::ColorSpace::SRgb || (profile.targetColorSpace == textures::ColorSpace::SRgb && !formatInfo.supportsSRgb) ||
             (static_cast<u16>(profile.flags) & ~knownFlags) != 0 ||
-            (tools::HasFlag(profile.flags, tools::TextureCookingFlags::RenormalizeNormals) &&
-             profile.targetColorSpace != textures::ColorSpace::Linear) ||
-            profile.alphaCoverageChannel > 3 || profile.alphaCoverageThreshold < 0.0f || profile.alphaCoverageThreshold > 1.0f ||
+            (tools::HasFlag(profile.flags, tools::TextureCookingFlags::RenormalizeNormals) && profile.targetColorSpace != textures::ColorSpace::Linear) ||
+            profile.alphaCoverageChannel > 3 || !std::isfinite(profile.alphaCoverageThreshold) || profile.alphaCoverageThreshold < 0.0f ||
+            profile.alphaCoverageThreshold > 1.0f ||
             profile.compressionQuality > 18)
         {
             return tools::ProfileRegistrationResult::InvalidArgument;
         }
         for (u32 index = 0; index < g_profileCount; ++index)
         {
-            if (g_profiles[index].id == profile.id) return tools::ProfileRegistrationResult::DuplicateIdentifier;
+            if (g_profiles[index].id == profile.id)
+                return tools::ProfileRegistrationResult::DuplicateIdentifier;
         }
-        if (g_profileCount == MaximumProfiles) return tools::ProfileRegistrationResult::CapacityExceeded;
+        if (g_profileCount == MaximumProfiles)
+            return tools::ProfileRegistrationResult::CapacityExceeded;
         g_profiles[g_profileCount++] = profile;
         return tools::ProfileRegistrationResult::Success;
     }
-}
+} // namespace
 
 namespace vanguard::texture_tools
 {
     [[nodiscard]] bool RegisterBuiltInTextureImporters() noexcept;
+    [[nodiscard]] bool FreezeTextureImporterRegistry(crypto::Digest256& fingerprint) noexcept;
+
+    [[nodiscard]] bool FreezeCookingProfileRegistry(crypto::Digest256& fingerprint) noexcept
+    {
+        if (!g_initialized)
+            return false;
+        if (!g_registrySealed)
+        {
+            u32 order[MaximumProfiles]{};
+            for (u32 index = 0; index < g_profileCount; ++index)
+            {
+                order[index] = index;
+                for (u32 cursor = index; cursor != 0 && g_profiles[order[cursor]].id < g_profiles[order[cursor - 1u]].id; --cursor)
+                {
+                    const u32 temporary = order[cursor];
+                    order[cursor] = order[cursor - 1u];
+                    order[cursor - 1u] = temporary;
+                }
+            }
+            constexpr char domain[] = "vanguard.texture-profile-registry.v1";
+            crypto::Sha256Builder builder;
+            if (!builder.Update(domain, sizeof(domain) - 1u) || !HashU32(builder, g_profileCount))
+                return false;
+            for (u32 position = 0; position < g_profileCount; ++position)
+            {
+                const TextureCookingProfile& profile = g_profiles[order[position]];
+                u32 thresholdBits = 0;
+                std::memcpy(&thresholdBits, &profile.alphaCoverageThreshold, sizeof(thresholdBits));
+                if (!HashU64(builder, profile.id) || !HashU32(builder, profile.version) || !HashU8(builder, static_cast<u8>(profile.targetFormat)) ||
+                    !HashU8(builder, static_cast<u8>(profile.targetColorSpace)) || !HashU16(builder, static_cast<u16>(profile.flags)) ||
+                    !HashU8(builder, profile.mipTailCount) || !HashU8(builder, profile.alphaCoverageChannel) || !HashU32(builder, thresholdBits) ||
+                    !HashU8(builder, profile.compressionQuality))
+                    return false;
+            }
+            if (!builder.Finalize(g_profileRegistryFingerprint))
+                return false;
+            g_registrySealed = true;
+        }
+        fingerprint = g_profileRegistryFingerprint;
+        return !fingerprint.IsEmpty();
+    }
 
     const char* ToString(const Result result) noexcept
     {
         switch (result)
         {
-        case Result::Success: return "Success";
-        case Result::InvalidArgument: return "InvalidArgument";
-        case Result::InvalidState: return "InvalidState";
-        case Result::UnknownCookingProfile: return "UnknownCookingProfile";
-        case Result::UnsupportedSourceFormat: return "UnsupportedSourceFormat";
-        case Result::UnsupportedTargetFormat: return "UnsupportedTargetFormat";
-        case Result::InvalidSourceLayout: return "InvalidSourceLayout";
-        case Result::InvalidSourceData: return "InvalidSourceData";
-        case Result::LimitExceeded: return "LimitExceeded";
-        case Result::OutOfMemory: return "OutOfMemory";
-        case Result::CodecFailure: return "CodecFailure";
-        case Result::TextureWriteFailure: return "TextureWriteFailure";
+        case Result::Success:
+            return "Success";
+        case Result::InvalidArgument:
+            return "InvalidArgument";
+        case Result::InvalidState:
+            return "InvalidState";
+        case Result::UnknownCookingProfile:
+            return "UnknownCookingProfile";
+        case Result::UnsupportedSourceFormat:
+            return "UnsupportedSourceFormat";
+        case Result::UnsupportedTargetFormat:
+            return "UnsupportedTargetFormat";
+        case Result::InvalidSourceLayout:
+            return "InvalidSourceLayout";
+        case Result::InvalidSourceData:
+            return "InvalidSourceData";
+        case Result::LimitExceeded:
+            return "LimitExceeded";
+        case Result::OutOfMemory:
+            return "OutOfMemory";
+        case Result::Cancelled:
+            return "Cancelled";
+        case Result::CodecFailure:
+            return "CodecFailure";
+        case Result::TextureWriteFailure:
+            return "TextureWriteFailure";
         }
         return "Unknown";
     }
 
     bool Initialize() noexcept
     {
-        if (g_initialized) return true;
+        if (g_initialized)
+            return true;
         rgbcx::init();
         bc7enc_compress_block_init();
-        if (!RegisterBuiltInTextureImporters()) return false;
+        if (!RegisterBuiltInTextureImporters())
+            return false;
         const TextureCookingFlags runtimeMips = TextureCookingFlags::GenerateFullMipChain | TextureCookingFlags::Streamable;
-        if (RegisterInternal({profiles::Color, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb, runtimeMips, 4, 3, 0.5f, 2}) != ProfileRegistrationResult::Success ||
+        if (RegisterInternal({profiles::Color, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb, runtimeMips, 4, 3, 0.5f, 2}) !=
+                ProfileRegistrationResult::Success ||
             RegisterInternal({profiles::ColorAlpha, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb,
                               runtimeMips | TextureCookingFlags::PreserveAlphaCoverage, 4, 3, 0.5f, 2}) != ProfileRegistrationResult::Success ||
             RegisterInternal({profiles::Normal, 2, textures::PixelFormat::BC5UNorm, textures::ColorSpace::Linear,
                               runtimeMips | TextureCookingFlags::RenormalizeNormals, 4, 3, 0.5f, 10}) != ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Masks, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 1}) != ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Data, 2, textures::PixelFormat::BC4UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 0, 0.5f, 10}) != ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Ui, 1, textures::PixelFormat::R8G8B8A8UNorm, textures::ColorSpace::SRgb,
-                              TextureCookingFlags::None, 1, 3, 0.5f, 0}) != ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Hdr, 2, textures::PixelFormat::BC6HUFloat, textures::ColorSpace::Linear,
-                              runtimeMips, 4, 3, 0.5f, 0}) != ProfileRegistrationResult::Success)
+            RegisterInternal({profiles::Masks, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 1}) !=
+                ProfileRegistrationResult::Success ||
+            RegisterInternal({profiles::Data, 2, textures::PixelFormat::BC4UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 0, 0.5f, 10}) !=
+                ProfileRegistrationResult::Success ||
+            RegisterInternal({profiles::Ui, 1, textures::PixelFormat::R8G8B8A8UNorm, textures::ColorSpace::SRgb, TextureCookingFlags::None, 1, 3, 0.5f, 0}) !=
+                ProfileRegistrationResult::Success ||
+            RegisterInternal({profiles::Hdr, 2, textures::PixelFormat::BC6HUFloat, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 0}) !=
+                ProfileRegistrationResult::Success)
         {
             return false;
         }
@@ -1068,9 +1170,19 @@ namespace vanguard::texture_tools
         return g_initialized;
     }
 
+    bool FreezeConfiguration(TextureToolsConfigurationFingerprint& fingerprint) noexcept
+    {
+        TextureToolsConfigurationFingerprint frozen;
+        if (!FreezeCookingProfileRegistry(frozen.profiles) || !FreezeTextureImporterRegistry(frozen.importers))
+            return false;
+        fingerprint = frozen;
+        return true;
+    }
+
     ProfileRegistrationResult RegisterCookingProfile(const TextureCookingProfile& profile) noexcept
     {
-        if (!g_initialized) return ProfileRegistrationResult::InvalidArgument;
+        if (!g_initialized)
+            return ProfileRegistrationResult::InvalidArgument;
         return RegisterInternal(profile);
     }
 
@@ -1078,25 +1190,30 @@ namespace vanguard::texture_tools
     {
         for (u32 index = 0; index < g_profileCount; ++index)
         {
-            if (g_profiles[index].id == id) return &g_profiles[index];
+            if (g_profiles[index].id == id)
+                return &g_profiles[index];
         }
         return nullptr;
     }
 
     Result CookTexture(const SourceTexture& source, filesystem::IFile& output, const CookSettings& settings, CookReport* report) noexcept
     {
-        if (!g_initialized) return Result::InvalidState;
-        if (settings.execution > CookSettings::Execution::Jobs || settings.maximumDimension == 0 ||
-            settings.maximumSubresources == 0 || settings.maximumOutputBytes == 0 ||
-            (settings.execution == CookSettings::Execution::Jobs && !jobs::IsInitialized()))
+        if (!g_initialized)
+            return Result::InvalidState;
+        if (settings.cancellation.IsCancellationRequested())
+            return Result::Cancelled;
+        if (settings.execution > CookSettings::Execution::Jobs || settings.maximumDimension == 0 || settings.maximumSubresources == 0 ||
+            settings.maximumOutputBytes == 0 || (settings.execution == CookSettings::Execution::Jobs && !jobs::IsInitialized()))
         {
             return Result::InvalidState;
         }
-        const bool useJobs = settings.execution == CookSettings::Execution::Jobs ||
-                             (settings.execution == CookSettings::Execution::Automatic && jobs::IsInitialized());
-        g_registrySealed = true;
+        const bool useJobs =
+            settings.execution == CookSettings::Execution::Jobs || (settings.execution == CookSettings::Execution::Automatic && jobs::IsInitialized());
+        if (!g_registrySealed)
+            return Result::InvalidState;
         const TextureCookingProfile* profile = FindCookingProfile(settings.profile);
-        if (profile == nullptr) return Result::UnknownCookingProfile;
+        if (profile == nullptr)
+            return Result::UnknownCookingProfile;
         if (source.dimension > textures::TextureDimension::Cube || source.format > SourcePixelFormat::R32G32B32A32Float ||
             source.colorSpace > textures::ColorSpace::SRgb)
         {
@@ -1114,15 +1231,18 @@ namespace vanguard::texture_tools
             return Result::InvalidArgument;
         }
         const u8 mipCount = HasFlag(profile->flags, TextureCookingFlags::GenerateFullMipChain)
-                                ? static_cast<u8>(textures::CalculateMipCount(source.width, source.height, source.depth)) : 1u;
+                                ? static_cast<u8>(textures::CalculateMipCount(source.width, source.height, source.depth))
+                                : 1u;
         const u64 subresourceCount64 = static_cast<u64>(expectedImages) * mipCount;
-        if (subresourceCount64 > settings.maximumSubresources || subresourceCount64 > 0xffffffffull) return Result::LimitExceeded;
+        if (subresourceCount64 > settings.maximumSubresources || subresourceCount64 > 0xffffffffull)
+            return Result::LimitExceeded;
         const u32 subresourceCount = static_cast<u32>(subresourceCount64);
         containers::DynamicArray<EncodedImage> encoded(memory::pools::Assets::GetInstance());
         containers::DynamicArray<textures::SubresourceBuildRecord> records(memory::pools::Assets::GetInstance());
         encoded.Resize(subresourceCount);
         records.Resize(subresourceCount);
-        if (encoded.Size() != subresourceCount || records.Size() != subresourceCount) return Result::OutOfMemory;
+        if (encoded.Size() != subresourceCount || records.Size() != subresourceCount)
+            return Result::OutOfMemory;
         u64 sourceBytes = 0;
         u64 cookedBytes = 0;
         u64 encodedBlockCount = 0;
@@ -1134,25 +1254,33 @@ namespace vanguard::texture_tools
         {
             for (u32 layer = 0; layer < source.arrayLayers; ++layer)
             {
+                if (settings.cancellation.IsCancellationRequested())
+                    return Result::Cancelled;
                 Image current[6];
                 for (u32 face = 0; face < 6; ++face)
                 {
+                    if (settings.cancellation.IsCancellationRequested())
+                        return Result::Cancelled;
                     const u32 imageIndex = layer * 6u + face;
-                    if (sourceBytes > ~0ull - source.images[imageIndex].byteSize) return Result::LimitExceeded;
+                    if (sourceBytes > ~0ull - source.images[imageIndex].byteSize)
+                        return Result::LimitExceeded;
                     sourceBytes += source.images[imageIndex].byteSize;
-                    const DecodeResult decodeResult = DecodeSourceImage(source, source.images[imageIndex],
-                                                                        source.colorSpace == textures::ColorSpace::SRgb,
-                                                                        current[face]);
-                    if (decodeResult == DecodeResult::InvalidLayout) return Result::InvalidSourceLayout;
-                    if (decodeResult == DecodeResult::InvalidData) return Result::InvalidSourceData;
-                    if (decodeResult == DecodeResult::OutOfMemory) return Result::OutOfMemory;
+                    const DecodeResult decodeResult =
+                        DecodeSourceImage(source, source.images[imageIndex], source.colorSpace == textures::ColorSpace::SRgb, current[face]);
+                    if (decodeResult == DecodeResult::InvalidLayout)
+                        return Result::InvalidSourceLayout;
+                    if (decodeResult == DecodeResult::InvalidData)
+                        return Result::InvalidSourceData;
+                    if (decodeResult == DecodeResult::OutOfMemory)
+                        return Result::OutOfMemory;
                 }
                 const f32 baseCoverage = HasFlag(profile->flags, TextureCookingFlags::PreserveAlphaCoverage)
-                                             ? CubeAlphaCoverage(current, profile->alphaCoverageChannel,
-                                                                 profile->alphaCoverageThreshold)
+                                             ? CubeAlphaCoverage(current, profile->alphaCoverageChannel, profile->alphaCoverageThreshold)
                                              : 0.0f;
                 for (u8 mip = 0; mip < mipCount; ++mip)
                 {
+                    if (settings.cancellation.IsCancellationRequested())
+                        return Result::Cancelled;
                     if (mip != 0)
                     {
                         Image next[6];
@@ -1165,79 +1293,113 @@ namespace vanguard::texture_tools
                         }
                     }
                     if (HasFlag(profile->flags, TextureCookingFlags::RenormalizeNormals))
-                        for (u32 face = 0; face < 6; ++face) NormalizeNormals(current[face]);
+                        for (u32 face = 0; face < 6; ++face)
+                            NormalizeNormals(current[face]);
                     if (mip != 0 && HasFlag(profile->flags, TextureCookingFlags::PreserveAlphaCoverage))
                     {
-                        const f32 coverageError = PreserveCubeCoverage(current, profile->alphaCoverageChannel,
-                                                                       profile->alphaCoverageThreshold, baseCoverage);
-                        if (coverageError > maximumAlphaCoverageError) maximumAlphaCoverageError = coverageError;
+                        const f32 coverageError = PreserveCubeCoverage(current, profile->alphaCoverageChannel, profile->alphaCoverageThreshold, baseCoverage);
+                        if (coverageError > maximumAlphaCoverageError)
+                            maximumAlphaCoverageError = coverageError;
                     }
                     for (u32 face = 0; face < 6; ++face)
                     {
                         const u32 imageIndex = layer * 6u + face;
                         const u32 recordIndex = imageIndex * mipCount + mip;
-                        if (!EncodeImage(current[face], *profile, encoded[recordIndex], useJobs,
-                                         settings.maximumBlocksPerJobBatch, jobFailure, encodedBlockCount, usedJobs))
+                        if (!EncodeImage(current[face], *profile, encoded[recordIndex], useJobs, settings.maximumBlocksPerJobBatch, jobFailure,
+                                         encodedBlockCount, usedJobs))
                             return jobFailure ? Result::InvalidState : Result::CodecFailure;
                         cookedBytes += encoded[recordIndex].bytes.Size();
-                        if (cookedBytes > settings.maximumOutputBytes) return Result::LimitExceeded;
-                        records[recordIndex] = {mip, static_cast<u16>(layer), static_cast<u8>(face),
-                                                encoded[recordIndex].bytes.TypedData(), encoded[recordIndex].bytes.Size(),
-                                                encoded[recordIndex].rowPitch, encoded[recordIndex].slicePitch};
+                        if (cookedBytes > settings.maximumOutputBytes)
+                            return Result::LimitExceeded;
+                        records[recordIndex] = {mip,
+                                                static_cast<u16>(layer),
+                                                static_cast<u8>(face),
+                                                encoded[recordIndex].bytes.TypedData(),
+                                                encoded[recordIndex].bytes.Size(),
+                                                encoded[recordIndex].rowPitch,
+                                                encoded[recordIndex].slicePitch};
                     }
                 }
             }
         }
-        else for (u32 imageIndex = 0; imageIndex < expectedImages; ++imageIndex)
-        {
-            if (sourceBytes > ~0ull - source.images[imageIndex].byteSize) return Result::LimitExceeded;
-            sourceBytes += source.images[imageIndex].byteSize;
-            Image current;
-            const DecodeResult decodeResult = DecodeSourceImage(source, source.images[imageIndex],
-                                                                source.colorSpace == textures::ColorSpace::SRgb, current);
-            if (decodeResult == DecodeResult::InvalidLayout) return Result::InvalidSourceLayout;
-            if (decodeResult == DecodeResult::InvalidData) return Result::InvalidSourceData;
-            if (decodeResult == DecodeResult::OutOfMemory) return Result::OutOfMemory;
-            const f32 baseCoverage = HasFlag(profile->flags, TextureCookingFlags::PreserveAlphaCoverage)
-                                       ? AlphaCoverage(current, profile->alphaCoverageChannel, profile->alphaCoverageThreshold) : 0.0f;
-            for (u8 mip = 0; mip < mipCount; ++mip)
+        else
+            for (u32 imageIndex = 0; imageIndex < expectedImages; ++imageIndex)
             {
-                if (mip != 0)
+                if (settings.cancellation.IsCancellationRequested())
+                    return Result::Cancelled;
+                if (sourceBytes > ~0ull - source.images[imageIndex].byteSize)
+                    return Result::LimitExceeded;
+                sourceBytes += source.images[imageIndex].byteSize;
+                Image current;
+                const DecodeResult decodeResult =
+                    DecodeSourceImage(source, source.images[imageIndex], source.colorSpace == textures::ColorSpace::SRgb, current);
+                if (decodeResult == DecodeResult::InvalidLayout)
+                    return Result::InvalidSourceLayout;
+                if (decodeResult == DecodeResult::InvalidData)
+                    return Result::InvalidSourceData;
+                if (decodeResult == DecodeResult::OutOfMemory)
+                    return Result::OutOfMemory;
+                const f32 baseCoverage = HasFlag(profile->flags, TextureCookingFlags::PreserveAlphaCoverage)
+                                             ? AlphaCoverage(current, profile->alphaCoverageChannel, profile->alphaCoverageThreshold)
+                                             : 0.0f;
+                for (u8 mip = 0; mip < mipCount; ++mip)
                 {
-                    Image next;
-                    if (!Downsample(current, next)) return Result::OutOfMemory;
-                    current = static_cast<Image&&>(next);
-                    generatedMipTexelCount += current.pixels.Size();
+                    if (settings.cancellation.IsCancellationRequested())
+                        return Result::Cancelled;
+                    if (mip != 0)
+                    {
+                        Image next;
+                        if (!Downsample(current, next))
+                            return Result::OutOfMemory;
+                        current = static_cast<Image&&>(next);
+                        generatedMipTexelCount += current.pixels.Size();
+                    }
+                    if (HasFlag(profile->flags, TextureCookingFlags::RenormalizeNormals))
+                        NormalizeNormals(current);
+                    if (mip != 0 && HasFlag(profile->flags, TextureCookingFlags::PreserveAlphaCoverage))
+                    {
+                        const f32 coverageError = PreserveCoverage(current, profile->alphaCoverageChannel, profile->alphaCoverageThreshold, baseCoverage);
+                        if (coverageError > maximumAlphaCoverageError)
+                            maximumAlphaCoverageError = coverageError;
+                    }
+                    const u32 recordIndex = imageIndex * mipCount + mip;
+                    if (!EncodeImage(current, *profile, encoded[recordIndex], useJobs, settings.maximumBlocksPerJobBatch, jobFailure, encodedBlockCount,
+                                     usedJobs))
+                    {
+                        return jobFailure ? Result::InvalidState : Result::CodecFailure;
+                    }
+                    cookedBytes += encoded[recordIndex].bytes.Size();
+                    if (cookedBytes > settings.maximumOutputBytes)
+                        return Result::LimitExceeded;
+                    records[recordIndex] = {mip,
+                                            source.dimension == textures::TextureDimension::Texture3D ? 0u : static_cast<u16>(imageIndex / faceCount),
+                                            source.dimension == textures::TextureDimension::Cube ? static_cast<u8>(imageIndex % faceCount) : 0u,
+                                            encoded[recordIndex].bytes.TypedData(),
+                                            encoded[recordIndex].bytes.Size(),
+                                            encoded[recordIndex].rowPitch,
+                                            encoded[recordIndex].slicePitch};
                 }
-                if (HasFlag(profile->flags, TextureCookingFlags::RenormalizeNormals)) NormalizeNormals(current);
-                if (mip != 0 && HasFlag(profile->flags, TextureCookingFlags::PreserveAlphaCoverage))
-                {
-                    const f32 coverageError = PreserveCoverage(current, profile->alphaCoverageChannel,
-                                                               profile->alphaCoverageThreshold, baseCoverage);
-                    if (coverageError > maximumAlphaCoverageError) maximumAlphaCoverageError = coverageError;
-                }
-                const u32 recordIndex = imageIndex * mipCount + mip;
-                if (!EncodeImage(current, *profile, encoded[recordIndex], useJobs, settings.maximumBlocksPerJobBatch,
-                                 jobFailure, encodedBlockCount, usedJobs))
-                {
-                    return jobFailure ? Result::InvalidState : Result::CodecFailure;
-                }
-                cookedBytes += encoded[recordIndex].bytes.Size();
-                if (cookedBytes > settings.maximumOutputBytes) return Result::LimitExceeded;
-                records[recordIndex] = {mip, source.dimension == textures::TextureDimension::Texture3D ? 0u : static_cast<u16>(imageIndex / faceCount),
-                                        source.dimension == textures::TextureDimension::Cube ? static_cast<u8>(imageIndex % faceCount) : 0u,
-                                        encoded[recordIndex].bytes.TypedData(), encoded[recordIndex].bytes.Size(), encoded[recordIndex].rowPitch,
-                                        encoded[recordIndex].slicePitch};
             }
-        }
         const u8 mipTailFirstLevel = HasFlag(profile->flags, TextureCookingFlags::Streamable) && mipCount > profile->mipTailCount
                                          ? static_cast<u8>(mipCount - profile->mipTailCount)
                                          : 0u;
         textures::TextureFlags textureFlags = textures::TextureFlags::DirectGpuUpload;
-        if (HasFlag(profile->flags, TextureCookingFlags::Streamable)) textureFlags = textureFlags | textures::TextureFlags::Streamable;
-        textures::BuildDescription description{source.dimension, profile->targetFormat, profile->targetColorSpace, textureFlags,
-                                               source.width, source.height, source.depth, source.arrayLayers, mipCount, mipTailFirstLevel,
-                                               source.sourceFingerprint, {records.TypedData(), records.Size()}};
+        if (HasFlag(profile->flags, TextureCookingFlags::Streamable))
+            textureFlags = textureFlags | textures::TextureFlags::Streamable;
+        textures::BuildDescription description{source.dimension,
+                                               profile->targetFormat,
+                                               profile->targetColorSpace,
+                                               textureFlags,
+                                               source.width,
+                                               source.height,
+                                               source.depth,
+                                               source.arrayLayers,
+                                               mipCount,
+                                               mipTailFirstLevel,
+                                               source.sourceFingerprint,
+                                               {records.TypedData(), records.Size()}};
+        if (settings.cancellation.IsCancellationRequested())
+            return Result::Cancelled;
         const textures::Result writeResult = textures::WriteTexture(output, description);
         if (writeResult != textures::Result::Success)
         {
@@ -1246,9 +1408,8 @@ namespace vanguard::texture_tools
         }
         if (report != nullptr)
         {
-            *report = {profile->id, profile->version, profile->targetFormat, mipCount, subresourceCount,
-                       sourceBytes, cookedBytes, encodedBlockCount, generatedMipTexelCount,
-                       maximumAlphaCoverageError, usedJobs};
+            *report = {profile->id,       profile->version,       profile->targetFormat,     mipCount, subresourceCount, sourceBytes, cookedBytes,
+                       encodedBlockCount, generatedMipTexelCount, maximumAlphaCoverageError, usedJobs};
         }
         return Result::Success;
     }

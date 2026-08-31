@@ -72,8 +72,8 @@ namespace
         if (out != 16)
             return false;
         for (u32 p = 0; p < 4; ++p)
-            id.parts[p] = (static_cast<u32>(bytes[p * 4]) << 24u) | (static_cast<u32>(bytes[p * 4 + 1]) << 16u) |
-                          (static_cast<u32>(bytes[p * 4 + 2]) << 8u) | bytes[p * 4 + 3];
+            id.parts[p] = (static_cast<u32>(bytes[p * 4]) << 24u) | (static_cast<u32>(bytes[p * 4 + 1]) << 16u) | (static_cast<u32>(bytes[p * 4 + 2]) << 8u) |
+                          bytes[p * 4 + 3];
         return id.IsValid();
     }
 
@@ -305,24 +305,36 @@ namespace
         return true;
     }
 
-    bool Key(ctr::StringView key, Field& field, const char*& name) noexcept
+    bool GetKey(ctr::StringView key, Field& field, const char*& name) noexcept
     {
-#define VG_FIELD(text, value)                                                                                                              \
-    if (key == text)                                                                                                                       \
-    {                                                                                                                                      \
-        field = value;                                                                                                                     \
-        name = text;                                                                                                                       \
-        return true;                                                                                                                       \
+#define VG_FIELD(text, value)                                                                                                                                  \
+    if (key == text)                                                                                                                                           \
+    {                                                                                                                                                          \
+        field = value;                                                                                                                                         \
+        name = text;                                                                                                                                           \
+        return true;                                                                                                                                           \
     }
+        // clang-format off
         VG_FIELD("project.id", Id)
-        VG_FIELD("project.name", Name) VG_FIELD("project.technicalName", TechnicalName) VG_FIELD("engine.minimum", EngineMin)
-            VG_FIELD("engine.maximum", EngineMax) VG_FIELD("paths.assets", Assets) VG_FIELD("paths.derivedData", Derived)
-                VG_FIELD("paths.intermediate", Intermediate) VG_FIELD("paths.saved", Saved) VG_FIELD("paths.builds", Builds)
-                    VG_FIELD("paths.config", Config) VG_FIELD("paths.plugins", PluginsRoot) VG_FIELD("policy.cooking", Cooking)
-                        VG_FIELD("policy.packaging", Packaging) VG_FIELD("startup.editorWorld", EditorWorld)
-                            VG_FIELD("startup.runtimeWorld", RuntimeWorld) VG_FIELD("startup.input", Input)
+        VG_FIELD("project.name", Name)
+        VG_FIELD("project.technicalName", TechnicalName)
+        VG_FIELD("engine.minimum", EngineMin)
+        VG_FIELD("engine.maximum", EngineMax)
+        VG_FIELD("paths.assets", Assets)
+        VG_FIELD("paths.derivedData", Derived)
+        VG_FIELD("paths.intermediate", Intermediate)
+        VG_FIELD("paths.saved", Saved)
+        VG_FIELD("paths.builds", Builds)
+        VG_FIELD("paths.config", Config)
+        VG_FIELD("paths.plugins", PluginsRoot)
+        VG_FIELD("policy.cooking", Cooking)
+        VG_FIELD("policy.packaging", Packaging)
+        VG_FIELD("startup.editorWorld", EditorWorld)
+        VG_FIELD("startup.runtimeWorld", RuntimeWorld)
+        VG_FIELD("startup.input", Input)
+        // clang-format on
 #undef VG_FIELD
-                                return false;
+        return false;
     }
 
     void Assign(project::ProjectDescriptor& p, Field f, ctr::String&& value) noexcept
@@ -430,8 +442,7 @@ namespace vanguard::projects
             return Result::InvalidValue;
         }
         if (p.engine.maximumMajor != p.engine.minimumMajor || p.engine.maximumMinor < p.engine.minimumMinor ||
-            (p.engine.maximumMinor == p.engine.minimumMinor && !p.engine.maximumPatchWildcard &&
-             p.engine.maximumPatch < p.engine.minimumPatch))
+            (p.engine.maximumMinor == p.engine.minimumMinor && !p.engine.maximumPatchWildcard && p.engine.maximumPatch < p.engine.minimumPatch))
         {
             Fail(d, Result::InvalidValue, 0, 0, "engine.maximum", "invalid engine compatibility range");
             return Result::InvalidValue;
@@ -630,7 +641,7 @@ namespace vanguard::projects
             }
             Field field{};
             const char* fieldName = nullptr;
-            if (!Key(key, field, fieldName))
+            if (!GetKey(key, field, fieldName))
             {
                 Fail(d, Result::UnknownField, lineNo, 1, nullptr, "unknown project field");
                 return Result::UnknownField;
@@ -653,8 +664,7 @@ namespace vanguard::projects
             }
             else if (field == EngineMin)
             {
-                if (!ParseVersion(decoded, candidate.engine.minimumMajor, candidate.engine.minimumMinor, candidate.engine.minimumPatch,
-                                  false, wild))
+                if (!ParseVersion(decoded, candidate.engine.minimumMajor, candidate.engine.minimumMinor, candidate.engine.minimumPatch, false, wild))
                 {
                     Fail(d, Result::InvalidValue, lineNo, equal + 2, fieldName, "invalid semantic version");
                     return Result::InvalidValue;
@@ -662,8 +672,8 @@ namespace vanguard::projects
             }
             else if (field == EngineMax)
             {
-                if (!ParseVersion(decoded, candidate.engine.maximumMajor, candidate.engine.maximumMinor, candidate.engine.maximumPatch,
-                                  true, candidate.engine.maximumPatchWildcard))
+                if (!ParseVersion(decoded, candidate.engine.maximumMajor, candidate.engine.maximumMinor, candidate.engine.maximumPatch, true,
+                                  candidate.engine.maximumPatchWildcard))
                 {
                     Fail(d, Result::InvalidValue, lineNo, equal + 2, fieldName, "invalid semantic version range");
                     return Result::InvalidValue;
@@ -747,9 +757,8 @@ namespace vanguard::projects
         Line(text, "project.technicalName", p.technicalName);
         text.Append('\n');
         ctr::String min = ctr::String::Printf("%u.%u.%u", p.engine.minimumMajor, p.engine.minimumMinor, p.engine.minimumPatch);
-        ctr::String max = p.engine.maximumPatchWildcard
-                              ? ctr::String::Printf("%u.%u.x", p.engine.maximumMajor, p.engine.maximumMinor)
-                              : ctr::String::Printf("%u.%u.%u", p.engine.maximumMajor, p.engine.maximumMinor, p.engine.maximumPatch);
+        ctr::String max = p.engine.maximumPatchWildcard ? ctr::String::Printf("%u.%u.x", p.engine.maximumMajor, p.engine.maximumMinor)
+                                                        : ctr::String::Printf("%u.%u.%u", p.engine.maximumMajor, p.engine.maximumMinor, p.engine.maximumPatch);
         Line(text, "engine.minimum", min);
         Line(text, "engine.maximum", max);
         text.Append('\n');

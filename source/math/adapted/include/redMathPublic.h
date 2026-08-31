@@ -26,9 +26,9 @@ static constexpr Float RED_FLT_EPSILON = std::numeric_limits<Float>::epsilon();
 // use this macro to enable additional sanity checks in structs like Transform, WorldTransform, vanguard::math::simd::QsTransform
 // #define RED_MATH_USE_PARANOID_SANITY_CHECK
 #ifdef RED_MATH_USE_PARANOID_SANITY_CHECK
-#define RED_MATH_PARANOID_SANITY_CHECK(x)                                                                                                  \
-    {                                                                                                                                      \
-        RED_MATH_ASSERT(x);                                                                                                                \
+#define RED_MATH_PARANOID_SANITY_CHECK(x)                                                                                                                      \
+    {                                                                                                                                                          \
+        RED_MATH_ASSERT(x);                                                                                                                                    \
     }
 #else
 #define RED_MATH_PARANOID_SANITY_CHECK(x)

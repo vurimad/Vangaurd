@@ -6,13 +6,9 @@
 
 namespace vanguard::packages::backend
 {
-    Result CompressLz4(
-        const void* const source,
-        const usize sourceSize,
-        containers::DynamicArray<u8>& destination) noexcept
+    Result CompressLz4(const void* const source, const usize sourceSize, containers::DynamicArray<u8>& destination) noexcept
     {
-        if ((sourceSize != 0 && source == nullptr) ||
-            sourceSize > static_cast<usize>(std::numeric_limits<int>::max()))
+        if ((sourceSize != 0 && source == nullptr) || sourceSize > static_cast<usize>(std::numeric_limits<int>::max()))
         {
             return Result::InvalidArgument;
         }
@@ -30,11 +26,7 @@ namespace vanguard::packages::backend
         }
 
         destination.Resize(static_cast<u32>(bound));
-        const int compressedSize = LZ4_compress_limitedOutput(
-            static_cast<const char*>(source),
-            reinterpret_cast<char*>(destination.Data()),
-            inputSize,
-            bound);
+        const int compressedSize = LZ4_compress_limitedOutput(static_cast<const char*>(source), reinterpret_cast<char*>(destination.Data()), inputSize, bound);
         if (compressedSize <= 0)
         {
             destination.Clear();
@@ -44,34 +36,20 @@ namespace vanguard::packages::backend
         return Result::Success;
     }
 
-    Result DecompressLz4(
-        const void* const source,
-        const usize sourceSize,
-        void* const destination,
-        const usize destinationSize) noexcept
+    Result DecompressLz4(const void* const source, const usize sourceSize, void* const destination, const usize destinationSize) noexcept
     {
-        if ((sourceSize != 0 && source == nullptr) ||
-            (destinationSize != 0 && destination == nullptr) ||
-            sourceSize > static_cast<usize>(std::numeric_limits<int>::max()) ||
-            destinationSize >
-                static_cast<usize>(std::numeric_limits<int>::max()))
+        if ((sourceSize != 0 && source == nullptr) || (destinationSize != 0 && destination == nullptr) ||
+            sourceSize > static_cast<usize>(std::numeric_limits<int>::max()) || destinationSize > static_cast<usize>(std::numeric_limits<int>::max()))
         {
             return Result::InvalidArgument;
         }
         if (destinationSize == 0)
         {
-            return sourceSize == 0
-                ? Result::Success
-                : Result::CompressionFailure;
+            return sourceSize == 0 ? Result::Success : Result::CompressionFailure;
         }
 
-        const int decompressedSize = LZ4_decompress_safe(
-            static_cast<const char*>(source),
-            static_cast<char*>(destination),
-            static_cast<int>(sourceSize),
-            static_cast<int>(destinationSize));
-        return decompressedSize == static_cast<int>(destinationSize)
-            ? Result::Success
-            : Result::CompressionFailure;
+        const int decompressedSize = LZ4_decompress_safe(static_cast<const char*>(source), static_cast<char*>(destination), static_cast<int>(sourceSize),
+                                                         static_cast<int>(destinationSize));
+        return decompressedSize == static_cast<int>(destinationSize) ? Result::Success : Result::CompressionFailure;
     }
-}
+} // namespace vanguard::packages::backend

@@ -58,12 +58,12 @@ namespace vanguard::game
         void GainFocus() noexcept;
         void LoseFocus() noexcept;
 
-        [[nodiscard]] RuntimeSystem* System(RuntimeSystemId id) noexcept;
-        [[nodiscard]] const RuntimeSystem* System(RuntimeSystemId id) const noexcept;
+        [[nodiscard]] RuntimeSystem* GetSystem(RuntimeSystemId id) noexcept;
+        [[nodiscard]] const RuntimeSystem* GetSystem(RuntimeSystemId id) const noexcept;
         [[nodiscard]] const char* ReadinessBlocker() const noexcept;
         [[nodiscard]] WorldMode Mode() const noexcept;
-        [[nodiscard]] ecs::World& Entities() noexcept;
-        [[nodiscard]] const ecs::World& Entities() const noexcept;
+        [[nodiscard]] ecs::World& GetEntities() noexcept;
+        [[nodiscard]] const ecs::World& GetEntities() const noexcept;
         [[nodiscard]] GameWorldStats GetStats() const noexcept;
 
     private:

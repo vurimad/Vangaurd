@@ -1,5 +1,7 @@
 #include <vanguard/streaming/streaming.hpp>
 
+#include <vanguard/streaming/resource_source_internal.hpp>
+
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -35,26 +37,52 @@ namespace
         memory::Free(block);
     }
 
-    [[nodiscard]] constexpr vanguard::io::AsyncPriority ToIoPriority(const resources::LoadPriority priority) noexcept
+} // namespace
+
+namespace vanguard::streaming
+{
+    io::AsyncPriority ToIoPriority(const resources::LoadPriority priority) noexcept
     {
         switch (priority)
         {
         case resources::LoadPriority::Background:
         case resources::LoadPriority::Low:
-            return vanguard::io::eAsyncPriority_Background;
+            return io::eAsyncPriority_Background;
         case resources::LoadPriority::Normal:
-            return vanguard::io::eAsyncPriority_Normal;
+            return io::eAsyncPriority_Normal;
         case resources::LoadPriority::High:
-            return vanguard::io::eAsyncPriority_High;
+            return io::eAsyncPriority_High;
         case resources::LoadPriority::Critical:
-            return vanguard::io::eAsyncPriority_GAMEPLAY_CRITICAL;
+            return io::eAsyncPriority_GAMEPLAY_CRITICAL;
         }
-        return vanguard::io::eAsyncPriority_Normal;
+        return io::eAsyncPriority_Normal;
     }
-} // namespace
 
-namespace vanguard::streaming
-{
+    resources::Failure ToFailure(const ResourceSourceResult result) noexcept
+    {
+        switch (result)
+        {
+        case ResourceSourceResult::Success:
+            return resources::Failure::None;
+        case ResourceSourceResult::NotFound:
+            return resources::Failure::NotFound;
+        case ResourceSourceResult::TypeMismatch:
+        case ResourceSourceResult::IntegrityFailure:
+            return resources::Failure::IntegrityFailure;
+        case ResourceSourceResult::UnsupportedVersion:
+            return resources::Failure::UnsupportedVersion;
+        case ResourceSourceResult::LimitExceeded:
+        case ResourceSourceResult::BufferTooSmall:
+            return resources::Failure::OutOfMemory;
+        case ResourceSourceResult::Cancelled:
+            return resources::Failure::Cancelled;
+        case ResourceSourceResult::IoFailure:
+            return resources::Failure::IoFailure;
+        default:
+            return resources::Failure::InternalError;
+        }
+    }
+
     namespace
     {
         struct LooseEntry
@@ -71,7 +99,13 @@ namespace vanguard::streaming
 
         struct PackageMount
         {
+            ~PackageMount()
+            {
+                detail::ReleaseResourceSourcePackageGeneration(generation);
+            }
+
             const packages::PackageReader* reader = nullptr;
+            detail::ResourceSourcePackageGeneration* generation = nullptr;
             filesystem::AbsolutePath path;
             i32 priority = 0;
             u64 sequence = 0;
@@ -92,44 +126,22 @@ namespace vanguard::streaming
             }
         };
 
-        struct StreamLoad;
-
-        struct ReadPiece
-        {
-            StreamLoad* load = nullptr;
-            io::AsyncReadToken token;
-            u32 index = 0;
-        };
-
         struct StreamLoad
         {
             StreamLoad() noexcept
-                : dependencies(memory::pools::Streaming::GetInstance()), segments(memory::pools::Streaming::GetInstance()),
-                  compressedOffsets(memory::pools::Streaming::GetInstance()), reads(memory::pools::Streaming::GetInstance())
+                : dependencies(memory::pools::Streaming::GetInstance())
             {
             }
 
             ResourceStreamer::Impl* owner = nullptr;
             resources::ResourceReference reference;
             DecoderDescriptor decoder;
-            SourceKind kind = SourceKind::LooseFile;
-            LooseEntry* loose = nullptr;
-            PackageMount* package = nullptr;
-            const packages::PackageReader* packageReader = nullptr;
-            packages::Resource packageResource;
-            filesystem::AbsolutePath physicalPath;
             containers::DynamicArray<DependencyDescriptor> dependencies;
-            containers::DynamicArray<packages::Segment> segments;
-            containers::DynamicArray<u64> compressedOffsets;
-            containers::DynamicArray<ReadPiece*> reads;
+            ResourceSource source;
+            ResourceReadRequest sourceRead;
             resources::PreparationRequest preparation;
             memory::MemoryBlock logicalData;
-            memory::MemoryBlock compressedData;
-            io::FileHandle file = io::InvalidFileHandle;
-            concurrency::Atomic<u32> pendingReads{0};
-            concurrency::Atomic<u32> readFailure{static_cast<u32>(resources::Failure::None)};
             u64 logicalSize = 0;
-            u64 compressedBytes = 0;
             u64 reservedBytes = 0;
             u64 expectedCrc64 = 0;
             bool preparationStarted = false;
@@ -186,7 +198,7 @@ namespace vanguard::streaming
             SchemaDependencyValidation(const resources::LoadContext& loadContext) noexcept
                 : context(loadContext), matched(memory::pools::Streaming::GetInstance())
             {
-                matched.Resize(context.DependencyCount());
+                matched.Resize(context.GetDependencyCount());
                 for (u32 index = 0; index < matched.Size(); ++index)
                 {
                     matched[index] = 0;
@@ -206,13 +218,12 @@ namespace vanguard::streaming
             {
                 return true;
             }
-            const resources::DependencyRequirement required = kind == resources::DependencyKind::Optional
-                                                                  ? resources::DependencyRequirement::Optional
-                                                                  : resources::DependencyRequirement::Required;
-            for (u32 index = 0; index < state.context.DependencyCount(); ++index)
+            const resources::DependencyRequirement required =
+                kind == resources::DependencyKind::Optional ? resources::DependencyRequirement::Optional : resources::DependencyRequirement::Required;
+            for (u32 index = 0; index < state.context.GetDependencyCount(); ++index)
             {
-                if (state.matched[index] == 0 && state.context.DependencyReference(index) == reference &&
-                    state.context.DependencyRequirementAt(index) == required)
+                if (state.matched[index] == 0 && state.context.GetDependencyReference(index) == reference &&
+                    state.context.GetDependencyRequirementAt(index) == required)
                 {
                     state.matched[index] = 1;
                     return true;
@@ -222,15 +233,15 @@ namespace vanguard::streaming
             return false;
         }
 
-        [[nodiscard]] resources::ResourceObject* DecodeSchemaResource(const resources::ResourceReference reference, const void* const data,
-                                                                      const usize size, const resources::LoadContext& context,
-                                                                      resources::Failure& failure, void* const userData) noexcept
+        [[nodiscard]] resources::ResourceObject* DecodeSchemaResource(const resources::ResourceReference reference, const void* const data, const usize size,
+                                                                      const resources::LoadContext& context, resources::Failure& failure,
+                                                                      void* const userData) noexcept
         {
             const auto& descriptor = *static_cast<const SchemaDecoderDescriptor*>(userData);
             const reflection::Schema* const schema =
                 descriptor.resolveSchema != nullptr ? descriptor.resolveSchema(context, descriptor.userData) : descriptor.schema;
-            if (!descriptor.IsValid() || descriptor.type != reference.ExpectedType() || schema == nullptr ||
-                reflection::FindSchema(schema->id) != schema || size > static_cast<usize>(~u32{0}) || context.IsCancellationRequested())
+            if (!descriptor.IsValid() || descriptor.type != reference.ExpectedType() || schema == nullptr || reflection::FindSchema(schema->id) != schema ||
+                size > static_cast<usize>(~u32{0}) || context.IsCancellationRequested())
             {
                 failure = context.IsCancellationRequested() ? resources::Failure::Cancelled : resources::Failure::InternalError;
                 return nullptr;
@@ -243,7 +254,7 @@ namespace vanguard::streaming
                 return nullptr;
             }
             void* const object = descriptor.object(*resource, descriptor.userData);
-            if (object == nullptr || resource->Type() != descriptor.type)
+            if (object == nullptr || resource->GetType() != descriptor.type)
             {
                 descriptor.destroy(resource, descriptor.userData);
                 failure = resources::Failure::InternalError;
@@ -261,7 +272,7 @@ namespace vanguard::streaming
             }
 
             SchemaDependencyValidation validation(context);
-            if (validation.matched.Size() != context.DependencyCount())
+            if (validation.matched.Size() != context.GetDependencyCount())
             {
                 descriptor.destroy(resource, descriptor.userData);
                 failure = resources::Failure::OutOfMemory;
@@ -325,15 +336,11 @@ namespace vanguard::streaming
         containers::DynamicArray<PackageMount*> packageMounts;
         containers::HashMap<resources::ResourceId, StreamLoad*> activeLoads;
         u64 nextSequence = 1;
-        u64 stagingBytesInUse = 0;
-        u64 peakStagingBytes = 0;
-        u64 bytesRead = 0;
         u64 completedLoads = 0;
         u64 failedLoads = 0;
         u64 cancelledLoads = 0;
         u64 integrityFailures = 0;
-        u64 budgetRejections = 0;
-        u32 activeReads = 0;
+        detail::ResourceSourceAccounting* sourceAccounting = nullptr;
 
         [[nodiscard]] ResolvedSource ResolveLocked(const resources::ResourceId id) noexcept
         {
@@ -341,7 +348,7 @@ namespace vanguard::streaming
             bool found = false;
             for (LooseEntry* const loose : looseEntries)
             {
-                if (loose->reference.Path().Id() != id)
+                if (loose->reference.GetPath().Id() != id)
                 {
                     continue;
                 }
@@ -371,7 +378,7 @@ namespace vanguard::streaming
         {
             if (load.reservedBytes != 0)
             {
-                stagingBytesInUse -= load.reservedBytes;
+                detail::ReleaseResourceSourceStaging(sourceAccounting, load.reservedBytes);
                 load.reservedBytes = 0;
             }
         }
@@ -386,53 +393,73 @@ namespace vanguard::streaming
             }
             load.released = true;
             StreamLoad* current = nullptr;
-            if (activeLoads.Find(load.reference.Path().Id(), current) && current == &load)
+            if (activeLoads.Find(load.reference.GetPath().Id(), current) && current == &load)
             {
-                static_cast<void>(activeLoads.Remove(load.reference.Path().Id()));
+                static_cast<void>(activeLoads.Remove(load.reference.GetPath().Id()));
             }
             ReleaseBudgetLocked(load);
             lock.Release();
 
-            if (load.file != io::InvalidFileHandle)
-            {
-                io::System().ReleaseFile(load.file);
-                load.file = io::InvalidFileHandle;
-            }
-            for (ReadPiece* const read : load.reads)
-            {
-                DeleteStreamingObject(read);
-            }
-            load.reads.Clear();
+            load.sourceRead.Reset();
             memory::Free(load.logicalData);
-            memory::Free(load.compressedData);
             DeleteStreamingObject(&load);
         }
 
         [[nodiscard]] bool ReserveStaging(StreamLoad& load, const u64 requestedBytes) noexcept
         {
-            lock.Acquire();
-            if (requestedBytes > config.stagingBudgetBytes || stagingBytesInUse > config.stagingBudgetBytes - requestedBytes)
-            {
-                ++budgetRejections;
-                lock.Release();
+            if (!detail::ReserveResourceSourceStaging(sourceAccounting, requestedBytes))
                 return false;
-            }
-            stagingBytesInUse += requestedBytes;
             load.reservedBytes = requestedBytes;
-            if (stagingBytesInUse > peakStagingBytes)
-            {
-                peakStagingBytes = stagingBytesInUse;
-            }
-            lock.Release();
             return true;
         }
 
-        [[nodiscard]] StreamLoad* FindLoad(const resources::ResourcePath path) noexcept
+        [[nodiscard]] resources::Failure OpenResolvedLocked(const resources::ResourceReference reference, ResourceSource& output,
+                                                            containers::DynamicArray<DependencyDescriptor>& dependencies,
+                                                            u64* const expectedCrc64 = nullptr) noexcept
         {
-            StreamLoad* load = nullptr;
-            VG_SCOPE_SHARED_LOCK(lock);
-            static_cast<void>(activeLoads.Find(path.Id(), load));
-            return load;
+            const ResolvedSource source = ResolveLocked(reference.GetPath().Id());
+            if (!source)
+                return resources::Failure::NotFound;
+            const resources::ResourceTypeId sourceType =
+                source.kind == SourceKind::LooseFile ? source.loose->reference.ExpectedType() : source.packageResource->type;
+            if (sourceType != reference.ExpectedType())
+                return resources::Failure::IntegrityFailure;
+
+            ResourceSourceResult opened = ResourceSourceResult::InvalidState;
+            if (source.kind == SourceKind::LooseFile)
+            {
+                if (expectedCrc64 != nullptr)
+                    *expectedCrc64 = source.loose->expectedCrc64;
+                for (const DependencyDescriptor& dependency : source.loose->dependencies)
+                {
+                    if (dependency.kind != resources::DependencyKind::Soft)
+                        dependencies.PushBack(dependency);
+                }
+                opened = output.OpenLoose(source.loose->path, reference.GetPath().Id(), reference.ExpectedType());
+            }
+            else
+            {
+                if (expectedCrc64 != nullptr)
+                    *expectedCrc64 = source.packageResource->contentCrc64;
+                if (source.package->reader->GetSegments(*source.packageResource).Count() > config.maximumSegmentsPerResource)
+                    return resources::Failure::DependencyLimit;
+                const auto packagedDependencies = source.package->reader->GetDependencies(*source.packageResource);
+                if (packagedDependencies.Count() > config.maximumDependenciesPerResource)
+                    return resources::Failure::DependencyLimit;
+                for (const packages::Dependency& dependency : packagedDependencies)
+                {
+                    if (dependency.kind != resources::DependencyKind::Soft)
+                        dependencies.PushBack({resources::ResourceReference(resources::ResourcePath::FromId(dependency.id), dependency.type), dependency.kind});
+                }
+                opened = output.OpenPackage(source.package->generation, reference.GetPath().Id(), reference.ExpectedType());
+            }
+            if (opened != ResourceSourceResult::Success)
+            {
+                dependencies.Clear();
+                return ToFailure(opened);
+            }
+            output.AttachAccounting(sourceAccounting);
+            return resources::Failure::None;
         }
 
         [[nodiscard]] resources::Failure CreateLoad(const resources::ResourceReference reference, StreamLoad*& output) noexcept
@@ -440,7 +467,7 @@ namespace vanguard::streaming
             output = nullptr;
             lock.Acquire();
             StreamLoad* existing = nullptr;
-            if (activeLoads.Find(reference.Path().Id(), existing))
+            if (activeLoads.Find(reference.GetPath().Id(), existing))
             {
                 lock.Release();
                 return resources::Failure::InternalError;
@@ -452,21 +479,6 @@ namespace vanguard::streaming
                 lock.Release();
                 return resources::Failure::UnknownType;
             }
-            const ResolvedSource source = ResolveLocked(reference.Path().Id());
-            if (!source)
-            {
-                lock.Release();
-                return resources::Failure::NotFound;
-            }
-
-            const resources::ResourceTypeId sourceType =
-                source.kind == SourceKind::LooseFile ? source.loose->reference.ExpectedType() : source.packageResource->type;
-            if (sourceType != reference.ExpectedType())
-            {
-                lock.Release();
-                return resources::Failure::IntegrityFailure;
-            }
-
             StreamLoad* const load = AllocateStreamingObject<StreamLoad>();
             if (load == nullptr)
             {
@@ -476,56 +488,16 @@ namespace vanguard::streaming
             load->owner = this;
             load->reference = reference;
             load->decoder = decoder;
-            load->kind = source.kind;
-
-            if (source.kind == SourceKind::LooseFile)
+            const resources::Failure opened = OpenResolvedLocked(reference, load->source, load->dependencies, &load->expectedCrc64);
+            if (opened != resources::Failure::None)
             {
-                load->loose = source.loose;
-                load->physicalPath = source.loose->path;
-                load->expectedCrc64 = source.loose->expectedCrc64;
-                for (const DependencyDescriptor& dependency : source.loose->dependencies)
-                {
-                    load->dependencies.PushBack(dependency);
-                }
+                DeleteStreamingObject(load);
+                lock.Release();
+                return opened;
             }
-            else
-            {
-                load->package = source.package;
-                load->packageReader = source.package->reader;
-                load->packageResource = *source.packageResource;
-                load->physicalPath = source.package->path;
-                load->expectedCrc64 = source.packageResource->contentCrc64;
-                const auto segments = source.package->reader->Segments(*source.packageResource);
-                if (segments.Count() > config.maximumSegmentsPerResource)
-                {
-                    DeleteStreamingObject(load);
-                    lock.Release();
-                    return resources::Failure::DependencyLimit;
-                }
-                for (const packages::Segment& segment : segments)
-                {
-                    load->segments.PushBack(segment);
-                }
+            load->logicalSize = load->source.GetLogicalSize();
 
-                const auto dependencyIds = source.package->reader->Dependencies(*source.packageResource);
-                if (dependencyIds.Count() > config.maximumDependenciesPerResource)
-                {
-                    DeleteStreamingObject(load);
-                    lock.Release();
-                    return resources::Failure::DependencyLimit;
-                }
-                for (const packages::Dependency& dependency : dependencyIds)
-                {
-                    if (dependency.kind == resources::DependencyKind::Soft)
-                    {
-                        continue;
-                    }
-                    load->dependencies.PushBack(DependencyDescriptor{
-                        resources::ResourceReference(resources::ResourcePath::FromId(dependency.id), dependency.type), dependency.kind});
-                }
-            }
-
-            if (!activeLoads.Insert(reference.Path().Id(), load).IsSuccessful())
+            if (!activeLoads.Insert(reference.GetPath().Id(), load).IsSuccessful())
             {
                 DeleteStreamingObject(load);
                 lock.Release();
@@ -536,97 +508,28 @@ namespace vanguard::streaming
             return resources::Failure::None;
         }
 
-        [[nodiscard]] bool AddReadPiece(StreamLoad& load, const u32 index, void* const destination, const u64 offset, const u64 size,
-                                        const resources::LoadPriority priority) noexcept
-        {
-            if (size > std::numeric_limits<u32>::max() || offset > static_cast<u64>(std::numeric_limits<i64>::max()))
-            {
-                return false;
-            }
-            ReadPiece* const piece = AllocateStreamingObject<ReadPiece>();
-            if (piece == nullptr)
-            {
-                return false;
-            }
-            piece->load = &load;
-            piece->index = index;
-            piece->token.m_callback = &IoReadCompletedThunk;
-            piece->token.m_userData = piece;
-            piece->token.m_buffer = destination;
-            piece->token.m_debugLogicalFileName = load.physicalPath.AsChar();
-            piece->token.m_offset = static_cast<i64>(offset);
-            piece->token.m_numberOfBytesToRead = static_cast<u32>(size);
-            piece->token.m_requestSource = io::RequestSource::ResourceSystem;
-            load.reads.PushBack(piece);
-            static_cast<void>(priority);
-            return true;
-        }
-
         [[nodiscard]] bool StartPreparation(StreamLoad& load, const resources::PreparationRequest& preparation) noexcept
         {
             load.preparation = preparation;
             load.preparationStarted = true;
             if (preparation.IsCancellationRequested())
             {
+                static_cast<void>(preparation.TakeLoaderState());
                 static_cast<void>(preparation.Complete(resources::Failure::Cancelled));
                 ReleaseLoad(load);
                 return true;
             }
 
-            load.file = io::System().OpenFile(load.physicalPath.AsChar(), io::eAsyncFlag_TryCloseFileWhenNotUsed);
-            if (load.file == io::InvalidFileHandle)
+            if (load.logicalSize > config.maximumResourceBytes || load.logicalSize > static_cast<u64>(std::numeric_limits<usize>::max()))
             {
-                static_cast<void>(preparation.Complete(resources::Failure::NotFound));
-                lock.Acquire();
-                ++failedLoads;
-                lock.Release();
-                ReleaseLoad(load);
-                return true;
-            }
-
-            if (load.kind == SourceKind::LooseFile)
-            {
-                load.logicalSize = io::System().GetFileSize(load.file);
-            }
-            else
-            {
-                load.logicalSize = load.packageResource.logicalSize;
-                u64 compressedOffset = 0;
-                for (const packages::Segment& segment : load.segments)
-                {
-                    if (segment.codec == packages::Codec::Lz4)
-                    {
-                        load.compressedOffsets.PushBack(compressedOffset);
-                        if (compressedOffset > ~u64{0} - segment.storedSize)
-                        {
-                            static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
-                            ReleaseLoad(load);
-                            return true;
-                        }
-                        compressedOffset += segment.storedSize;
-                    }
-                    else
-                    {
-                        load.compressedOffsets.PushBack(~u64{0});
-                    }
-                }
-                load.compressedBytes = compressedOffset;
-            }
-
-            if (load.logicalSize > config.maximumResourceBytes || load.compressedBytes > config.maximumResourceBytes ||
-                load.logicalSize > ~u64{0} - load.compressedBytes)
-            {
+                static_cast<void>(preparation.TakeLoaderState());
                 static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
-                lock.Acquire();
-                ++budgetRejections;
-                lock.Release();
                 ReleaseLoad(load);
                 return true;
             }
-
-            const u64 stagingBytes = load.logicalSize + load.compressedBytes;
-            if (!ReserveStaging(load, stagingBytes))
+            if (!ReserveStaging(load, load.logicalSize))
             {
+                static_cast<void>(preparation.TakeLoaderState());
                 static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
                 ReleaseLoad(load);
                 return true;
@@ -637,128 +540,47 @@ namespace vanguard::streaming
                 load.logicalData = memory::Allocate(memory::PoolId::Streaming, static_cast<usize>(load.logicalSize), 16);
                 if (!load.logicalData)
                 {
+                    static_cast<void>(preparation.TakeLoaderState());
                     static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
                     ReleaseLoad(load);
                     return true;
                 }
             }
-            if (load.compressedBytes != 0)
+            const ResourceRangeRead read{0, load.logicalSize, load.logicalData.address, static_cast<usize>(load.logicalSize), ToIoPriority(preparation.Priority())};
+            const ResourceSourceResult started = load.source.ReadAsync(read, load.sourceRead, &SourceReadCompletedThunk, &load);
+            if (started != ResourceSourceResult::Success)
             {
-                load.compressedData = memory::Allocate(memory::PoolId::Streaming, static_cast<usize>(load.compressedBytes), 16);
-                if (!load.compressedData)
-                {
-                    static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
-                    ReleaseLoad(load);
-                    return true;
-                }
-            }
-
-            const resources::LoadPriority priority = preparation.Priority();
-            if (load.kind == SourceKind::LooseFile)
-            {
-                if (load.logicalSize != 0 && !AddReadPiece(load, 0, load.logicalData.address, 0, load.logicalSize, priority))
-                {
-                    static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
-                    ReleaseLoad(load);
-                    return true;
-                }
-            }
-            else
-            {
-                u64 logicalOffset = 0;
-                for (u32 index = 0; index < load.segments.Size(); ++index)
-                {
-                    const packages::Segment& segment = load.segments[index];
-                    void* destination = nullptr;
-                    if (segment.codec == packages::Codec::None)
-                    {
-                        destination = static_cast<u8*>(load.logicalData.address) + logicalOffset;
-                    }
-                    else
-                    {
-                        destination = static_cast<u8*>(load.compressedData.address) + load.compressedOffsets[index];
-                    }
-                    if (segment.storedSize != 0 && !AddReadPiece(load, index, destination, segment.offset, segment.storedSize, priority))
-                    {
-                        static_cast<void>(preparation.Complete(resources::Failure::OutOfMemory));
-                        ReleaseLoad(load);
-                        return true;
-                    }
-                    logicalOffset += segment.logicalSize;
-                }
-            }
-
-            if (load.reads.Empty())
-            {
-                io::System().ReleaseFile(load.file);
-                load.file = io::InvalidFileHandle;
-                static_cast<void>(preparation.Complete());
-                return true;
-            }
-
-            load.pendingReads.SetValue(load.reads.Size());
-            lock.Acquire();
-            activeReads += load.reads.Size();
-            lock.Release();
-            const io::AsyncPriority ioPriority = ToIoPriority(priority);
-            for (ReadPiece* const read : load.reads)
-            {
-                io::System().BeginRead(load.file, read->token, ioPriority);
+                static_cast<void>(preparation.TakeLoaderState());
+static_cast<void>(preparation.Complete(ToFailure(started)));
+                ReleaseLoad(load);
             }
             return true;
         }
 
-        static void IoReadCompletedThunk(const io::AsyncReadToken& token, const io::AsyncResult result, const u32 bytesTransferred,
-                                         io::ShareableIOMemory, const u32, io::UniqueBuffer)
+        static void SourceReadCompletedThunk(const ResourceSourceResult result, const ResourceReadStats&, void* const userData)
         {
-            auto* const piece = static_cast<ReadPiece*>(token.m_userData);
-            piece->load->owner->OnReadCompleted(*piece, result, bytesTransferred);
+            auto& load = *static_cast<StreamLoad*>(userData);
+            load.owner->OnSourceReadCompleted(load, result);
         }
 
-        void OnReadCompleted(ReadPiece& piece, const io::AsyncResult result, const u32 bytesTransferred) noexcept
+        void OnSourceReadCompleted(StreamLoad& load, const ResourceSourceResult result) noexcept
         {
-            StreamLoad& load = *piece.load;
-            resources::Failure failure = resources::Failure::None;
-            if (result == io::eAsyncResult_Canceled || load.preparation.IsCancellationRequested())
-            {
+            load.sourceRead.Reset();
+resources::Failure failure = ToFailure(result);
+            if (load.preparation.IsCancellationRequested())
                 failure = resources::Failure::Cancelled;
-            }
-            else if (result != io::eAsyncResult_Success || bytesTransferred != piece.token.m_numberOfBytesToRead)
-            {
-                failure = resources::Failure::IoFailure;
-            }
+            static_cast<void>(load.preparation.Complete(failure));
             if (failure != resources::Failure::None)
             {
-                static_cast<void>(load.readFailure.CompareExchange(static_cast<u32>(failure), static_cast<u32>(resources::Failure::None)));
-            }
-
-            lock.Acquire();
-            --activeReads;
-            bytesRead += bytesTransferred;
-            lock.Release();
-
-            if (load.pendingReads.Decrement() != 0)
-            {
-                return;
-            }
-
-            if (load.file != io::InvalidFileHandle)
-            {
-                io::System().ReleaseFile(load.file);
-                load.file = io::InvalidFileHandle;
-            }
-            const resources::Failure finalFailure = static_cast<resources::Failure>(load.readFailure.GetValue());
-            static_cast<void>(load.preparation.Complete(finalFailure));
-            if (finalFailure != resources::Failure::None)
-            {
+                static_cast<void>(load.preparation.TakeLoaderState());
                 lock.Acquire();
-                if (finalFailure == resources::Failure::Cancelled)
-                {
+                if (failure == resources::Failure::Cancelled)
                     ++cancelledLoads;
-                }
                 else
                 {
                     ++failedLoads;
+                    if (failure == resources::Failure::IntegrityFailure)
+                        ++integrityFailures;
                 }
                 lock.Release();
                 ReleaseLoad(load);
@@ -767,70 +589,27 @@ namespace vanguard::streaming
 
         void CancelPreparation(const resources::PreparationRequest& request) noexcept
         {
-            StreamLoad* const load = FindLoad(request.Reference().Path());
+            auto* const load = static_cast<StreamLoad*>(request.TakeLoaderState());
             if (load == nullptr)
-            {
                 return;
-            }
-            if (load->pendingReads.GetValue() == 0)
+            if (!load->sourceRead.IsValid() || load->sourceRead.HasFinished())
             {
                 ReleaseLoad(*load);
                 return;
             }
-            for (ReadPiece* const read : load->reads)
-            {
-                // A read may complete and release its I/O context while sibling pieces are still pending. Cancellation
-                // therefore applies only to tokens that still own a live context; completion remains authoritative.
-                if (read->token.m_ioContext) read->token.m_ioContext->RequestCancel();
-            }
+            static_cast<void>(load->sourceRead.Cancel());
         }
 
         [[nodiscard]] resources::ResourceObject* Decode(const resources::LoadContext& context, resources::Failure& failure) noexcept
         {
-            StreamLoad* const load = FindLoad(context.Reference().Path());
+            auto* const load = static_cast<StreamLoad*>(context.TakeLoaderState());
             if (load == nullptr)
             {
                 failure = resources::Failure::InternalError;
                 return nullptr;
             }
 
-            if (load->kind == SourceKind::Package)
-            {
-                u64 logicalOffset = 0;
-                for (u32 index = 0; index < load->segments.Size(); ++index)
-                {
-                    const packages::Segment& segment = load->segments[index];
-                    const void* stored = nullptr;
-                    if (segment.codec == packages::Codec::None)
-                    {
-                        stored = static_cast<const u8*>(load->logicalData.address) + logicalOffset;
-                    }
-                    else
-                    {
-                        stored = static_cast<const u8*>(load->compressedData.address) + load->compressedOffsets[index];
-                    }
-                    void* const destination = static_cast<u8*>(load->logicalData.address) + logicalOffset;
-                    const packages::Result result = load->packageReader->DecodeSegment(
-                        segment, stored, static_cast<usize>(segment.storedSize), destination, static_cast<usize>(segment.logicalSize));
-                    if (result != packages::Result::Success)
-                    {
-                        failure = ConvertPackageFailure(result);
-                        lock.Acquire();
-                        ++failedLoads;
-                        if (failure == resources::Failure::IntegrityFailure)
-                        {
-                            ++integrityFailures;
-                        }
-                        lock.Release();
-                        ReleaseLoad(*load);
-                        return nullptr;
-                    }
-                    logicalOffset += segment.logicalSize;
-                }
-            }
-
-            if (serialization::Crc64(load->logicalData.address, static_cast<usize>(load->logicalSize)) != load->expectedCrc64 &&
-                load->expectedCrc64 != 0)
+            if (serialization::Crc64(load->logicalData.address, static_cast<usize>(load->logicalSize)) != load->expectedCrc64 && load->expectedCrc64 != 0)
             {
                 failure = resources::Failure::IntegrityFailure;
                 lock.Acquire();
@@ -841,9 +620,8 @@ namespace vanguard::streaming
                 return nullptr;
             }
 
-            resources::ResourceObject* const resource =
-                load->decoder.decode(load->reference, load->logicalData.address, static_cast<usize>(load->logicalSize), context, failure,
-                                     load->decoder.userData);
+            resources::ResourceObject* const resource = load->decoder.decode(load->reference, load->logicalData.address, static_cast<usize>(load->logicalSize),
+                                                                             context, failure, load->decoder.userData);
             lock.Acquire();
             if (resource != nullptr)
             {
@@ -858,8 +636,8 @@ namespace vanguard::streaming
             return resource;
         }
 
-        static resources::Failure DiscoverDependencies(const resources::ResourceReference reference,
-                                                       resources::DependencyBuilder& dependencies, void* const userData) noexcept
+        static resources::Failure DiscoverDependencies(const resources::ResourceReference reference, resources::DependencyBuilder& dependencies,
+                                                       void* const userData) noexcept
         {
             auto& self = *static_cast<Impl*>(userData);
             StreamLoad* load = nullptr;
@@ -867,6 +645,11 @@ namespace vanguard::streaming
             if (failure != resources::Failure::None)
             {
                 return failure;
+            }
+            if (!dependencies.SetLoaderState(load))
+            {
+                self.ReleaseLoad(*load);
+                return resources::Failure::InternalError;
             }
             for (const DependencyDescriptor& dependency : load->dependencies)
             {
@@ -879,7 +662,9 @@ namespace vanguard::streaming
                                                                          : resources::DependencyRequirement::Required;
                 if (!dependencies.Add(dependency.reference, requirement))
                 {
-                    self.ReleaseLoad(*load);
+                    auto* const owned = static_cast<StreamLoad*>(dependencies.TakeLoaderState());
+                    if (owned != nullptr)
+                        self.ReleaseLoad(*owned);
                     return resources::Failure::DependencyLimit;
                 }
             }
@@ -889,7 +674,7 @@ namespace vanguard::streaming
         static bool BeginPreparation(const resources::PreparationRequest& request, void* const userData) noexcept
         {
             auto& self = *static_cast<Impl*>(userData);
-            StreamLoad* const load = self.FindLoad(request.Reference().Path());
+            auto* const load = static_cast<StreamLoad*>(request.GetLoaderState());
             return load != nullptr && self.StartPreparation(*load, request);
         }
 
@@ -898,8 +683,7 @@ namespace vanguard::streaming
             static_cast<Impl*>(userData)->CancelPreparation(request);
         }
 
-        static resources::ResourceObject* Construct(const resources::LoadContext& context, resources::Failure& failure,
-                                                    void* const userData) noexcept
+        static resources::ResourceObject* Construct(const resources::LoadContext& context, resources::Failure& failure, void* const userData) noexcept
         {
             return static_cast<Impl*>(userData)->Decode(context, failure);
         }
@@ -909,7 +693,7 @@ namespace vanguard::streaming
             auto& self = *static_cast<Impl*>(userData);
             DecoderDescriptor decoder;
             self.lock.AcquireShared();
-            static_cast<void>(self.decoders.Find(resource->Type(), decoder));
+            static_cast<void>(self.decoders.Find(resource->GetType(), decoder));
             self.lock.ReleaseShared();
             if (decoder.destroy != nullptr)
             {
@@ -935,7 +719,16 @@ namespace vanguard::streaming
             return false;
         }
         m_impl = AllocateStreamingObject<Impl>(pipeline, config);
-        return m_impl != nullptr;
+        if (m_impl == nullptr)
+            return false;
+        m_impl->sourceAccounting = detail::CreateResourceSourceAccounting(config.stagingBudgetBytes);
+        if (m_impl->sourceAccounting == nullptr)
+        {
+            DeleteStreamingObject(m_impl);
+            m_impl = nullptr;
+            return false;
+        }
+        return true;
     }
 
     bool ResourceStreamer::Shutdown() noexcept
@@ -945,7 +738,8 @@ namespace vanguard::streaming
             return true;
         }
         m_impl->lock.AcquireShared();
-        const bool busy = !m_impl->activeLoads.Empty() || m_impl->activeReads != 0 || m_impl->stagingBytesInUse != 0;
+        const detail::ResourceSourceAccountingStats sourceStats = detail::GetResourceSourceAccountingStats(m_impl->sourceAccounting);
+        const bool busy = !m_impl->activeLoads.Empty() || sourceStats.activeReads != 0 || sourceStats.stagingBytesInUse != 0;
         m_impl->lock.ReleaseShared();
         if (busy)
         {
@@ -968,6 +762,7 @@ namespace vanguard::streaming
         {
             DeleteStreamingObject(mount);
         }
+        detail::ReleaseResourceSourceAccounting(m_impl->sourceAccounting);
         DeleteStreamingObject(m_impl);
         m_impl = nullptr;
         return true;
@@ -1012,8 +807,7 @@ namespace vanguard::streaming
         {
             return false;
         }
-        return RegisterDecoder(
-            {decoder.type, decoder.name, &DecodeSchemaResource, &DestroySchemaResource, const_cast<SchemaDecoderDescriptor*>(&decoder)});
+        return RegisterDecoder({decoder.type, decoder.name, &DecodeSchemaResource, &DestroySchemaResource, const_cast<SchemaDecoderDescriptor*>(&decoder)});
     }
 
     bool ResourceStreamer::UnregisterDecoder(const resources::ResourceTypeId type) noexcept
@@ -1065,7 +859,7 @@ namespace vanguard::streaming
         m_impl->lock.Acquire();
         for (const LooseEntry* const existing : m_impl->looseEntries)
         {
-            if (existing->reference.Path() == entry->reference.Path())
+            if (existing->reference.GetPath() == entry->reference.GetPath())
             {
                 m_impl->lock.Release();
                 DeleteStreamingObject(entry);
@@ -1094,7 +888,7 @@ namespace vanguard::streaming
         for (u32 index = 0; index < m_impl->looseEntries.Size(); ++index)
         {
             LooseEntry* const entry = m_impl->looseEntries[index];
-            if (entry->reference.Path() == path)
+            if (entry->reference.GetPath() == path)
             {
                 static_cast<void>(m_impl->looseEntries.RemoveAt(index));
                 m_impl->lock.Release();
@@ -1106,8 +900,7 @@ namespace vanguard::streaming
         return false;
     }
 
-    bool ResourceStreamer::MountPackage(const packages::PackageReader& reader, const filesystem::AbsolutePath& physicalPath,
-                                        const i32 priority) noexcept
+    bool ResourceStreamer::MountPackage(const packages::PackageReader& reader, const filesystem::AbsolutePath& physicalPath, const i32 priority) noexcept
     {
         const PackageMountDescriptor mount{&reader, physicalPath, priority};
         return MountPackages({&mount, 1});
@@ -1165,6 +958,18 @@ namespace vanguard::streaming
             mount->reader = descriptor.reader;
             mount->path = descriptor.physicalPath;
             mount->priority = descriptor.priority;
+            mount->generation = detail::CreateResourceSourcePackageGeneration(descriptor.physicalPath);
+            const packages::PackageReader* const ownedReader = detail::GetResourceSourcePackageReader(mount->generation);
+            if (ownedReader == nullptr || ownedReader->GetHeader().packageId != descriptor.reader->GetHeader().packageId ||
+                ownedReader->GetHeader().buildId != descriptor.reader->GetHeader().buildId ||
+                ownedReader->GetHeader().indexCrc64 != descriptor.reader->GetHeader().indexCrc64 ||
+                ownedReader->GetHeader().fileSize != descriptor.reader->GetHeader().fileSize)
+            {
+                DeleteStreamingObject(mount);
+                for (PackageMount* const allocated : pending)
+                    DeleteStreamingObject(allocated);
+                return false;
+            }
             pending.PushBack(mount);
         }
 
@@ -1231,17 +1036,6 @@ namespace vanguard::streaming
         }
 
         m_impl->lock.Acquire();
-        for (const auto iterator : m_impl->activeLoads)
-        {
-            for (const PackageMountDescriptor& descriptor : mounts)
-            {
-                if (iterator.Value()->packageReader == descriptor.reader)
-                {
-                    m_impl->lock.Release();
-                    return false;
-                }
-            }
-        }
         for (u32 descriptorIndex = 0; descriptorIndex < mounts.Count(); ++descriptorIndex)
         {
             PackageMount* found = nullptr;
@@ -1279,10 +1073,22 @@ namespace vanguard::streaming
         return true;
     }
 
-    resources::PipelineRequest ResourceStreamer::Request(const resources::ResourceReference reference,
-                                                         const resources::LoadPriority priority) noexcept
+    resources::PipelineRequest ResourceStreamer::Request(const resources::ResourceReference reference, const resources::LoadPriority priority) noexcept
     {
         return m_impl != nullptr ? m_impl->pipeline->Request(reference, priority) : resources::PipelineRequest{};
+    }
+
+    resources::Failure ResourceStreamer::OpenSource(const resources::ResourceReference reference, ResourceSource& output,
+                                                    containers::DynamicArray<DependencyDescriptor>& dependencies) noexcept
+    {
+        dependencies.Clear();
+        if (m_impl == nullptr || output.IsOpen() || !reference.IsValid() || !reference.IsTyped())
+            return resources::Failure::InternalError;
+
+        m_impl->lock.AcquireShared();
+        const resources::Failure opened = m_impl->OpenResolvedLocked(reference, output, dependencies);
+        m_impl->lock.ReleaseShared();
+        return opened;
     }
 
     Stats ResourceStreamer::GetStats() const noexcept
@@ -1293,21 +1099,81 @@ namespace vanguard::streaming
             return stats;
         }
         VG_SCOPE_SHARED_LOCK(m_impl->lock);
+        const detail::ResourceSourceAccountingStats sourceStats = detail::GetResourceSourceAccountingStats(m_impl->sourceAccounting);
         stats.registeredDecoders = m_impl->decoderTypes.Size();
         stats.looseResources = m_impl->looseEntries.Size();
         stats.mountedPackages = m_impl->packageMounts.Size();
         stats.activeLoads = m_impl->activeLoads.Size();
-        stats.activeReads = m_impl->activeReads;
+        stats.activeReads = sourceStats.activeReads;
         stats.stagingBudgetBytes = m_impl->config.stagingBudgetBytes;
-        stats.stagingBytesInUse = m_impl->stagingBytesInUse;
-        stats.peakStagingBytes = m_impl->peakStagingBytes;
-        stats.bytesRead = m_impl->bytesRead;
+        stats.stagingBytesInUse = sourceStats.stagingBytesInUse;
+        stats.peakStagingBytes = sourceStats.peakStagingBytes;
+        stats.bytesRead = sourceStats.bytesRead;
         stats.completedLoads = m_impl->completedLoads;
         stats.failedLoads = m_impl->failedLoads;
         stats.cancelledLoads = m_impl->cancelledLoads;
         stats.integrityFailures = m_impl->integrityFailures;
-        stats.budgetRejections = m_impl->budgetRejections;
+        stats.budgetRejections = sourceStats.budgetRejections;
         return stats;
+    }
+
+    StagingReservation::~StagingReservation()
+    {
+        Reset();
+    }
+
+    StagingReservation::StagingReservation(StagingReservation&& other) noexcept : m_accounting(other.m_accounting), m_bytes(other.m_bytes)
+    {
+        other.m_accounting = nullptr;
+        other.m_bytes = 0;
+    }
+
+    StagingReservation& StagingReservation::operator=(StagingReservation&& other) noexcept
+    {
+        if (this != &other)
+        {
+            Reset();
+            m_accounting = other.m_accounting;
+            m_bytes = other.m_bytes;
+            other.m_accounting = nullptr;
+            other.m_bytes = 0;
+        }
+        return *this;
+    }
+
+    void StagingReservation::Reset() noexcept
+    {
+        detail::ReleaseResourceSourceStaging(m_accounting, m_bytes);
+        detail::ReleaseResourceSourceAccounting(m_accounting);
+        m_accounting = nullptr;
+        m_bytes = 0;
+    }
+
+    u64 StagingReservation::GetBytes() const noexcept
+    {
+        return m_bytes;
+    }
+
+    bool ResourceStreamer::ReserveStaging(const u64 bytes, StagingReservation& reservation) noexcept
+    {
+        if (m_impl == nullptr || (reservation.m_accounting != nullptr && reservation.m_accounting != m_impl->sourceAccounting))
+            return false;
+        if (bytes > reservation.m_bytes)
+        {
+            if (!detail::ReserveResourceSourceStaging(m_impl->sourceAccounting, bytes - reservation.m_bytes))
+                return false;
+        }
+        else
+        {
+            detail::ReleaseResourceSourceStaging(m_impl->sourceAccounting, reservation.m_bytes - bytes);
+        }
+        if (reservation.m_accounting == nullptr)
+        {
+            detail::RetainResourceSourceAccounting(m_impl->sourceAccounting);
+            reservation.m_accounting = m_impl->sourceAccounting;
+        }
+        reservation.m_bytes = bytes;
+        return true;
     }
 
     namespace
@@ -1318,8 +1184,7 @@ namespace vanguard::streaming
             MountedPackageInfo info;
         };
 
-        [[nodiscard]] bool BuildDataPath(const filesystem::AbsolutePath& directory, const u32 packageNumber,
-                                         filesystem::AbsolutePath& path) noexcept
+        [[nodiscard]] bool BuildDataPath(const filesystem::AbsolutePath& directory, const u32 packageNumber, filesystem::AbsolutePath& path) noexcept
         {
             char name[13]{};
             usize written = 0;
@@ -1341,13 +1206,11 @@ namespace vanguard::streaming
             return (static_cast<u32>(flags) & static_cast<u32>(packages::PackageSetEntryFlags::Override)) != 0;
         }
 
-        [[nodiscard]] PackageSetMountResult ConvertCatalogOpenFailure(const packages::Result result,
-                                                                      const bool digestVerification) noexcept
+        [[nodiscard]] PackageSetMountResult ConvertCatalogOpenFailure(const packages::Result result, const bool digestVerification) noexcept
         {
             if (result == packages::Result::IntegrityFailure)
             {
-                return digestVerification ? PackageSetMountResult::PackageDigestMismatch
-                                          : PackageSetMountResult::PackageMetadataMismatch;
+                return digestVerification ? PackageSetMountResult::PackageDigestMismatch : PackageSetMountResult::PackageMetadataMismatch;
             }
             if (result == packages::Result::IoFailure)
             {
@@ -1398,8 +1261,7 @@ namespace vanguard::streaming
             return impl.packages.Size() == previous + 1u;
         }
 
-        [[nodiscard]] bool HasAuthorizedOverrides(const PackageSetMount::Impl& impl,
-                                                  const OwnedSetPackage& candidate) noexcept
+        [[nodiscard]] bool HasAuthorizedOverrides(const PackageSetMount::Impl& impl, const OwnedSetPackage& candidate) noexcept
         {
             for (const OwnedSetPackage* const existing : impl.packages)
             {
@@ -1408,7 +1270,7 @@ namespace vanguard::streaming
                 {
                     continue;
                 }
-                for (const packages::Resource& resource : candidate.reader.Resources())
+                for (const packages::Resource& resource : candidate.reader.GetResources())
                 {
                     if (existing->reader.Find(resource.id) != nullptr && !HasOverride(candidate.info.flags))
                     {
@@ -1561,10 +1423,8 @@ namespace vanguard::streaming
         impl->gameId = packageSet->gameId;
         impl->buildId = packageSet->buildId;
         impl->targetPlatformId = packageSet->targetPlatformId;
-        impl->startupWorld = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->startupWorld),
-                                                           packageSet->startupWorldType);
-        impl->defaultInput = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->defaultInput),
-                                                          packageSet->defaultInputType);
+        impl->startupWorld = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->startupWorld), packageSet->startupWorldType);
+        impl->defaultInput = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->defaultInput), packageSet->defaultInputType);
         root->info = {&root->reader, rootPath, 0, packages::PackageSetEntryFlags::Required, config.rootPriority};
         if (!AddOwnedPackage(*impl, root))
         {
@@ -1615,13 +1475,12 @@ namespace vanguard::streaming
                 DeletePackageSetImpl(impl);
                 return PackageSetMountResult::OutOfMemory;
             }
-            packages::Result opened = packages::OpenCatalogPackage(*file, entry, owned->reader,
-                                                                    packages::CatalogVerification::IndexAndIdentity,
-                                                                    config.packageLimits, config.hashBufferBytes);
+            packages::Result opened = packages::OpenCatalogPackage(*file, entry, owned->reader, packages::CatalogVerification::IndexAndIdentity,
+                                                                   config.packageLimits, config.hashBufferBytes);
             if (opened == packages::Result::Success && config.verification == packages::CatalogVerification::WholeFileDigest)
             {
-                opened = packages::OpenCatalogPackage(*file, entry, owned->reader, packages::CatalogVerification::WholeFileDigest,
-                                                      config.packageLimits, config.hashBufferBytes);
+                opened = packages::OpenCatalogPackage(*file, entry, owned->reader, packages::CatalogVerification::WholeFileDigest, config.packageLimits,
+                                                      config.hashBufferBytes);
             }
             file.Reset();
             if (opened != packages::Result::Success)
@@ -1703,7 +1562,7 @@ namespace vanguard::streaming
         return m_impl != nullptr && m_impl->mounted;
     }
 
-    u64 PackageSetMount::GameId() const noexcept
+    u64 PackageSetMount::GetGameId() const noexcept
     {
         return m_impl != nullptr ? m_impl->gameId : 0;
     }
@@ -1713,7 +1572,7 @@ namespace vanguard::streaming
         return m_impl != nullptr ? m_impl->buildId : 0;
     }
 
-    u32 PackageSetMount::TargetPlatformId() const noexcept
+    u32 PackageSetMount::GetTargetPlatformId() const noexcept
     {
         return m_impl != nullptr ? m_impl->targetPlatformId : 0;
     }
@@ -1723,7 +1582,7 @@ namespace vanguard::streaming
         return m_impl != nullptr ? m_impl->startupWorld : resources::ResourceReference{};
     }
 
-    resources::ResourceReference PackageSetMount::DefaultInput() const noexcept
+    resources::ResourceReference PackageSetMount::GetDefaultInput() const noexcept
     {
         return m_impl != nullptr ? m_impl->defaultInput : resources::ResourceReference{};
     }

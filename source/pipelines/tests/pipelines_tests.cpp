@@ -52,18 +52,15 @@ namespace
 
         ShaderFixture()
         {
-            stages = {
-                {{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size(), "mainPS"},
-                 {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size(), "mainVS"}}};
-            inputs = {{{0x10002, 0, 1, shaders::NumericClass::FloatingPoint, 2, 32},
-                       {0x10001, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
+            stages = {{{shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 0x2002, FragmentBytecode.data(), FragmentBytecode.size(), "mainPS"},
+                       {shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 0x1001, VertexBytecode.data(), VertexBytecode.size(), "mainVS"}}};
+            inputs = {{{0x10002, 0, 1, shaders::NumericClass::FloatingPoint, 2, 32}, {0x10001, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32}}};
             outputs = {{{0x20001, 0, 0, shaders::NumericClass::FloatingPoint, 0x0f}}};
             description.kind = shaders::ProgramKind::Graphics;
             description.program = 0x51504c4e;
             description.permutation = vanguard::crypto::Sha256("pipeline-permutation", 20);
             description.compilerFingerprint = vanguard::crypto::Sha256("compiler-and-options", 20);
-            description.pipelineInterface.stages =
-                shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
+            description.pipelineInterface.stages = shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
             description.pipelineInterface.primitiveClass = shaders::PrimitiveClass::Triangle;
             description.pipelineInterface.renderTargetCount = 1;
             description.stages = {stages.data(), static_cast<vanguard::u32>(stages.size())};
@@ -81,17 +78,14 @@ namespace
 
         explicit GraphicsFixture(const shaders::ShaderFile& shaderFile)
         {
-            shader = {
-                {{0x70001, shaderFile.Permutation(), shaderFile.BindingLayoutFingerprint(), shaderFile.PipelineInterfaceFingerprint()}}};
+            shader = {{{0x70001, shaderFile.GetPermutation(), shaderFile.BindingLayoutFingerprint(), shaderFile.GetPipelineInterfaceFingerprint()}}};
             streams = {{{1, 8, pipelines::InputRate::PerVertex, 1}, {0, 12, pipelines::InputRate::PerVertex, 1}}};
-            attributes = {{{0x10002, 0, 1, 1, 0, shaders::NumericClass::FloatingPoint, 2, 32,
-                            pipelines::Format::R32G32Float, "TEXCOORD"},
-                           {0x10001, 0, 0, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32,
-                            pipelines::Format::R32G32B32Float, "POSITION"}}};
+            attributes = {{{0x10002, 0, 1, 1, 0, shaders::NumericClass::FloatingPoint, 2, 32, pipelines::Format::R32G32Float, "TEXCOORD"},
+                           {0x10001, 0, 0, 0, 0, shaders::NumericClass::FloatingPoint, 3, 32, pipelines::Format::R32G32B32Float, "POSITION"}}};
             description.kind = pipelines::PipelineKind::Graphics;
             description.name = 0x90001;
-            description.dynamicStates = pipelines::DynamicState::Viewport | pipelines::DynamicState::Scissor |
-                                        pipelines::DynamicState::DepthBias | pipelines::DynamicState::DepthBounds;
+            description.dynamicStates = pipelines::DynamicState::Viewport | pipelines::DynamicState::Scissor | pipelines::DynamicState::DepthBias |
+                                        pipelines::DynamicState::DepthBounds;
             description.shaders = {shader.data(), static_cast<vanguard::u32>(shader.size())};
             description.vertexStreams = {streams.data(), static_cast<vanguard::u32>(streams.size())};
             description.vertexAttributes = {attributes.data(), static_cast<vanguard::u32>(attributes.size())};
@@ -162,50 +156,47 @@ int main()
     filesystem::MemoryFileReader pipelineReader(first, 0);
     pipelines::PipelineFile pipeline;
     Check(pipeline.Open(pipelineReader) == pipelines::Result::Success, "open pipeline");
-    Check(pipeline.IsOpen() && pipeline.Kind() == pipelines::PipelineKind::Graphics && pipeline.Name() == fixture.description.name,
+    Check(pipeline.IsOpen() && pipeline.GetKind() == pipelines::PipelineKind::Graphics && pipeline.GetName() == fixture.description.name,
           "pipeline identity round trip");
-    Check(pipeline.Graphics().topology == pipelines::PrimitiveTopology::TriangleList && pipeline.Graphics().blend.attachmentCount == 1 &&
-              pipeline.Graphics().blend.attachments[0].sourceColor == pipelines::BlendFactor::One &&
-              pipeline.Graphics().blend.attachments[0].destinationColor == pipelines::BlendFactor::Zero &&
-              pipeline.Graphics().blend.attachments[0].sourceAlpha == pipelines::BlendFactor::One &&
-              pipeline.Graphics().blend.attachments[0].destinationAlpha == pipelines::BlendFactor::Zero,
+    Check(pipeline.GetGraphics().topology == pipelines::PrimitiveTopology::TriangleList && pipeline.GetGraphics().blend.attachmentCount == 1 &&
+              pipeline.GetGraphics().blend.attachments[0].sourceColor == pipelines::BlendFactor::One &&
+              pipeline.GetGraphics().blend.attachments[0].destinationColor == pipelines::BlendFactor::Zero &&
+              pipeline.GetGraphics().blend.attachments[0].sourceAlpha == pipelines::BlendFactor::One &&
+              pipeline.GetGraphics().blend.attachments[0].destinationAlpha == pipelines::BlendFactor::Zero,
           "graphics fixed function state round trip");
-    Check(pipeline.VertexStreams().Size() == 2 && pipeline.VertexStreams()[0].binding == 0 && pipeline.VertexAttributes()[0].location == 0,
+    Check(pipeline.GetVertexStreams().Size() == 2 && pipeline.GetVertexStreams()[0].binding == 0 && pipeline.GetVertexAttributes()[0].location == 0,
           "vertex layout is canonical");
-    Check(pipeline.VertexAttributes()[0].format == pipelines::Format::R32G32B32Float &&
-              std::strcmp(pipeline.VertexAttributes()[0].semanticName, "POSITION") == 0 &&
-              pipeline.VertexAttributes()[1].format == pipelines::Format::R32G32Float &&
-              std::strcmp(pipeline.VertexAttributes()[1].semanticName, "TEXCOORD") == 0,
+    Check(pipeline.GetVertexAttributes()[0].format == pipelines::Format::R32G32B32Float &&
+              std::strcmp(pipeline.GetVertexAttributes()[0].semanticName, "POSITION") == 0 &&
+              pipeline.GetVertexAttributes()[1].format == pipelines::Format::R32G32Float &&
+              std::strcmp(pipeline.GetVertexAttributes()[1].semanticName, "TEXCOORD") == 0,
           "native vertex formats and semantic names round trip");
-    Check(pipeline.Shaders().Size() == 1 && pipeline.Shaders()[0].permutation == shaderFile.Permutation() &&
-              pipeline.Shaders()[0].bindingLayout == shaderFile.BindingLayoutFingerprint() &&
-              pipeline.Shaders()[0].pipelineInterface == shaderFile.PipelineInterfaceFingerprint(),
+    Check(pipeline.GetShaders().Size() == 1 && pipeline.GetShaders()[0].permutation == shaderFile.GetPermutation() &&
+              pipeline.GetShaders()[0].bindingLayout == shaderFile.BindingLayoutFingerprint() &&
+              pipeline.GetShaders()[0].pipelineInterface == shaderFile.GetPipelineInterfaceFingerprint(),
           "shader dependency fingerprints round trip");
-    Check(pipeline.VertexAttributes().Size() == shaderFile.VertexInputs().Size() &&
-              pipeline.VertexAttributes()[0].numericClass == shaderFile.VertexInputs()[0].numericClass &&
-              pipeline.VertexAttributes()[0].componentCount == shaderFile.VertexInputs()[0].componentCount &&
-              pipeline.VertexAttributes()[0].componentBits == shaderFile.VertexInputs()[0].componentBits &&
-              pipeline.VertexAttributes()[1].numericClass == shaderFile.VertexInputs()[1].numericClass &&
-              pipeline.VertexAttributes()[1].componentCount == shaderFile.VertexInputs()[1].componentCount &&
-              pipeline.VertexAttributes()[1].componentBits == shaderFile.VertexInputs()[1].componentBits,
+    Check(pipeline.GetVertexAttributes().Size() == shaderFile.GetVertexInputs().Size() &&
+              pipeline.GetVertexAttributes()[0].numericClass == shaderFile.GetVertexInputs()[0].numericClass &&
+              pipeline.GetVertexAttributes()[0].componentCount == shaderFile.GetVertexInputs()[0].componentCount &&
+              pipeline.GetVertexAttributes()[0].componentBits == shaderFile.GetVertexInputs()[0].componentBits &&
+              pipeline.GetVertexAttributes()[1].numericClass == shaderFile.GetVertexInputs()[1].numericClass &&
+              pipeline.GetVertexAttributes()[1].componentCount == shaderFile.GetVertexInputs()[1].componentCount &&
+              pipeline.GetVertexAttributes()[1].componentBits == shaderFile.GetVertexInputs()[1].componentBits,
           "vertex interface round trip");
-    Check(pipeline.Graphics().rasterizer.depthBias == 0 && pipeline.Graphics().rasterizer.depthBiasClamp == 0.0f &&
-              pipeline.Graphics().depthStencil.minimumDepthBounds == 0.0f && pipeline.Graphics().depthStencil.maximumDepthBounds == 1.0f,
+    Check(pipeline.GetGraphics().rasterizer.depthBias == 0 && pipeline.GetGraphics().rasterizer.depthBiasClamp == 0.0f &&
+              pipeline.GetGraphics().depthStencil.minimumDepthBounds == 0.0f && pipeline.GetGraphics().depthStencil.maximumDepthBounds == 1.0f,
           "dynamic values are excluded from the static pipeline template");
 
     const pipelines::AttachmentSignature attachments = MakeAttachments(pipelines::Format::R8G8B8A8UNorm);
     pipelines::AttachmentSignature alternateAttachments = MakeAttachments(pipelines::Format::R16G16B16A16Float);
-    Check(shaderFile.Interface().primitiveClass == shaders::PrimitiveClass::Triangle &&
-              shaderFile.Interface().renderTargetCount == attachments.colorCount && shaderFile.FragmentOutputs().Size() == 1 &&
-              shaderFile.FragmentOutputs()[0].numericClass == attachments.colors[0].numericClass,
+    Check(shaderFile.GetInterface().primitiveClass == shaders::PrimitiveClass::Triangle && shaderFile.GetInterface().renderTargetCount == attachments.colorCount &&
+              shaderFile.GetFragmentOutputs().Size() == 1 && shaderFile.GetFragmentOutputs()[0].numericClass == attachments.colors[0].numericClass,
           "graphics shader interface matches attachment contract");
     std::array<shaders::VertexInput, 2> reflectedLayout{
-        {{pipeline.VertexAttributes()[0].semantic, pipeline.VertexAttributes()[0].semanticIndex, pipeline.VertexAttributes()[0].location,
-          pipeline.VertexAttributes()[0].numericClass, pipeline.VertexAttributes()[0].componentCount,
-          pipeline.VertexAttributes()[0].componentBits},
-         {pipeline.VertexAttributes()[1].semantic, pipeline.VertexAttributes()[1].semanticIndex, pipeline.VertexAttributes()[1].location,
-          pipeline.VertexAttributes()[1].numericClass, pipeline.VertexAttributes()[1].componentCount,
-          pipeline.VertexAttributes()[1].componentBits}}};
+        {{pipeline.GetVertexAttributes()[0].semantic, pipeline.GetVertexAttributes()[0].semanticIndex, pipeline.GetVertexAttributes()[0].location,
+          pipeline.GetVertexAttributes()[0].numericClass, pipeline.GetVertexAttributes()[0].componentCount, pipeline.GetVertexAttributes()[0].componentBits},
+         {pipeline.GetVertexAttributes()[1].semantic, pipeline.GetVertexAttributes()[1].semanticIndex, pipeline.GetVertexAttributes()[1].location,
+          pipeline.GetVertexAttributes()[1].numericClass, pipeline.GetVertexAttributes()[1].componentCount, pipeline.GetVertexAttributes()[1].componentBits}}};
     shaders::PipelineCompatibility directCompatibility;
     directCompatibility.kind = shaders::PipelineKind::Graphics;
     directCompatibility.primitiveClass = shaders::PrimitiveClass::Triangle;
@@ -215,17 +206,15 @@ int main()
     directCompatibility.depthStencilFormatPresent = true;
     directCompatibility.vertexLayout = {reflectedLayout.data(), static_cast<vanguard::u32>(reflectedLayout.size())};
     directCompatibility.bindingLayoutFingerprint = shaderFile.BindingLayoutFingerprint();
-    directCompatibility.pipelineInterfaceFingerprint = shaderFile.PipelineInterfaceFingerprint();
+    directCompatibility.pipelineInterfaceFingerprint = shaderFile.GetPipelineInterfaceFingerprint();
     Check(shaders::ValidatePipeline(shaderFile, directCompatibility) == shaders::Result::Success, "direct shader compatibility contract");
     vanguard::crypto::Digest256 firstKey;
     vanguard::crypto::Digest256 repeatedKey;
     vanguard::crypto::Digest256 alternateKey;
     Check(pipelines::CalculateConcretePipelineKey(pipeline, &attachments, firstKey) == pipelines::Result::Success &&
-              pipelines::CalculateConcretePipelineKey(pipeline, &attachments, repeatedKey) == pipelines::Result::Success &&
-              firstKey == repeatedKey,
+              pipelines::CalculateConcretePipelineKey(pipeline, &attachments, repeatedKey) == pipelines::Result::Success && firstKey == repeatedKey,
           "concrete PSO key is deterministic");
-    Check(pipelines::CalculateConcretePipelineKey(pipeline, &alternateAttachments, alternateKey) == pipelines::Result::Success &&
-              alternateKey != firstKey,
+    Check(pipelines::CalculateConcretePipelineKey(pipeline, &alternateAttachments, alternateKey) == pipelines::Result::Success && alternateKey != firstKey,
           "render-graph attachment formats specialize the concrete PSO key");
     Check(pipelines::CalculateConcretePipelineKey(pipeline, nullptr, alternateKey) == pipelines::Result::InvalidArgument,
           "deferred attachment signature is explicit at materialization");
@@ -256,8 +245,7 @@ int main()
         GraphicsFixture duplicate(shaderFile);
         duplicate.streams[0].binding = duplicate.streams[1].binding;
         ByteArray rejected(memory::pools::Rendering::GetInstance());
-        Check(WriteFixture(duplicate.description, rejected) == pipelines::Result::DuplicateVertexStream,
-              "duplicate vertex stream rejection");
+        Check(WriteFixture(duplicate.description, rejected) == pipelines::Result::DuplicateVertexStream, "duplicate vertex stream rejection");
     }
     {
         ByteArray corrupt(first);
@@ -267,8 +255,7 @@ int main()
         }
         filesystem::MemoryFileReader reader(corrupt, 0);
         pipelines::PipelineFile rejected;
-        Check(corrupt.Size() > 64 && rejected.Open(reader) == pipelines::Result::IntegrityFailure,
-              "checksummed pipeline corruption rejection");
+        Check(corrupt.Size() > 64 && rejected.Open(reader) == pipelines::Result::IntegrityFailure, "checksummed pipeline corruption rejection");
     }
     {
         std::array<pipelines::ShaderReference, 1> shader{{fixture.shader[0]}};
@@ -302,8 +289,8 @@ int main()
         Check(WriteFixture(rayTracing, bytes) == pipelines::Result::Success, "data-driven ray-tracing pipeline");
         filesystem::MemoryFileReader reader(bytes, 0);
         pipelines::PipelineFile rayTracingPipeline;
-        Check(rayTracingPipeline.Open(reader) == pipelines::Result::Success && rayTracingPipeline.RayTracingGroups().Size() == 2 &&
-                  rayTracingPipeline.RayTracingGroups()[0].name == 0xb0001,
+        Check(rayTracingPipeline.Open(reader) == pipelines::Result::Success && rayTracingPipeline.GetRayTracingGroups().Size() == 2 &&
+                  rayTracingPipeline.GetRayTracingGroups()[0].name == 0xb0001,
               "ray-tracing groups are canonical data");
     }
 

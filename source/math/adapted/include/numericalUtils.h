@@ -61,14 +61,12 @@ namespace vanguard::math
         std::swap(a, b);
     }
 
-    template <typename T>
-    RED_INLINE constexpr typename std::enable_if<!std::is_integral<T>::value, T>::type ArithmeticAverage(const T& v1, const T& v2)
+    template <typename T> RED_INLINE constexpr typename std::enable_if<!std::is_integral<T>::value, T>::type ArithmeticAverage(const T& v1, const T& v2)
     {
         return (v1 + v2) * 0.5f;
     }
 
-    template <typename T>
-    RED_INLINE constexpr typename std::enable_if<std::is_integral<T>::value, T>::type ArithmeticAverage(const T& v1, const T& v2)
+    template <typename T> RED_INLINE constexpr typename std::enable_if<std::is_integral<T>::value, T>::type ArithmeticAverage(const T& v1, const T& v2)
     {
         return (v1 + v2) >> 1;
     }
@@ -78,34 +76,29 @@ namespace vanguard::math
         return src * (1.f - t) + dst * t;
     }
 
-    template <typename T>
-    RED_FORCE_INLINE constexpr bool AlmostEquals(const T& val1, const T& val2, const T& eps = std::numeric_limits<T>::epsilon())
+    template <typename T> RED_FORCE_INLINE constexpr bool AlmostEquals(const T& val1, const T& val2, const T& eps = std::numeric_limits<T>::epsilon())
     {
         return Abs(val1 - val2) <= eps;
     }
 
-    template <typename T>
-    RED_FORCE_INLINE constexpr bool AlmostEqualsOrSmaller(const T& val1, const T& val2, const T& eps = std::numeric_limits<T>::epsilon())
+    template <typename T> RED_FORCE_INLINE constexpr bool AlmostEqualsOrSmaller(const T& val1, const T& val2, const T& eps = std::numeric_limits<T>::epsilon())
     {
         return AlmostEquals(val1, val2, eps) || val1 < val2;
     }
 
-    template <typename T>
-    RED_FORCE_INLINE constexpr bool AlmostEqualsOrGreater(const T& val1, const T& val2, const T& eps = std::numeric_limits<T>::epsilon())
+    template <typename T> RED_FORCE_INLINE constexpr bool AlmostEqualsOrGreater(const T& val1, const T& val2, const T& eps = std::numeric_limits<T>::epsilon())
     {
         return AlmostEquals(val1, val2, eps) || val1 > val2;
     }
 
     template <typename T>
-    RED_FORCE_INLINE constexpr bool InRangeIncluding(const T& val1, const std::pair<T, T>& range,
-                                                     const T& eps = std::numeric_limits<T>::epsilon())
+    RED_FORCE_INLINE constexpr bool InRangeIncluding(const T& val1, const std::pair<T, T>& range, const T& eps = std::numeric_limits<T>::epsilon())
     {
         return AlmostEqualsOrGreater(val1, range.first, eps) && AlmostEqualsOrSmaller(val1, range.second, eps);
     }
 
     template <typename T>
-    RED_FORCE_INLINE constexpr bool InRangeExcluding(const T& val1, const std::pair<T, T>& range,
-                                                     const T& eps = std::numeric_limits<T>::epsilon())
+    RED_FORCE_INLINE constexpr bool InRangeExcluding(const T& val1, const std::pair<T, T>& range, const T& eps = std::numeric_limits<T>::epsilon())
     {
         return val1 > range.first && val1 < range.second;
     }

@@ -79,7 +79,9 @@ namespace vanguard::shaders
         ReadWriteStructuredBuffer,
         ByteAddressBuffer,
         ReadWriteByteAddressBuffer,
-        AccelerationStructure
+        AccelerationStructure,
+        TypedBuffer,
+        ReadWriteTypedBuffer
     };
 
     enum class BindingAccess : u8
@@ -312,22 +314,22 @@ namespace vanguard::shaders
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] ProgramKind Kind() const noexcept;
-        [[nodiscard]] u64 Program() const noexcept;
-        [[nodiscard]] const crypto::Digest256& Permutation() const noexcept;
+        [[nodiscard]] ProgramKind GetKind() const noexcept;
+        [[nodiscard]] u64 GetProgram() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetPermutation() const noexcept;
         [[nodiscard]] const crypto::Digest256& CompilerFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& LayoutFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetLayoutFingerprint() const noexcept;
         [[nodiscard]] const crypto::Digest256& BindingLayoutFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& PipelineInterfaceFingerprint() const noexcept;
-        [[nodiscard]] const PipelineInterface& Interface() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const StageRecord> Stages() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetPipelineInterfaceFingerprint() const noexcept;
+        [[nodiscard]] const PipelineInterface& GetInterface() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const StageRecord> GetStages() const noexcept;
         [[nodiscard]] containers::ArraySpan<const DescriptorBinding> Bindings() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ConstantBuffer> ConstantBuffers() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ConstantMember> ConstantMembers() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const VertexInput> VertexInputs() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const FragmentOutput> FragmentOutputs() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const SpecializationConstant> SpecializationConstants() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const u8> Bytecode(const StageRecord& stage) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ConstantBuffer> GetConstantBuffers() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ConstantMember> GetConstantMembers() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const VertexInput> GetVertexInputs() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const FragmentOutput> GetFragmentOutputs() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const SpecializationConstant> GetSpecializationConstants() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const u8> GetBytecode(const StageRecord& stage) const noexcept;
 
     private:
         ProgramKind m_kind = ProgramKind::Graphics;
@@ -352,7 +354,6 @@ namespace vanguard::shaders
     [[nodiscard]] Result WriteShader(filesystem::IFile& writer, const BuildDescription& description) noexcept;
     [[nodiscard]] Result CalculateLayoutFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
     [[nodiscard]] Result CalculateBindingLayoutFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
-    [[nodiscard]] Result CalculatePipelineInterfaceFingerprint(const BuildDescription& description,
-                                                               crypto::Digest256& fingerprint) noexcept;
+    [[nodiscard]] Result CalculatePipelineInterfaceFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
     [[nodiscard]] Result ValidatePipeline(const ShaderFile& shader, const PipelineCompatibility& pipeline) noexcept;
 } // namespace vanguard::shaders

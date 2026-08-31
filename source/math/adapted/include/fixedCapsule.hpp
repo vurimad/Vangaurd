@@ -6,10 +6,7 @@
 
 namespace vanguard::math
 {
-    RED_INLINE FixedCapsule::FixedCapsule(const Vector4& point, Float radius, Float height)
-        : PointRadius(point.X, point.Y, point.Z, radius), Height(height)
-    {
-    }
+    RED_INLINE FixedCapsule::FixedCapsule(const Vector4& point, Float radius, Float height) : PointRadius(point.X, point.Y, point.Z, radius), Height(height) {}
 
     RED_INLINE Vector4 FixedCapsule::GetMassCenter() const
     {

@@ -946,7 +946,12 @@ relink buffers are empty.
 - Slow spatial relocation completes before a scene version that contains the new proxy bounds is published to collectors.
 - Coalescing preserves edge-triggered semantics such as teleport and explicit auxiliary-resource replacement/clearing.
 
-#### Vanguard decisions
+#### Historical Vanguard decisions (superseded)
+
+This subsection records the earlier attempt to redesign RED's relink machinery. It is not the active implementation plan.
+The GPU-driven reevaluation later in this document now requires mirroring RED's bounded double-buffered requests,
+newest-request-wins reduction, live proxy mutation, structural command lane, and Jobs ordering before adding Vanguard-specific
+extensions.
 
 - Preserve scene-direct, multi-producer relink ingress and an epoch flip before jobs are dispatched. Do not route
   high-frequency transform updates through a general command object or render function assumption.
@@ -1497,33 +1502,30 @@ Vanguard should keep query objects frame-scoped and allocate them from a frame a
 activation history belongs to later camera/view custom data keyed by a generational view identity, not to the core spatial
 index.
 
-#### Vanguard spatial publication contract
+#### Vanguard spatial update contract
 
-The Render Scene owns a mutable staging index written only by its scene-mutation commit authority. Completion of membership,
-relink, slow spatial movement, and dirty-cell repair publishes a `SpatialVersion` together with the scene's `SceneVersion`.
-Collectors acquire a `SpatialReadLease` for that exact version. Every batch and job derived from the lease retains it, so
-proxy retirement and spatial-page reclamation cannot occur while a collector still holds cell/object spans.
-
-The public read contract is immutable even if the implementation can update storage in place when no older reader exists.
-When collection overlaps the next scene update, the writer copies only dirty spatial pages/cells and publishes a new root or
-directory; unchanged pages are shared. Retired pages are reclaimed through reader epochs. This avoids copying an open-world
-index every frame while allowing runtime and editor views to collect the same or adjacent scene versions concurrently.
+The Render Scene owns stable live proxy records and one live spatial index. It mirrors RED's ordering model rather than
+publishing immutable copies: producers append retained relink requests to the active bounded buffer, frame preparation swaps
+the two buffers, unique relinks update proxy-local state in parallel, and only structural spatial moves enter the serialized
+render-command lane. Collection receives an explicit dependency on completion of that scene update chain.
 
 ```text
-scene mutation ingress
-    -> single-writer membership/relink reduction
-    -> staging spatial updates and dirty-cell repair
-    -> publish SceneVersion + SpatialVersion
-    -> acquire immutable SpatialReadLease
-    -> create view queries
-    -> batch traversal and redJobs target testing
-    -> release read lease after every dependent job
-    -> reclaim retired spatial pages and proxy records
+producer relink ingress
+    -> swap bounded producer/processing buffers
+    -> newest-request-wins duplicate removal
+    -> parallel proxy-local transform/bounds updates
+    -> quick conditional VisGrid bound update
+    -> batch escaped-cell structural moves
+    -> merge add/remove/move operations per proxy
+    -> remove/move, repair dirty cells once, then add
+    -> signal scene-update completion
+    -> create view queries and produce candidates
 ```
 
-No raw proxy address is the durable payload of a spatial record. Records store a compact generation-checked proxy reference
-or dense scene index valid for the pinned scene version. Collection resolves it through version-pinned proxy storage. Spatial
-back-references remain private and are updated by the writer when dense removal relocates an entry.
+Spatial records use compact generation-checked proxy identities rather than public raw addresses. The update/collection Jobs
+chain retains the required proxy storage until every dependent consumer finishes. Runtime and editor views may coexist, but
+they consume the same completed live scene state for that update epoch; Vanguard does not manufacture overlapping immutable
+copies merely to let them observe different scene revisions.
 
 #### Spatial-index shape for Vanguard
 
@@ -1539,21 +1541,21 @@ belongs in proxy/type data. Time-of-day, editor isolation, ray tracing, shadow p
 not compete for undocumented bits.
 
 Traversal preserves RED's coarse-to-fine batching, but batch sizing becomes data-driven. Telemetry records cells visited,
-aggregate rejects, objects tested, visible candidates, jobs emitted, average batch occupancy, oversized objects, dirty pages,
-copy-on-write bytes, reader age, and reclamation latency. The scheduler can target a minimum work estimate rather than
-hardcoding one threshold for every scene and platform.
+aggregate rejects, objects tested, visible candidates, jobs emitted, average batch occupancy, oversized objects, relink queue
+depth, duplicate relinks removed, quick moves, structural moves, dirty cells, overflow, and update-chain latency. The scheduler
+can target a minimum work estimate rather than hardcoding one threshold for every scene and platform.
 
 #### Invariants to preserve
 
-- Spatial staging has one commit authority; readers never observe a partially repaired membership/relink batch.
-- A published spatial version is immutable for the complete lifetime of every derived collection job.
-- Scene and spatial versions advance together when proxy membership, bounds, or broad query roles change.
+- Spatial mutation has one command-owned authority; readers never observe a partially repaired membership/relink batch.
+- Collection starts only after the scene-update dependency covering relinks and structural VisGrid work completes.
+- Producers continue in the alternate relink buffer while the captured update epoch is processed.
 - Spatial entries use generation-checked scene identity; dense index relocation cannot retarget a stale job.
-- Fast in-cell bounds updates and structural moves both complete before their version is published.
+- Fast in-cell bounds updates and structural moves both complete before collection is released.
 - Dirty aggregate bounds are repaired once per mutation batch, not after every removal or movement.
 - Broad-phase traversal produces dense, coarse-to-fine work batches suitable for redJobs fan-out.
-- View queries are ephemeral consumers of a read lease and cannot mutate or outlive the pinned spatial version.
-- Proxy and spatial-page retirement waits for all read leases, independently of GPU resource retirement.
+- View queries are ephemeral consumers of the completed live scene epoch and cannot mutate scene storage.
+- Proxy retirement waits for retained command/update/collection work, independently of GPU resource retirement.
 - Spatial configuration is renderer-agnostic and world-scale capable; no project-specific world extent or visibility bit
   allocation leaks into the public Render Scene API.
 
@@ -1625,46 +1627,45 @@ Several hazards must not be copied:
 
 #### Vanguard visibility-feedback service
 
-Query-only targets should remain first-class non-renderable spatial consumers, but they do not belong as miscellaneous methods
-on `IRenderScene`. Vanguard will expose them through a `VisibilityFeedbackService` that schedules work against published scene
-read leases. World streaming, editor diagnostics, audio, AI, or gameplay may create probes without gaining access to Render
-Scene internals.
+Query-only targets remain first-class non-renderable spatial consumers, but they are not miscellaneous methods on
+`IRenderScene`. `VisibilityFeedbackService` binds to a scene identity and validates the exact completed mutation epoch while
+owning its probe storage independently. World streaming, editor diagnostics, audio, AI, or gameplay may create probes without
+gaining access to RenderScene internals.
 
 ```text
 VisibilityProbeHandle
     generational producer identity
 
-VisibilityProbeDescriptor
+VisibilityProbeDesc
     bounds, query roles, evaluation policy, debug category
 
 VisibilityFeedback
-    Unknown | Visible | Hidden
-    evaluated SceneVersion
+    Unknown | Visible | NotVisible
+    evaluated mutation epoch
     evaluated ViewSetRevision
     evaluation frame/time and age
 ```
 
-Every public operation validates the complete generation. Creation, update, and destruction participate in the same
-capture/reduce/publish discipline as scene mutations: removal dominates, repeated bounds updates coalesce latest-by-revision,
-and overflow is a reported admission result rather than a silent drop. Probe reclamation waits for any evaluation job holding
-the relevant probe-data read lease.
+Every public operation validates the complete generation. Creation, update, and destruction are blocked only while one
+evaluation owns the unpublished bank. Active probes live in a dense directory with O(1) swap-removal. Jobs consume exact
+disjoint ranges, and bank completion or cancellation prevents partial feedback from becoming observable.
 
 The descriptor selects an explicit view policy:
 
 - one generational view identity;
 - any view in a named view family;
 - the designated streaming-authority view set;
-- an explicit aggregation callback registered by engine policy, never an arbitrary hot-path function capture.
+- no arbitrary hot-path callback; aggregation is fixed to visible-if-any for matching views.
 
 Runtime streaming normally uses the streaming-authority game views; editor scene views do not accidentally keep the entire
 world resident. Split-screen or future multi-camera games can use `AnyVisible` aggregation. A view-set revision makes results
 from destroyed, recreated, or reconfigured views distinguishable. Unknown/stale feedback is surfaced to the consumer; the
 streaming policy can conservatively retain content instead of interpreting missing renderer feedback as hidden.
 
-Probe visibility and streaming distance are separate decisions. The renderer reports geometric/occlusion visibility for the
-declared view policy. The streaming observer combines that feedback with reference distance, hysteresis, prediction,
-priority, persistent-distant policy, and load state. An optional renderer evaluation-distance bound may avoid useless tests,
-but it is metadata in the result and never silently changes streaming truth.
+Probe visibility and streaming distance are separate decisions. The implemented service reports conservative CPU
+bounds/frustum visibility for the declared view policy; it does not claim occlusion truth or require GPU readback. A later
+renderer observation source may refine this through a separately proven contract. The streaming observer combines feedback
+with reference distance, hysteresis, prediction, priority, persistent-distant policy, and load state.
 
 The probe store may use a flat dense SIMD batch below a measured threshold and a separate sparse spatial index above it. It
 can reuse Vanguard's immutable spatial-page and reader-epoch machinery without inserting probe records into render-proxy
@@ -1695,12 +1696,11 @@ proxy would retain RED's global exclusion requirement and permit multiple camera
 
 #### Vanguard collection read model
 
-One `SceneReadLease` pins a coherent `SceneVersion`, its `SpatialReadLease`, the generation table, immutable base proxy records,
-and immutable type-payload versions. Spatial candidates resolve to a compact `ProxyReadIndex`; generation validation occurs
-before any type data is read. Resource and material objects referenced by the payload are immutable or independently
-versioned and retained for the lease lifetime rather than copied into every scene snapshot.
+This earlier immutable-read proposal is superseded by the RED-aligned update/collection chain. Collection reads stable live
+proxy/type storage after the per-scene update dependency completes. Generational identities are validated at command/relink
+admission, and retained scene/proxy ownership spans every dependent collection job.
 
-The base read record contains only broadly shared collection inputs:
+The base live record contains only broadly shared collection inputs:
 
 ```text
 ProxyReadRecord
@@ -1709,19 +1709,13 @@ ProxyReadRecord
     renderer role/layer masks
     logical contribution flags
     auto-hide/reference-point policy
-    immutable type-payload index and version
+    type-payload index and GPU Scene identity
 ```
 
-Per-view computations never write this record. Distance, projected size, selected LOD, dissolve factor, temporal visibility,
-occlusion history, and once-per-view feature state live in frame-scoped `ViewCollectionState`, indexed by the resolved proxy
-identity. State that must persist across frames lives in later camera/view custom-data storage and is versioned by both view
-and proxy generations.
-
-Collection uses type dispatch over dense type pools rather than arbitrary public virtual callbacks on mutable proxy objects.
-Each registered proxy type supplies a renderer-owned collector implementation with declared read domains and output kinds.
-It consumes immutable proxy/type data plus view-local state and emits typed candidates or draw-packet inputs into partitioned
-job-local output pages. A deterministic merge builds the later batching inputs. Feature code cannot mutate Render Scene,
-camera history, or global collector structures without declaring a separate reduction/commit phase.
+Per-view computations must not write shared state that can race another view. Distance, temporal visibility, occlusion history,
+and feature state belong to later camera/view custom-data storage. The primary GPU-driven collection output is a compact
+`GpuInstanceIndex` candidate span, not copied proxy/type packets. Specialized non-mesh proxy systems may retain RED-style
+renderer-owned collection functions when their real requirements are implemented.
 
 This keeps the useful RED flow:
 
@@ -1729,13 +1723,9 @@ This keeps the useful RED flow:
 prepared view query
     -> coarse spatial cells
     -> dense candidate testing
-    -> proxy/type collection
-    -> render-stage and feature outputs
+    -> compact persistent candidate indices
+    -> GPU visibility and later graph stages
 ```
-
-but removes hidden mutable calls from the parallel read phase. The later representative proxy study will determine the exact
-type payloads and whether a small closed dispatch table or registered collector table is the better implementation; the
-immutable boundary is fixed regardless.
 
 #### Collector output rules
 
@@ -1744,10 +1734,9 @@ Atomics may reserve ranges, but overflow cannot leave counts beyond physical cap
 bounded output reports accepted, dropped, and fallback counts. Locks are reserved for low-frequency aggregation such as
 diagnostics, not per-candidate insertion.
 
-Outputs retain stable proxy/resource identities or immutable references until the consuming batching/frame phase completes.
-They never retain pointers into temporary query results, mutable spatial cells, or unpinned scene storage. Main-view results
-may feed dependent work such as local-shadow query construction through explicit redJobs dependencies, while independent
-views collect concurrently from the same scene version.
+Outputs retain stable GPU Scene indices until the consuming graph phase completes. They never retain pointers into temporary
+query results. Main-view results may feed dependent work such as local-shadow query construction through explicit redJobs
+dependencies, while independent views collect after the same completed scene-update epoch.
 
 #### Invariants to preserve
 
@@ -1756,7 +1745,7 @@ views collect concurrently from the same scene version.
 - Every probe operation validates full generational identity; slot reuse cannot redirect polling or destruction.
 - Multiple views publish independent results before an explicit aggregation policy combines them.
 - Streaming distance, hysteresis, and residency decisions remain outside renderer visibility evaluation.
-- A `SceneReadLease` pins all base and type-specific data dereferenced by collection, not only the spatial index.
+- The update/collection dependency and retained proxy ownership cover all base and type-specific data dereferenced by jobs.
 - Parallel collection reads immutable scene data and writes only job-local or declared reduction outputs.
 - Per-view and temporal calculations never mutate shared published proxy records.
 - Collection outputs retain version-safe identities/references until dependent batching work completes.
@@ -2097,11 +2086,11 @@ containers or `std::malloc` are not acceptable for hot scene storage when an eng
 
 #### Required service shape
 
-RenderScene should become an engine-registered service with explicit frame-facing operations. The service is the composition
-point; the scene object remains renderer-owned state. The shape should be:
+RenderScene should remain a renderer subsystem with explicit frame-facing operations. `RenderingService` is the engine
+composition point; scene state does not require an independent engine service. The shape is:
 
 ```text
-RenderSceneService
+RenderingService
     owns RenderSceneManager and frame-pipeline registration
     exposes scene creation/destruction for runtime, editor, preview, and thumbnail worlds
     owns frame-stage admission budgets and service stats
@@ -2110,11 +2099,11 @@ RenderSceneManager
     owns scene slots and generational RenderSceneHandle values
 
 RenderScene
-    owns proxy storage, payload pools, mutation buffers, spatial state, published read versions, and collection epochs
+    owns proxy storage, payload pools, bounded mutation accounting, spatial state, and scene-update epochs
 
 WorldRenderBridge
     optional per-world adapter attached above GameWorld/Flecs
-    converts committed world/entity/component changes into RenderScene mutation packets
+    converts committed world/entity/component changes into typed RenderScene operations
 ```
 
 The service should not depend on Flecs. The bridge may know about the game-world/materialization layer, because that is exactly
@@ -2185,8 +2174,8 @@ The cross-check did not find a blocking dependency for a CPU RenderScene. It did
 The first RenderScene implementation can start without waiting for RHI, cameras, batching, or render graph. The safe first scope
 is CPU-only:
 
-1. create `RenderSceneService`, `RenderSceneManager`, generational scene/proxy handles, stats, failure records, and rendering
-   pools;
+1. create the `RenderingService`-owned `RenderSceneManager`, generational scene/proxy handles, stats, failure records, and
+   rendering pools;
 2. implement proxy creation, mutation admission, destruction, and scene-version publication with no Flecs dependency;
 3. implement basic immutable read leases and lifetime pinning;
 4. add typed payload pools for initial mesh/light/decal descriptors, with resource references/handles but no GPU residency;
@@ -2194,24 +2183,188 @@ is CPU-only:
 6. add tests for handle generation, mutation coalescing, read-lease retirement, resource-handle retention, and job-token
    completion.
 
-The world bridge should be the next layer after this CPU core is proven. That keeps RenderScene focused, while still preserving
-the RED-derived architecture: world systems produce renderer mutation intent, RenderScene publishes immutable scene versions,
-and render-path jobs collect view data for later batching and graph execution.
+The world bridge remains the producer layer above this CPU core. World systems produce renderer mutation intent, RenderScene
+publishes immutable scene state, and later render-path jobs produce compact GPU Scene candidates without importing batching or
+graph-execution policy into RenderScene.
+
+## GPU-driven architecture reevaluation
+
+This checkpoint supersedes both the original complete per-view CPU packet path and the later proposal to repair it with
+copy-on-write scene versions. RED does neither. Its RenderScene owns stable live proxies and a live VisGrid; safety comes from
+bounded double-buffered update queues, render-command ownership, and explicit Jobs ordering. Vanguard will mirror that model
+while its persistent GPU Scene receives sparse changes and views move compact persistent indices through visibility,
+classification, batching, and indirect execution.
+
+The audit found that Phases 0 through 8 exist in code and tests. Phases 9 and 10 were not implemented. Runtime and editor now
+register `RenderingService`, which owns `RenderSceneManager` and drives its dense scene directory through the live frame loop.
+
+### Required producer contract
+
+RenderScene is responsible for producing only these GPU Scene inputs:
+
+- sparse create, update, and retirement intent for mutable instances, lights, and decals;
+- stable private mappings from exact proxy generations to generational GPU Scene handles;
+- references to renderer-resolved immutable renderable/material definitions, without owning their GPU allocation policy;
+- compact `GpuInstanceIndex` candidates written directly into caller-owned per-view reservations after CPU spatial broad phase;
+- scene publication and mutation epochs that let later renderer work correlate CPU and GPU publications.
+
+RenderScene must not select final LODs, expand render phases, choose pipelines, build material bindings, sort draw work, emit
+indirect arguments, allocate graph resources, record RHI commands, or submit GPU work. Camera storage supplies `RenderView` /
+`GpuView`; mesh residency supplies resident geometry and LOD fallback facts; the Render Graph owns transient resources and
+execution.
+
+### RED scene-update mechanism to mirror
+
+The implementation reference is `renderer/src/renderScene.h/.cpp`, `renderer/src/renderProxyDrawable.cpp`,
+`renderer/src/renderCommandHandler.cpp`, and `visibility/include|src/visVolumeHierarchyGrid.*`:
+
+1. `ScheduleRelink` rejects requests that change neither transform nor bounds, then appends a complete retained relink request
+   to one of two preallocated bounded arrays using an atomic count under a shared index lock.
+2. `PrepareForUpdate` takes the index lock briefly, swaps producer and processing buffers, and atomically extracts the request
+   count. Producers immediately continue in the other buffer.
+3. `ExecuteUpdateState` scans requests newest-first and removes duplicate proxy relinks, then dispatches unique requests across
+   render-path Jobs. A proxy updates its live transform, bounds, motion/skinning state, and other dependent state in place.
+4. A collectable proxy asks `QuickConditionalMoveObject` to update object bounds immediately. If the new bounds can invalidate
+   the cell's aggregate coverage, the proxy is appended to a small structural-move batch instead of moving the VisGrid from the
+   parallel relink job.
+5. Structural add/remove/move operations enter the render-command owner. It merges repeated operations for the same proxy,
+   orders removals and moves before additions, processes the affected proxies, and calls `RebalanceTree` once to repair dirty
+   cells.
+6. The render command chain waits for the previous frame's command processing, flushes scene commands, executes scene update
+   jobs, and only then permits render collection. Stable retained proxy references keep objects alive through queued work; RED
+   does not create an immutable copy of every proxy for each frame.
+
+Vanguard should preserve those behaviors with Vanguard handles, pools, redJobs, the existing configurable VisGrid, and sparse
+GPU Scene change emission. RED-specific raw proxy pointers and global renderer access are not copied into Vanguard's public API.
+
+### Audit decisions
+
+| Existing area | Decision | Required change |
+| --- | --- | --- |
+| Scene/service ownership and generational scene handles | Keep | Register through runtime/editor composition only after the revised frame participants exist. |
+| Generational proxy lifecycle and change-driven world bridge | Keep and adapt | Add private GPU identity and dirty-category state; preserve exact ECS change capture and coalescing. |
+| Prepare/commit publication boundary and read leases | Removed | Stable renderer-owned proxies now advance through an ordered update job chain. Complete versions, read leases, retirement lists, synchronous commit wrappers, and broad proxy snapshots no longer exist. |
+| Typed mesh/light/decal CPU pools | Keep and adapt | They remain authoritative CPU state. Mesh payloads resolve to shared renderable definitions; light/decal payloads produce sparse persistent table updates. Do not duplicate strong resource handles into every published version. |
+| Spatial write index and dirty-cell repair | Keep | It is the CPU broad phase and must remain change-driven. Add stable GPU identities to published spatial membership. |
+| Spatial query semantics | Keep and adapt | Like RED, query the live VisGrid only after scene-update jobs complete. Queries borrow only bounds, masks, flags, and payload kind from authoritative proxy storage and return compact handles without copying proxy state. |
+| `RenderSceneCollector` Jobs fan-out | Removed | Future candidate production writes compact persistent GPU indices and is designed against the GPU Scene contract. |
+| `MeshCollectorPacket`, `LightCollectorPacket`, `DecalCollectorPacket`, packet pages, and final packet reduction | Removed | They copied full proxy/payload state through temporary pages. GPU-driven rendering needs stable indices, not duplicated draw payloads. |
+| CPU `selectedLod`, `dissolve`, and per-packet distance state | Remove from the primary runtime path | LOD selection and draw classification belong to GPU work once mesh residency and camera policy exist. Any editor/tool fallback must be explicitly separate. |
+| Collector-owned `RenderSceneViewHandle` registry | Removed | Camera/view storage will own view identity. RenderScene must not invent a parallel camera identity system. |
+| Visibility feedback probes | Reintroduced independently | `VisibilityFeedbackService` uses current generational view/family identities and explicit frame-scoped frusta without collector, proxy, or camera ownership. |
+| `RenderSceneFrameLifecycle` | Removed | Frame ordering will be composed by the later rendering command/service layer rather than a collector/version retirement wrapper. |
+| Broad proxy and typed snapshot APIs | Removed | GPU publication and visibility use private borrowed reads. Future tooling must introduce purpose-specific inspection contracts rather than restoring complete proxy or payload copies. |
+| Original Phase 9 frame-pipeline plan | Redesign before implementation | Do not wire the existing full-copy commit and CPU packet collector into the engine loop. |
+| Original Phase 10 generic extension seam | Supersede | Replace it with the explicit GPU Scene publication and candidate-production boundary described below. |
+
+### Concrete hot-path removals and adaptations
+
+The following audit records the removed snapshot path:
+
+1. `CommitScene` previously scanned every proxy slot and rebuilt complete proxy, payload, lookup, spatial-cell, and membership
+   arrays. That runtime image has been removed. The active path now retains stable live proxies, swaps bounded relink buffers
+   once per tick, applies only newest unique changes, and exposes `PrepareSceneUpdate`/`ExecuteSceneUpdate` for Jobs ordering.
+   The compatibility versions and leases have also been deleted; queries validate an exact completed mutation epoch.
+2. `RenderSceneCollector::CollectBatch` first builds a temporary `RenderProxyHandle` array, then resolves a full base snapshot,
+   then resolves a full typed snapshot, then copies the resulting packet into a job-local page. `Finalize` copies those packets
+   again into final arrays. The revised candidate path writes only stable `GpuInstanceIndex` values directly into the reserved
+   output span. Light and decal candidate streams may use their own compact persistent indices when their GPU processing path
+   is defined.
+3. `ViewProxyState::selectedLod` and `dissolve` currently imply CPU ownership of decisions that belong to future GPU LOD and
+   transition policy. They must not become persistent runtime contracts. CPU tools needing preview LOD selection should use a
+   separate opt-in utility.
+4. Visibility feedback no longer piggybacks on collector registration or collection completion. It consumes explicit
+   camera-supplied view identities/frusta, evaluates dense disjoint probe ranges into an unpublished bank, and publishes only
+   after the caller's Jobs dependency joins.
+5. Transform mutation ingress now uses fixed-capacity double-buffered relink requests: producer/consumer buffers swap under a
+   short index lock, duplicates are removed newest-first through paged direct-address stamps without hashing or transient
+   allocation, unique proxies update in parallel, and only structural VisGrid moves enter the serialized epilogue. The
+   `RenderCommandSystem` now owns the CPU ordering tail; generalized typed add/remove/property ingress remains later work.
+6. GPU publication no longer resolves broad base/light/decal snapshots. It freezes retained dirty-index slices, subdivides the
+   serial stream into bounded ranges, and lets disjoint workers read narrow borrowed fields from sealed proxy storage while
+   constructing final GPU ABI objects directly in mapped upload reservations.
+
+### Revised continuation phases
+
+These phases replace the unimplemented original Phases 9 and 10. They deliberately stop before camera, mesh residency and
+Render Graph work. The command-chain and engine ownership shells now exist, but do not yet pretend to be the renderer.
+
+1. **RED-style scene update core — implemented:** remove complete runtime scene versions and implement bounded double-buffered relink queues,
+   newest-request-wins duplicate removal, parallel proxy relink jobs, quick conditional VisGrid updates, batched structural
+   moves, and one dirty-cell rebalance after removals/moves. Expose an update completion dependency rather than read leases.
+2. **GPU identity and mutation boundary — implemented:** add private proxy-to-GPU-handle mappings and emit coalesced instance/light/decal
+   sparse changes from the same final relink operations. Resource-definition resolution and retirement remain explicit. This
+   phase emits plans only and performs no RHI work.
+3. **Direct candidate production — implemented:** replace typed runtime collector packets with Jobs producers that query the live post-update
+   VisGrid and write compact persistent indices directly into `GpuVisibilityCandidateReservation` spans. Preserve deterministic
+   capacity and overflow reporting.
+4. **Feedback separation — implemented:** `VisibilityFeedbackService` owns scene-relative generational probes outside proxy,
+   payload, spatial, camera, and collector storage. Callers provide explicit frame-scoped `RenderViewId`, family, frustum,
+   query-mask, and streaming-authority inputs. Disjoint Jobs batches write an unpublished feedback bank; completion verifies
+   every batch and flips the bank atomically at the phase boundary. Cancellation cannot expose partial results and no GPU
+   readback is required.
+5. **Command-chain and service ownership shell — implemented:** `RenderCommandSystem` owns one CPU rendering tail. Its
+   `FrameTick` appends unique live-scene updates and its `RenderFrame` appends retained viewport frames to that same chain;
+   `FlushPreviousFrameProcessing` waits only this CPU chain. `RenderingService` owns the command system and viewport manager,
+   and runtime/editor composition registers both Render Scene and Rendering services. No bridge is hard-coded into the generic
+   service. The private frame dispatcher constructs a renderer continuation context inside the retained frame job, matching
+   the RED command-handler boundary without adding another tail. The service destination currently fails closed because no
+   Render Graph executor is installed. Automatic frame-participant ingress ordering, camera/frame publication, and the graph
+   executor remain the next integration step.
+
+### RED-to-Vanguard frame insertion contract
+
+The command shell deliberately preserves the same ownership split as RED while leaving renderer policy unimplemented:
+
+1. The future engine Render-phase driver owns the normal-frame CPU boundary. It first calls
+   `FlushPreviousFrameProcessing`, then asks registered producers to finish mutation ingress and gather the live scenes for
+   the tick. `WorldRenderBridge` is one producer, not a hard-coded `RenderingService` dependency.
+2. `RenderCommandSystem::FrameTick` performs main-thread scene preparation, appends scene-update jobs, and finally enters
+   `RenderingService::FrameTick(RenderFrameTickContext&)`. GPU Scene publication, fence-based retirement, renderer-global
+   streaming decisions, and other tick-wide work extend this same chain through `RenderFrameTickContext::Jobs()`. If later
+   renderer state requires RED-style synchronous `FrameTickPrepare`, its callback belongs at the start of this function,
+   before `PrepareSceneUpdate`; it must not be hidden inside the asynchronous continuation.
+3. `ViewportManager::BeginFrame` creates the frame identity and snapshots output policy and dimensions. Camera requests,
+   scene references, view-family requests, and retained frame-owned storage are populated after this point and sealed before
+   submission; camera-derived renderer data is not allocated here.
+4. `ViewportManager::SubmitFrame` transfers the sealed frame to `RenderCommandSystem`. When output rendering is connected,
+   this main-thread boundary also acquires the exact output image and retains that acquisition in the frame packet. Dispatch
+   failure must abandon it immediately.
+5. The private `RenderFrameDispatcher` retains the packet, appends one root job behind the shared CPU tail, and constructs
+   `RenderFrameContext` from that job's continuation context. There is no second renderer queue or frame-local CPU tail.
+   Future generic renderer-command ingress is drained into the dispatcher builder before this root job, matching RED's queue
+   flush location. World mutation ingress remains before `FrameTick` and does not enter this command queue.
+6. `RenderingService::RenderFrame(RenderFrameContext&)` is the equivalent of RED's `CRenderInterface::RenderFrame`. Camera
+   storage allocation and derived views occur first, followed by the graph key/cache lookup and graph construction. Scene
+   custom data is prepared once per frame; camera custom data is prepared once per derived camera/view.
+7. GPU Scene uploads, candidate production, GPU visibility, phase batching, indirect generation, command recording, queue
+   submission, and graph cleanup are Render Graph work appended through `RenderFrameContext::Jobs()`. The context exposes the
+   dispatcher-thread index needed by thread-affine renderer/RHI scratch state.
+8. Presentation completion and viewport bookkeeping return to a main-thread completion stage. GPU resources retire from RHI
+   fences during later frame ticks; `FlushPreviousFrameProcessing` remains a CPU-chain boundary and never becomes a per-frame
+   GPU idle wait.
+
+After this checkpoint, work should move to mesh global buffers/residency, camera storage, camera/scene custom data, and the
+Render Graph. GPU LOD selection, phase expansion, batching, and indirect generation resume only when those dependencies provide
+real contracts.
 
 ## RenderScene execution phases
 
-These are the implementation phases Vanguard should execute one by one. Each phase must compile, test, and leave a useful
-engine checkpoint. Later rendering work can extend these contracts, but should not reorder the ownership model.
+The following is the original phase history. It remains useful as an implementation inventory, but every phase is now governed
+by the GPU-driven decision recorded above and beside it. The revised continuation phases, not the original Phases 9 and 10,
+are the active roadmap.
 
 ### Phase 0: module boundary and service shell
 
 Goal: make RenderScene a real engine subsystem without adding renderer policy.
 
+Status: implemented and consolidated. `RenderingService` owns the manager and runtime/editor application composition is live.
+
 Add:
 
 - public rendering headers for scene handles, failure codes, stats, service descriptors, and basic creation settings;
-- `RenderSceneService` registered through the engine host;
-- `RenderSceneManager` owned by the service;
+- `RenderingService` registered through the engine host;
+- `RenderSceneManager` owned directly by `RenderingService`;
 - deterministic scene-slot allocation with generational `RenderSceneHandle`;
 - explicit runtime/editor/preview/thumbnail scene creation modes;
 - rendering memory-pool use from the first allocation site;
@@ -2231,13 +2384,16 @@ Done when:
 
 Goal: add the producer-facing RenderProxy lifecycle without spatial indexing or collection.
 
+Status: implemented and retained with adaptation required. Proxy slots need private GPU Scene identities and coalesced dirty
+categories, but producer-facing generational lifecycle semantics remain correct.
+
 Add:
 
 - generational `RenderProxyHandle`;
 - proxy base records: stable proxy identity, owning scene, lifecycle state, transform, bounds, visibility flags, layer/mask bits,
   type id, producer generation, and debug name;
 - call-borrowed creation descriptors that are synchronously internalized;
-- mutation packet pages for create, destroy, transform/bounds update, visibility update, layer/mask update, and user-data epoch;
+- allocation-free mutation admission accounting for create, destroy, visibility, layer/mask, user-data, and typed payload updates;
 - admission budgets and overflow reporting;
 - explicit results for invalid handle, stale generation, wrong scene, duplicate create, pending destroy, and capacity exceeded;
 - tests for stale proxy handles, create/destroy coalescing, mutation ordering, budget limits, and shutdown drain.
@@ -2255,6 +2411,10 @@ Done when:
 ### Phase 2: scene publication and read leases
 
 Goal: split mutable ingress from immutable published scene state.
+
+Status: implemented, but superseded for the runtime hot path. RED does not publish complete immutable scene versions. Replace
+runtime read leases and full snapshots with stable live proxies, command-owned mutation, and a Jobs dependency that makes
+collection run after scene updates. Retain on-demand snapshots only for tooling, validation, and tests.
 
 Add:
 
@@ -2280,6 +2440,9 @@ Done when:
 
 Goal: add representative renderer payload families without turning the base proxy into a giant inheritance tree.
 
+Status: implemented and retained with adaptation required. The pools remain CPU-authoritative, while their runtime publication
+changes from copied per-version/per-view snapshots to sparse GPU Scene mutation and shared-definition references.
+
 Add:
 
 - `MeshProxyPayload`, `LightProxyPayload`, and `DecalProxyPayload` pools;
@@ -2287,7 +2450,7 @@ Add:
 - resource identity fields using `resources::ResourceReference`;
 - optional strong `resources::ResourceHandle` retention for already-loaded resources;
 - payload generation checks tied to the base proxy generation;
-- payload-side mutation packets for resource replacement and common authored property updates;
+- typed in-place payload updates for resource replacement and common authored property changes;
 - tests for payload attach/detach, resource-handle retention, stale payload generation, and cross-type rejection.
 
 This phase does not upload anything to GPU memory. Mesh/material/texture handles mean the CPU scene knows what resource is
@@ -2308,6 +2471,10 @@ Status: implemented as the first CPU write-side spatial adapter. It uses sparse 
 entry metadata, explicit finite-extent policy, dirty-cell repair during frame preparation, empty-cell recycling, an explicit
 overflow lane for retained out-of-range proxies, and validation/stat counters. Immutable spatial snapshots and visibility
 queries are provided by Phase 5.
+
+GPU-driven decision: retain and align more closely with RED. Relinks first update proxy-local bounds and attempt the VisGrid
+quick conditional move; only moves that can invalidate cell coverage enter the structural move queue. Remove/move batches
+repair dirty cell bounds once before later collection.
 
 Add:
 
@@ -2346,6 +2513,10 @@ proxy state from being published under an older mutation epoch or paired with un
 multi-producer ingress implementation may replace this temporary freeze with buffer flipping, but it must preserve the same
 publication boundary.
 
+GPU-driven decision: retain the CPU broad-phase semantics but remove immutable scene replicas from the hot path. Queries read
+the stable live VisGrid after the scene-update dependency and write compact GPU Scene indices directly. Full snapshot reads
+become cold tooling/diagnostic operations.
+
 Add:
 
 - `SpatialReadLease` included inside `SceneReadLease`;
@@ -2377,6 +2548,9 @@ Dispatch itself does not wait. Packet budgets produce explicit overflow counts i
 history is still updated for packets omitted from bounded output. One collection may mutate a view's state at a time; different
 views over the same scene version remain independent.
 
+GPU-driven decision: superseded for the primary runtime path. Do not extend the typed packet/page/reduction design. Replace it
+with direct candidate-index production; move view ownership to the future camera system and remove CPU LOD/dissolve ownership.
+
 Add:
 
 - `ViewProxyState` indexed by view identity and generational proxy identity;
@@ -2397,40 +2571,49 @@ Done when:
 - collection completion is represented by a `jobs::Counter`;
 - no collector blocks the game loop.
 
-### Phase 7: feedback and end-frame retirement
+### Phase 7: feedback separation
 
-Goal: finish the CPU scene frame lifecycle.
+Goal: retain conservative streaming visibility without restoring collector ownership or fake render proxies.
 
-Status: implemented. `VisibilityFeedbackService` owns generational non-renderable probes separately from proxy and typed
-payload storage. Views register an explicit identity, family, and streaming-authority role. Collection dispatch snapshots only
-the probes selected by that view policy; the render-path completion job evaluates those immutable inputs and produces
-generation-, descriptor-, scene-version-, frame-, and view-set-versioned observations. End-frame performs only deterministic
-observation reduction, with visible dominating not-visible for coherent observations from the same frame and scene version.
+Status: implemented on the revised GPU-driven boundary. `VisibilityFeedbackService` is bound to one scene but owns its own
+generational non-renderable probes and dense active-probe directory. Probes are never inserted into RenderScene proxy/payload or
+spatial storage. Evaluation consumes explicit frame-scoped view descriptions using current `RenderViewId` and
+`RenderViewFamilyId` identities; it does not register or own cameras.
 
-`RenderSceneFrameLifecycle::EndFrame` first checks every eligible collection counter without waiting. Pending Jobs return an
-explicit `Pending` result and leave feedback and retained storage untouched. A completed end-frame publishes tri-state feedback,
-retires collection pages, and asks `RenderSceneManager` to reclaim retired scene/spatial/type-payload versions. Reader-pinned
-versions remain retained and observable until a later end-frame. With no matching or active views, probes publish `Unknown`
-while retaining their last evaluation frame so consumers can measure age.
+Planning partitions the dense probe directory into disjoint caller-owned Jobs batches. Each batch writes only its probe range
+into the unpublished feedback bank. `CompleteEvaluation` verifies every exact prepared range before flipping banks, while
+`CancelEvaluation` discards the unpublished bank. There is no shared append cursor, per-probe atomic, observation array,
+collector reduction, full-capacity scan, or mandatory GPU readback.
+
+View-policy routing is direct: specific views use a stamped index table, families use per-family linked ordinals, and
+streaming-authority views use a dense ordinal list. Evaluation cost is therefore proportional to active probes plus the views
+actually selected by each probe policy, rather than active probes multiplied by every submitted view.
+
+One feedback service attaches to its owning scene. The attachment is only a lifetime edge: it exposes no probe data to
+RenderScene, and scene destruction is rejected until the service has destroyed its probes and detached.
+
+Feedback is generation-, descriptor-, mutation-epoch-, frame-, and view-set-versioned. A probe is `Visible` when any matching
+view intersects its bounds, `NotVisible` when at least one matching view evaluated it and all rejected it, and `Unknown` when
+no view matches its specific-view, family, or streaming-authority policy. Unknown feedback retains the last genuine evaluation
+frame so consumers can measure age and remain conservative.
 
 Add:
 
-- `VisibilityFeedbackService` for query-only probes and renderer visibility feedback;
+- `VisibilityFeedbackService` for query-only probes and conservative CPU feedback;
+- explicit view/family/streaming-authority policies over current renderer view identities;
 - versioned tri-state feedback: unknown, visible, not visible;
-- authoritative view-policy aggregation for runtime/editor differences;
-- `RenderSceneEndFrame` to publish feedback, retire completed collector state, and release old scene/spatial versions;
-- explicit dependency checks against collection counters and read leases;
-- tests for stale feedback, multi-view aggregation, end-frame retirement under live readers, and release after collection.
+- double-buffered publication with verified disjoint evaluation batches and cancellation;
+- tests for visible/not-visible classification, open-evaluation read rejection, and cancellation isolation.
 
-This is where visibility can feed world streaming decisions later. The streaming policy remains outside RenderScene; RenderScene
-only reports what the selected view policy observed.
+This is where visibility can feed world streaming decisions later. Streaming policy remains outside both RenderScene and the
+feedback service; the service only reports what the selected view policy conservatively observed.
 
 Done when:
 
 - query-only objects are not modeled as drawable proxies;
-- feedback names scene version, view policy, and age;
-- old scene storage is reclaimed only after all CPU readers and dependent collection work are complete;
-- end-frame can run with no active views and still maintain correct retirement.
+- feedback names the scene mutation epoch, view-set revision, view policy, published frame, and evaluation age;
+- parallel evaluation has no shared output cursor or serial probe reduction;
+- an empty view set deterministically publishes `Unknown` without losing the last real evaluation age.
 
 ### Phase 8: world bridge integration
 
@@ -2447,6 +2630,10 @@ publication and requires a rebuild. Session generations discard retained work fr
 acknowledged only after no published scene version retains their exact generation. A cold full-world validator compares
 tracked contributor components against Flecs state without entering the normal frame path. Frame-pipeline ownership and
 automatic invocation remain Phase 9.
+
+GPU-driven decision: retain and adapt. Exact change capture, coalescing, and session invalidation are correct. Detach safety
+will follow RED's retained command/update jobs plus Vanguard's GPU Scene retirement fences; it no longer waits for copied CPU
+scene versions.
 
 Add:
 
@@ -2536,6 +2723,9 @@ Done when:
 
 Goal: make the CPU RenderScene lifecycle run automatically in engine frames.
 
+Status: not implemented. The original plan is superseded and must not be implemented over the current full-copy publication and
+typed CPU collector. Use the revised continuation phases in the reevaluation section.
+
 Add:
 
 - frame participants for bridge capture, scene prepare/commit, collection scheduling, and end-frame retirement;
@@ -2558,6 +2748,9 @@ Done when:
 ### Phase 10: renderer-facing extension seam
 
 Goal: prepare for RenderScene consumers without implementing them prematurely.
+
+Status: not implemented and superseded. The renderer-facing seam is now explicitly the GPU Scene mutation/publication contract
+plus direct candidate reservations, rather than generic typed collector outputs.
 
 Add:
 
@@ -2582,9 +2775,9 @@ Done when:
 This is not final API. It records only conclusions already supported by reviewed chunks.
 
 ```text
-RenderSceneService
-    engine service that owns RenderSceneManager, frame-pipeline hooks,
-    admission budgets, stats, and scene lifecycle access
+RenderingService
+    major engine service that owns RenderSceneManager, renderer/device lifetime,
+    frame-pipeline hooks, command serialization, viewports, and GPU Scene publication
 
 RenderSceneManager
     owns scene slots and generational RenderSceneHandle values
@@ -2596,46 +2789,49 @@ RenderProxyHandle
     producer-side attachment and mutation façade
 
 RenderScene
-    renderer-owned proxy storage, spatial membership, mutation buffers, and published read state
+    renderer-owned stable live proxy storage, spatial membership, and update buffers
 
-SpatialWriteIndex
-    single-writer staging index with dirty-page/cell repair
+RenderSceneUpdateQueue
+    two bounded preallocated relink buffers with atomic producer admission and newest-wins reduction
 
-SpatialReadLease
-    immutable version-pinned spatial and proxy read view retained by collection jobs
+ProxyRelinkMetadata
+    paged per-proxy generation, admission-closed state, outstanding-request count, and deduplication stamp
 
-SceneReadLease
-    coherent scene, spatial, proxy-base, and type-payload version retained by collection
+SpatialIndex
+    live VisGrid with quick conditional moves, serialized structural operations, and dirty-cell repair
+
+RenderSceneUpdateDependency
+    redJobs completion dependency covering command flush, relinks, structural VisGrid work, and repair
 
 VisibilityQuery
-    frame-scoped view policy prepared against one SpatialReadLease
+    frame-scoped view policy consuming the completed live scene epoch
 
 VisibilityFeedbackService
     owns generational non-renderable probes and publishes versioned per-view feedback
 
 ViewCollectionState
-    frame/view-local proxy calculations and typed job-local collector outputs
+    frame/view-local camera and feature state owned outside shared RenderScene proxy storage
 
 MeshProxyPayload, LightProxyPayload, DecalProxyPayload
-    typed immutable proxy payload pools resolved from ProxyReadRecord
+    typed renderer-owned live proxy payload pools with explicit update access behavior
 
-ViewProxyState
-    per-view proxy temporal state, LOD/dissolve decisions, and clustered-instance buckets
+GpuSceneCandidateProducer
+    Jobs traversal writing compact persistent indices directly into caller-owned reservations
 
-CollectorOutputPages
-    typed mesh, decal, light, shadow, feedback, and diagnostics outputs
+GpuSceneChangePlan
+    sparse instance/light/decal changes emitted from the final scene update operations
 
 RenderSceneFramePrepare
-    captures pending mutations and schedules publish-ready scene update work
+    swaps update buffers and captures the bounded relink epoch
 
-RenderSceneCommit
-    publishes a coherent SceneVersion/SpatialVersion for collection
+RenderSceneUpdate
+    removes duplicate relinks, applies proxy-local updates in parallel, commits structural spatial work, and signals completion
 
 RenderSceneCollect
-    dispatches visibility and collection jobs against a SceneReadLease
+    dispatches candidate production after RenderSceneUpdateDependency
 
 RenderSceneEndFrame
-    publishes visibility feedback and retires CPU scene state after dependent tokens complete
+    publishes visibility feedback and retires retained proxy/update work after dependent tokens complete
 
 WorldRenderBridge
     consumes committed Flecs/world transactions, owns proxy lifecycle records,
@@ -2655,6 +2851,7 @@ runtime world. No viewport owns a Render Scene.
 | Public identity uses generational handles | Accepted | Chunks 02, 08, and 09 show queued relink, command, admission, destruction, and world-switch work can outlive the producer identity that emitted it. |
 | Logical lifecycle state is distinct from scene membership | Accepted | RED handle contains scene assignment, logical attachment, visibility-dependent membership, and queued completion as separate realities but exposes them ambiguously. |
 | Relinks use dedicated scene ingress | Accepted | RED routes high-frequency relinks directly to the scene while ordinary mutations use render commands. |
+| Relink admission and destruction arbitrate per proxy | Accepted | One packed atomic generation/closed/count state prevents validate-then-enqueue races and makes destruction O(1) relative to queued relinks without a manager-wide exclusive lock. |
 | Generic proxy handle excludes feature-specific mutation methods | Accepted | RED's handle accumulated unrelated mesh, particle, cloth, effect, light, and editor operations. |
 | Render Scene preserves fixed-point world position | Accepted | RED carries fixed-point position through `RenderProxyTransform`; Vanguard already has the corresponding math types. |
 | Creation descriptors are call-borrowed and synchronously internalized | Accepted | RED call sites routinely pass stack descriptors; safe asynchronous work must own its copied inputs. |
@@ -2670,14 +2867,14 @@ runtime world. No viewport owns a Render Scene.
 | Core RenderScene excludes accumulated feature managers | Accepted | RED's concrete scene mixes foundational storage with decals, particles, dissolve, motion, interior data, and shader-specific state. |
 | Primary proxy spatial index and secondary visibility subsystem are distinct | Accepted | RED owns both `m_rpMainSceneProxies` and a retained `vis::Scene`, and their use sites serve different query paths. |
 | Permanent indexes require cross-view justification | Accepted | RED explicitly warns against adding scene collections for data needed only by one camera collection. |
-| Scene access uses scoped leases rather than a rendering Boolean | Accepted | Chunks 10 and 11 show spatial jobs retain live cell and proxy pointers while RED relies on one render-exclusive interval; leases express multiple readers, versions, and retirement directly. |
+| Scene access uses an explicit update/collection dependency rather than copied versions or a rendering Boolean | Accepted | RED's live proxy and VisGrid storage is safe because command flushing and scene updates precede collection in one Jobs chain. Vanguard makes that dependency explicit per scene. |
 | Game-specific scene-layer names are rejected | Accepted | RED's `Cyberspace` and `WorldMap` are project policy; Vanguard needs renderer-agnostic registered layers. |
 | Scene membership has one serialized commit authority | Accepted | RED accepts multi-producer pending operations but applies each drained scene batch in one mutation job. |
 | Pending proxy operations coalesce through an explicit lifecycle transition table | Accepted | RED reduces repeated addition/removal/move requests before touching scene storage; Vanguard will make every transition defined and observable. |
 | Proxy mutation uses preflight followed by a non-failing commit | Accepted | RED's commit is assertion-driven and has no rollback; Vanguard preserves the fast commit while adding capacity, identity, and lifecycle validation before publication. |
 | Spatial repair is amortized across a mutation batch | Accepted | RED removes and moves without per-operation rebalance, then repairs dirty nodes once before clustered additions. |
 | Relinks use scene-direct epoch ingress rather than general commands | Accepted | RED publishes retained relink requests into a double-buffered per-scene path and executes them through redJobs. |
-| Relink coalescing is field-aware | Accepted | RED's whole-request latest-wins reduction prevents duplicate writers but can lose teleport and auxiliary-resource updates. |
+| Relink coalescing mirrors RED's whole-request newest-wins reduction | Accepted | One complete retained request owns transform, bounds, teleport, skinning, float-track, and instance data; the reverse scan guarantees one writer per proxy. |
 | Slow spatial moves complete in the producing update epoch | Accepted | RED's escaped-parent path defers structural movement and exposes backend-dependent temporary bounds; Vanguard will gather and commit these moves before publication. |
 | Proxy types declare relink access behavior | Accepted | RED runs distinct proxy relinks in parallel but relies on implementation knowledge for non-local scene-extension work. |
 | Relink overflow and stale lifecycle are explicit results | Accepted | RED can drop fixed-capacity updates while most handle entry points ignore the returned failure. |
@@ -2695,19 +2892,19 @@ runtime world. No viewport owns a Render Scene.
 | Scene ownership mode is explicit | Accepted | RED stores internally created and externally supplied scenes in the same pointer and relies on lifecycle context for teardown authority. |
 | World/scene switches advance bridge generations | Accepted | Queued admission, relink, and retirement operations must not target a replacement world or reused proxy slot. |
 | Main proxy spatial index is distinct from view-query coordination | Accepted | RED directly owns the live `visGrid` in Render Scene while `vis::Scene` owns ephemeral queries and per-view frame data. |
-| Published collection state uses immutable versioned read leases | Accepted | RED traverses live cells through raw pointers and depends on global render exclusion; Vanguard needs safe concurrent runtime/editor views and bounded frame overlap. |
-| Spatial publication uses dirty-page copy-on-write when readers overlap | Provisional | Preserves immutable read semantics without copying a complete open-world index; exact page/directory shape awaits collection workload validation. |
-| Fast and structural spatial moves complete before publication | Accepted | RED's quick move can temporarily place object bounds outside aggregate cell bounds until a later move; this is incompatible with a strict published-version contract. |
+| Collection reads stable live state after a per-scene update dependency | Accepted | Mirror RED's retained proxies, double-buffered relinks, command-owned structural operations, and Jobs ordering; do not copy the scene to manufacture reader versions. |
+| Spatial state remains live rather than copy-on-write | Accepted | Runtime/editor collections consume the same completed scene epoch. Overlap is expressed through the scheduler; mutation waits behind dependent collection instead of cloning the VisGrid. |
+| Fast and structural spatial moves complete before collection | Accepted | RED updates object bounds immediately, queues escaped-cell moves, and repairs dirty nodes before the later collection chain proceeds. |
 | Spatial configuration does not encode a fixed world extent or 2D grid | Accepted | RED's 32-metre XY grid and 8-kilometre half extent are workload-specific measured constants rather than general engine semantics. |
 | Broad visibility roles are registered renderer masks | Accepted | RED embeds fixed 16-bit inclusion and time-of-day masks; Vanguard must remain project-agnostic and extensible while keeping hot filters compact. |
-| Visibility queries are frame-scoped and cannot escape their read lease | Accepted | RED retains queries until `FinishQueries` and asserts that external references do not survive the render. |
-| Published immutable scene view | Accepted | RED proves live mutable traversal requires global exclusion; Vanguard replaces that implicit fence contract with explicit scene/spatial versions and reader epochs. |
+| Visibility queries are frame-scoped and cannot escape their collection epoch | Accepted | RED retains queries until `FinishQueries` and asserts that external references do not survive the render. |
+| Live scene view with explicit scheduler ownership | Accepted | Vanguard makes RED's implicit global ordering a per-scene update/collection dependency while retaining stable live proxy and spatial storage. |
 | Query-only visibility is a separate feedback service | Accepted | RED's query-only boxes are renderer-evaluated streaming probes with no drawable/proxy behavior, despite being exposed directly on `IRenderScene`. |
 | Visibility feedback is versioned tri-state data | Accepted | RED's Boolean bitset omits view, scene version, age, and not-yet-evaluated state and can redirect stale handles after slot reuse. |
 | Feedback aggregation names an authoritative view policy | Accepted | RED has one scene-global result buffer cleared by an evaluated camera; runtime/editor and multi-camera views require independent results plus explicit aggregation. |
 | Streaming policy remains outside visibility evaluation | Accepted | RED combines frustum/occlusion and activation distance inside the renderer; Vanguard observers own distance, hysteresis, prediction, and residency decisions. |
-| Scene read leases pin immutable type payloads as well as spatial state | Accepted | RED candidates resolve to live virtual proxies whose collection dereferences transforms, flags, resources, materials, geometry, lights, and custom data. |
-| Per-view collection state never mutates published proxies | Accepted | RED's `UpdateOncePerFrame` and type hooks write proxy frame trackers, cached distance, LOD/visibility state, and feature state during collection. |
+| Update and collection jobs retain live type payloads through completion | Accepted | RED candidates resolve to retained live proxies whose collection dereferences transforms, flags, resources, materials, geometry, lights, and custom data. |
+| Per-view collection state never mutates shared proxy state needed by other views | Accepted | RED writes some proxy frame trackers and LOD state during collection; Vanguard moves view-local state into camera/view storage instead. |
 | Collector outputs are typed job-local pages followed by deterministic reduction | Provisional | Replaces RED's mixed atomics, locks, fixed arrays, and virtual callbacks; representative proxies must validate exact output families and dispatch shape. |
 | Representative proxy payloads are typed pools, not one inheritance forest | Accepted | RED mesh, light, and decal proxies expose very different hot fields, sidecars, and output families while sharing only identity, transform, bounds, layers, and visibility roles. |
 | Mesh collection requires immutable payload plus view-local state | Accepted | RED mesh collection reads resources/materials/instances/sidecars but mutates camera dissolve, frame tracker, LOD buckets, cached distance, and feature state. |

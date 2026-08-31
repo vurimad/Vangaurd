@@ -23,11 +23,11 @@ namespace
         ~SdlInputBackend() override
         {
             for (GamepadRecord& record : m_gamepads)
-                if (record.handle != nullptr) SDL_CloseGamepad(record.handle);
+                if (record.handle != nullptr)
+                    SDL_CloseGamepad(record.handle);
         }
 
-        [[nodiscard]] vanguard::input::BackendDrainResult Drain(vanguard::input::RawEvent* const destination,
-                                                                 const vanguard::u32 capacity) noexcept override
+        [[nodiscard]] vanguard::input::BackendDrainResult Drain(vanguard::input::RawEvent* const destination, const vanguard::u32 capacity) noexcept override
         {
             vanguard::input::BackendDrainResult result;
             result.droppedSinceLastDrain = m_dropped;
@@ -45,35 +45,47 @@ namespace
             return result;
         }
 
-        [[nodiscard]] bool SetRumble(const vanguard::input::DeviceId device, const vanguard::f32 lowFrequency,
-                                     const vanguard::f32 highFrequency,
+        [[nodiscard]] bool SetRumble(const vanguard::input::DeviceId device, const vanguard::f32 lowFrequency, const vanguard::f32 highFrequency,
                                      const vanguard::u32 durationMilliseconds) noexcept override
         {
             GamepadRecord* const record = FindByDevice(device);
-            if (record == nullptr || record->handle == nullptr) return false;
+            if (record == nullptr || record->handle == nullptr)
+                return false;
             const auto low = static_cast<vanguard::u16>(lowFrequency * 65535.0f);
             const auto high = static_cast<vanguard::u16>(highFrequency * 65535.0f);
             return SDL_RumbleGamepad(record->handle, low, high, durationMilliseconds);
         }
 
-        void RequestDeviceRefresh() noexcept override { m_refreshRequested = true; }
+        void RequestDeviceRefresh() noexcept override
+        {
+            m_refreshRequested = true;
+        }
 
         void RefreshIfRequested() noexcept
         {
-            if (!m_refreshRequested) return;
+            if (!m_refreshRequested)
+                return;
             m_refreshRequested = false;
             int count = 0;
             SDL_JoystickID* const devices = SDL_GetGamepads(&count);
-            if (devices == nullptr) return;
+            if (devices == nullptr)
+                return;
             for (int index = 0; index < count; ++index)
-                if (FindByInstance(devices[index]) == nullptr) ConnectGamepad(devices[index], SDL_GetTicksNS());
+                if (FindByInstance(devices[index]) == nullptr)
+                    ConnectGamepad(devices[index], SDL_GetTicksNS());
             for (GamepadRecord& record : m_gamepads)
             {
-                if (record.handle == nullptr) continue;
+                if (record.handle == nullptr)
+                    continue;
                 bool present = false;
                 for (int index = 0; index < count; ++index)
-                    if (devices[index] == record.instance) { present = true; break; }
-                if (!present) DisconnectGamepad(record.instance, SDL_GetTicksNS());
+                    if (devices[index] == record.instance)
+                    {
+                        present = true;
+                        break;
+                    }
+                if (!present)
+                    DisconnectGamepad(record.instance, SDL_GetTicksNS());
             }
             SDL_free(devices);
         }
@@ -107,11 +119,9 @@ namespace
                 translated.window = window;
                 if (event.text.text != nullptr)
                 {
-                    while (translated.data.text.length + 1u < MaximumTextInputBytes &&
-                           event.text.text[translated.data.text.length] != '\0')
+                    while (translated.data.text.length + 1u < MaximumTextInputBytes && event.text.text[translated.data.text.length] != '\0')
                     {
-                        translated.data.text.utf8[translated.data.text.length] =
-                            event.text.text[translated.data.text.length];
+                        translated.data.text.utf8[translated.data.text.length] = event.text.text[translated.data.text.length];
                         ++translated.data.text.length;
                     }
                     translated.data.text.utf8[translated.data.text.length] = '\0';
@@ -120,8 +130,7 @@ namespace
                 break;
             case SDL_EVENT_KEYBOARD_ADDED:
             case SDL_EVENT_KEYBOARD_REMOVED:
-                translated.type = event.type == SDL_EVENT_KEYBOARD_ADDED ? EventType::DeviceConnected
-                                                                         : EventType::DeviceDisconnected;
+                translated.type = event.type == SDL_EVENT_KEYBOARD_ADDED ? EventType::DeviceConnected : EventType::DeviceDisconnected;
                 translated.deviceType = DeviceType::Keyboard;
                 translated.device = MakeSimpleDevice(DeviceType::Keyboard, event.kdevice.which);
                 translated.timestampNanoseconds = event.kdevice.timestamp;
@@ -129,8 +138,7 @@ namespace
                 break;
             case SDL_EVENT_MOUSE_ADDED:
             case SDL_EVENT_MOUSE_REMOVED:
-                translated.type = event.type == SDL_EVENT_MOUSE_ADDED ? EventType::DeviceConnected
-                                                                      : EventType::DeviceDisconnected;
+                translated.type = event.type == SDL_EVENT_MOUSE_ADDED ? EventType::DeviceConnected : EventType::DeviceDisconnected;
                 translated.deviceType = DeviceType::Mouse;
                 translated.device = MakeSimpleDevice(DeviceType::Mouse, event.mdevice.which);
                 translated.timestampNanoseconds = event.mdevice.timestamp;
@@ -169,8 +177,12 @@ namespace
                 translated.data.wheel.y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
                 Push(translated);
                 break;
-            case SDL_EVENT_GAMEPAD_ADDED: ConnectGamepad(event.gdevice.which, event.gdevice.timestamp); break;
-            case SDL_EVENT_GAMEPAD_REMOVED: DisconnectGamepad(event.gdevice.which, event.gdevice.timestamp); break;
+            case SDL_EVENT_GAMEPAD_ADDED:
+                ConnectGamepad(event.gdevice.which, event.gdevice.timestamp);
+                break;
+            case SDL_EVENT_GAMEPAD_REMOVED:
+                DisconnectGamepad(event.gdevice.which, event.gdevice.timestamp);
+                break;
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
             case SDL_EVENT_GAMEPAD_BUTTON_UP:
             {
@@ -198,9 +210,9 @@ namespace
                     translated.timestampNanoseconds = event.gaxis.timestamp;
                     translated.data.gamepadAxis.axis = static_cast<GamepadAxis>(event.gaxis.axis);
                     translated.data.gamepadAxis.value = event.gaxis.axis >= SDL_GAMEPAD_AXIS_LEFT_TRIGGER
-                        ? static_cast<vanguard::f32>(event.gaxis.value) / 32767.0f
-                        : (event.gaxis.value < 0 ? static_cast<vanguard::f32>(event.gaxis.value) / 32768.0f
-                                                 : static_cast<vanguard::f32>(event.gaxis.value) / 32767.0f);
+                                                            ? static_cast<vanguard::f32>(event.gaxis.value) / 32767.0f
+                                                            : (event.gaxis.value < 0 ? static_cast<vanguard::f32>(event.gaxis.value) / 32768.0f
+                                                                                     : static_cast<vanguard::f32>(event.gaxis.value) / 32767.0f);
                     Push(translated);
                 }
                 break;
@@ -212,7 +224,8 @@ namespace
                 translated.window = window;
                 Push(translated);
                 break;
-            default: break;
+            default:
+                break;
             }
         }
 
@@ -226,22 +239,31 @@ namespace
             vanguard::u32 generation = 0;
         };
 
-        [[nodiscard]] static vanguard::input::DeviceId MakeSimpleDevice(const vanguard::input::DeviceType type,
-                                                                        const vanguard::u32 instance) noexcept
+        [[nodiscard]] static vanguard::input::DeviceId MakeSimpleDevice(const vanguard::input::DeviceType type, const vanguard::u32 instance) noexcept
         {
             return (static_cast<vanguard::u64>(type) << 56u) | static_cast<vanguard::u64>(instance + 1u);
         }
-        [[nodiscard]] static bool TranslateMouseButton(const vanguard::u8 source,
-                                                       vanguard::input::MouseButton& destination) noexcept
+        [[nodiscard]] static bool TranslateMouseButton(const vanguard::u8 source, vanguard::input::MouseButton& destination) noexcept
         {
             switch (source)
             {
-            case SDL_BUTTON_LEFT: destination = vanguard::input::MouseButton::Left; return true;
-            case SDL_BUTTON_MIDDLE: destination = vanguard::input::MouseButton::Middle; return true;
-            case SDL_BUTTON_RIGHT: destination = vanguard::input::MouseButton::Right; return true;
-            case SDL_BUTTON_X1: destination = vanguard::input::MouseButton::Extra1; return true;
-            case SDL_BUTTON_X2: destination = vanguard::input::MouseButton::Extra2; return true;
-            default: return false;
+            case SDL_BUTTON_LEFT:
+                destination = vanguard::input::MouseButton::Left;
+                return true;
+            case SDL_BUTTON_MIDDLE:
+                destination = vanguard::input::MouseButton::Middle;
+                return true;
+            case SDL_BUTTON_RIGHT:
+                destination = vanguard::input::MouseButton::Right;
+                return true;
+            case SDL_BUTTON_X1:
+                destination = vanguard::input::MouseButton::Extra1;
+                return true;
+            case SDL_BUTTON_X2:
+                destination = vanguard::input::MouseButton::Extra2;
+                return true;
+            default:
+                return false;
             }
         }
         void Push(const vanguard::input::RawEvent& event) noexcept
@@ -259,26 +281,32 @@ namespace
         [[nodiscard]] GamepadRecord* FindByInstance(const SDL_JoystickID instance) noexcept
         {
             for (GamepadRecord& record : m_gamepads)
-                if (record.handle != nullptr && record.instance == instance) return &record;
+                if (record.handle != nullptr && record.instance == instance)
+                    return &record;
             return nullptr;
         }
         [[nodiscard]] GamepadRecord* FindByDevice(const vanguard::input::DeviceId device) noexcept
         {
             for (GamepadRecord& record : m_gamepads)
-                if (record.handle != nullptr && record.device == device) return &record;
+                if (record.handle != nullptr && record.device == device)
+                    return &record;
             return nullptr;
         }
         void ConnectGamepad(const SDL_JoystickID instance, const vanguard::u64 timestamp) noexcept
         {
-            if (FindByInstance(instance) != nullptr) return;
+            if (FindByInstance(instance) != nullptr)
+                return;
             for (vanguard::u32 index = 0; index < vanguard::input::MaximumGamepads; ++index)
             {
                 GamepadRecord& record = m_gamepads[index];
-                if (record.handle != nullptr) continue;
+                if (record.handle != nullptr)
+                    continue;
                 SDL_Gamepad* const handle = SDL_OpenGamepad(instance);
-                if (handle == nullptr) return;
+                if (handle == nullptr)
+                    return;
                 ++record.generation;
-                if (record.generation == 0) ++record.generation;
+                if (record.generation == 0)
+                    ++record.generation;
                 record.handle = handle;
                 record.instance = instance;
                 record.device = (static_cast<vanguard::u64>(record.generation) << 32u) | (index + 1u);
@@ -294,7 +322,8 @@ namespace
         void DisconnectGamepad(const SDL_JoystickID instance, const vanguard::u64 timestamp) noexcept
         {
             GamepadRecord* const record = FindByInstance(instance);
-            if (record == nullptr) return;
+            if (record == nullptr)
+                return;
             vanguard::input::RawEvent event;
             event.type = vanguard::input::EventType::DeviceDisconnected;
             event.deviceType = vanguard::input::DeviceType::Gamepad;
@@ -321,12 +350,10 @@ namespace
         // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is the stable pseudo-handle value -4. Resolve the Windows 10 API
         // dynamically so Vanguard can retain an older minimum-OS build contract and still use the modern mode.
         const HMODULE user32Module = ::GetModuleHandleW(L"User32.dll");
-        const auto setProcessDpiAwarenessContext = user32Module != nullptr
-            ? reinterpret_cast<SetProcessDpiAwarenessContextFunction>(
-                  ::GetProcAddress(user32Module, "SetProcessDpiAwarenessContext"))
-            : nullptr;
-        if (setProcessDpiAwarenessContext != nullptr &&
-            setProcessDpiAwarenessContext(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4))) != FALSE)
+        const auto setProcessDpiAwarenessContext =
+            user32Module != nullptr ? reinterpret_cast<SetProcessDpiAwarenessContextFunction>(::GetProcAddress(user32Module, "SetProcessDpiAwarenessContext"))
+                                    : nullptr;
+        if (setProcessDpiAwarenessContext != nullptr && setProcessDpiAwarenessContext(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4))) != FALSE)
             return;
         static_cast<void>(::SetProcessDPIAware());
     }
@@ -346,7 +373,7 @@ namespace
             return FALSE;
         }
     }
-}
+} // namespace
 
 namespace vanguard::platform::windows
 {
@@ -355,11 +382,15 @@ namespace vanguard::platform::windows
         Shutdown();
     }
 
-    const char* WindowsPlatformHost::Name() const noexcept { return "Windows"; }
+    const char* WindowsPlatformHost::GetName() const noexcept
+    {
+        return "Windows";
+    }
 
     application::PlatformStatus WindowsPlatformHost::Initialize(const application::PlatformStartupInfo&) noexcept
     {
-        if (m_initialized) return application::PlatformStatus::Failure("Windows platform host is already initialized");
+        if (m_initialized)
+            return application::PlatformStatus::Failure("Windows platform host is already initialized");
         if (g_platformHostActive.CompareExchange(true, false))
             return application::PlatformStatus::Failure("another Windows platform host is already active");
 
@@ -379,8 +410,8 @@ namespace vanguard::platform::windows
             g_platformHostActive.SetValue(false);
             return application::PlatformStatus::Failure("failed to initialize SDL event and gamepad subsystems");
         }
-        vanguard::memory::MemoryBlock inputBlock = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Input, sizeof(SdlInputBackend), alignof(SdlInputBackend));
+        vanguard::memory::MemoryBlock inputBlock =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Input, sizeof(SdlInputBackend), alignof(SdlInputBackend));
         if (!inputBlock)
         {
             SDL_QuitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS);
@@ -391,8 +422,7 @@ namespace vanguard::platform::windows
         m_inputBackend = ::new (inputBlock.address) SdlInputBackend();
 
         vanguard::memory::MemoryBlock windowBlock = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Window, sizeof(vanguard::window::sdl::SdlWindowBackend),
-            alignof(vanguard::window::sdl::SdlWindowBackend));
+            vanguard::memory::PoolId::Window, sizeof(vanguard::window::sdl::SdlWindowBackend), alignof(vanguard::window::sdl::SdlWindowBackend));
         if (!windowBlock)
         {
             static_cast<SdlInputBackend*>(m_inputBackend)->~SdlInputBackend();
@@ -416,8 +446,7 @@ namespace vanguard::platform::windows
             SDL_QuitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS);
             static_cast<void>(::SetConsoleCtrlHandler(ConsoleControlHandler, FALSE));
             g_platformHostActive.SetValue(false);
-            return application::PlatformStatus::Failure(
-                windowStatus.message != nullptr ? windowStatus.message : "failed to initialize the SDL window backend");
+            return application::PlatformStatus::Failure(windowStatus.message != nullptr ? windowStatus.message : "failed to initialize the SDL window backend");
         }
         m_initialized = true;
         return application::PlatformStatus::Success();
@@ -427,7 +456,8 @@ namespace vanguard::platform::windows
     {
         if (!m_initialized)
             return {application::PlatformPumpAction::Failure, -1, "Windows platform host is not initialized"};
-        if (g_consoleExitRequested.GetValue()) return {application::PlatformPumpAction::ExitRequested, 0, nullptr};
+        if (g_consoleExitRequested.GetValue())
+            return {application::PlatformPumpAction::ExitRequested, 0, nullptr};
 
         SDL_Event event{};
         while (SDL_PollEvent(&event))
@@ -459,8 +489,7 @@ namespace vanguard::platform::windows
                 SDL_Window* const nativeWindow = SDL_GetWindowFromEvent(&event);
                 if (nativeWindow != nullptr)
                 {
-                    const vanguard::window::BackendWindowId backendWindow =
-                        m_windowBackend->ResolveNativeWindow(SDL_GetWindowID(nativeWindow));
+                    const vanguard::window::BackendWindowId backendWindow = m_windowBackend->ResolveNativeWindow(SDL_GetWindowID(nativeWindow));
                     inputWindow = m_windowEventSink->ResolveWindow(backendWindow);
                 }
             }
@@ -470,31 +499,39 @@ namespace vanguard::platform::windows
         return {};
     }
 
-    input::IInputBackend* WindowsPlatformHost::InputBackend() noexcept { return m_inputBackend; }
+    input::IInputBackend* WindowsPlatformHost::GetInputBackend() noexcept
+    {
+        return m_inputBackend;
+    }
 
-    window::IWindowBackend* WindowsPlatformHost::WindowBackend() noexcept { return m_windowBackend; }
+    window::IWindowBackend* WindowsPlatformHost::GetWindowBackend() noexcept
+    {
+        return m_windowBackend;
+    }
 
     bool WindowsPlatformHost::AttachWindowEventSink(window::IWindowEventSink* const sink) noexcept
     {
-        if (!m_initialized || sink == nullptr || m_windowEventSink != nullptr) return false;
+        if (!m_initialized || sink == nullptr || m_windowEventSink != nullptr)
+            return false;
         m_windowEventSink = sink;
         return true;
     }
 
     void WindowsPlatformHost::DetachWindowEventSink(window::IWindowEventSink* const sink) noexcept
     {
-        if (m_windowEventSink == sink) m_windowEventSink = nullptr;
+        if (m_windowEventSink == sink)
+            m_windowEventSink = nullptr;
     }
 
     void WindowsPlatformHost::Shutdown() noexcept
     {
-        if (!m_initialized) return;
+        if (!m_initialized)
+            return;
         m_windowEventSink = nullptr;
         if (m_inputBackend != nullptr)
         {
             static_cast<SdlInputBackend*>(m_inputBackend)->~SdlInputBackend();
-            vanguard::memory::MemoryBlock block{
-                m_inputBackend, sizeof(SdlInputBackend), vanguard::memory::PoolId::Input};
+            vanguard::memory::MemoryBlock block{m_inputBackend, sizeof(SdlInputBackend), vanguard::memory::PoolId::Input};
             vanguard::memory::Free(block);
             m_inputBackend = nullptr;
         }
@@ -502,8 +539,7 @@ namespace vanguard::platform::windows
         {
             static_cast<void>(m_windowBackend->Shutdown());
             m_windowBackend->~SdlWindowBackend();
-            vanguard::memory::MemoryBlock block{
-                m_windowBackend, sizeof(vanguard::window::sdl::SdlWindowBackend), vanguard::memory::PoolId::Window};
+            vanguard::memory::MemoryBlock block{m_windowBackend, sizeof(vanguard::window::sdl::SdlWindowBackend), vanguard::memory::PoolId::Window};
             vanguard::memory::Free(block);
             m_windowBackend = nullptr;
         }

@@ -95,8 +95,7 @@ namespace
              {g_tail.data(), g_tail.size(), packages::Codec::None, 12, packages::SegmentFlags::Inline}}};
         const std::array<packages::BuildSegment, 1> textureSegments{
             {{g_texture.data(), g_texture.size(), packages::Codec::None, 12, packages::SegmentFlags::MemoryResident}}};
-        const std::array<packages::Dependency, 1> meshDependencies{
-            {{textureId, TextureType, vanguard::resources::DependencyKind::Optional}}};
+        const std::array<packages::Dependency, 1> meshDependencies{{{textureId, TextureType, vanguard::resources::DependencyKind::Optional}}};
 
         packages::BuildResource mesh;
         mesh.path = "Meshes\\Hero.vmesh";
@@ -180,8 +179,8 @@ namespace
         {
             return false;
         }
-        deduplicatedSegments = writer.DeduplicatedSegmentCount();
-        storedBytes = writer.StoredPayloadBytes();
+        deduplicatedSegments = writer.GetDeduplicatedSegmentCount();
+        storedBytes = writer.GetStoredPayloadBytes();
         return true;
     }
 
@@ -266,29 +265,25 @@ int main()
     packages::PackageReader package;
     Check(package.Open(packageFile) == packages::Result::Success, "open package");
     Check(package.IsOpen(), "open state");
-    Check(package.Header().resourceCount == 2, "resource count");
-    Check(package.Header().segmentCount == 3, "segment count");
-    Check(package.Header().dependencyCount == 1, "dependency count");
+    Check(package.GetHeader().resourceCount == 2, "resource count");
+    Check(package.GetHeader().segmentCount == 3, "segment count");
+    Check(package.GetHeader().dependencyCount == 1, "dependency count");
     Check(!package.HasPackageSet() && package.GetPackageSet() == nullptr, "ordinary VPAK has no package-set boot record");
 
     packages::PackageSet absentPackageSet;
     packageFile.Seek(0);
-    Check(packages::ReadPackageSet(packageFile, absentPackageSet) == packages::Result::MissingPackageSet &&
-              !absentPackageSet.IsValid(),
+    Check(packages::ReadPackageSet(packageFile, absentPackageSet) == packages::Result::MissingPackageSet && !absentPackageSet.IsValid(),
           "ordinary VPAK rejects package-set bootstrap discovery explicitly");
 
     char packageFileName[13]{};
     vanguard::usize packageFileNameSize = 0;
-    Check(packages::FormatPackageFileName(0, packageFileName, sizeof(packageFileName), packageFileNameSize) ==
-                  packages::Result::Success &&
+    Check(packages::FormatPackageFileName(0, packageFileName, sizeof(packageFileName), packageFileNameSize) == packages::Result::Success &&
               packageFileNameSize == 12 && std::memcmp(packageFileName, "DATA000.vpak", 13) == 0,
           "canonical root package filename");
-    Check(packages::FormatPackageFileName(999, packageFileName, sizeof(packageFileName), packageFileNameSize) ==
-                  packages::Result::Success &&
+    Check(packages::FormatPackageFileName(999, packageFileName, sizeof(packageFileName), packageFileNameSize) == packages::Result::Success &&
               std::memcmp(packageFileName, "DATA999.vpak", 13) == 0,
           "canonical maximum package filename");
-    Check(packages::FormatPackageFileName(1000, packageFileName, sizeof(packageFileName), packageFileNameSize) ==
-              packages::Result::InvalidArgument,
+    Check(packages::FormatPackageFileName(1000, packageFileName, sizeof(packageFileName), packageFileNameSize) == packages::Result::InvalidArgument,
           "reject out-of-range package filename");
 
     ByteArray rootPackageBytes(memory::pools::Resources::GetInstance());
@@ -302,20 +297,19 @@ int main()
           "read DATA000 boot record without mounting or opening the package index");
     Check(packageSet.gameId == 0x56414e4755415244ull && packageSet.buildId == 0x20260804 &&
               packageSet.targetPlatformId == vanguard::serialization::MakeFourCC('W', 'I', 'N', '6') &&
-              packageSet.startupWorld == packages::HashResourcePath("worlds/main.vworld") &&
-              packageSet.startupWorldType == WorldType &&
-              packageSet.defaultInput == packages::HashResourcePath("input/default.vinput") &&
-              packageSet.defaultInputType == TextureType && packageSet.packages.Size() == 2,
+              packageSet.startupWorld == packages::HashResourcePath("worlds/main.vworld") && packageSet.startupWorldType == WorldType &&
+              packageSet.defaultInput == packages::HashResourcePath("input/default.vinput") && packageSet.defaultInputType == TextureType &&
+              packageSet.packages.Size() == 2,
           "DATA000 game identity and startup resources");
     Check(packageSet.packages.Size() == 2 && packageSet.packages[0].packageNumber == 1 &&
-              packageSet.packages[0].flags == packages::PackageSetEntryFlags::Required &&
-              packageSet.packages[1].packageNumber == 2 && packageSet.packages[1].mountPriority == 100,
+              packageSet.packages[0].flags == packages::PackageSetEntryFlags::Required && packageSet.packages[1].packageNumber == 2 &&
+              packageSet.packages[1].mountPriority == 100,
           "ordered package catalog and mount policy");
 
     filesystem::MemoryFileReader rootPackageFile(rootPackageBytes, 0);
     packages::PackageReader rootPackage;
-    Check(rootPackage.Open(rootPackageFile) == packages::Result::Success && rootPackage.HasPackageSet() &&
-              rootPackage.GetPackageSet() != nullptr && rootPackage.GetPackageSet()->IsValid(),
+    Check(rootPackage.Open(rootPackageFile) == packages::Result::Success && rootPackage.HasPackageSet() && rootPackage.GetPackageSet() != nullptr &&
+              rootPackage.GetPackageSet()->IsValid(),
           "ordinary PackageReader validates and exposes DATA000 boot data");
 
     {
@@ -323,8 +317,7 @@ int main()
         limits.maximumPackages = 1;
         filesystem::MemoryFileReader limitedRootFile(rootPackageBytes, 0);
         packages::PackageSet limitedPackageSet;
-        Check(packages::ReadPackageSet(limitedRootFile, limitedPackageSet, {}, limits) == packages::Result::LimitExceeded,
-              "package-set catalog count limit");
+        Check(packages::ReadPackageSet(limitedRootFile, limitedPackageSet, {}, limits) == packages::Result::LimitExceeded, "package-set catalog count limit");
     }
 
     {
@@ -332,16 +325,14 @@ int main()
         corruptBootHeader[104] ^= 1u;
         filesystem::MemoryFileReader corruptBootFile(corruptBootHeader, 0);
         packages::PackageSet corruptPackageSet;
-        Check(packages::ReadPackageSet(corruptBootFile, corruptPackageSet) == packages::Result::IntegrityFailure,
-              "package-set header corruption");
+        Check(packages::ReadPackageSet(corruptBootFile, corruptPackageSet) == packages::Result::IntegrityFailure, "package-set header corruption");
     }
 
     {
         ByteArray unsupportedBootVersion(rootPackageBytes);
         unsupportedBootVersion[104] = 2;
         unsupportedBootVersion[105] = 0;
-        StoreU32(unsupportedBootVersion, 96u + 88u,
-                 vanguard::serialization::Crc32(unsupportedBootVersion.TypedData() + 96u, 88));
+        StoreU32(unsupportedBootVersion, 96u + 88u, vanguard::serialization::Crc32(unsupportedBootVersion.TypedData() + 96u, 88));
         filesystem::MemoryFileReader unsupportedBootFile(unsupportedBootVersion, 0);
         packages::PackageSet unsupportedPackageSet;
         Check(packages::ReadPackageSet(unsupportedBootFile, unsupportedPackageSet) == packages::Result::UnsupportedVersion,
@@ -353,8 +344,7 @@ int main()
         corruptCatalog[96u + 96u + 16u] ^= 1u;
         filesystem::MemoryFileReader corruptCatalogFile(corruptCatalog, 0);
         packages::PackageSet corruptPackageSet;
-        Check(packages::ReadPackageSet(corruptCatalogFile, corruptPackageSet) == packages::Result::IntegrityFailure,
-              "package-set catalog corruption");
+        Check(packages::ReadPackageSet(corruptCatalogFile, corruptPackageSet) == packages::Result::IntegrityFailure, "package-set catalog corruption");
     }
 
     {
@@ -362,10 +352,8 @@ int main()
         constexpr vanguard::u32 bootHeaderOffset = 96;
         constexpr vanguard::u32 entriesOffset = bootHeaderOffset + 96;
         StoreU32(malformedCatalog, entriesOffset + 80, 1);
-        StoreU64(malformedCatalog, bootHeaderOffset + 76,
-                 vanguard::serialization::Crc64(malformedCatalog.TypedData() + entriesOffset, 160));
-        StoreU32(malformedCatalog, bootHeaderOffset + 88,
-                 vanguard::serialization::Crc32(malformedCatalog.TypedData() + bootHeaderOffset, 88));
+        StoreU64(malformedCatalog, bootHeaderOffset + 76, vanguard::serialization::Crc64(malformedCatalog.TypedData() + entriesOffset, 160));
+        StoreU32(malformedCatalog, bootHeaderOffset + 88, vanguard::serialization::Crc32(malformedCatalog.TypedData() + bootHeaderOffset, 88));
         filesystem::MemoryFileReader malformedCatalogFile(malformedCatalog, 0);
         packages::PackageSet malformedPackageSet;
         Check(packages::ReadPackageSet(malformedCatalogFile, malformedPackageSet) == packages::Result::InvalidLayout,
@@ -390,13 +378,11 @@ int main()
         const vanguard::u32 segmentTable = static_cast<vanguard::u32>(indexOffset64) + 32u + resourceCount * 64u;
         StoreU64(overlappingPayload, segmentTable, 176u);
         StoreU64(overlappingPayload, 72,
-                 vanguard::serialization::Crc64(overlappingPayload.TypedData() + indexOffset64,
-                                                static_cast<vanguard::usize>(indexSize64)));
+                 vanguard::serialization::Crc64(overlappingPayload.TypedData() + indexOffset64, static_cast<vanguard::usize>(indexSize64)));
         StoreU32(overlappingPayload, 88, vanguard::serialization::Crc32(overlappingPayload.TypedData(), 88));
         filesystem::MemoryFileReader overlappingPayloadFile(overlappingPayload, 0);
         packages::PackageReader overlappingPackage;
-        Check(overlappingPackage.Open(overlappingPayloadFile) == packages::Result::InvalidLayout,
-              "resource payload cannot overlap DATA000 boot record");
+        Check(overlappingPackage.Open(overlappingPayloadFile) == packages::Result::InvalidLayout, "resource payload cannot overlap DATA000 boot record");
     }
 
     const packages::Resource* mesh = package.Find("MESHES/hero.vmesh");
@@ -406,8 +392,8 @@ int main()
     Check(package.Find("missing/resource") == nullptr, "missing lookup");
     if (mesh != nullptr)
     {
-        Check(package.DebugPath(*mesh) == "meshes/hero.vmesh", "canonical debug path");
-        const auto dependencies = package.Dependencies(*mesh);
+        Check(package.GetDebugPath(*mesh) == "meshes/hero.vmesh", "canonical debug path");
+        const auto dependencies = package.GetDependencies(*mesh);
         Check(dependencies.Count() == 1 && dependencies[0].id == texture->id && dependencies[0].type == TextureType &&
                   dependencies[0].kind == vanguard::resources::DependencyKind::Optional,
               "typed dependency range and requirement");
@@ -415,33 +401,27 @@ int main()
         std::array<vanguard::u8, g_compressible.size() + g_tail.size()> decoded{};
         std::array<vanguard::u8, g_compressible.size()> scratch{};
         packageFile.Seek(0);
-        Check(package.ReadResource(packageFile, *mesh, decoded.data(), decoded.size(), scratch.data(), scratch.size()) ==
-                  packages::Result::Success,
+        Check(package.ReadResource(packageFile, *mesh, decoded.data(), decoded.size(), scratch.data(), scratch.size()) == packages::Result::Success,
               "read segmented compressed resource");
         Check(std::memcmp(decoded.data(), g_compressible.data(), g_compressible.size()) == 0 &&
                   std::memcmp(decoded.data() + g_compressible.size(), g_tail.data(), g_tail.size()) == 0,
               "decoded resource contents");
 
         packages::ResourceFileReader logicalView;
-        Check(logicalView.Open(package, *mesh, packageFile) == packages::Result::Success,
-              "open lazy logical resource view");
+        Check(logicalView.Open(package, *mesh, packageFile) == packages::Result::Success, "open lazy logical resource view");
         std::array<vanguard::u8, 8> range{};
         logicalView.Seek(static_cast<vanguard::i64>(g_compressible.size()));
         logicalView.Serialize(range.data(), 4);
-        Check(logicalView.LastResult() == packages::Result::Success &&
-                  logicalView.DecodedSegmentCount() == 1 &&
-                  logicalView.StoredBytesRead() == package.Segments(*mesh)[1].storedSize &&
-                  std::memcmp(range.data(), g_tail.data(), 4) == 0,
+        Check(logicalView.GetLastResult() == packages::Result::Success && logicalView.GetDecodedSegmentCount() == 1 &&
+                  logicalView.GetStoredBytesRead() == package.GetSegments(*mesh)[1].storedSize && std::memcmp(range.data(), g_tail.data(), 4) == 0,
               "decode only the segment intersecting a logical range");
         logicalView.Seek(static_cast<vanguard::i64>(g_compressible.size() - 4));
         logicalView.Serialize(range.data(), range.size());
-        Check(logicalView.LastResult() == packages::Result::Success &&
-                  logicalView.DecodedSegmentCount() == 3 &&
-                  std::memcmp(range.data(), g_compressible.data() + g_compressible.size() - 4, 4) == 0 &&
-                  std::memcmp(range.data() + 4, g_tail.data(), 4) == 0,
+        Check(logicalView.GetLastResult() == packages::Result::Success && logicalView.GetDecodedSegmentCount() == 3 &&
+                  std::memcmp(range.data(), g_compressible.data() + g_compressible.size() - 4, 4) == 0 && std::memcmp(range.data() + 4, g_tail.data(), 4) == 0,
               "read a logical range spanning independently decoded segments");
 
-        const packages::Segment copiedSegment = package.Segments(*mesh)[0];
+        const packages::Segment copiedSegment = package.GetSegments(*mesh)[0];
         Check(package.ReadSegment(packageFile, copiedSegment, decoded.data(), decoded.size(), scratch.data(), scratch.size()) ==
                   packages::Result::InvalidArgument,
               "foreign segment descriptor rejection");
@@ -459,10 +439,10 @@ int main()
     filesystem::MemoryFileReader deduplicatedFile(deduplicatedBytes, 0);
     packages::PackageReader deduplicatedPackage;
     Check(deduplicatedPackage.Open(deduplicatedFile) == packages::Result::Success, "open deduplicated package");
-    if (deduplicatedPackage.Resources().Count() == 2)
+    if (deduplicatedPackage.GetResources().Count() == 2)
     {
-        const auto firstSegments = deduplicatedPackage.Segments(deduplicatedPackage.Resources()[0]);
-        const auto secondSegments = deduplicatedPackage.Segments(deduplicatedPackage.Resources()[1]);
+        const auto firstSegments = deduplicatedPackage.GetSegments(deduplicatedPackage.GetResources()[0]);
+        const auto secondSegments = deduplicatedPackage.GetSegments(deduplicatedPackage.GetResources()[1]);
         Check(firstSegments.Count() == 1 && secondSegments.Count() == 1 && firstSegments[0].offset == secondSegments[0].offset,
               "exact shared physical segment range");
     }
@@ -475,8 +455,7 @@ int main()
         const vanguard::u32 resourceCount = LoadU32(falseAlias, 56);
         const vanguard::u32 secondSegment = static_cast<vanguard::u32>(indexOffset64) + 32u + resourceCount * 64u + 40u;
         StoreU64(falseAlias, secondSegment + 24u, LoadU64(falseAlias, secondSegment + 24u) ^ 1u);
-        StoreU64(falseAlias, 72,
-                 vanguard::serialization::Crc64(falseAlias.TypedData() + indexOffset64, static_cast<vanguard::usize>(indexSize64)));
+        StoreU64(falseAlias, 72, vanguard::serialization::Crc64(falseAlias.TypedData() + indexOffset64, static_cast<vanguard::usize>(indexSize64)));
         StoreU32(falseAlias, 88, vanguard::serialization::Crc32(falseAlias.TypedData(), 88));
         filesystem::MemoryFileReader falseAliasFile(falseAlias, 0);
         packages::PackageReader falseAliasPackage;
@@ -529,8 +508,7 @@ int main()
         const vanguard::u32 indexOffset = static_cast<vanguard::u32>(indexOffset64);
         const vanguard::u32 segmentTable = indexOffset + 32u + resourceCount * 64u;
         StoreU64(malformed, segmentTable, 97);
-        StoreU64(malformed, 72,
-                 vanguard::serialization::Crc64(malformed.TypedData() + indexOffset, static_cast<vanguard::usize>(indexSize64)));
+        StoreU64(malformed, 72, vanguard::serialization::Crc64(malformed.TypedData() + indexOffset, static_cast<vanguard::usize>(indexSize64)));
         StoreU32(malformed, 88, vanguard::serialization::Crc32(malformed.TypedData(), 88));
 
         filesystem::MemoryFileReader malformedFile(malformed, 0);
@@ -541,12 +519,11 @@ int main()
     if (texture != nullptr)
     {
         ByteArray corrupt(packageBytes);
-        const auto segments = package.Segments(*texture);
+        const auto segments = package.GetSegments(*texture);
         corrupt[static_cast<vanguard::u32>(segments[0].offset)] ^= 1u;
         filesystem::MemoryFileReader corruptFile(corrupt, 0);
         std::array<vanguard::u8, g_texture.size()> output{};
-        Check(package.ReadResource(corruptFile, *texture, output.data(), output.size()) == packages::Result::IntegrityFailure,
-              "payload corruption");
+        Check(package.ReadResource(corruptFile, *texture, output.data(), output.size()) == packages::Result::IntegrityFailure, "payload corruption");
     }
 
     {

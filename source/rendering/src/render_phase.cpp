@@ -11,37 +11,42 @@ namespace vanguard::rendering
     {
         void ClearFailure(RenderPhaseFailure* const failure) noexcept
         {
-            if (failure != nullptr) *failure = {};
+            if (failure != nullptr)
+                *failure = {};
         }
 
-        [[nodiscard]] bool Fail(RenderPhaseFailure* const failure, const RenderPhaseFailureCode code,
-                                const char* const message, const RenderPhaseKey key = {},
+        [[nodiscard]] bool Fail(RenderPhaseFailure* const failure, const RenderPhaseFailureCode code, const char* const message, const RenderPhaseKey key = {},
                                 const RenderPhaseId phase = {}) noexcept
         {
-            if (failure != nullptr) *failure = {code, key, phase, message};
+            if (failure != nullptr)
+                *failure = {code, key, phase, message};
             return false;
         }
 
         [[nodiscard]] bool CopyName(char* const destination, const char* const source) noexcept
         {
-            if (source == nullptr || source[0] == '\0') return false;
+            if (source == nullptr || source[0] == '\0')
+                return false;
             u32 index = 0;
             while (index + 1u < MaximumRenderPhaseNameBytes && source[index] != '\0')
             {
                 destination[index] = source[index];
                 ++index;
             }
-            if (source[index] != '\0') return false;
+            if (source[index] != '\0')
+                return false;
             destination[index] = '\0';
             return true;
         }
 
         [[nodiscard]] bool SameName(const char* left, const char* right) noexcept
         {
-            if (left == nullptr || right == nullptr) return left == right;
+            if (left == nullptr || right == nullptr)
+                return left == right;
             while (*left == *right)
             {
-                if (*left == '\0') return true;
+                if (*left == '\0')
+                    return true;
                 ++left;
                 ++right;
             }
@@ -63,27 +68,23 @@ namespace vanguard::rendering
 
     RenderPhaseRegistry::~RenderPhaseRegistry()
     {
-        if (m_impl != nullptr) static_cast<void>(Shutdown());
+        if (m_impl != nullptr)
+            static_cast<void>(Shutdown());
     }
 
-    bool RenderPhaseRegistry::Initialize(const RenderPhaseRegistryConfig& config,
-                                         RenderPhaseFailure* const failure) noexcept
+    bool RenderPhaseRegistry::Initialize(const RenderPhaseRegistryConfig& config, RenderPhaseFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl != nullptr)
-            return Fail(failure, RenderPhaseFailureCode::AlreadyInitialized,
-                        "render phase registry is already initialized");
+            return Fail(failure, RenderPhaseFailureCode::AlreadyInitialized, "render phase registry is already initialized");
         if (!concurrency::IsMainThread())
-            return Fail(failure, RenderPhaseFailureCode::WrongThread,
-                        "render phase registry must initialize on the main thread");
+            return Fail(failure, RenderPhaseFailureCode::WrongThread, "render phase registry must initialize on the main thread");
         if (config.maximumPhases == 0 || config.maximumPhases > MaximumRenderPhases)
-            return Fail(failure, RenderPhaseFailureCode::InvalidDescriptor,
-                        "render phase registry capacity is invalid");
+            return Fail(failure, RenderPhaseFailureCode::InvalidDescriptor, "render phase registry capacity is invalid");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
         if (!block)
-            return Fail(failure, RenderPhaseFailureCode::CapacityExceeded,
-                        "render phase registry allocation failed");
+            return Fail(failure, RenderPhaseFailureCode::CapacityExceeded, "render phase registry allocation failed");
         m_impl = ::new (block.address) Impl();
         m_impl->maximumPhases = config.maximumPhases;
         m_impl->stats.capacity = config.maximumPhases;
@@ -93,10 +94,10 @@ namespace vanguard::rendering
     bool RenderPhaseRegistry::Shutdown(RenderPhaseFailure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (m_impl == nullptr) return true;
+        if (m_impl == nullptr)
+            return true;
         if (!concurrency::IsMainThread())
-            return Fail(failure, RenderPhaseFailureCode::WrongThread,
-                        "render phase registry must shutdown on the main thread");
+            return Fail(failure, RenderPhaseFailureCode::WrongThread, "render phase registry must shutdown on the main thread");
         Impl* const impl = m_impl;
         m_impl = nullptr;
         impl->~Impl();
@@ -105,52 +106,52 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderPhaseRegistry::IsInitialized() const noexcept { return m_impl != nullptr; }
-    bool RenderPhaseRegistry::IsSealed() const noexcept { return m_impl != nullptr && m_impl->stats.sealed; }
+    bool RenderPhaseRegistry::IsInitialized() const noexcept
+    {
+        return m_impl != nullptr;
+    }
+    bool RenderPhaseRegistry::IsSealed() const noexcept
+    {
+        return m_impl != nullptr && m_impl->stats.sealed;
+    }
 
-    bool RenderPhaseRegistry::Register(const RenderPhaseDesc& desc, RenderPhaseId& phase,
-                                       RenderPhaseFailure* const failure) noexcept
+    bool RenderPhaseRegistry::Register(const RenderPhaseDesc& desc, RenderPhaseId& phase, RenderPhaseFailure* const failure) noexcept
     {
         ClearFailure(failure);
         phase = {};
         if (m_impl == nullptr)
-            return Fail(failure, RenderPhaseFailureCode::NotInitialized,
-                        "render phase registry is not initialized");
+            return Fail(failure, RenderPhaseFailureCode::NotInitialized, "render phase registry is not initialized");
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedRegistrations;
-            return Fail(failure, RenderPhaseFailureCode::WrongThread,
-                        "render phases must be registered on the main thread");
+            return Fail(failure, RenderPhaseFailureCode::WrongThread, "render phases must be registered on the main thread");
         }
         if (m_impl->stats.sealed)
         {
             ++m_impl->stats.rejectedRegistrations;
-            return Fail(failure, RenderPhaseFailureCode::RegistrySealed,
-                        "render phase registry is sealed");
+            return Fail(failure, RenderPhaseFailureCode::RegistrySealed, "render phase registry is sealed");
         }
         char name[MaximumRenderPhaseNameBytes]{};
         if (!CopyName(name, desc.name) || !ValidSortMode(desc.sortMode))
         {
             ++m_impl->stats.rejectedRegistrations;
-            return Fail(failure, RenderPhaseFailureCode::InvalidDescriptor,
-                        "render phase descriptor is invalid");
+            return Fail(failure, RenderPhaseFailureCode::InvalidDescriptor, "render phase descriptor is invalid");
         }
         const RenderPhaseKey key = MakeRenderPhaseKey(name, desc.pass);
         for (u32 index = 0; index < m_impl->stats.registeredPhases; ++index)
         {
             const RenderPhaseDefinition& existing = m_impl->definitions[index];
-            if (existing.key != key) continue;
+            if (existing.key != key)
+                continue;
             if (!SameName(existing.name, name) || existing.pass != desc.pass)
             {
                 ++m_impl->stats.rejectedRegistrations;
-                return Fail(failure, RenderPhaseFailureCode::HashCollision,
-                            "render phase stable identity collides with another definition", key, existing.id);
+                return Fail(failure, RenderPhaseFailureCode::HashCollision, "render phase stable identity collides with another definition", key, existing.id);
             }
             if (existing.sortMode != desc.sortMode)
             {
                 ++m_impl->stats.rejectedRegistrations;
-                return Fail(failure, RenderPhaseFailureCode::IncompatibleDefinition,
-                            "render phase was registered with incompatible policy", key, existing.id);
+                return Fail(failure, RenderPhaseFailureCode::IncompatibleDefinition, "render phase was registered with incompatible policy", key, existing.id);
             }
             phase = existing.id;
             return true;
@@ -158,8 +159,7 @@ namespace vanguard::rendering
         if (m_impl->stats.registeredPhases == m_impl->maximumPhases)
         {
             ++m_impl->stats.rejectedRegistrations;
-            return Fail(failure, RenderPhaseFailureCode::CapacityExceeded,
-                        "render phase registry capacity exceeded", key);
+            return Fail(failure, RenderPhaseFailureCode::CapacityExceeded, "render phase registry capacity exceeded", key);
         }
 
         const u32 index = m_impl->stats.registeredPhases++;
@@ -177,24 +177,24 @@ namespace vanguard::rendering
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderPhaseFailureCode::NotInitialized,
-                        "render phase registry is not initialized");
+            return Fail(failure, RenderPhaseFailureCode::NotInitialized, "render phase registry is not initialized");
         if (!concurrency::IsMainThread())
-            return Fail(failure, RenderPhaseFailureCode::WrongThread,
-                        "render phase registry must be sealed on the main thread");
-        if (m_impl->stats.sealed) return true;
+            return Fail(failure, RenderPhaseFailureCode::WrongThread, "render phase registry must be sealed on the main thread");
+        if (m_impl->stats.sealed)
+            return true;
         if (m_impl->stats.registeredPhases == 0)
-            return Fail(failure, RenderPhaseFailureCode::InvalidDescriptor,
-                        "render phase registry cannot seal without definitions");
+            return Fail(failure, RenderPhaseFailureCode::InvalidDescriptor, "render phase registry cannot seal without definitions");
         m_impl->stats.sealed = true;
         return true;
     }
 
     RenderPhaseId RenderPhaseRegistry::Find(const RenderPhaseKey key) const noexcept
     {
-        if (m_impl == nullptr || !key.IsValid()) return {};
+        if (m_impl == nullptr || !key.IsValid())
+            return {};
         for (u32 index = 0; index < m_impl->stats.registeredPhases; ++index)
-            if (m_impl->definitions[index].key == key) return m_impl->definitions[index].id;
+            if (m_impl->definitions[index].key == key)
+                return m_impl->definitions[index].id;
         return {};
     }
 
@@ -206,14 +206,16 @@ namespace vanguard::rendering
     bool RenderPhaseRegistry::Get(const RenderPhaseId phase, RenderPhaseDefinition& definition) const noexcept
     {
         definition = {};
-        if (m_impl == nullptr || !phase.IsValid() || phase.index >= m_impl->stats.registeredPhases) return false;
+        if (m_impl == nullptr || !phase.IsValid() || phase.index >= m_impl->stats.registeredPhases)
+            return false;
         definition = m_impl->definitions[phase.index];
         return true;
     }
 
     void RenderPhaseRegistry::Visit(const VisitRenderPhase visitor, void* const userData) const noexcept
     {
-        if (m_impl == nullptr || visitor == nullptr) return;
+        if (m_impl == nullptr || visitor == nullptr)
+            return;
         for (u32 index = 0; index < m_impl->stats.registeredPhases; ++index)
             visitor(m_impl->definitions[index], userData);
     }
@@ -223,21 +225,18 @@ namespace vanguard::rendering
         return m_impl != nullptr ? m_impl->stats : RenderPhaseRegistryStats{};
     }
 
-    bool RegisterStandardRenderPhases(RenderPhaseRegistry& registry,
-                                      RenderPhaseFailure* const failure) noexcept
+    bool RegisterStandardRenderPhases(RenderPhaseRegistry& registry, RenderPhaseFailure* const failure) noexcept
     {
         const RenderPhaseDesc phases[] = {
-            {"vanguard.render.shadow_depth", 0, RenderPhaseSortMode::State},
-            {"vanguard.render.depth_prepass", 0, RenderPhaseSortMode::FrontToBack},
-            {"vanguard.render.opaque", 0, RenderPhaseSortMode::FrontToBack},
-            {"vanguard.render.decal", 0, RenderPhaseSortMode::State},
-            {"vanguard.render.transparent", 0, RenderPhaseSortMode::BackToFront},
-            {"vanguard.render.velocity", 0, RenderPhaseSortMode::State},
+            {"vanguard.render.shadow_depth", 0, RenderPhaseSortMode::State},      {"vanguard.render.depth_prepass", 0, RenderPhaseSortMode::FrontToBack},
+            {"vanguard.render.opaque", 0, RenderPhaseSortMode::FrontToBack},      {"vanguard.render.decal", 0, RenderPhaseSortMode::State},
+            {"vanguard.render.transparent", 0, RenderPhaseSortMode::BackToFront}, {"vanguard.render.velocity", 0, RenderPhaseSortMode::State},
             {"vanguard.render.selection", 0, RenderPhaseSortMode::State}};
         for (const RenderPhaseDesc& desc : phases)
         {
             RenderPhaseId phase;
-            if (!registry.Register(desc, phase, failure)) return false;
+            if (!registry.Register(desc, phase, failure))
+                return false;
         }
         return true;
     }

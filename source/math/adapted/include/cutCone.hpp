@@ -51,8 +51,7 @@ namespace vanguard::math
 
     RED_INLINE Vector4 CutCone::GetMassCenter() const
     {
-        return m_positionAndRadius1 +
-               m_normalAndRadius2 * (GetRadius1() + 2 * GetRadius2()) * m_height / (3 * (GetRadius1() + GetRadius2()));
+        return m_positionAndRadius1 + m_normalAndRadius2 * (GetRadius1() + 2 * GetRadius2()) * m_height / (3 * (GetRadius1() + GetRadius2()));
     }
 
     RED_INLINE Float CutCone::GetMass() const

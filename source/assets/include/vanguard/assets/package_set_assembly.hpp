@@ -88,8 +88,8 @@ namespace vanguard::assets
     {
     public:
         [[nodiscard]] PackagingResult Prepare(const PackageBuildPlan& source, const PackageSetPlanOptions& options,
-                                              const PackagePlacementState* previousPlacement,
-                                              PackageSetBuildPlan& plan, PackagePlacementState& nextPlacement) const noexcept;
+                                              const PackagePlacementState* previousPlacement, PackageSetBuildPlan& plan,
+                                              PackagePlacementState& nextPlacement) const noexcept;
     };
 
     struct PackageSetPublicationLimits
@@ -104,7 +104,6 @@ namespace vanguard::assets
         // The output directory must not already contain any target DATA files. All packages are staged and validated first;
         // DATA000 is renamed last and acts as the commit marker for the complete runtime image.
         [[nodiscard]] PackagingResult Publish(const PackageSetBuildPlan& plan, const filesystem::AbsolutePath& outputDirectory,
-                                              const PackageAssemblyCallbacks& callbacks,
-                                              const PackageSetPublicationLimits& limits = {}) const noexcept;
+                                              const PackageAssemblyCallbacks& callbacks, const PackageSetPublicationLimits& limits = {}) const noexcept;
     };
 } // namespace vanguard::assets

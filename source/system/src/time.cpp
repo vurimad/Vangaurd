@@ -10,19 +10,20 @@
 
 namespace vanguard::system
 {
-    u64 MonotonicTicks() noexcept
+    u64 GetMonotonicTicks() noexcept
     {
 #if VG_PLATFORM_WINDOWS
         LARGE_INTEGER value;
         return ::QueryPerformanceCounter(&value) != 0 ? static_cast<u64>(value.QuadPart) : 0;
 #elif VG_PLATFORM_LINUX
         timespec value{};
-        if (::clock_gettime(CLOCK_MONOTONIC_RAW, &value) != 0) return 0;
+        if (::clock_gettime(CLOCK_MONOTONIC_RAW, &value) != 0)
+            return 0;
         return static_cast<u64>(value.tv_sec) * 1'000'000'000ull + static_cast<u64>(value.tv_nsec);
 #endif
     }
 
-    u64 MonotonicFrequency() noexcept
+    u64 GetMonotonicFrequency() noexcept
     {
 #if VG_PLATFORM_WINDOWS
         LARGE_INTEGER value;
@@ -31,4 +32,4 @@ namespace vanguard::system
         return 1'000'000'000ull;
 #endif
     }
-}
+} // namespace vanguard::system

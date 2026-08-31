@@ -16,7 +16,8 @@ namespace
 
     void Check(const bool condition, const char* const message) noexcept
     {
-        if (condition) return;
+        if (condition)
+            return;
         std::fprintf(stderr, "[applicationTests] FAILED: %s\n", message);
         ++g_failures;
     }
@@ -60,7 +61,10 @@ namespace
             ++m_fixture.liveInstances;
         }
 
-        ~RecordingService() override { --m_fixture.liveInstances; }
+        ~RecordingService() override
+        {
+            --m_fixture.liveInstances;
+        }
 
     protected:
         app::LifecycleStatus OnInitialize(app::ServiceContext& context) noexcept override
@@ -70,15 +74,13 @@ namespace
                 m_fixture.observedDependency = context.Find(m_fixture.dependencyToObserve) != nullptr;
             if (m_fixture.capabilityToObserve != app::InvalidCapabilityId)
                 m_fixture.observedCapability = context.FindCapability(m_fixture.capabilityToObserve) != nullptr;
-            return m_fixture.failInitialize ? app::LifecycleStatus::Failure("requested initialize failure")
-                                            : app::LifecycleStatus::Success();
+            return m_fixture.failInitialize ? app::LifecycleStatus::Failure("requested initialize failure") : app::LifecycleStatus::Success();
         }
 
         app::LifecycleStatus OnStart(app::ServiceContext&) noexcept override
         {
             Record(m_fixture, RecordedStage::Start, m_id);
-            return m_fixture.failStart ? app::LifecycleStatus::Failure("requested start failure")
-                                       : app::LifecycleStatus::Success();
+            return m_fixture.failStart ? app::LifecycleStatus::Failure("requested start failure") : app::LifecycleStatus::Success();
         }
 
         app::LifecycleStatus OnQuiesce(app::ServiceContext&) noexcept override
@@ -96,8 +98,7 @@ namespace
         app::LifecycleStatus OnStop(app::ServiceContext&) noexcept override
         {
             Record(m_fixture, RecordedStage::Stop, m_id);
-            return m_fixture.failStop ? app::LifecycleStatus::Failure("requested stop failure")
-                                      : app::LifecycleStatus::Success();
+            return m_fixture.failStop ? app::LifecycleStatus::Failure("requested stop failure") : app::LifecycleStatus::Success();
         }
 
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
@@ -120,14 +121,15 @@ namespace
     app::Service* CreateRecordingService(void* const userData) noexcept
     {
         FactoryData& data = *static_cast<FactoryData*>(userData);
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Runtime, sizeof(RecordingService), alignof(RecordingService));
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Runtime, sizeof(RecordingService), alignof(RecordingService));
         return block ? ::new (block.address) RecordingService(data.id, *data.fixture) : nullptr;
     }
 
     void DestroyRecordingService(app::Service* const service, void* const userData) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<RecordingService*>(service)->~RecordingService();
         vanguard::memory::MemoryBlock block{service, sizeof(RecordingService), vanguard::memory::PoolId::Runtime};
         vanguard::memory::Free(block);
@@ -148,7 +150,9 @@ namespace
 
     bool Contains(const vanguard::containers::DynamicArray<u64>& calls, const u64 value) noexcept
     {
-        for (const u64 call : calls) if (call == value) return true;
+        for (const u64 call : calls)
+            if (call == value)
+                return true;
         return false;
     }
 
@@ -165,8 +169,7 @@ namespace
         app::ServiceDependency jobsDependencies[]{{10, app::DependencyKind::Required}};
         app::ServiceDependency resourceDependencies[]{{20, app::DependencyKind::Required}};
         app::CapabilityId storageProvides[]{storageCapability};
-        app::CapabilityRequirement resourceCapabilities[]{
-            {storageCapability, app::CapabilityCardinality::ExactlyOne, false}};
+        app::CapabilityRequirement resourceCapabilities[]{{storageCapability, app::CapabilityCardinality::ExactlyOne, false}};
 
         app::EngineHost host;
         app::HostFailure failure;
@@ -186,8 +189,7 @@ namespace
         app::ServiceDescriptor jobsDescriptor = Descriptor(20, "jobs", jobsFactory);
         jobsDescriptor.dependencies = {jobsDependencies, 1};
         Check(host.RegisterService(coreModule, jobsDescriptor, &failure), "jobs service registers");
-        Check(host.RegisterService(coreModule, Descriptor(10, "memory", memoryFactory), &failure),
-              "memory service registers");
+        Check(host.RegisterService(coreModule, Descriptor(10, "memory", memoryFactory), &failure), "memory service registers");
 
         Check(host.Compile(app::ApplicationProfile::Runtime, &failure), "runtime graph compiles");
         Check(host.GetStats().selectedServices == 4, "profile excludes editor service");
@@ -202,10 +204,9 @@ namespace
         Check(resourcesHandle && host.Resolve(resourcesHandle) != nullptr, "live service handle resolves");
         Check(host.Shutdown(&failure), "graph shuts down cleanly");
         Check(host.Resolve(resourcesHandle) == nullptr, "destroyed service handle becomes stale");
-        Check(memory.liveInstances + jobs.liveInstances + storage.liveInstances + resources.liveInstances == 0,
-              "host destroys every owned service instance");
-        Check(resources.calls[2] == 3030 && resources.calls[3] == 4030 && resources.calls[4] == 5030 &&
-                  resources.calls[5] == 6030 && resources.calls[6] == 7030,
+        Check(memory.liveInstances + jobs.liveInstances + storage.liveInstances + resources.liveInstances == 0, "host destroys every owned service instance");
+        Check(resources.calls[2] == 3030 && resources.calls[3] == 4030 && resources.calls[4] == 5030 && resources.calls[5] == 6030 &&
+                  resources.calls[6] == 7030,
               "shutdown executes quiesce, drain, stop, shutdown, and destroy");
     }
 
@@ -226,8 +227,7 @@ namespace
             Check(host.RegisterModule({module, "cycle", 1}, &failure), "cycle module registers");
             Check(host.RegisterService(module, firstDescriptor, &failure), "first cycle service registers");
             Check(host.RegisterService(module, secondDescriptor, &failure), "second cycle service registers");
-            Check(!host.Compile(app::ApplicationProfile::Runtime, &failure) &&
-                      failure.code == app::HostFailureCode::DependencyCycle,
+            Check(!host.Compile(app::ApplicationProfile::Runtime, &failure) && failure.code == app::HostFailureCode::DependencyCycle,
                   "compile rejects dependency cycles before construction");
             Check(first.liveInstances + second.liveInstances == 0, "invalid graph constructs nothing");
         }
@@ -243,8 +243,7 @@ namespace
             Check(host.RegisterService(module, failingDescriptor, &failure), "failing service registers");
             Check(host.RegisterService(module, Descriptor(10, "base", baseFactory), &failure), "base service registers");
             Check(host.Compile(app::ApplicationProfile::Runtime, &failure), "rollback graph compiles");
-            Check(!host.Start(&failure) && failure.code == app::HostFailureCode::StartFailure,
-                  "start failure is reported");
+            Check(!host.Start(&failure) && failure.code == app::HostFailureCode::StartFailure, "start failure is reported");
             Check(base.liveInstances + failing.liveInstances == 0, "failed startup rolls every instance back");
             Check(Contains(failing.calls, 5020) && Contains(failing.calls, 6020) && Contains(failing.calls, 7020),
                   "failed start still receives stop, shutdown, and destruction");
@@ -263,8 +262,7 @@ namespace
         Check(host.Compile(app::ApplicationProfile::Runtime), "cleanup graph compiles");
         Check(host.Start(), "cleanup graph starts");
         Check(!host.Shutdown(), "cleanup failure is returned even without a HostFailure output");
-        Check(fixture.liveInstances == 0 && Contains(fixture.calls, 7010),
-              "cleanup failure does not prevent later shutdown and destruction stages");
+        Check(fixture.liveInstances == 0 && Contains(fixture.calls, 7010), "cleanup failure does not prevent later shutdown and destruction stages");
     }
 
     class FakePlatform final : public app::IPlatformHost
@@ -274,7 +272,10 @@ namespace
         bool shutdown = false;
         u32 pumpCalls = 0;
 
-        const char* Name() const noexcept override { return "Test"; }
+        const char* GetName() const noexcept override
+        {
+            return "Test";
+        }
         app::PlatformStatus Initialize(const app::PlatformStartupInfo&) noexcept override
         {
             initialized = true;
@@ -285,7 +286,10 @@ namespace
             ++pumpCalls;
             return {};
         }
-        void Shutdown() noexcept override { shutdown = true; }
+        void Shutdown() noexcept override
+        {
+            shutdown = true;
+        }
     };
 
     class FirstApplicationState final : public app::ApplicationState
@@ -351,8 +355,7 @@ namespace
             receivedStartup = startup.platform != nullptr && startup.profile == app::ApplicationProfile::Test;
             if (!services.RegisterModule({1, "runner-test", 1}))
                 return app::CompositionStatus::Failure("runner test module failed");
-            if (!states.RegisterState({1, "first", &first}) || !states.RegisterState({2, "final", &final}) ||
-                !states.SetInitialState(1))
+            if (!states.RegisterState({1, "first", &first}) || !states.RegisterState({2, "final", &final}) || !states.SetInitialState(1))
                 return app::CompositionStatus::Failure("runner test states failed");
             return app::CompositionStatus::Success();
         }
@@ -368,8 +371,7 @@ namespace
         app::ApplicationRunner runner;
         const app::RunnerResult result = runner.Run(platform, composition, settings);
         Check(result && result.exitCode == 42, "portable runner returns the application-requested exit code");
-        Check(platform.initialized && platform.shutdown && platform.pumpCalls >= 7,
-              "portable runner owns the complete injected platform-host lifetime");
+        Check(platform.initialized && platform.shutdown && platform.pumpCalls >= 7, "portable runner owns the complete injected platform-host lifetime");
         Check(composition.receivedStartup, "composition receives portable startup and platform context");
         Check(composition.first.enterCalls == 2 && composition.first.tickCalls == 1 && composition.first.exitCalls == 2,
               "pending enter and exit operations advance explicitly across runner ticks");
@@ -396,11 +398,9 @@ namespace
     public:
         NeverFinishesExitState state;
 
-        app::CompositionStatus Compose(const app::ApplicationStartupContext&, app::EngineHost& services,
-                                       app::ApplicationStateMachine& states) noexcept override
+        app::CompositionStatus Compose(const app::ApplicationStartupContext&, app::EngineHost& services, app::ApplicationStateMachine& states) noexcept override
         {
-            if (!services.RegisterModule({1, "timeout-test", 1}) ||
-                !states.RegisterState({1, "never-finishes", &state}) || !states.SetInitialState(1))
+            if (!services.RegisterModule({1, "timeout-test", 1}) || !states.RegisterState({1, "never-finishes", &state}) || !states.SetInitialState(1))
                 return app::CompositionStatus::Failure("timeout test composition failed");
             return app::CompositionStatus::Success();
         }
@@ -416,8 +416,7 @@ namespace
         settings.maximumShutdownTicks = 3;
         app::ApplicationRunner runner;
         const app::RunnerResult result = runner.Run(platform, composition, settings);
-        Check(!result && result.failure == app::RunnerFailureCode::ShutdownTimeout,
-              "runner bounds an application state that never completes graceful exit");
+        Check(!result && result.failure == app::RunnerFailureCode::ShutdownTimeout, "runner bounds an application state that never completes graceful exit");
         Check(platform.shutdown, "shutdown timeout still releases the platform host");
     }
 
@@ -443,11 +442,9 @@ namespace
     public:
         FailingTickState state;
 
-        app::CompositionStatus Compose(const app::ApplicationStartupContext&, app::EngineHost& services,
-                                       app::ApplicationStateMachine& states) noexcept override
+        app::CompositionStatus Compose(const app::ApplicationStartupContext&, app::EngineHost& services, app::ApplicationStateMachine& states) noexcept override
         {
-            if (!services.RegisterModule({1, "state-failure-test", 1}) ||
-                !states.RegisterState({1, "fails", &state}) || !states.SetInitialState(1))
+            if (!services.RegisterModule({1, "state-failure-test", 1}) || !states.RegisterState({1, "fails", &state}) || !states.SetInitialState(1))
                 return app::CompositionStatus::Failure("state failure test composition failed");
             return app::CompositionStatus::Success();
         }
@@ -462,19 +459,16 @@ namespace
         settings.profile = app::ApplicationProfile::Test;
         app::ApplicationRunner runner;
         const app::RunnerResult result = runner.Run(platform, composition, settings);
-        Check(!result && result.failure == app::RunnerFailureCode::StateMachineFailure,
-              "state callback failure remains the runner's primary failure");
-        Check(composition.state.exitCalls == 1,
-              "state tick failure still executes state exit cleanup exactly once");
+        Check(!result && result.failure == app::RunnerFailureCode::StateMachineFailure, "state callback failure remains the runner's primary failure");
+        Check(composition.state.exitCalls == 1, "state tick failure still executes state exit cleanup exactly once");
         Check(platform.shutdown, "state failure unwind still releases the platform host");
     }
-}
+} // namespace
 
 int main()
 {
     Check(vanguard::memory::Initialize(), "memory initializes");
-    Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "applicationTests"),
-          "diagnostics initializes");
+    Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "applicationTests"), "diagnostics initializes");
     Check(vanguard::containers::Initialize(), "containers initialize");
 
     vanguard::memory::Pool& pool = vanguard::memory::pools::Runtime::GetInstance();
@@ -486,6 +480,7 @@ int main()
     TestStateFailureUnwind();
 
     vanguard::diagnostics::Shutdown();
-    if (g_failures == 0) std::printf("[applicationTests] all tests passed\n");
+    if (g_failures == 0)
+        std::printf("[applicationTests] all tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

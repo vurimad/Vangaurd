@@ -72,7 +72,7 @@ int main()
     const u32 hardwareThreads = vanguard::concurrency::GetMaxHardwareConcurrency();
     const u32 availableWorkers = hardwareThreads > 1 ? hardwareThreads - 1 : 1;
     const u32 expectedWorkers = availableWorkers < MaximumWorkerCount ? availableWorkers : MaximumWorkerCount;
-    if (WorkerCount() != expectedWorkers)
+    if (GetWorkerCount() != expectedWorkers)
     {
         std::fputs("[jobsStress] RED worker ceiling mismatch\n", stderr);
         return 12;
@@ -84,9 +84,8 @@ int main()
 
     Atomic<u64> completed{0};
     Counter producerCounters[ProducerCount];
-    Producer producers[ProducerCount]{{0, bulkName, completed, producerCounters[0]},
-                                      {1, bulkName, completed, producerCounters[1]},
-                                      {2, bulkName, completed, producerCounters[2]}};
+    Producer producers[ProducerCount]{
+        {0, bulkName, completed, producerCounters[0]}, {1, bulkName, completed, producerCounters[1]}, {2, bulkName, completed, producerCounters[2]}};
 
     for (Producer& producer : producers)
     {
@@ -187,7 +186,7 @@ int main()
         counter = {};
     }
 
-    if (OutstandingJobCount() != 0 || !Shutdown())
+    if (GetOutstandingJobCount() != 0 || !Shutdown())
     {
         std::fputs("[jobsStress] shutdown contract failed\n", stderr);
         return 11;

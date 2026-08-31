@@ -30,7 +30,5 @@ namespace vanguard
 
     // Product entry points explicitly provide their native platform host. This keeps platform selection visible at
     // the only layer that knows the native executable ABI while all framework machinery remains portable.
-    [[nodiscard]] i32 RunFramework(Application& appInstance,
-                                   const FrameworkLaunchParameters& parameters,
-                                   application::IPlatformHost& platform) noexcept;
+    [[nodiscard]] i32 RunFramework(Application& appInstance, const FrameworkLaunchParameters& parameters, application::IPlatformHost& platform) noexcept;
 } // namespace vanguard

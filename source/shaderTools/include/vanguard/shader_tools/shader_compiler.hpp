@@ -20,6 +20,7 @@ namespace vanguard::shader_tools
         SourceFailure,
         EntryPointFailure,
         LinkFailure,
+        ReflectionFailure,
         CodeGenerationFailure,
         LimitExceeded,
         WriteFailure
@@ -61,6 +62,13 @@ namespace vanguard::shader_tools
         const char* value = nullptr;
     };
 
+    struct LoadedSource
+    {
+        containers::ArraySpan<const u8> content;
+    };
+
+    using LoadSourceFunction = bool (*)(const char* canonicalPath, LoadedSource& source, void* userData) noexcept;
+
     struct CompileSettings
     {
         Target target = Target::D3D12Dxil;
@@ -80,6 +88,8 @@ namespace vanguard::shader_tools
         const char* const* searchPaths = nullptr;
         u32 searchPathCount = 0;
         containers::ArraySpan<const Define> defines;
+        LoadSourceFunction loadSource = nullptr;
+        void* loadSourceUserData = nullptr;
         CompileSettings settings;
 
         [[nodiscard]] bool IsValid() const noexcept;
@@ -107,12 +117,22 @@ namespace vanguard::shader_tools
         CompileOutput() noexcept;
 
         void Reset() noexcept;
-        [[nodiscard]] containers::ArraySpan<const CompiledStage> Stages() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const u8> Bytecode() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const SourceDependency> Dependencies() const noexcept;
-        [[nodiscard]] const char* Diagnostics() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const CompiledStage> GetStages() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const u8> GetBytecode() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const SourceDependency> GetDependencies() const noexcept;
+        [[nodiscard]] const char* GetDiagnostics() const noexcept;
         [[nodiscard]] const char* CompilerVersion() const noexcept;
         [[nodiscard]] const crypto::Digest256& CompilerFingerprint() const noexcept;
+        [[nodiscard]] const shaders::PipelineInterface& GetInterface() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::DescriptorBinding> Bindings() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::ConstantBuffer> GetConstantBuffers() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::ConstantMember> GetConstantMembers() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::VertexInput> GetVertexInputs() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::FragmentOutput> GetFragmentOutputs() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::SpecializationConstant> GetSpecializationConstants() const noexcept;
+
+        /// Emits the compiled program as a complete platform-specific .vshader document.
+        [[nodiscard]] Result WriteShader(filesystem::IFile& output, u64 program, const crypto::Digest256& permutation = {}) const noexcept;
 
     private:
         void AppendDiagnosticBytes(const void* bytes, usize size) noexcept;
@@ -124,6 +144,13 @@ namespace vanguard::shader_tools
         containers::DynamicArray<char> m_diagnostics;
         char m_compilerVersion[64]{};
         crypto::Digest256 m_compilerFingerprint;
+        shaders::PipelineInterface m_interface;
+        containers::DynamicArray<shaders::DescriptorBinding> m_bindings;
+        containers::DynamicArray<shaders::ConstantBuffer> m_constantBuffers;
+        containers::DynamicArray<shaders::ConstantMember> m_constantMembers;
+        containers::DynamicArray<shaders::VertexInput> m_vertexInputs;
+        containers::DynamicArray<shaders::FragmentOutput> m_fragmentOutputs;
+        containers::DynamicArray<shaders::SpecializationConstant> m_specializationConstants;
 
         friend class ShaderCompiler;
     };
@@ -142,6 +169,7 @@ namespace vanguard::shader_tools
         [[nodiscard]] Result Initialize() noexcept;
         void Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
+        [[nodiscard]] const crypto::Digest256& CompilerFingerprint() const noexcept;
         [[nodiscard]] Result Compile(const CompileRequest& request, CompileOutput& output) noexcept;
 
     private:

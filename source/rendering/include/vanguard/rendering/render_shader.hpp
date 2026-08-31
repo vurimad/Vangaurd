@@ -30,13 +30,13 @@ namespace vanguard::rendering
         void Unload() noexcept;
 
         [[nodiscard]] bool IsLoaded() const noexcept;
-        [[nodiscard]] shaders::ProgramKind Kind() const noexcept;
-        [[nodiscard]] u64 Program() const noexcept;
-        [[nodiscard]] rhi::ShaderRef Stage(shaders::ShaderStage stage) const noexcept;
-        [[nodiscard]] const crypto::Digest256& Permutation() const noexcept;
+        [[nodiscard]] shaders::ProgramKind GetKind() const noexcept;
+        [[nodiscard]] u64 GetProgram() const noexcept;
+        [[nodiscard]] rhi::ShaderRef GetStage(shaders::ShaderStage stage) const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetPermutation() const noexcept;
         [[nodiscard]] const crypto::Digest256& BindingLayoutFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& PipelineInterfaceFingerprint() const noexcept;
-        [[nodiscard]] const shaders::PipelineInterface& Interface() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetPipelineInterfaceFingerprint() const noexcept;
+        [[nodiscard]] const shaders::PipelineInterface& GetInterface() const noexcept;
 
     private:
         rhi::ShaderRef m_stages[static_cast<u32>(shaders::ShaderStage::Count)]{};

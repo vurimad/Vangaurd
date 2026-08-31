@@ -37,9 +37,10 @@ project "textures"
     files { "include/**.hpp", "src/**.hpp", "src/**.cpp", "README.md" }
     includedirs {
         "include", "src", "../system/include", "../memory/include", "../containers/include", "../io/include",
-        "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include"
+        "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include",
+        "../streaming/include", "../packages/include", "../jobs/include", "../concurrency/include", "../reflection/include", "../schemas/include"
     }
-    links { "serialization", "crypto", "resources", "filesystem", "containers", "memory", "system" }
+    links { "serialization", "crypto", "resources", "streaming", "packages", "schemas", "reflection", "filesystem", "concurrency", "containers", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
         ["Source/*"] = { "src/**.hpp", "src/**.cpp" },
@@ -60,12 +61,13 @@ project "texturesTests"
     files { "tests/**.cpp" }
     includedirs {
         "include", "../system/include", "../memory/include", "../diagnostics/include", "../containers/include",
-        "../io/include", "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include"
+        "../io/include", "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include",
+        "../streaming/include", "../packages/include", "../jobs/include", "../concurrency/include", "../reflection/include", "../schemas/include"
     }
     importedIncludes()
     libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
     links {
-        "textures", "resources", "crypto", "serialization", "serializationCompat", "filesystem", "filesystemCompat",
+        "textures", "streaming", "packages", "schemas", "reflection", "resources", "crypto", "serialization", "serializationCompat", "filesystem", "filesystemCompat",
         "redFileSystemCompat", "redCompressionCompat", "redCoreCompat", "redIOCompat", "redContainersCompat",
         "redMathCompat", "io", "diagnostics", "diagnosticsCompat", "containers", "containersCompat", "memory",
         "redSystemCompat", "system", "nvToolsExt64_1", "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Shell32",

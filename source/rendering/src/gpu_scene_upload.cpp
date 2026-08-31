@@ -11,11 +11,17 @@ namespace vanguard::rendering
 {
     namespace
     {
-        enum class BatchState : u8 { None, Open, Submitting };
+        enum class BatchState : u8
+        {
+            None,
+            Open,
+            Submitting
+        };
 
         struct PlannedRequest
         {
             GpuSceneAllocation allocation;
+            GpuSceneTableKind destinationTable = GpuSceneTableKind::Count;
             u32 request = 0;
             u32 first = 0;
             u32 count = 0;
@@ -26,6 +32,7 @@ namespace vanguard::rendering
         struct PlannedUpdate
         {
             GpuSceneAllocation allocation;
+            GpuSceneTableKind destinationTable = GpuSceneTableKind::Count;
             u32 request = 0;
             u32 first = 0;
             u32 count = 0;
@@ -43,11 +50,9 @@ namespace vanguard::rendering
             u64 size = 0;
         };
 
-        [[nodiscard]] constexpr bool SameDestination(const PlannedRequest& left,
-                                                     const PlannedRequest& right) noexcept
+        [[nodiscard]] constexpr bool SameDestination(const PlannedRequest& left, const PlannedRequest& right) noexcept
         {
-            return left.allocation.table == right.allocation.table && left.first == right.first &&
-                   left.count == right.count;
+            return left.destinationTable == right.destinationTable && left.first == right.first && left.count == right.count;
         }
 
         [[nodiscard]] constexpr u64 AlignUp(const u64 value, const u64 alignment) noexcept
@@ -57,15 +62,16 @@ namespace vanguard::rendering
 
         void ClearFailure(GpuSceneUploadFailure* const failure) noexcept
         {
-            if (failure != nullptr) *failure = {};
+            if (failure != nullptr)
+                *failure = {};
         }
 
-        [[nodiscard]] bool Fail(GpuSceneUploadFailure* const failure,
-                                const GpuSceneUploadFailureCode code, const char* const message,
+        [[nodiscard]] bool Fail(GpuSceneUploadFailure* const failure, const GpuSceneUploadFailureCode code, const char* const message,
                                 const u32 request = 0xffffffffu, const rhi::Failure& rhiFailure = {},
                                 const GpuSceneLifetimeFailure& lifetimeFailure = {}) noexcept
         {
-            if (failure != nullptr) *failure = {code, request, message, rhiFailure, lifetimeFailure};
+            if (failure != nullptr)
+                *failure = {code, request, message, rhiFailure, lifetimeFailure};
             return false;
         }
     } // namespace
@@ -82,8 +88,7 @@ namespace vanguard::rendering
         Impl() noexcept
             : requests(memory::pools::Rendering::GetInstance()), uniqueRequests(memory::pools::Rendering::GetInstance()),
               updates(memory::pools::Rendering::GetInstance()), copies(memory::pools::Rendering::GetInstance()),
-              affectedPages(memory::pools::Rendering::GetInstance()),
-              initialPublications(memory::pools::Rendering::GetInstance())
+              affectedPages(memory::pools::Rendering::GetInstance()), initialPublications(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -127,8 +132,10 @@ namespace vanguard::rendering
         [[nodiscard]] bool AddAffectedPage(const rhi::BufferRef page) noexcept
         {
             for (const rhi::BufferRef existing : affectedPages)
-                if (existing == page) return true;
-            if (affectedPages.Size() >= config.maximumCopiesPerBatch) return false;
+                if (existing == page)
+                    return true;
+            if (affectedPages.Size() >= config.maximumCopiesPerBatch)
+                return false;
             affectedPages.PushBack(page);
             return true;
         }
@@ -138,15 +145,15 @@ namespace vanguard::rendering
             if (!copies.Empty())
             {
                 PlannedCopy& previous = copies.Back();
-                if (previous.destination == copy.destination &&
-                    previous.destinationOffset + previous.size == copy.destinationOffset &&
+                if (previous.destination == copy.destination && previous.destinationOffset + previous.size == copy.destinationOffset &&
                     previous.sourceOffset + previous.size == copy.sourceOffset)
                 {
                     previous.size += copy.size;
                     return true;
                 }
             }
-            if (copies.Size() >= config.maximumCopiesPerBatch) return false;
+            if (copies.Size() >= config.maximumCopiesPerBatch)
+                return false;
             copies.PushBack(copy);
             return true;
         }
@@ -154,31 +161,26 @@ namespace vanguard::rendering
 
     GpuSceneUploader::~GpuSceneUploader()
     {
-        if (m_impl != nullptr) static_cast<void>(Shutdown());
+        if (m_impl != nullptr)
+            static_cast<void>(Shutdown());
     }
 
-    bool GpuSceneUploader::Initialize(GpuSceneTables& tables, GpuSceneLifetime& lifetime,
-                                      const GpuSceneUploadConfig& config,
+    bool GpuSceneUploader::Initialize(GpuSceneTables& tables, GpuSceneLifetime& lifetime, const GpuSceneUploadConfig& config,
                                       GpuSceneUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl != nullptr)
-            return Fail(failure, GpuSceneUploadFailureCode::AlreadyInitialized,
-                        "GPU Scene uploader is already initialized");
+            return Fail(failure, GpuSceneUploadFailureCode::AlreadyInitialized, "GPU Scene uploader is already initialized");
         if (!concurrency::IsMainThread())
-            return Fail(failure, GpuSceneUploadFailureCode::WrongThread,
-                        "GPU Scene uploader must initialize on the main thread");
-        if (!tables.IsInitialized() || !lifetime.IsInitialized() || !rhi::IsInitialized() ||
-            config.bytesPerSegment == 0 || config.segmentCount < 2 ||
+            return Fail(failure, GpuSceneUploadFailureCode::WrongThread, "GPU Scene uploader must initialize on the main thread");
+        if (!tables.IsInitialized() || !lifetime.IsInitialized() || !rhi::IsInitialized() || config.bytesPerSegment == 0 || config.segmentCount < 2 ||
             config.segmentCount > MaximumGpuSceneUploadSegments || config.maximumUpdatesPerBatch == 0 ||
             config.maximumCopiesPerBatch < config.maximumUpdatesPerBatch)
-            return Fail(failure, GpuSceneUploadFailureCode::InvalidConfiguration,
-                        "GPU Scene uploader configuration is invalid");
+            return Fail(failure, GpuSceneUploadFailureCode::InvalidConfiguration, "GPU Scene uploader configuration is invalid");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
         if (!block)
-            return Fail(failure, GpuSceneUploadFailureCode::InvalidConfiguration,
-                        "GPU Scene uploader metadata allocation failed");
+            return Fail(failure, GpuSceneUploadFailureCode::InvalidConfiguration, "GPU Scene uploader metadata allocation failed");
         Impl* const impl = ::new (block.address) Impl();
         impl->tables = &tables;
         impl->lifetime = &lifetime;
@@ -204,16 +206,14 @@ namespace vanguard::rendering
             if (!segment.buffer)
             {
                 static_cast<void>(Shutdown());
-                return Fail(failure, GpuSceneUploadFailureCode::RhiFailure,
-                            "GPU Scene upload segment creation failed", 0xffffffffu, rhiFailure);
+                return Fail(failure, GpuSceneUploadFailureCode::RhiFailure, "GPU Scene upload segment creation failed", 0xffffffffu, rhiFailure);
             }
             rhi::SetResourceDebugName(segment.buffer, "GPU Scene Upload Segment");
             segment.mapped = static_cast<u8*>(rhi::LockBuffer(segment.buffer, 0, config.bytesPerSegment, &rhiFailure));
             if (segment.mapped == nullptr)
             {
                 static_cast<void>(Shutdown());
-                return Fail(failure, GpuSceneUploadFailureCode::RhiFailure,
-                            "GPU Scene upload segment mapping failed", 0xffffffffu, rhiFailure);
+                return Fail(failure, GpuSceneUploadFailureCode::RhiFailure, "GPU Scene upload segment mapping failed", 0xffffffffu, rhiFailure);
             }
         }
         return true;
@@ -222,10 +222,10 @@ namespace vanguard::rendering
     bool GpuSceneUploader::Shutdown(GpuSceneUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (m_impl == nullptr) return true;
+        if (m_impl == nullptr)
+            return true;
         if (!concurrency::IsMainThread())
-            return Fail(failure, GpuSceneUploadFailureCode::WrongThread,
-                        "GPU Scene uploader must shutdown on the main thread");
+            return Fail(failure, GpuSceneUploadFailureCode::WrongThread, "GPU Scene uploader must shutdown on the main thread");
 
         Impl* const impl = m_impl;
         {
@@ -255,28 +255,20 @@ namespace vanguard::rendering
     }
 
     bool GpuSceneUploader::Begin(const containers::ArraySpan<const GpuSceneUploadRequest> batchRequests,
-                                 containers::ArraySpan<GpuSceneUploadReservation> reservations,
-                                 GpuSceneUploadFailure* const failure) noexcept
+                                 containers::ArraySpan<GpuSceneUploadReservation> reservations, GpuSceneUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, GpuSceneUploadFailureCode::NotInitialized,
-                        "GPU Scene uploader is not initialized");
-        if (!concurrency::IsMainThread())
-            return Fail(failure, GpuSceneUploadFailureCode::WrongThread,
-                        "GPU Scene upload planning must run on the main thread");
-
+            return Fail(failure, GpuSceneUploadFailureCode::NotInitialized, "GPU Scene uploader is not initialized");
         concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
         if (m_impl->batchState != BatchState::None)
-            return Fail(failure, GpuSceneUploadFailureCode::BatchAlreadyOpen,
-                        "GPU Scene uploader already has an open batch");
+            return Fail(failure, GpuSceneUploadFailureCode::BatchAlreadyOpen, "GPU Scene uploader already has an open batch");
         if (batchRequests.Empty() || batchRequests.Size() != reservations.Size())
-            return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest,
-                        "GPU Scene upload requests and reservations do not match");
+            return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "GPU Scene upload requests and reservations do not match");
         if (batchRequests.Size() > m_impl->config.maximumUpdatesPerBatch)
-            return Fail(failure, GpuSceneUploadFailureCode::UpdateCapacityExceeded,
-                        "GPU Scene upload batch exceeds its update capacity");
-        for (GpuSceneUploadReservation& reservation : reservations) reservation = {};
+            return Fail(failure, GpuSceneUploadFailureCode::UpdateCapacityExceeded, "GPU Scene upload batch exceeds its update capacity");
+        for (GpuSceneUploadReservation& reservation : reservations)
+            reservation = {};
 
         u32 selectedSegment = 0xffffffffu;
         for (u32 attempt = 0; attempt < m_impl->config.segmentCount; ++attempt)
@@ -292,8 +284,7 @@ namespace vanguard::rendering
         if (selectedSegment == 0xffffffffu)
         {
             ++m_impl->stats.segmentBusyEvents;
-            return Fail(failure, GpuSceneUploadFailureCode::StagingExhausted,
-                        "every GPU Scene upload segment is still in flight");
+            return Fail(failure, GpuSceneUploadFailureCode::StagingExhausted, "every GPU Scene upload segment is still in flight");
         }
 
         m_impl->ResetBatch();
@@ -302,68 +293,73 @@ namespace vanguard::rendering
         for (u32 requestIndex = 0; requestIndex < batchRequests.Size(); ++requestIndex)
         {
             const GpuSceneUploadRequest request = batchRequests[requestIndex];
-            const GpuSceneAllocationState state = m_impl->lifetime->State(request.allocation);
-            if (!request.allocation.IsValid() || request.elementCount == 0 ||
-                request.allocationOffset > request.allocation.count ||
+            const GpuSceneAllocationState state = m_impl->lifetime->GetState(request.allocation);
+            const GpuSceneTableKind destinationTable = request.destinationTable == GpuSceneTableKind::Count ? request.allocation.table : request.destinationTable;
+            if (!request.allocation.IsValid() || request.elementCount == 0 || request.allocationOffset > request.allocation.count ||
                 request.elementCount > request.allocation.count - request.allocationOffset)
             {
                 m_impl->ResetBatch();
-                return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest,
-                            "GPU Scene upload request exceeds its allocation", requestIndex);
+                return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "GPU Scene upload request exceeds its allocation", requestIndex);
             }
             if (state != GpuSceneAllocationState::Allocated && state != GpuSceneAllocationState::Active)
             {
                 m_impl->ResetBatch();
-                return Fail(failure, GpuSceneUploadFailureCode::InvalidAllocationState,
-                            "GPU Scene upload request does not reference allocated or active data", requestIndex);
+                return Fail(failure, GpuSceneUploadFailureCode::InvalidAllocationState, "GPU Scene upload request does not reference allocated or active data",
+                            requestIndex);
             }
-            if (state == GpuSceneAllocationState::Allocated &&
-                (request.allocationOffset != 0 || request.elementCount != request.allocation.count))
+            const bool parallel = IsGpuSceneParallelTable(destinationTable);
+            if ((parallel && (GetGpuSceneParallelOwner(destinationTable) != request.allocation.table || state != GpuSceneAllocationState::Active)) ||
+                (!parallel && destinationTable != request.allocation.table))
             {
                 m_impl->ResetBatch();
                 return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest,
-                            "initial GPU Scene publication must cover the complete allocation", requestIndex);
+                            "GPU Scene parallel upload destination does not match its live owner allocation", requestIndex);
             }
-            const GpuSceneTableStats table = m_impl->tables->GetTableStats(request.allocation.table);
+            if (state == GpuSceneAllocationState::Allocated && (request.allocationOffset != 0 || request.elementCount != request.allocation.count))
+            {
+                m_impl->ResetBatch();
+                return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "initial GPU Scene publication must cover the complete allocation",
+                            requestIndex);
+            }
+            const GpuSceneTableStats table = m_impl->tables->GetTableStats(destinationTable);
             if (table.elementStride == 0)
             {
                 m_impl->ResetBatch();
-                return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest,
-                            "GPU Scene upload request references an invalid table", requestIndex);
+                return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "GPU Scene upload request references an invalid table", requestIndex);
             }
-            m_impl->requests.PushBack({request.allocation, requestIndex,
-                                       request.allocation.first + request.allocationOffset,
-                                       request.elementCount, table.elementStride,
-                                       state == GpuSceneAllocationState::Allocated});
+            m_impl->requests.PushBack({request.allocation, destinationTable, requestIndex, request.allocation.first + request.allocationOffset,
+                                       request.elementCount, table.elementStride, !parallel && state == GpuSceneAllocationState::Allocated});
         }
 
         std::sort(m_impl->requests.Begin(), m_impl->requests.End(),
                   [](const PlannedRequest& left, const PlannedRequest& right) noexcept
                   {
-                      if (left.allocation.table != right.allocation.table)
-                          return left.allocation.table < right.allocation.table;
-                      if (left.first != right.first) return left.first < right.first;
-                      if (left.count != right.count) return left.count < right.count;
+                      if (left.destinationTable != right.destinationTable)
+                          return left.destinationTable < right.destinationTable;
+                      if (left.first != right.first)
+                          return left.first < right.first;
+                      if (left.count != right.count)
+                          return left.count < right.count;
                       return left.request < right.request;
                   });
 
         for (u32 index = 0; index < m_impl->requests.Size();)
         {
             u32 end = index + 1u;
-            while (end < m_impl->requests.Size() && SameDestination(m_impl->requests[index], m_impl->requests[end])) ++end;
+            while (end < m_impl->requests.Size() && SameDestination(m_impl->requests[index], m_impl->requests[end]))
+                ++end;
             const PlannedRequest selected = m_impl->requests[end - 1u];
             for (u32 superseded = index; superseded + 1u < end; ++superseded)
-                m_impl->supersededBytes += static_cast<u64>(m_impl->requests[superseded].count) *
-                                           m_impl->requests[superseded].stride;
+                m_impl->supersededBytes += static_cast<u64>(m_impl->requests[superseded].count) * m_impl->requests[superseded].stride;
             if (!m_impl->uniqueRequests.Empty())
             {
                 const PlannedRequest& previous = m_impl->uniqueRequests.Back();
                 const u64 previousEnd = static_cast<u64>(previous.first) + previous.count;
-                if (previous.allocation.table == selected.allocation.table && selected.first < previousEnd)
+                if (previous.destinationTable == selected.destinationTable && selected.first < previousEnd)
                 {
                     m_impl->ResetBatch();
-                    return Fail(failure, GpuSceneUploadFailureCode::OverlappingUpdates,
-                                "GPU Scene upload batch contains partially overlapping destinations", selected.request);
+                    return Fail(failure, GpuSceneUploadFailureCode::OverlappingUpdates, "GPU Scene upload batch contains partially overlapping destinations",
+                                selected.request);
                 }
             }
             m_impl->uniqueRequests.PushBack(selected);
@@ -379,16 +375,16 @@ namespace vanguard::rendering
             if (stagingOffset > m_impl->config.bytesPerSegment || size > m_impl->config.bytesPerSegment - stagingOffset)
             {
                 m_impl->ResetBatch();
-                return Fail(failure, GpuSceneUploadFailureCode::StagingExhausted,
-                            "GPU Scene upload batch exceeds one staging segment", request.request);
+                return Fail(failure, GpuSceneUploadFailureCode::StagingExhausted, "GPU Scene upload batch exceeds one staging segment", request.request);
             }
 
             const u32 updateIndex = m_impl->updates.Size();
-            m_impl->updates.PushBack({request.allocation, request.request, request.first, request.count,
-                                      stagingOffset, size, false, request.initialPublication});
-            reservations[request.request] = {m_impl->segments[selectedSegment].mapped + stagingOffset,
-                                             size, updateIndex, m_impl->batchGeneration + 1u};
-            if (request.initialPublication) m_impl->initialPublications.PushBack(request.allocation);
+            m_impl->updates.PushBack(
+                {request.allocation, request.destinationTable, request.request, request.first, request.count, stagingOffset, size, false,
+                 request.initialPublication});
+            reservations[request.request] = {m_impl->segments[selectedSegment].mapped + stagingOffset, size, updateIndex, m_impl->batchGeneration + 1u};
+            if (request.initialPublication)
+                m_impl->initialPublications.PushBack(request.allocation);
 
             u32 remaining = request.count;
             u32 element = request.first;
@@ -396,22 +392,19 @@ namespace vanguard::rendering
             while (remaining != 0)
             {
                 GpuSceneElementAddress destination;
-                if (!m_impl->tables->Resolve(request.allocation.table, element, destination))
+                if (!m_impl->tables->Resolve(request.destinationTable, element, destination))
                 {
                     m_impl->ResetBatch();
-                    return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest,
-                                "GPU Scene upload destination is not materialized", request.request);
+                    return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "GPU Scene upload destination is not materialized", request.request);
                 }
-                const GpuSceneTableStats table = m_impl->tables->GetTableStats(request.allocation.table);
+                const GpuSceneTableStats table = m_impl->tables->GetTableStats(request.destinationTable);
                 const u32 pageRemaining = table.elementsPerPage - destination.element;
                 const u32 copiedElements = remaining < pageRemaining ? remaining : pageRemaining;
                 const u64 copiedBytes = static_cast<u64>(copiedElements) * request.stride;
-                if (!m_impl->AddAffectedPage(destination.buffer) ||
-                    !m_impl->AddCopy({destination.buffer, destination.byteOffset, sourceOffset, copiedBytes}))
+                if (!m_impl->AddAffectedPage(destination.buffer) || !m_impl->AddCopy({destination.buffer, destination.byteOffset, sourceOffset, copiedBytes}))
                 {
                     m_impl->ResetBatch();
-                    return Fail(failure, GpuSceneUploadFailureCode::CopyCapacityExceeded,
-                                "GPU Scene upload batch exceeds its copy capacity", request.request);
+                    return Fail(failure, GpuSceneUploadFailureCode::CopyCapacityExceeded, "GPU Scene upload batch exceeds its copy capacity", request.request);
                 }
                 element += copiedElements;
                 remaining -= copiedElements;
@@ -422,16 +415,17 @@ namespace vanguard::rendering
         }
 
         ++m_impl->batchGeneration;
-        if (m_impl->batchGeneration == 0) ++m_impl->batchGeneration;
+        if (m_impl->batchGeneration == 0)
+            ++m_impl->batchGeneration;
         for (GpuSceneUploadReservation& reservation : reservations)
-            if (reservation.destination != nullptr) reservation.batch = m_impl->batchGeneration;
+            if (reservation.destination != nullptr)
+                reservation.batch = m_impl->batchGeneration;
         m_impl->usedBytes = stagingOffset;
         m_impl->batchState = BatchState::Open;
         return true;
     }
 
-    bool GpuSceneUploader::Complete(const GpuSceneUploadReservation reservation,
-                                    GpuSceneUploadFailure* const failure) noexcept
+    bool GpuSceneUploader::Complete(const GpuSceneUploadReservation reservation, GpuSceneUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -442,10 +436,9 @@ namespace vanguard::rendering
         if (!reservation.IsValid() || reservation.batch != m_impl->batchGeneration || reservation.ticket >= m_impl->updates.Size())
             return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "GPU Scene upload reservation is stale");
         PlannedUpdate& update = m_impl->updates[reservation.ticket];
-        if (reservation.destination != m_impl->segments[m_impl->currentSegment].mapped + update.stagingOffset ||
-            reservation.size != update.size || update.ready)
-            return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest,
-                        "GPU Scene upload reservation does not match its planned update", update.request);
+        if (reservation.destination != m_impl->segments[m_impl->currentSegment].mapped + update.stagingOffset || reservation.size != update.size ||
+            update.ready)
+            return Fail(failure, GpuSceneUploadFailureCode::InvalidRequest, "GPU Scene upload reservation does not match its planned update", update.request);
         update.ready = true;
         return true;
     }
@@ -456,27 +449,22 @@ namespace vanguard::rendering
         result = {};
         if (m_impl == nullptr)
             return Fail(failure, GpuSceneUploadFailureCode::NotInitialized, "GPU Scene uploader is not initialized");
-        if (!concurrency::IsMainThread())
-            return Fail(failure, GpuSceneUploadFailureCode::WrongThread, "GPU Scene upload submission must run on the main thread");
         {
             concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
             if (m_impl->batchState != BatchState::Open)
                 return Fail(failure, GpuSceneUploadFailureCode::NoOpenBatch, "GPU Scene uploader has no open batch");
             for (const PlannedUpdate& update : m_impl->updates)
                 if (!update.ready)
-                    return Fail(failure, GpuSceneUploadFailureCode::BatchNotReady,
-                                "GPU Scene upload batch contains an incomplete reservation", update.request);
+                    return Fail(failure, GpuSceneUploadFailureCode::BatchNotReady, "GPU Scene upload batch contains an incomplete reservation", update.request);
             for (const PlannedUpdate& update : m_impl->updates)
             {
-                const GpuSceneAllocationState expected = update.initialPublication
-                                                             ? GpuSceneAllocationState::Allocated
-                                                             : GpuSceneAllocationState::Active;
-                if (m_impl->lifetime->State(update.allocation) != expected)
+                const GpuSceneAllocationState expected = update.initialPublication ? GpuSceneAllocationState::Allocated : GpuSceneAllocationState::Active;
+                if (m_impl->lifetime->GetState(update.allocation) != expected)
                 {
                     ++m_impl->stats.rejectedOperations;
                     m_impl->ResetBatch();
-                    return Fail(failure, GpuSceneUploadFailureCode::InvalidAllocationState,
-                                "GPU Scene allocation changed state before upload submission", update.request);
+                    return Fail(failure, GpuSceneUploadFailureCode::InvalidAllocationState, "GPU Scene allocation changed state before upload submission",
+                                update.request);
                 }
             }
             m_impl->batchState = BatchState::Submitting;
@@ -489,59 +477,65 @@ namespace vanguard::rendering
         if (recorded)
             for (const rhi::BufferRef page : m_impl->affectedPages)
                 if (!rhi::TransitionBuffer(page, rhi::ResourceState::Unknown, rhi::ResourceState::CopyDestination, &rhiFailure))
-                { recorded = false; break; }
+                {
+                    recorded = false;
+                    break;
+                }
         if (recorded)
         {
             const rhi::BufferRef source = m_impl->segments[m_impl->currentSegment].buffer;
             for (const PlannedCopy copy : m_impl->copies)
                 if (!rhi::CopyBuffer(copy.destination, copy.destinationOffset, source, copy.sourceOffset, copy.size, &rhiFailure))
-                { recorded = false; break; }
+                {
+                    recorded = false;
+                    break;
+                }
         }
         if (recorded)
             for (const rhi::BufferRef page : m_impl->affectedPages)
                 if (!rhi::TransitionBuffer(page, rhi::ResourceState::Unknown, shaderRead, &rhiFailure))
-                { recorded = false; break; }
+                {
+                    recorded = false;
+                    break;
+                }
         rhi::UnbindCommandList();
         if (!recorded)
         {
-            if (commandList.IsValid()) rhi::DiscardCommandList(commandList);
+            if (commandList.IsValid())
+                rhi::DiscardCommandList(commandList);
             concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
             ++m_impl->stats.rejectedOperations;
             m_impl->ResetBatch();
-            return Fail(failure, GpuSceneUploadFailureCode::RhiFailure,
-                        "GPU Scene upload command recording failed", 0xffffffffu, rhiFailure);
+            return Fail(failure, GpuSceneUploadFailureCode::RhiFailure, "GPU Scene upload command recording failed", 0xffffffffu, rhiFailure);
         }
 
         rhi::GpuFence completion;
         const rhi::CommandListRef submission[] = {commandList};
-        if (!rhi::CloseAndSubmitCommandLists("GPU Scene sparse publication", {submission, 1},
-                                             rhi::CommandListSyncType::None, completion, &rhiFailure))
+        if (!rhi::CloseAndSubmitCommandLists("GPU Scene sparse publication", {submission, 1}, rhi::CommandListSyncType::None, completion, &rhiFailure))
         {
             rhi::DiscardCommandList(commandList);
             concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
             ++m_impl->stats.rejectedOperations;
             m_impl->ResetBatch();
-            return Fail(failure, GpuSceneUploadFailureCode::RhiFailure,
-                        "GPU Scene upload submission failed", 0xffffffffu, rhiFailure);
+            return Fail(failure, GpuSceneUploadFailureCode::RhiFailure, "GPU Scene upload submission failed", 0xffffffffu, rhiFailure);
         }
 
         if (!m_impl->initialPublications.Empty())
         {
             GpuSceneLifetimeFailure lifetimeFailure;
-            if (!m_impl->lifetime->CommitInitialPublications(
-                    {m_impl->initialPublications.TypedData(), m_impl->initialPublications.Size()}, &lifetimeFailure))
+            if (!m_impl->lifetime->CommitInitialPublications({m_impl->initialPublications.TypedData(), m_impl->initialPublications.Size()}, &lifetimeFailure))
             {
                 concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
                 ++m_impl->stats.rejectedOperations;
                 m_impl->segments[m_impl->currentSegment].completion = completion;
                 m_impl->ResetBatch();
-                return Fail(failure, GpuSceneUploadFailureCode::LifetimeFailure,
-                            "GPU Scene initial publication commit failed", 0xffffffffu, {}, lifetimeFailure);
+                return Fail(failure, GpuSceneUploadFailureCode::LifetimeFailure, "GPU Scene initial publication commit failed", 0xffffffffu, {},
+                            lifetimeFailure);
             }
         }
 
-        result = {completion, m_impl->requestedUpdateCount, m_impl->updates.Size(), m_impl->copies.Size(),
-                  m_impl->affectedPages.Size(), m_impl->payloadBytes, m_impl->supersededBytes};
+        result = {completion,           m_impl->requestedUpdateCount, m_impl->updates.Size(), m_impl->copies.Size(), m_impl->affectedPages.Size(),
+                  m_impl->payloadBytes, m_impl->supersededBytes};
         {
             concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
             m_impl->segments[m_impl->currentSegment].completion = completion;
@@ -562,10 +556,9 @@ namespace vanguard::rendering
         ClearFailure(failure);
         if (m_impl == nullptr)
             return Fail(failure, GpuSceneUploadFailureCode::NotInitialized, "GPU Scene uploader is not initialized");
-        if (!concurrency::IsMainThread())
-            return Fail(failure, GpuSceneUploadFailureCode::WrongThread, "GPU Scene upload cancellation must run on the main thread");
         concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
-        if (m_impl->batchState == BatchState::None) return true;
+        if (m_impl->batchState == BatchState::None)
+            return true;
         if (m_impl->batchState != BatchState::Open)
             return Fail(failure, GpuSceneUploadFailureCode::BatchNotReady, "GPU Scene upload batch is already submitting");
         m_impl->ResetBatch();
@@ -574,7 +567,8 @@ namespace vanguard::rendering
 
     GpuSceneUploadStats GpuSceneUploader::GetStats() const noexcept
     {
-        if (m_impl == nullptr) return {};
+        if (m_impl == nullptr)
+            return {};
         concurrency::ScopedSharedLock<concurrency::RWLock> guard(m_impl->batchLock);
         return m_impl->stats;
     }

@@ -11,16 +11,22 @@ namespace
     namespace engine = vanguard::engine;
     namespace input = vanguard::input;
 
-    [[nodiscard]] vanguard::u32 BitIndex(const input::Key key) noexcept { return static_cast<vanguard::u32>(key); }
+    [[nodiscard]] vanguard::u32 BitIndex(const input::Key key) noexcept
+    {
+        return static_cast<vanguard::u32>(key);
+    }
     void ClearWords(vanguard::u64* const words, const vanguard::u32 count) noexcept
     {
-        for (vanguard::u32 index = 0; index < count; ++index) words[index] = 0;
+        for (vanguard::u32 index = 0; index < count; ++index)
+            words[index] = 0;
     }
     void SetWordBit(vanguard::u64* const words, const vanguard::u32 bit, const bool value) noexcept
     {
         const vanguard::u64 mask = 1ull << (bit & 63u);
-        if (value) words[bit >> 6u] |= mask;
-        else words[bit >> 6u] &= ~mask;
+        if (value)
+            words[bit >> 6u] |= mask;
+        else
+            words[bit >> 6u] &= ~mask;
     }
     [[nodiscard]] bool WordBit(const vanguard::u64* const words, const vanguard::u32 bit) noexcept
     {
@@ -28,7 +34,8 @@ namespace
     }
     [[nodiscard]] vanguard::f32 ClampUnit(const vanguard::f32 value) noexcept
     {
-        if (value != value) return 0.0f;
+        if (value != value)
+            return 0.0f;
         return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
     }
 
@@ -37,30 +44,40 @@ namespace
     public:
         explicit ManagedInputService(input::IInputBackend* const backend) noexcept : m_backend(backend) {}
 
-        [[nodiscard]] const input::FrameSnapshot& Snapshot() const noexcept override { return m_snapshot; }
-        [[nodiscard]] vanguard::containers::ArraySpan<const input::RawEvent> Events() const noexcept override
+        [[nodiscard]] const input::FrameSnapshot& GetSnapshot() const noexcept override
+        {
+            return m_snapshot;
+        }
+        [[nodiscard]] vanguard::containers::ArraySpan<const input::RawEvent> GetEvents() const noexcept override
         {
             return {m_events, m_eventCount};
         }
         [[nodiscard]] const input::GamepadState* FindGamepad(const input::DeviceId device) const noexcept override
         {
             for (const input::GamepadState& gamepad : m_snapshot.gamepads)
-                if (gamepad.connected && gamepad.device == device) return &gamepad;
+                if (gamepad.connected && gamepad.device == device)
+                    return &gamepad;
             return nullptr;
         }
-        [[nodiscard]] bool SetRumble(const input::DeviceId device, const vanguard::f32 lowFrequency,
-                                     const vanguard::f32 highFrequency,
+        [[nodiscard]] bool SetRumble(const input::DeviceId device, const vanguard::f32 lowFrequency, const vanguard::f32 highFrequency,
                                      const vanguard::u32 durationMilliseconds) noexcept override
         {
             return m_backend != nullptr && FindGamepad(device) != nullptr &&
                    m_backend->SetRumble(device, ClampUnit(lowFrequency), ClampUnit(highFrequency), durationMilliseconds);
         }
-        void RequestReset() noexcept override { m_resetRequested = true; }
+        void RequestReset() noexcept override
+        {
+            m_resetRequested = true;
+        }
         void RequestDeviceRefresh() noexcept override
         {
-            if (m_backend != nullptr) m_backend->RequestDeviceRefresh();
+            if (m_backend != nullptr)
+                m_backend->RequestDeviceRefresh();
         }
-        [[nodiscard]] input::InputStats GetStats() const noexcept override { return m_stats; }
+        [[nodiscard]] input::InputStats GetStats() const noexcept override
+        {
+            return m_stats;
+        }
 
     protected:
         app::LifecycleStatus OnInitialize(app::ServiceContext& context) noexcept override
@@ -72,15 +89,14 @@ namespace
             descriptor.id = engine::InputFrameParticipantId;
             descriptor.name = "input";
             descriptor.phase = engine::FramePhase::Input;
-            descriptor.profiles = app::ApplicationProfile::Runtime | app::ApplicationProfile::Editor |
-                                  app::ApplicationProfile::Tool | app::ApplicationProfile::Test;
+            descriptor.profiles =
+                app::ApplicationProfile::Runtime | app::ApplicationProfile::Editor | app::ApplicationProfile::Tool | app::ApplicationProfile::Test;
             descriptor.affinity = app::ThreadAffinity::MainThread;
             descriptor.execute = ExecuteFrame;
             descriptor.userData = this;
             engine::FrameFailure failure;
             if (!m_framePipeline->RegisterParticipant(descriptor, &failure))
-                return app::LifecycleStatus::Failure(failure.message != nullptr ? failure.message
-                                                                               : "Input frame registration failed");
+                return app::LifecycleStatus::Failure(failure.message != nullptr ? failure.message : "Input frame registration failed");
             return app::LifecycleStatus::Success();
         }
 
@@ -88,15 +104,15 @@ namespace
         {
             if (m_backend != nullptr)
                 for (const input::GamepadState& gamepad : m_snapshot.gamepads)
-                    if (gamepad.connected) static_cast<void>(m_backend->SetRumble(gamepad.device, 0.0f, 0.0f, 0));
+                    if (gamepad.connected)
+                        static_cast<void>(m_backend->SetRumble(gamepad.device, 0.0f, 0.0f, 0));
             m_backend = nullptr;
             m_framePipeline = nullptr;
             return app::LifecycleStatus::Success();
         }
 
     private:
-        static engine::FrameParticipantStatus ExecuteFrame(const engine::FrameContext& context,
-                                                            void* const userData) noexcept
+        static engine::FrameParticipantStatus ExecuteFrame(const engine::FrameContext& context, void* const userData) noexcept
         {
             auto* const service = static_cast<ManagedInputService*>(userData);
             if (service == nullptr || !service->Update(context.frame))
@@ -108,7 +124,8 @@ namespace
         {
             ClearTransientState();
             const input::BackendDrainResult drain = m_backend->Drain(m_backendEvents, input::MaximumBackendEventsPerFrame);
-            if (drain.count > input::MaximumBackendEventsPerFrame) return false;
+            if (drain.count > input::MaximumBackendEventsPerFrame)
+                return false;
             m_stats.droppedBackendEvents += drain.droppedSinceLastDrain;
             if (m_resetRequested || drain.resetRequested || drain.droppedSinceLastDrain != 0)
             {
@@ -117,7 +134,8 @@ namespace
             }
             for (vanguard::u32 index = 0; index < drain.count; ++index)
             {
-                if (!Publish(m_backendEvents[index])) return false;
+                if (!Publish(m_backendEvents[index]))
+                    return false;
                 Apply(m_backendEvents[index]);
             }
             m_snapshot.frame = frame;
@@ -126,7 +144,8 @@ namespace
             m_stats.lastFrameEvents = m_eventCount;
             m_stats.connectedGamepads = 0;
             for (const input::GamepadState& gamepad : m_snapshot.gamepads)
-                if (gamepad.connected) ++m_stats.connectedGamepads;
+                if (gamepad.connected)
+                    ++m_stats.connectedGamepads;
             return true;
         }
 
@@ -150,7 +169,8 @@ namespace
 
         [[nodiscard]] bool Publish(const input::RawEvent& event) noexcept
         {
-            if (m_eventCount >= input::MaximumInputEventsPerFrame) return false;
+            if (m_eventCount >= input::MaximumInputEventsPerFrame)
+                return false;
             m_events[m_eventCount++] = event;
             return true;
         }
@@ -160,7 +180,8 @@ namespace
             for (vanguard::u32 button = 0; button < static_cast<vanguard::u32>(input::GamepadButton::Count); ++button)
             {
                 const vanguard::u64 mask = 1ull << button;
-                if ((gamepad.down & mask) == 0) continue;
+                if ((gamepad.down & mask) == 0)
+                    continue;
                 gamepad.released |= mask;
                 if (publish)
                 {
@@ -192,7 +213,8 @@ namespace
         {
             for (vanguard::u32 key = 1; key < input::MaximumKeyboardKeys; ++key)
             {
-                if (!WordBit(m_snapshot.keyboard.down, key)) continue;
+                if (!WordBit(m_snapshot.keyboard.down, key))
+                    continue;
                 SetWordBit(m_snapshot.keyboard.released, key, true);
                 SetWordBit(m_snapshot.keyboard.down, key, false);
                 if (publish)
@@ -207,7 +229,8 @@ namespace
             for (vanguard::u32 button = 0; button < static_cast<vanguard::u32>(input::MouseButton::Count); ++button)
             {
                 const auto mask = static_cast<vanguard::u8>(1u << button);
-                if ((m_snapshot.mouse.down & mask) == 0) continue;
+                if ((m_snapshot.mouse.down & mask) == 0)
+                    continue;
                 m_snapshot.mouse.released |= mask;
                 if (publish)
                 {
@@ -220,14 +243,16 @@ namespace
             }
             m_snapshot.mouse.down = 0;
             for (input::GamepadState& gamepad : m_snapshot.gamepads)
-                if (gamepad.connected) ResetGamepad(gamepad, publish);
+                if (gamepad.connected)
+                    ResetGamepad(gamepad, publish);
             ++m_stats.stateResets;
         }
 
         input::GamepadState* FindOrCreateGamepad(const input::DeviceId device) noexcept
         {
             for (input::GamepadState& gamepad : m_snapshot.gamepads)
-                if (gamepad.connected && gamepad.device == device) return &gamepad;
+                if (gamepad.connected && gamepad.device == device)
+                    return &gamepad;
             for (input::GamepadState& gamepad : m_snapshot.gamepads)
                 if (!gamepad.connected)
                 {
@@ -252,21 +277,30 @@ namespace
             case input::EventType::KeyChanged:
             {
                 const vanguard::u32 bit = BitIndex(event.data.key.key);
-                if (bit >= input::MaximumKeyboardKeys || event.data.key.key == input::Key::Unknown) break;
+                if (bit >= input::MaximumKeyboardKeys || event.data.key.key == input::Key::Unknown)
+                    break;
                 const bool wasDown = WordBit(m_snapshot.keyboard.down, bit);
                 SetWordBit(m_snapshot.keyboard.down, bit, event.data.key.pressed);
-                if (event.data.key.pressed && !wasDown) SetWordBit(m_snapshot.keyboard.pressed, bit, true);
-                if (!event.data.key.pressed && wasDown) SetWordBit(m_snapshot.keyboard.released, bit, true);
-                if (!event.data.key.repeated) MarkActive(event);
+                if (event.data.key.pressed && !wasDown)
+                    SetWordBit(m_snapshot.keyboard.pressed, bit, true);
+                if (!event.data.key.pressed && wasDown)
+                    SetWordBit(m_snapshot.keyboard.released, bit, true);
+                if (!event.data.key.repeated)
+                    MarkActive(event);
                 break;
             }
             case input::EventType::MouseButtonChanged:
             {
                 const vanguard::u8 mask = static_cast<vanguard::u8>(1u << static_cast<vanguard::u32>(event.data.mouseButton.button));
                 const bool wasDown = (m_snapshot.mouse.down & mask) != 0;
-                if (event.data.mouseButton.pressed) m_snapshot.mouse.down |= mask; else m_snapshot.mouse.down &= static_cast<vanguard::u8>(~mask);
-                if (event.data.mouseButton.pressed && !wasDown) m_snapshot.mouse.pressed |= mask;
-                if (!event.data.mouseButton.pressed && wasDown) m_snapshot.mouse.released |= mask;
+                if (event.data.mouseButton.pressed)
+                    m_snapshot.mouse.down |= mask;
+                else
+                    m_snapshot.mouse.down &= static_cast<vanguard::u8>(~mask);
+                if (event.data.mouseButton.pressed && !wasDown)
+                    m_snapshot.mouse.pressed |= mask;
+                if (!event.data.mouseButton.pressed && wasDown)
+                    m_snapshot.mouse.released |= mask;
                 MarkActive(event);
                 break;
             }
@@ -275,7 +309,8 @@ namespace
                 m_snapshot.mouse.y = event.data.mouseMotion.y;
                 m_snapshot.mouse.deltaX += event.data.mouseMotion.deltaX;
                 m_snapshot.mouse.deltaY += event.data.mouseMotion.deltaY;
-                if (event.data.mouseMotion.deltaX != 0.0f || event.data.mouseMotion.deltaY != 0.0f) MarkActive(event);
+                if (event.data.mouseMotion.deltaX != 0.0f || event.data.mouseMotion.deltaY != 0.0f)
+                    MarkActive(event);
                 break;
             case input::EventType::MouseWheel:
                 m_snapshot.mouse.wheelX += event.data.wheel.x;
@@ -285,25 +320,34 @@ namespace
             case input::EventType::GamepadButtonChanged:
             {
                 input::GamepadState* const gamepad = FindOrCreateGamepad(event.device);
-                if (gamepad == nullptr) break;
+                if (gamepad == nullptr)
+                    break;
                 const vanguard::u64 mask = 1ull << static_cast<vanguard::u32>(event.data.gamepadButton.button);
                 const bool wasDown = (gamepad->down & mask) != 0;
-                if (event.data.gamepadButton.pressed) gamepad->down |= mask; else gamepad->down &= ~mask;
-                if (event.data.gamepadButton.pressed && !wasDown) gamepad->pressed |= mask;
-                if (!event.data.gamepadButton.pressed && wasDown) gamepad->released |= mask;
+                if (event.data.gamepadButton.pressed)
+                    gamepad->down |= mask;
+                else
+                    gamepad->down &= ~mask;
+                if (event.data.gamepadButton.pressed && !wasDown)
+                    gamepad->pressed |= mask;
+                if (!event.data.gamepadButton.pressed && wasDown)
+                    gamepad->released |= mask;
                 MarkActive(event);
                 break;
             }
             case input::EventType::GamepadAxisChanged:
             {
                 input::GamepadState* const gamepad = FindOrCreateGamepad(event.device);
-                if (gamepad == nullptr) break;
+                if (gamepad == nullptr)
+                    break;
                 gamepad->axes[static_cast<vanguard::u32>(event.data.gamepadAxis.axis)] = event.data.gamepadAxis.value;
-                if (event.data.gamepadAxis.value > 0.05f || event.data.gamepadAxis.value < -0.05f) MarkActive(event);
+                if (event.data.gamepadAxis.value > 0.05f || event.data.gamepadAxis.value < -0.05f)
+                    MarkActive(event);
                 break;
             }
             case input::EventType::DeviceConnected:
-                if (event.deviceType == input::DeviceType::Gamepad) static_cast<void>(FindOrCreateGamepad(event.device));
+                if (event.deviceType == input::DeviceType::Gamepad)
+                    static_cast<void>(FindOrCreateGamepad(event.device));
                 break;
             case input::EventType::DeviceDisconnected:
                 if (event.deviceType == input::DeviceType::Gamepad)
@@ -315,9 +359,16 @@ namespace
                             break;
                         }
                 break;
-            case input::EventType::FocusGained: m_snapshot.focused = true; break;
-            case input::EventType::FocusLost: m_snapshot.focused = false; ResetHeldState(true); break;
-            case input::EventType::TextInput: MarkActive(event); break;
+            case input::EventType::FocusGained:
+                m_snapshot.focused = true;
+                break;
+            case input::EventType::FocusLost:
+                m_snapshot.focused = false;
+                ResetHeldState(true);
+                break;
+            case input::EventType::TextInput:
+                MarkActive(event);
+                break;
             }
         }
 
@@ -333,24 +384,24 @@ namespace
 
     app::Service* CreateInputService(void* const userData) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Input, sizeof(ManagedInputService), alignof(ManagedInputService));
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Input, sizeof(ManagedInputService), alignof(ManagedInputService));
         return block ? ::new (block.address) ManagedInputService(static_cast<input::IInputBackend*>(userData)) : nullptr;
     }
 
     void DestroyInputService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<ManagedInputService*>(service)->~ManagedInputService();
         vanguard::memory::MemoryBlock block{service, sizeof(ManagedInputService), vanguard::memory::PoolId::Input};
         vanguard::memory::Free(block);
     }
-}
+} // namespace
 
 namespace vanguard::engine
 {
-    bool RegisterInputService(application::EngineHost& host, input::IInputBackend* const backend,
-                              application::HostFailure* const failure) noexcept
+    bool RegisterInputService(application::EngineHost& host, input::IInputBackend* const backend, application::HostFailure* const failure) noexcept
     {
         if (backend == nullptr)
         {
@@ -363,15 +414,14 @@ namespace vanguard::engine
             }
             return false;
         }
-        constexpr application::ServiceDependency dependencies[]{
-            {FramePipelineServiceId, application::DependencyKind::Required},
-            {WindowServiceId, application::DependencyKind::StartAfter}};
+        constexpr application::ServiceDependency dependencies[]{{FramePipelineServiceId, application::DependencyKind::Required},
+                                                                {WindowServiceId, application::DependencyKind::StartAfter}};
         constexpr application::CapabilityId capabilities[]{InputCapabilityId};
         application::ServiceDescriptor descriptor;
         descriptor.id = InputServiceId;
         descriptor.name = "input";
-        descriptor.profiles = application::ApplicationProfile::Runtime | application::ApplicationProfile::Editor |
-                              application::ApplicationProfile::Tool | application::ApplicationProfile::Test;
+        descriptor.profiles = application::ApplicationProfile::Runtime | application::ApplicationProfile::Editor | application::ApplicationProfile::Tool |
+                              application::ApplicationProfile::Test;
         descriptor.scope = application::ServiceScope::Engine;
         descriptor.affinity = application::ThreadAffinity::MainThread;
         descriptor.dependencies = {dependencies, 2};
@@ -390,4 +440,4 @@ namespace vanguard::engine
     {
         return static_cast<InputService*>(context.FindCapability(InputCapabilityId));
     }
-}
+} // namespace vanguard::engine

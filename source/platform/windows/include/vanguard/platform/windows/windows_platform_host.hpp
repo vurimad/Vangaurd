@@ -2,8 +2,14 @@
 
 #include <vanguard/application/platform_host.hpp>
 
-namespace vanguard::window { class IWindowEventSink; }
-namespace vanguard::window::sdl { class SdlWindowBackend; }
+namespace vanguard::window
+{
+    class IWindowEventSink;
+}
+namespace vanguard::window::sdl
+{
+    class SdlWindowBackend;
+}
 
 namespace vanguard::platform::windows
 {
@@ -13,12 +19,11 @@ namespace vanguard::platform::windows
         WindowsPlatformHost() noexcept = default;
         ~WindowsPlatformHost() override;
 
-        [[nodiscard]] const char* Name() const noexcept override;
-        [[nodiscard]] application::PlatformStatus Initialize(
-            const application::PlatformStartupInfo& startup) noexcept override;
+        [[nodiscard]] const char* GetName() const noexcept override;
+        [[nodiscard]] application::PlatformStatus Initialize(const application::PlatformStartupInfo& startup) noexcept override;
         [[nodiscard]] application::PlatformPumpResult PumpEvents() noexcept override;
-        [[nodiscard]] input::IInputBackend* InputBackend() noexcept override;
-        [[nodiscard]] window::IWindowBackend* WindowBackend() noexcept override;
+        [[nodiscard]] input::IInputBackend* GetInputBackend() noexcept override;
+        [[nodiscard]] window::IWindowBackend* GetWindowBackend() noexcept override;
         [[nodiscard]] bool AttachWindowEventSink(window::IWindowEventSink* sink) noexcept override;
         void DetachWindowEventSink(window::IWindowEventSink* sink) noexcept override;
         void Shutdown() noexcept override;

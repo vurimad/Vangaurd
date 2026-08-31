@@ -20,8 +20,8 @@ namespace vanguard::pipeline_cache
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return backend != 0 && backendVersion != 0 && cacheSchema != 0 && vendorId != 0 && deviceId != 0 && adapterId != 0 &&
-                   driverVersion != 0 && !backendCompatibility.IsEmpty() && !engineBuild.IsEmpty();
+            return backend != 0 && backendVersion != 0 && cacheSchema != 0 && vendorId != 0 && deviceId != 0 && adapterId != 0 && driverVersion != 0 &&
+                   !backendCompatibility.IsEmpty() && !engineBuild.IsEmpty();
         }
     };
 
@@ -90,8 +90,8 @@ namespace vanguard::pipeline_cache
         [[nodiscard]] StoreResult CaptureAndPublish(ExportNativeCacheFunction exporter, void* userData = nullptr) noexcept;
         [[nodiscard]] bool Clear() noexcept;
 
-        [[nodiscard]] const NativeCacheIdentity& Identity() const noexcept;
-        [[nodiscard]] const crypto::Digest256& IdentityFingerprint() const noexcept;
+        [[nodiscard]] const NativeCacheIdentity& GetIdentity() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetIdentityFingerprint() const noexcept;
         [[nodiscard]] const filesystem::AbsolutePath& RecordPath() const noexcept;
         [[nodiscard]] NativeCacheStats GetStats() const noexcept;
 

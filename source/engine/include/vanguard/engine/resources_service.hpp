@@ -12,10 +12,10 @@ namespace vanguard::engine
     public:
         ~ResourcesService() override = default;
 
-        [[nodiscard]] virtual resources::ResourceRegistry& Registry() noexcept = 0;
-        [[nodiscard]] virtual const resources::ResourceRegistry& Registry() const noexcept = 0;
-        [[nodiscard]] virtual resources::ResourcePipeline& Pipeline() noexcept = 0;
-        [[nodiscard]] virtual const resources::ResourcePipeline& Pipeline() const noexcept = 0;
+        [[nodiscard]] virtual resources::ResourceRegistry& GetRegistry() noexcept = 0;
+        [[nodiscard]] virtual const resources::ResourceRegistry& GetRegistry() const noexcept = 0;
+        [[nodiscard]] virtual resources::ResourcePipeline& GetPipeline() noexcept = 0;
+        [[nodiscard]] virtual const resources::ResourcePipeline& GetPipeline() const noexcept = 0;
 
     protected:
         ResourcesService() noexcept = default;

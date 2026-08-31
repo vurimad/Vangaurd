@@ -45,8 +45,7 @@ int main()
         return 4;
     }
 
-    if (memory::Allocate(0) || memory::Allocate(128, 3) ||
-        memory::Allocate(static_cast<usize>(std::numeric_limits<std::uint32_t>::max()) + 1))
+    if (memory::Allocate(0) || memory::Allocate(128, 3) || memory::Allocate(static_cast<usize>(std::numeric_limits<std::uint32_t>::max()) + 1))
     {
         return 5;
     }

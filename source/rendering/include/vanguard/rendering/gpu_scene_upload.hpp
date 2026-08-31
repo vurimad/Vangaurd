@@ -20,6 +20,9 @@ namespace vanguard::rendering
         GpuSceneAllocation allocation;
         u32 allocationOffset = 0;
         u32 elementCount = 0;
+        /// Count means an ordinary update to allocation.table. A parallel destination must be the
+        /// same-index placement table owned by allocation.table; it never owns an allocation itself.
+        GpuSceneTableKind destinationTable = GpuSceneTableKind::Count;
     };
 
     /// Direct view into the selected persistently mapped upload segment. The caller writes the final GPU
@@ -102,25 +105,22 @@ namespace vanguard::rendering
         GpuSceneUploader(const GpuSceneUploader&) = delete;
         GpuSceneUploader& operator=(const GpuSceneUploader&) = delete;
 
-        [[nodiscard]] bool Initialize(GpuSceneTables& tables, GpuSceneLifetime& lifetime,
-                                      const GpuSceneUploadConfig& config = {},
+        [[nodiscard]] bool Initialize(GpuSceneTables& tables, GpuSceneLifetime& lifetime, const GpuSceneUploadConfig& config = {},
                                       GpuSceneUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GpuSceneUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Plans one batch in destination order. Exact duplicate ranges use last-request-wins semantics;
-        /// the superseded request receives an invalid reservation. Other overlaps are rejected.
-        [[nodiscard]] bool Begin(containers::ArraySpan<const GpuSceneUploadRequest> requests,
-                                 containers::ArraySpan<GpuSceneUploadReservation> reservations,
+        /// the superseded request receives an invalid reservation. Other overlaps are rejected. Runtime initialization
+        /// and shutdown remain main-thread operations; the batch lifecycle may run on the serialized renderer Jobs chain.
+        [[nodiscard]] bool Begin(containers::ArraySpan<const GpuSceneUploadRequest> requests, containers::ArraySpan<GpuSceneUploadReservation> reservations,
                                  GpuSceneUploadFailure* failure = nullptr) noexcept;
 
         /// May be called by producer jobs after they finish writing their reservation.
-        [[nodiscard]] bool Complete(GpuSceneUploadReservation reservation,
-                                    GpuSceneUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Complete(GpuSceneUploadReservation reservation, GpuSceneUploadFailure* failure = nullptr) noexcept;
 
         /// Records one graphics-queue copy command list, submits it, and publishes newly allocated identities.
-        [[nodiscard]] bool Submit(GpuSceneUploadResult& result,
-                                  GpuSceneUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Submit(GpuSceneUploadResult& result, GpuSceneUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Cancel(GpuSceneUploadFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] GpuSceneUploadStats GetStats() const noexcept;

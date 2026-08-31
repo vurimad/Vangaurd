@@ -10,16 +10,14 @@ namespace
     [[nodiscard]] bool ValidSettings(const vanguard::application::RunnerSettings& settings) noexcept
     {
         return settings.applicationName != nullptr && settings.applicationName[0] != '\0' &&
-               settings.profile != vanguard::application::ApplicationProfile::None &&
-               settings.commandLine.argumentCount >= 0 &&
+               settings.profile != vanguard::application::ApplicationProfile::None && settings.commandLine.argumentCount >= 0 &&
                (settings.commandLine.argumentCount == 0 || settings.commandLine.arguments != nullptr);
     }
-}
+} // namespace
 
 namespace vanguard::application
 {
-    RunnerResult ApplicationRunner::Run(IPlatformHost& platform, IApplicationComposition& composition,
-                                        const RunnerSettings& settings) noexcept
+    RunnerResult ApplicationRunner::Run(IPlatformHost& platform, IApplicationComposition& composition, const RunnerSettings& settings) noexcept
     {
         RunnerResult result;
         if (!ValidSettings(settings))
@@ -42,13 +40,14 @@ namespace vanguard::application
             result.message = "diagnostics bootstrap failed";
             return result;
         }
-        const bool diagnosticsFileOpened = diagnosticsOwned && settings.diagnosticsFilePath != nullptr &&
-                                           diagnostics::OpenFileSink(settings.diagnosticsFilePath);
+        const bool diagnosticsFileOpened =
+            diagnosticsOwned && settings.diagnosticsFilePath != nullptr && diagnostics::OpenFileSink(settings.diagnosticsFilePath);
         if (!containers::IsInitialized() && !containers::Initialize())
         {
             result.failure = RunnerFailureCode::ContainersBootstrapFailure;
             result.message = "containers bootstrap failed";
-            if (diagnosticsOwned) diagnostics::Shutdown();
+            if (diagnosticsOwned)
+                diagnostics::Shutdown();
             return result;
         }
 
@@ -68,8 +67,7 @@ namespace vanguard::application
             else
             {
                 platformInitialized = true;
-                const ApplicationStartupContext startup{
-                    settings.applicationName, settings.profile, settings.commandLine, &platform};
+                const ApplicationStartupContext startup{settings.applicationName, settings.profile, settings.commandLine, &platform};
                 const CompositionStatus compositionStatus = composition.Compose(startup, services, states);
                 if (!compositionStatus)
                 {
@@ -96,7 +94,7 @@ namespace vanguard::application
                     bool platformPumpAvailable = true;
                     bool shutdownRequested = false;
                     u32 shutdownTicks = 0;
-                    while (states.Phase() != StateMachinePhase::Stopped && states.Phase() != StateMachinePhase::Failed)
+                    while (states.GetPhase() != StateMachinePhase::Stopped && states.GetPhase() != StateMachinePhase::Failed)
                     {
                         if (platformPumpAvailable)
                         {
@@ -128,13 +126,15 @@ namespace vanguard::application
                                 result.message = tickFailure.message;
                                 result.stateFailure = tickFailure;
                             }
-                            if (states.Phase() != StateMachinePhase::Exiting) break;
+                            if (states.GetPhase() != StateMachinePhase::Exiting)
+                                break;
                             shutdownRequested = true;
                         }
-                        if (tick == StateMachineTickResult::Stopped) break;
-                        if (states.ExitRequested()) shutdownRequested = true;
-                        if (shutdownRequested && settings.maximumShutdownTicks != 0 &&
-                            ++shutdownTicks > settings.maximumShutdownTicks)
+                        if (tick == StateMachineTickResult::Stopped)
+                            break;
+                        if (states.IsExitRequested())
+                            shutdownRequested = true;
+                        if (shutdownRequested && settings.maximumShutdownTicks != 0 && ++shutdownTicks > settings.maximumShutdownTicks)
                         {
                             result.failure = RunnerFailureCode::ShutdownTimeout;
                             result.message = "application state shutdown exceeded its tick budget";
@@ -155,18 +155,20 @@ namespace vanguard::application
                     }
                 }
             }
-            if (platformInitialized) platform.Shutdown();
+            if (platformInitialized)
+                platform.Shutdown();
         }
 
         if (result.failure != RunnerFailureCode::None)
-            VG_LOG_ERROR(diagnostics::Category::Engine, "application runner failed: code=%u message=%s",
-                         static_cast<u32>(result.failure), result.message != nullptr ? result.message : "unspecified");
+            VG_LOG_ERROR(diagnostics::Category::Engine, "application runner failed: code=%u message=%s", static_cast<u32>(result.failure),
+                         result.message != nullptr ? result.message : "unspecified");
         if (diagnosticsFileOpened)
         {
             diagnostics::Flush(diagnostics::FlushMode::Synchronous);
             diagnostics::CloseFileSink();
         }
-        if (diagnosticsOwned) diagnostics::Shutdown();
+        if (diagnosticsOwned)
+            diagnostics::Shutdown();
         return result;
     }
 } // namespace vanguard::application

@@ -5,16 +5,16 @@
 namespace vanguard::jobs::backend
 {
     [[nodiscard]] Config RuntimeConfig() noexcept;
-    [[nodiscard]] Config EditorConfig() noexcept;
+    [[nodiscard]] Config GetEditorConfig() noexcept;
     [[nodiscard]] Config ToolConfig() noexcept;
 
     [[nodiscard]] bool Initialize(const Config& config) noexcept;
     [[nodiscard]] bool Shutdown() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
-    [[nodiscard]] u32 WorkerCount() noexcept;
-    [[nodiscard]] u32 OutstandingJobCount() noexcept;
+    [[nodiscard]] u32 GetWorkerCount() noexcept;
+    [[nodiscard]] u32 GetOutstandingJobCount() noexcept;
     [[nodiscard]] SchedulerStats GetSchedulerStats() noexcept;
-    [[nodiscard]] u32 DispatcherThreadIndex() noexcept;
+    [[nodiscard]] u32 GetDispatcherThreadIndex() noexcept;
     [[nodiscard]] bool IsWorkerThread() noexcept;
     void RegisterCurrentThread(const char* name) noexcept;
 
@@ -28,8 +28,8 @@ namespace vanguard::jobs::backend
 
     [[nodiscard]] bool Dispatch(void* builder, void* jobName, detail::TaskPacket task, Fence fence) noexcept;
     [[nodiscard]] bool DispatchAfter(void* builder, const void* dependency, void* jobName, detail::TaskPacket task, Fence fence) noexcept;
-    [[nodiscard]] bool DispatchParallel(void* builder, void* jobName, u32 elementCount, detail::ParallelTaskPacket task,
-                                        detail::TaskPacket epilogue, u32 maximumBatchSize, Fence fence) noexcept;
+    [[nodiscard]] bool DispatchParallel(void* builder, void* jobName, u32 elementCount, detail::ParallelTaskPacket task, detail::TaskPacket epilogue,
+                                        u32 maximumBatchSize, Fence fence) noexcept;
 
     void AddDependency(void* builder, const void* dependency) noexcept;
     void DispatchFence(void* builder) noexcept;
@@ -38,6 +38,7 @@ namespace vanguard::jobs::backend
     void DestroyCounter(void* counter) noexcept;
     [[nodiscard]] bool CounterIsReady(const void* counter) noexcept;
     [[nodiscard]] bool WaitCounter(const void* counter, bool processLatent, i32 timeoutMilliseconds) noexcept;
+    [[nodiscard]] bool WaitCounterOnProcessFrame(const void* counter) noexcept;
     [[nodiscard]] void* CreateDeferral(void* counter, const char* staticDebugName, const void* debugUserData) noexcept;
     void DestroyDeferral(void* deferral) noexcept;
     [[nodiscard]] bool DeferralIsFinished(const void* deferral) noexcept;

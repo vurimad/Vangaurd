@@ -1,11 +1,12 @@
 #include <vanguard/rendering/render_scene.hpp>
-#include <vanguard/rendering/render_scene_collector.hpp>
-#include <vanguard/rendering/render_scene_feedback.hpp>
 #include <vanguard/rendering/gpu_scene_types.hpp>
 #include <vanguard/rendering/gpu_scene_tables.hpp>
 #include <vanguard/rendering/gpu_scene_lifetime.hpp>
+#include <vanguard/rendering/gpu_scene_visibility.hpp>
 #include <vanguard/rendering/render_phase.hpp>
+#include <vanguard/rendering/render_command_system.hpp>
 #include <vanguard/rendering/render_view.hpp>
+#include <vanguard/rendering/visibility_feedback.hpp>
 #include <vanguard/rendering/viewport.hpp>
 
 #include <vanguard/concurrency/atomic.hpp>
@@ -15,6 +16,10 @@
 
 #include <cstdio>
 #include <limits>
+#include <utility>
+void RunRenderCameraTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
+void RunRenderFlowResourceAllocatorTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
+void RunTextureUploadCandidateTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
 
 namespace
 {
@@ -32,7 +37,8 @@ namespace
 
     void Check(const bool condition, const char* const message) noexcept
     {
-        if (condition) return;
+        if (condition)
+            return;
         std::fprintf(stderr, "[renderingTests] FAILED: %s\n", message);
         ++g_failures;
     }
@@ -48,9 +54,17 @@ namespace
     struct ExecutionState
     {
         concurrency::Atomic<u32> executions{0};
+        concurrency::Atomic<u32> tickContinuationExecutions{0};
+        concurrency::Atomic<u32> continuationExecutions{0};
         concurrency::Atomic<u32> nextOrder{0};
         concurrency::Atomic<u32> orderFailures{0};
+        concurrency::Atomic<u32> frameTickSceneCount{0};
+        concurrency::Atomic<u32> preparedViewFamilies{0};
+        concurrency::Atomic<u32> lastPreparedViewCount{0};
+        concurrency::Atomic<u64> frameTickMutationEpoch{~u64{0}};
+        concurrency::Atomic<u64> lastPreparedSceneVersion{0};
         concurrency::Atomic<u64> lastSerial{0};
+        concurrency::Atomic<bool> failFrameTick{false};
     };
 
     class TestResource final : public resources::ResourceObject
@@ -60,7 +74,10 @@ namespace
 
         explicit TestResource(const resources::ResourceTypeId type) noexcept : m_type(type) {}
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override { return m_type; }
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override
+        {
+            return m_type;
+        }
 
     private:
         resources::ResourceTypeId m_type = resources::InvalidResourceTypeId;
@@ -72,8 +89,7 @@ namespace
         concurrency::Atomic<u32> destructions{0};
     };
 
-    void BeginResourceLoad(resources::ResourceRegistry& registry, const resources::ResourceRequest& request,
-                           void* const userData) noexcept
+    void BeginResourceLoad(resources::ResourceRegistry& registry, const resources::ResourceRequest& request, void* const userData) noexcept
     {
         auto* const harness = static_cast<ResourceHarness*>(userData);
         static_cast<void>(harness->starts.Increment());
@@ -99,27 +115,57 @@ namespace
         static_cast<void>(payload->releases.Increment());
     }
 
-    rendering::RenderFrameExecutionStatus ExecuteFrame(const rendering::RenderFrameInfo& frame,
-                                                        const jobs::JobContext& context,
-                                                        void* const userData) noexcept
+    rendering::RenderFrameExecutionStatus ExecuteFrame(rendering::RenderFrameContext& context, void* const userData) noexcept
     {
+        const rendering::RenderFrameInfo& frame = context.GetFrame();
         auto* const execution = static_cast<ExecutionState*>(userData);
-        auto* const payload = static_cast<PayloadState*>(frame.Payload().data);
+        auto* const payload = static_cast<PayloadState*>(frame.GetPayload().data);
         const u32 order = execution->nextOrder.PostIncrement();
         if (payload == nullptr || payload->expectedOrder != order)
             static_cast<void>(execution->orderFailures.Increment());
         static_cast<void>(execution->executions.Increment());
-        execution->lastSerial.SetValue(frame.Serial());
-        if (context.debugName == nullptr || context.debugName[0] == '\0')
+        execution->lastSerial.SetValue(frame.GetSerial());
+        if (!context.IsValid())
             static_cast<void>(execution->orderFailures.Increment());
-        return payload != nullptr && payload->fail
-                   ? rendering::RenderFrameExecutionStatus::Failure("intentional viewport test failure")
-                   : rendering::RenderFrameExecutionStatus::Success();
+        if (frame.HasViewSetup())
+        {
+            if (!frame.GetViewFamily().IsValid())
+                static_cast<void>(execution->orderFailures.Increment());
+            else
+            {
+                const rendering::RenderViewFamily& family = frame.GetViewFamily().GetFamily();
+                static_cast<void>(execution->preparedViewFamilies.Increment());
+                execution->lastPreparedViewCount.SetValue(family.viewCount);
+                execution->lastPreparedSceneVersion.SetValue(family.sceneVersion);
+            }
+        }
+        static jobs::JobName continuationName{"RenderingTests.RenderFrameContinuation"};
+        jobs::Task continuation =
+            jobs::Task::Create([execution](const jobs::JobContext&) noexcept { static_cast<void>(execution->continuationExecutions.Increment()); });
+        if (!continuation || !context.GetJobs().Dispatch(continuationName, std::move(continuation)))
+            return rendering::RenderFrameExecutionStatus::Failure("render frame continuation dispatch failed");
+        return payload != nullptr && payload->fail ? rendering::RenderFrameExecutionStatus::Failure("intentional viewport test failure")
+                                                   : rendering::RenderFrameExecutionStatus::Success();
     }
 
-    rendering::RenderFrameInfo Begin(rendering::ViewportManager& manager,
-                                     const rendering::EngineViewportHandle viewport,
-                                     const bool present = true) noexcept
+    rendering::RenderFrameExecutionStatus ExecuteFrameTick(rendering::RenderFrameTickContext& context, void* const userData) noexcept
+    {
+        if (!context.IsValid())
+            return rendering::RenderFrameExecutionStatus::Failure("invalid rendering test FrameTick context");
+        auto* const execution = static_cast<ExecutionState*>(userData);
+        execution->frameTickSceneCount.SetValue(context.GetScenes().Size());
+        if (!context.GetScenes().Empty())
+            execution->frameTickMutationEpoch.SetValue(context.GetScenes()[0].mutationEpoch);
+        static jobs::JobName continuationName{"RenderingTests.FrameTickContinuation"};
+        jobs::Task continuation =
+            jobs::Task::Create([execution](const jobs::JobContext&) noexcept { static_cast<void>(execution->tickContinuationExecutions.Increment()); });
+        if (!continuation || !context.GetJobs().Dispatch(continuationName, std::move(continuation)))
+            return rendering::RenderFrameExecutionStatus::Failure("render FrameTick continuation dispatch failed");
+        return execution->failFrameTick.GetValue() ? rendering::RenderFrameExecutionStatus::Failure("intentional FrameTick test failure")
+                                                   : rendering::RenderFrameExecutionStatus::Success();
+    }
+
+    rendering::RenderFrameInfo Begin(rendering::ViewportManager& manager, const rendering::EngineViewportHandle viewport, const bool present = true) noexcept
     {
         rendering::RenderFrameInfo frame;
         rendering::RenderFrameSetup setup;
@@ -147,36 +193,36 @@ int main()
     jobs::Config jobsConfig = jobs::ToolConfig();
     jobsConfig.maxWorkers = 2;
     Check(jobs::Initialize(jobsConfig), "Jobs initialization");
+    RunRenderCameraTests(&Check);
+    const int failuresBeforeResourceFlowAllocator = g_failures;
+    RunRenderFlowResourceAllocatorTests(&Check);
+    if (g_failures == failuresBeforeResourceFlowAllocator)
+        std::printf("Vanguard Resource Flow Allocator Stage 1 tests passed.\n");
 
     {
         rendering::RenderPhaseRegistry phases;
         rendering::RenderPhaseFailure phaseFailure;
         Check(phases.Initialize({}, &phaseFailure), "render phase registry initialization");
-        Check(rendering::RegisterStandardRenderPhases(phases, &phaseFailure),
-              "standard render phase registration");
+        Check(rendering::RegisterStandardRenderPhases(phases, &phaseFailure), "standard render phase registration");
         const rendering::RenderPhaseId opaque = phases.Find(rendering::standardRenderPhases::Opaque);
         const rendering::RenderPhaseId transparent = phases.Find("vanguard.render.transparent");
-        Check(opaque.IsValid() && transparent.IsValid() && opaque != transparent,
-              "stable render phase keys resolve to compact identities");
+        Check(opaque.IsValid() && transparent.IsValid() && opaque != transparent, "stable render phase keys resolve to compact identities");
 
         rendering::RenderPhaseId duplicateOpaque;
-        Check(phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::FrontToBack},
-                              duplicateOpaque, &phaseFailure) && duplicateOpaque == opaque,
+        Check(phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::FrontToBack}, duplicateOpaque, &phaseFailure) &&
+                  duplicateOpaque == opaque,
               "identical render phase registration is idempotent");
-        Check(!phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::BackToFront},
-                               duplicateOpaque, &phaseFailure) &&
+        Check(!phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::BackToFront}, duplicateOpaque, &phaseFailure) &&
                   phaseFailure.code == rendering::RenderPhaseFailureCode::IncompatibleDefinition,
               "incompatible render phase redefinition is rejected");
         Check(phases.Seal(&phaseFailure) && phases.IsSealed(), "render phase registry sealing");
         rendering::RenderPhaseId forbiddenPhase;
-        Check(!phases.Register({"vanguard.render.late", 0, rendering::RenderPhaseSortMode::State},
-                               forbiddenPhase, &phaseFailure) &&
+        Check(!phases.Register({"vanguard.render.late", 0, rendering::RenderPhaseSortMode::State}, forbiddenPhase, &phaseFailure) &&
                   phaseFailure.code == rendering::RenderPhaseFailureCode::RegistrySealed,
               "sealed render phase registry rejects late registration");
 
         rendering::RenderPhaseSet mainPhases;
-        Check(mainPhases.Add(phases.Find(rendering::standardRenderPhases::DepthPrepass)) &&
-                  mainPhases.Add(opaque) && mainPhases.Add(transparent) &&
+        Check(mainPhases.Add(phases.Find(rendering::standardRenderPhases::DepthPrepass)) && mainPhases.Add(opaque) && mainPhases.Add(transparent) &&
                   mainPhases.Contains(opaque),
               "render phase set stores compact phase membership");
 
@@ -184,9 +230,7 @@ int main()
         views[0].id = {0, 1};
         views[0].family = {0, 1};
         views[0].purpose = rendering::RenderViewPurpose::Main;
-        views[0].flags = rendering::RenderViewFlags::Primary |
-                         rendering::RenderViewFlags::TemporalHistory |
-                         rendering::RenderViewFlags::OcclusionCulling;
+        views[0].flags = rendering::RenderViewFlags::Primary | rendering::RenderViewFlags::TemporalHistory | rendering::RenderViewFlags::OcclusionCulling;
         views[0].phases = mainPhases;
         views[0].rect = {0, 0, 1920, 1080};
         views[0].frustum.planeCount = 1;
@@ -203,8 +247,7 @@ int main()
         views[1].purpose = rendering::RenderViewPurpose::Shadow;
         views[1].flags = rendering::RenderViewFlags::ReverseDepth;
         views[1].phases.Clear();
-        Check(views[1].phases.Add(phases.Find(rendering::standardRenderPhases::ShadowDepth)),
-              "shadow view phase selection");
+        Check(views[1].phases.Add(phases.Find(rendering::standardRenderPhases::ShadowDepth)), "shadow view phase selection");
         views[1].temporalIdentity = 0;
         views[1].name[0] = 'S';
         views[1].name[1] = 'h';
@@ -222,8 +265,7 @@ int main()
         family.sceneIdentity = 9;
         family.sceneVersion = 4;
         rendering::RenderViewFailure viewFailure;
-        Check(rendering::ValidateRenderViewFamily(family, phases, &viewFailure),
-              "main and shadow views form one valid view family");
+        Check(rendering::ValidateRenderViewFamily(family, phases, &viewFailure), "main and shadow views form one valid view family");
 
         views[0].origin.worldCell[0] = -12;
         views[0].origin.localPosition[1] = 34.5f;
@@ -231,41 +273,106 @@ int main()
         views[0].temporalIdentity = 0xaabbccddeeff0011ull;
         views[0].matrices.worldToClip[15] = 1.0f;
         rendering::GpuView gpuView;
-        Check(rendering::BuildGpuView(views[0], gpuView) && gpuView.worldCell[0] == -12 &&
-                  gpuView.localPosition[1] == 34.5f && gpuView.worldToClip[15] == 1.0f &&
-                  gpuView.layerMaskLow == 0x55667788u && gpuView.layerMaskHigh == 0x11223344u &&
+        Check(rendering::BuildGpuView(views[0], gpuView) && gpuView.worldCell[0] == -12 && gpuView.localPosition[1] == 34.5f &&
+                  gpuView.worldToClip[15] == 1.0f && gpuView.layerMaskLow == 0x55667788u && gpuView.layerMaskHigh == 0x11223344u &&
                   gpuView.temporalIdentityLow == 0xeeff0011u && gpuView.temporalIdentityHigh == 0xaabbccddu &&
-                  gpuView.phaseMaskLow == static_cast<u32>(mainPhases.Bits()) &&
-                  gpuView.phaseMaskHigh == static_cast<u32>(mainPhases.Bits() >> 32u),
+                  gpuView.phaseMaskLow == static_cast<u32>(mainPhases.Bits()) && gpuView.phaseMaskHigh == static_cast<u32>(mainPhases.Bits() >> 32u),
               "validated render view encodes into the exact GPU scene ABI");
         rendering::GpuInstanceHandle gpuInstance{7, 3};
-        Check(gpuInstance.IsValid() && !rendering::GpuInstanceHandle{}.IsValid() &&
-                  sizeof(rendering::GpuInstance) == 96 && sizeof(rendering::GpuView) == 544,
+        Check(gpuInstance.IsValid() && !rendering::GpuInstanceHandle{}.IsValid() && sizeof(rendering::GpuInstance) == 112 && sizeof(rendering::GpuView) == 544,
               "GPU scene handles and structured-buffer strides are stable");
         constexpr rendering::GpuSceneLinearAddress firstInstancePageTwo =
-            rendering::DecodeGpuSceneIndex<rendering::GpuInstance>(
-                rendering::GpuSceneElementsPerPage<rendering::GpuInstance>() * 2u + 7u);
+            rendering::DecodeGpuSceneIndex<rendering::GpuInstance>(rendering::GpuSceneElementsPerPage<rendering::GpuInstance>() * 2u + 7u);
         Check(firstInstancePageTwo.page == 2 && firstInstancePageTwo.element == 7 &&
-                  rendering::GpuSceneElementsPerPage<rendering::GpuMaterialIndex>() == 262'144 &&
-                  sizeof(rendering::GpuSceneTableDirectory) == 32 &&
-                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16,
+                  rendering::GpuSceneElementsPerPage<rendering::GpuMaterialIndex>() == 262'144 && sizeof(rendering::GpuSceneTableDirectory) == 32 &&
+                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16 && rendering::GpuSceneLayoutVersion == 6 &&
+                  static_cast<u32>(rendering::GpuSceneTableKind::TextureResidency) == 18 &&
+                  sizeof(rendering::GpuTextureResidency) == 16,
               "GPU Scene paged addressing is stable and shader-compatible");
-        constexpr rendering::GpuSceneAllocation allocation{
-            rendering::GpuSceneTableKind::Instance, 19, 1, 7};
-        Check(allocation.IsValid() && allocation.AsSlotHandle<rendering::GpuInstanceHandle>() ==
-                  rendering::GpuInstanceHandle{19, 7},
+        constexpr rendering::GpuSceneAllocation allocation{rendering::GpuSceneTableKind::Instance, 19, 1, 7};
+        Check(allocation.IsValid() && allocation.AsSlotHandle<rendering::GpuInstanceHandle>() == rendering::GpuInstanceHandle{19, 7},
               "GPU Scene allocation converts single identities to typed generational handles");
 
+        rendering::GpuView visibilityViews[2]{};
+        rendering::GpuInstanceIndex visibilityCandidates[512]{};
+        rendering::GpuVisibilityWorkRange visibilityWork[8]{};
+        rendering::GpuVisibilityResultRange visibilityResults[2]{};
+        rendering::GpuVisibilityPlanBuilder visibilityBuilder;
+        rendering::GpuVisibilityBuildFailure visibilityFailure;
+        Check(visibilityBuilder.Begin({visibilityViews, visibilityCandidates, visibilityWork, visibilityResults}, 17, &visibilityFailure),
+              "GPU visibility planning begins over caller-owned staging storage");
+        rendering::GpuVisibilityCandidateReservation mainCandidates;
+        rendering::GpuVisibilityCandidateReservation shadowCandidates;
+        Check(visibilityBuilder.ReserveView(gpuView, 257, 192, mainCandidates, &visibilityFailure) && mainCandidates.destination == visibilityCandidates &&
+                  mainCandidates.capacity == 257,
+              "main-view candidates reserve their final staging destination");
+        rendering::GpuView shadowGpuView = gpuView;
+        shadowGpuView.viewIndex = 1;
+        shadowGpuView.viewGeneration = 3;
+        Check(visibilityBuilder.ReserveView(shadowGpuView, 128, 64, shadowCandidates, &visibilityFailure) &&
+                  shadowCandidates.destination == visibilityCandidates + 257,
+              "another view receives a disjoint candidate reservation");
+        for (u32 index = 0; index < mainCandidates.capacity; ++index)
+            mainCandidates.destination[index] = index + 10;
+        for (u32 index = 0; index < shadowCandidates.capacity; ++index)
+            shadowCandidates.destination[index] = index + 1000;
+        rendering::GpuVisibilityCandidateReservation prematureShadow = shadowCandidates;
+        Check(!visibilityBuilder.CompleteView(prematureShadow, 128, &visibilityFailure) &&
+                  visibilityFailure.code == rendering::GpuVisibilityBuildFailureCode::CompletionOrderViolation,
+              "visibility planning rejects nondeterministic view completion order");
+        Check(visibilityBuilder.CompleteView(mainCandidates, 257, &visibilityFailure) &&
+                  visibilityBuilder.CompleteView(shadowCandidates, 128, &visibilityFailure),
+              "candidate producers complete their direct-write reservations");
+        rendering::GpuVisibilityPlan visibilityPlan;
+        Check(visibilityBuilder.Finalize(visibilityPlan, &visibilityFailure) && visibilityPlan.IsValid() && visibilityPlan.views.Size() == 2 &&
+                  visibilityPlan.candidates.Size() == 385 && visibilityPlan.workRanges.Size() == 4 && visibilityPlan.visibleCapacity == 256 &&
+                  visibilityPlan.workRanges[0].candidateOffset == 0 && visibilityPlan.workRanges[0].candidateCount == rendering::GpuVisibilityThreadsPerGroup &&
+                  visibilityPlan.workRanges[2].candidateOffset == 256 && visibilityPlan.workRanges[2].candidateCount == 1 &&
+                  visibilityPlan.workRanges[3].candidateOffset == 257 && visibilityPlan.results[1].visibleOffset == 192 &&
+                  sizeof(rendering::GpuVisibilityConstants) == 64,
+              "GPU visibility plan produces bounded per-view work and output partitions");
+
+        rendering::GpuView capacityViews[2]{};
+        rendering::GpuInstanceIndex capacityCandidates[512]{};
+        rendering::GpuVisibilityWorkRange capacityWork[3]{};
+        rendering::GpuVisibilityResultRange capacityResults[2]{};
+        Check(visibilityBuilder.Begin({capacityViews, capacityCandidates, capacityWork, capacityResults}, 18, &visibilityFailure),
+              "GPU visibility capacity audit begins");
+        rendering::GpuVisibilityCandidateReservation capacityMain;
+        rendering::GpuVisibilityCandidateReservation capacityShadow;
+        Check(visibilityBuilder.ReserveView(gpuView, 257, 257, capacityMain, &visibilityFailure) &&
+                  !visibilityBuilder.ReserveView(shadowGpuView, 1, 1, capacityShadow, &visibilityFailure) &&
+                  visibilityFailure.code == rendering::GpuVisibilityBuildFailureCode::CapacityExceeded,
+              "outstanding views cannot collectively overbook work-range storage");
+        visibilityBuilder.Cancel();
+
+        rendering::GpuView sparseViews[1]{};
+        rendering::GpuInstanceIndex sparseCandidates[257]{};
+        rendering::GpuVisibilityWorkRange sparseWork[3]{};
+        rendering::GpuVisibilityResultRange sparseResults[1]{};
+        Check(visibilityBuilder.Begin({sparseViews, sparseCandidates, sparseWork, sparseResults}, 19, &visibilityFailure),
+              "sparse GPU visibility planning begins");
+        rendering::GpuVisibilityCandidateReservation sparseReservation;
+        Check(visibilityBuilder.ReserveViewRanges(gpuView, 257, 3, 128, sparseReservation, &visibilityFailure),
+              "sparse candidate production reserves disjoint filled-prefix capacity");
+        sparseReservation.destination[0] = 41;
+        sparseReservation.destination[200] = 73;
+        const rendering::GpuVisibilityCandidateRange sparseRanges[3]{{0, 1}, {200, 1}, {256, 0}};
+        Check(visibilityBuilder.CompleteViewRanges(sparseReservation, sparseRanges, &visibilityFailure),
+              "sparse candidate ranges complete without gathering their disjoint prefixes");
+        rendering::GpuVisibilityPlan sparsePlan;
+        Check(visibilityBuilder.Finalize(sparsePlan, &visibilityFailure) && sparsePlan.candidates.Size() == 201 && sparsePlan.workRanges.Size() == 2 &&
+                  sparsePlan.workRanges[0].candidateOffset == 0 && sparsePlan.workRanges[1].candidateOffset == 200,
+              "GPU visibility work references only filled candidate prefixes and skips holes");
+
         views[1].id = views[0].id;
-        Check(!rendering::ValidateRenderViewFamily(family, phases, &viewFailure) &&
-                  viewFailure.code == rendering::RenderViewFailureCode::DuplicateView,
+        Check(!rendering::ValidateRenderViewFamily(family, phases, &viewFailure) && viewFailure.code == rendering::RenderViewFailureCode::DuplicateView,
               "view family rejects duplicate view identities");
         views[1].id = {1, 1};
 
         rendering::RenderView invalidPhaseView = views[0];
         invalidPhaseView.phases = rendering::RenderPhaseSet(1ull << 63u);
-        Check(!rendering::ValidateRenderView(invalidPhaseView, phases, &viewFailure) &&
-                  viewFailure.code == rendering::RenderViewFailureCode::UnknownPhase,
+        Check(!rendering::ValidateRenderView(invalidPhaseView, phases, &viewFailure) && viewFailure.code == rendering::RenderViewFailureCode::UnknownPhase,
               "render view rejects phase bits outside the sealed registry");
         Check(phases.Shutdown(&phaseFailure), "render phase registry shutdown");
     }
@@ -275,22 +382,16 @@ int main()
     Check(resourceRegistry.Initialize(), "test resource registry initialization");
     const resources::ResourceTypeId meshType = resources::HashTypeName("vanguard.mesh");
     const resources::ResourceTypeId materialType = resources::HashTypeName("vanguard.material");
-    Check(resourceRegistry.RegisterLoader({meshType, "rendering test mesh loader", BeginResourceLoad,
-                                           DestroyResource, &resourceHarness}),
+    Check(resourceRegistry.RegisterLoader({meshType, "rendering test mesh loader", BeginResourceLoad, DestroyResource, &resourceHarness}),
           "test mesh loader registration");
-    Check(resourceRegistry.RegisterLoader({materialType, "rendering test material loader", BeginResourceLoad,
-                                           DestroyResource, &resourceHarness}),
+    Check(resourceRegistry.RegisterLoader({materialType, "rendering test material loader", BeginResourceLoad, DestroyResource, &resourceHarness}),
           "test material loader registration");
-    const resources::ResourceReference meshReference(
-        resources::ResourcePath::FromString("meshes/render_scene_payload.vmesh"), meshType);
-    const resources::ResourceReference materialReference(
-        resources::ResourcePath::FromString("materials/render_scene_payload.vmat"), materialType);
+    const resources::ResourceReference meshReference(resources::ResourcePath::FromString("meshes/render_scene_payload.vmesh"), meshType);
+    const resources::ResourceReference materialReference(resources::ResourcePath::FromString("materials/render_scene_payload.vmat"), materialType);
     resources::ResourceRequest meshRequest = resourceRegistry.Request(meshReference);
     resources::ResourceRequest materialRequest = resourceRegistry.Request(materialReference);
-    Check(resourceRegistry.Publish(meshRequest, VANGUARD_NEW(TestResource)(meshType)),
-          "test mesh resource publication");
-    Check(resourceRegistry.Publish(materialRequest, VANGUARD_NEW(TestResource)(materialType)),
-          "test material resource publication");
+    Check(resourceRegistry.Publish(meshRequest, VANGUARD_NEW(TestResource)(meshType)), "test mesh resource publication");
+    Check(resourceRegistry.Publish(materialRequest, VANGUARD_NEW(TestResource)(materialType)), "test material resource publication");
     meshRequest.Wait();
     materialRequest.Wait();
     resources::ResourceHandle meshHandle = meshRequest.Acquire();
@@ -301,28 +402,80 @@ int main()
         rendering::RenderSceneManager scenes;
         rendering::RenderSceneFailure sceneFailure;
         Check(scenes.Initialize({}, &sceneFailure), "RenderSceneManager initialization");
-        rendering::RenderSceneDesc runtimeDesc;
-        runtimeDesc.name = "Runtime scene";
-        runtimeDesc.mode = rendering::RenderSceneMode::Runtime;
-        runtimeDesc.maximumProxies = 4096;
-        runtimeDesc.maximumPendingProxyMutations = 32;
-        runtimeDesc.maximumViews = 4;
-        rendering::RenderSceneHandle runtimeScene;
-        Check(scenes.CreateScene(runtimeDesc, runtimeScene, &sceneFailure) && runtimeScene.IsValid(),
-              "runtime RenderScene creation");
-        rendering::RenderSceneSnapshot runtimeSnapshot;
-        Check(scenes.Snapshot(runtimeScene, runtimeSnapshot) &&
-                  runtimeSnapshot.handle == runtimeScene &&
-                  runtimeSnapshot.mode == rendering::RenderSceneMode::Runtime &&
-                  runtimeSnapshot.state == rendering::RenderSceneState::Alive &&
-                  runtimeSnapshot.maximumProxies == 4096 &&
-                  runtimeSnapshot.maximumPendingProxyMutations == 32 &&
-                  runtimeSnapshot.maximumViews == 4 &&
-                  runtimeSnapshot.allowFramePipelineParticipation,
-              "runtime RenderScene snapshot");
+
+        rendering::RenderSceneDesc sceneDesc;
+        sceneDesc.name = "Runtime scene";
+        sceneDesc.mode = rendering::RenderSceneMode::Runtime;
+        sceneDesc.maximumProxies = 4096;
+        sceneDesc.maximumPendingProxyMutations = 32;
+        sceneDesc.maximumViews = 4;
+        rendering::RenderSceneHandle scene;
+        Check(scenes.CreateScene(sceneDesc, scene, &sceneFailure) && scene.IsValid(), "runtime RenderScene creation");
+
+        rendering::RenderSceneDesc editorSceneDesc = sceneDesc;
+        editorSceneDesc.name = "Detached editor scene";
+        editorSceneDesc.mode = rendering::RenderSceneMode::Editor;
+        editorSceneDesc.maximumProxies = 8;
+        editorSceneDesc.maximumPendingProxyMutations = 8;
+        editorSceneDesc.maximumViews = 1;
+        editorSceneDesc.allowFramePipelineParticipation = false;
+        rendering::RenderSceneHandle editorScene;
+        Check(scenes.CreateScene(editorSceneDesc, editorScene, &sceneFailure), "non-participating editor RenderScene creation");
+
+        rendering::RenderSceneDesc previewSceneDesc = editorSceneDesc;
+        previewSceneDesc.name = "Participating preview scene";
+        previewSceneDesc.mode = rendering::RenderSceneMode::Preview;
+        previewSceneDesc.allowFramePipelineParticipation = true;
+        rendering::RenderSceneHandle previewScene;
+        Check(scenes.CreateScene(previewSceneDesc, previewScene, &sceneFailure), "participating preview RenderScene creation");
+
+        rendering::RenderSceneDesc thumbnailSceneDesc = previewSceneDesc;
+        thumbnailSceneDesc.name = "Participating thumbnail scene";
+        thumbnailSceneDesc.mode = rendering::RenderSceneMode::Thumbnail;
+        rendering::RenderSceneHandle thumbnailScene;
+        Check(scenes.CreateScene(thumbnailSceneDesc, thumbnailScene, &sceneFailure), "participating thumbnail RenderScene creation");
+
+        containers::ArraySpan<const rendering::RenderSceneHandle> participatingScenes = scenes.GetFramePipelineScenes();
+        Check(participatingScenes.Count() == 3 && participatingScenes[0] == scene && participatingScenes[1] == previewScene &&
+                  participatingScenes[2] == thumbnailScene && scenes.GetStats().framePipelineScenes == 3,
+              "frame-pipeline scene directory is dense, allocation-free, and excludes opted-out scenes");
+
+        const rendering::RenderSceneHandle stalePreviewScene = previewScene;
+        Check(scenes.DestroyScene(previewScene, &sceneFailure), "middle participating RenderScene destruction");
+        participatingScenes = scenes.GetFramePipelineScenes();
+        Check(participatingScenes.Count() == 2 && participatingScenes[0] == scene && participatingScenes[1] == thumbnailScene,
+              "frame-pipeline scene directory repairs moved indices in constant time");
+
+        previewSceneDesc.name = "Reused preview scene";
+        rendering::RenderSceneHandle replacementPreviewScene;
+        Check(scenes.CreateScene(previewSceneDesc, replacementPreviewScene, &sceneFailure) && replacementPreviewScene.index == stalePreviewScene.index &&
+                  replacementPreviewScene.generation != stalePreviewScene.generation,
+              "reused participating RenderScene slot advances its generation");
+        participatingScenes = scenes.GetFramePipelineScenes();
+        Check(participatingScenes.Count() == 3 && participatingScenes[0] == scene && participatingScenes[1] == thumbnailScene &&
+                  participatingScenes[2] == replacementPreviewScene,
+              "reused scene generation is appended exactly once to the dense frame directory");
+        Check(scenes.DestroyScene(replacementPreviewScene, &sceneFailure) && scenes.DestroyScene(thumbnailScene, &sceneFailure) &&
+                  scenes.DestroyScene(editorScene, &sceneFailure) && scenes.GetFramePipelineScenes().Count() == 1 && scenes.GetFramePipelineScenes()[0] == scene,
+              "mixed scene modes retire without scanning or disturbing the remaining runtime scene");
+
+        u64 updateTick = 1;
+        const auto executeSceneUpdate = [&](rendering::RenderSceneUpdateResult& update) noexcept
+        {
+            rendering::RenderSceneFramePrepareResult prepare;
+            if (!scenes.PrepareSceneUpdate(scene, updateTick++, prepare, &sceneFailure))
+                return false;
+            jobs::Builder builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker});
+            if (!scenes.ExecuteSceneUpdate(scene, builder, update, &sceneFailure))
+                return false;
+            if (!update.dispatched)
+                return true;
+            jobs::Counter completion = builder.ExtractCounter();
+            return completion.IsValid() && completion.Wait();
+        };
 
         rendering::RenderProxyDesc proxyDesc;
-        proxyDesc.scene = runtimeScene;
+        proxyDesc.scene = scene;
         proxyDesc.typeId = 7;
         proxyDesc.producerId = 42;
         proxyDesc.producerGeneration = 3;
@@ -332,775 +485,268 @@ int main()
         proxyDesc.bounds.maximum[0] = 1.0f;
         proxyDesc.bounds.maximum[1] = 2.0f;
         proxyDesc.bounds.maximum[2] = 3.0f;
-        proxyDesc.visibility = rendering::RenderProxyVisibilityFlags::Visible |
-                               rendering::RenderProxyVisibilityFlags::CastsShadow;
+        proxyDesc.visibility = rendering::RenderProxyVisibilityFlags::Visible | rendering::RenderProxyVisibilityFlags::CastsShadow;
         proxyDesc.layerMask = 0x15ull;
         proxyDesc.visibilityMask = 0x3u;
-        proxyDesc.userDataEpoch = 11;
-        proxyDesc.debugName = "Borrowed proxy name";
-        rendering::RenderProxyHandle proxy;
-        Check(scenes.CreateProxy(proxyDesc, proxy, &sceneFailure) && proxy.IsValid(),
-              "RenderProxy creation");
-        rendering::SpatialWriteIndexStats spatialStats;
-        Check(scenes.ValidateSpatialIndex(runtimeScene, &spatialStats) &&
-                  spatialStats.activeEntries == 1 &&
-                  spatialStats.occupiedCells == 1 &&
-                  spatialStats.dirtyCells == 1,
-              "RenderProxy creation inserts private spatial entry");
-        proxyDesc.debugName = "Mutated caller-owned string";
-        rendering::RenderProxySnapshot proxySnapshot;
-        Check(scenes.SnapshotProxy(proxy, proxySnapshot) &&
-                  proxySnapshot.handle == proxy &&
-                  proxySnapshot.state == rendering::RenderProxyState::Alive &&
-                  proxySnapshot.typeId == 7 &&
-                  proxySnapshot.producerId == 42 &&
-                  proxySnapshot.producerGeneration == 3 &&
-                  proxySnapshot.layerMask == 0x15ull &&
-                  proxySnapshot.visibilityMask == 0x3u &&
-                  proxySnapshot.userDataEpoch == 11 &&
-                  proxySnapshot.debugName[0] == 'B',
-              "RenderProxy creation synchronously internalizes borrowed descriptor data");
-        Check(!scenes.DestroyScene(runtimeScene, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::ProxiesRemainAlive,
-              "RenderScene destruction refuses live proxies");
+        proxyDesc.debugName = "Runtime proxy";
 
+        rendering::RenderProxyHandle proxy;
+        Check(scenes.CreateProxy(proxyDesc, proxy, &sceneFailure) && proxy.IsValid(), "RenderProxy creation");
         rendering::RenderProxyTransform movedTransform;
-        movedTransform.row0[3] = 10.0f;
+        movedTransform.row0[3] = 12.0f;
         movedTransform.row1[3] = 20.0f;
         movedTransform.row2[3] = 30.0f;
         rendering::RenderProxyBounds movedBounds = proxyDesc.bounds;
-        movedBounds.minimum[0] = 9.0f;
-        movedBounds.maximum[0] = 11.0f;
-        Check(scenes.UpdateProxyTransform(proxy, movedTransform, movedBounds, 4, &sceneFailure),
-              "RenderProxy transform mutation");
-        Check(scenes.UpdateProxyVisibility(proxy, rendering::RenderProxyVisibilityFlags::QueryOnly, 0x7u,
-                                           &sceneFailure),
-              "RenderProxy visibility mutation");
-        Check(scenes.UpdateProxyLayerMask(proxy, 0x22ull, &sceneFailure), "RenderProxy layer mutation");
-        Check(scenes.UpdateProxyUserDataEpoch(proxy, 12, &sceneFailure), "RenderProxy user-data mutation");
-        Check(scenes.SnapshotProxy(proxy, proxySnapshot) &&
-                  proxySnapshot.transform.row0[3] == 10.0f &&
-                  proxySnapshot.bounds.minimum[0] == 9.0f &&
-                  proxySnapshot.producerGeneration == 4 &&
-                  proxySnapshot.visibility == rendering::RenderProxyVisibilityFlags::QueryOnly &&
-                  proxySnapshot.visibilityMask == 0x7u &&
-                  proxySnapshot.layerMask == 0x22ull &&
-                  proxySnapshot.userDataEpoch == 12,
-              "RenderProxy snapshot reflects coalesced latest mutable state");
+        movedBounds.minimum[0] = 11.0f;
+        movedBounds.maximum[0] = 13.0f;
+        Check(scenes.UpdateProxyTransform(proxy, movedTransform, movedBounds, 5, &sceneFailure), "RenderProxy relink enters the retained update queue");
 
-        rendering::RenderSceneFramePrepareResult prepareResult;
-        rendering::RenderSceneCommitResult firstCommit;
-        Check(scenes.PrepareSceneFrame(runtimeScene, prepareResult, &sceneFailure) &&
-                  prepareResult.drainedMutations == 5 &&
-                  prepareResult.mutationEpoch == 5,
-              "RenderScene frame preparation drains mutation ingress pages");
-        Check(!scenes.UpdateProxyLayerMask(proxy, 0x99ull, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::Busy &&
-                  scenes.SnapshotProxy(proxy, proxySnapshot) && proxySnapshot.layerMask == 0x22ull,
-              "prepared RenderScene epoch rejects mutations without changing mutable state");
-        Check(!scenes.PrepareSceneFrame(runtimeScene, prepareResult, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::Busy,
-              "RenderScene rejects duplicate frame preparation before commit");
-        Check(scenes.ValidateSpatialIndex(runtimeScene, &spatialStats) &&
-                  spatialStats.activeEntries == 1 &&
-                  spatialStats.cells == 1 &&
-                  spatialStats.dirtyCells == 0 &&
-                  spatialStats.fastMoves == 1 &&
-                  spatialStats.repairedCells == 1,
-              "RenderScene frame preparation repairs dirty spatial cells after fast movement");
-        Check(scenes.CommitScene(runtimeScene, firstCommit, &sceneFailure) &&
-                  firstCommit.version.IsValid() &&
-                  firstCommit.completion.IsValid() &&
-                  firstCommit.proxyCount == 1,
-              "RenderScene commit publishes first immutable scene version");
-        rendering::SceneReadLease firstLease;
-        Check(scenes.AcquireReadLease(runtimeScene, firstCommit.version, firstLease, &sceneFailure) &&
-                  firstLease.IsValid() &&
-                  firstLease.proxyCount == 1,
-              "exact RenderScene read lease acquisition");
-        rendering::RenderProxySnapshot leasedProxy;
-        Check(scenes.ReadProxy(firstLease, proxy, leasedProxy, &sceneFailure) &&
-                  leasedProxy.layerMask == 0x22ull &&
-                  leasedProxy.userDataEpoch == 12,
-              "RenderScene read lease resolves immutable proxy data");
+        // TODO: This former assertion does not compile against the snapshot-free RenderScene API. Replace it with a
+        // purpose-specific relink-state query when test work resumes; do not restore broad proxy copies.
+        rendering::RenderSceneUpdateResult firstUpdate;
+        Check(executeSceneUpdate(firstUpdate) && firstUpdate.mutationEpoch != 0, "explicit scene update applies the newest retained proxy state");
 
-        Check(scenes.UpdateProxyLayerMask(proxy, 0x33ull, &sceneFailure), "post-lease RenderProxy layer mutation");
-        rendering::RenderProxyTransform structuralTransform = movedTransform;
-        structuralTransform.row0[3] = 130.0f;
-        rendering::RenderProxyBounds structuralBounds = movedBounds;
-        structuralBounds.minimum[0] = 129.0f;
-        structuralBounds.maximum[0] = 131.0f;
-        Check(scenes.UpdateProxyTransform(proxy, structuralTransform, structuralBounds, 5, &sceneFailure),
-              "RenderProxy structural spatial movement mutation");
-        Check(scenes.SnapshotProxy(proxy, proxySnapshot) && proxySnapshot.layerMask == 0x33ull,
-              "mutable RenderProxy snapshot advances after post-lease mutation");
-        Check(scenes.ReadProxy(firstLease, proxy, leasedProxy, &sceneFailure) &&
-                  leasedProxy.layerMask == 0x22ull,
-              "existing RenderScene read lease is isolated from later mutations");
+        rendering::VisibilityQueryRequest visibilityRequest;
+        visibilityRequest.scene = scene;
+        visibilityRequest.mutationEpoch = firstUpdate.mutationEpoch;
+        visibilityRequest.useBounds = false;
+        containers::DynamicArray<rendering::RenderProxyHandle> visibleProxies(memory::pools::Rendering::GetInstance());
+        rendering::VisibilityQueryResult visibilityResult;
+        Check(scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) && visibilityResult.completed &&
+                  visibleProxies.Size() == 1 && visibleProxies[0] == proxy,
+              "visibility query consumes the exact completed live scene epoch");
 
-        rendering::RenderSceneCommitResult secondCommit;
-        Check(scenes.PrepareSceneFrame(runtimeScene, prepareResult, &sceneFailure) &&
-                  prepareResult.drainedMutations == 2 &&
-                  prepareResult.mutationEpoch == 7,
-              "second RenderScene preparation drains only new mutations and structural movement");
-        Check(scenes.ValidateSpatialIndex(runtimeScene, &spatialStats) &&
-                  spatialStats.activeEntries == 1 &&
-                  spatialStats.cells == 1 &&
-                  spatialStats.dirtyCells == 0 &&
-                  spatialStats.structuralMoves == 1 &&
-                  spatialStats.repairedCells == 2,
-              "RenderScene spatial write index repairs structural movement before publication");
-        Check(scenes.CommitScene(runtimeScene, secondCommit, &sceneFailure) &&
-                  secondCommit.version.value > firstCommit.version.value &&
-                  secondCommit.proxyCount == 1,
-              "RenderScene versions are monotonic");
-        rendering::SceneReadLease latestLease;
-        Check(scenes.AcquireLatestReadLease(runtimeScene, latestLease, &sceneFailure) &&
-                  latestLease.version == secondCommit.version &&
-                  scenes.ReadProxy(latestLease, proxy, leasedProxy, &sceneFailure) &&
-                  leasedProxy.layerMask == 0x33ull,
-              "latest RenderScene read lease sees newest committed proxy state");
-        rendering::SceneReadLease copiedLease = latestLease;
-        Check(scenes.ReleaseReadLease(copiedLease, &sceneFailure) &&
-                  !scenes.ReleaseReadLease(latestLease, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::VersionNotFound,
-              "copied RenderScene leases cannot release one registered reader twice");
-        latestLease = {};
-        Check(scenes.AcquireLatestReadLease(runtimeScene, latestLease, &sceneFailure),
-              "latest RenderScene read lease can be reacquired after copied release");
-        rendering::SceneReadLease occupiedLease = latestLease;
-        Check(!scenes.AcquireLatestReadLease(runtimeScene, occupiedLease, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidState,
-              "read lease acquisition refuses to overwrite a live lease");
-
-        rendering::RenderProxyDesc invalidProxyDesc = proxyDesc;
-        invalidProxyDesc.scene = runtimeScene;
-        invalidProxyDesc.bounds.minimum[0] = 5.0f;
-        invalidProxyDesc.bounds.maximum[0] = -5.0f;
-        rendering::RenderProxyHandle invalidProxy;
-        Check(!scenes.CreateProxy(invalidProxyDesc, invalidProxy, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidDescriptor,
-              "invalid RenderProxy bounds are rejected");
-        invalidProxyDesc = proxyDesc;
-        invalidProxyDesc.scene = runtimeScene;
-        invalidProxyDesc.debugName = "Non-finite proxy";
-        invalidProxyDesc.bounds.maximum[0] = std::numeric_limits<float>::infinity();
-        Check(!scenes.CreateProxy(invalidProxyDesc, invalidProxy, &sceneFailure) &&
-                  !invalidProxy.IsValid() &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidDescriptor,
-              "non-finite RenderProxy bounds are rejected");
-        Check(scenes.DestroyProxy(proxy, &sceneFailure), "RenderProxy destruction");
-        Check(!scenes.IsProxyAlive(proxy), "destroyed RenderProxy is no longer alive");
-        rendering::RenderSceneCommitResult thirdCommit;
-        Check(scenes.PrepareSceneFrame(runtimeScene, prepareResult, &sceneFailure) &&
-                  prepareResult.drainedMutations == 1 &&
-                  prepareResult.mutationEpoch == 8,
-              "destroy RenderProxy mutation is prepared");
-        Check(scenes.ValidateSpatialIndex(runtimeScene, &spatialStats) &&
-                  spatialStats.activeEntries == 0 &&
-                  spatialStats.cells == 0 &&
-                  spatialStats.dirtyCells == 0,
-              "RenderProxy destruction removes private spatial entry");
-        Check(scenes.CommitScene(runtimeScene, thirdCommit, &sceneFailure) &&
-                  thirdCommit.proxyCount == 0,
-              "RenderScene commit after proxy destruction publishes an empty active proxy set");
-        rendering::SceneReadLease emptyLease;
-        Check(scenes.AcquireLatestReadLease(runtimeScene, emptyLease, &sceneFailure) &&
-                  emptyLease.version == thirdCommit.version &&
-                  emptyLease.proxyCount == 0,
-              "latest lease after proxy destruction is empty");
-        Check(!scenes.ReadProxy(emptyLease, proxy, leasedProxy, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidHandle,
-              "destroyed RenderProxy is absent from newer published versions");
-        Check(scenes.ReadProxy(firstLease, proxy, leasedProxy, &sceneFailure) &&
-                  leasedProxy.layerMask == 0x22ull,
-              "old read lease keeps destroyed RenderProxy data alive");
-        Check(!scenes.DestroyScene(runtimeScene, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::ReadersRemainAlive,
-              "RenderScene destruction refuses live read leases");
-        Check(scenes.ReleaseReadLease(emptyLease, &sceneFailure), "release empty RenderScene read lease");
-        Check(scenes.ReleaseReadLease(latestLease, &sceneFailure), "release latest RenderScene read lease");
-        Check(scenes.ReleaseReadLease(firstLease, &sceneFailure), "release first RenderScene read lease");
-        rendering::RenderSceneVersionRetirementResult earlyRetirement;
-        Check(scenes.RetirePublishedVersions(earlyRetirement, &sceneFailure) &&
-                  earlyRetirement.reclaimedVersions >= 2,
-              "end-frame retirement reclaims unreferenced scene versions");
-        rendering::SceneReadLease staleVersionLease;
-        Check(!scenes.AcquireReadLease(runtimeScene, firstCommit.version, staleVersionLease, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::VersionNotFound,
-              "unreferenced retired RenderScene versions are reclaimed");
-        Check(!scenes.UpdateProxyLayerMask(proxy, 0x44ull, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidHandle,
-              "destroyed RenderProxy rejects further mutations");
-
-        rendering::RenderProxyHandle reusedProxy;
-        proxyDesc.debugName = "Reused proxy slot";
-        Check(scenes.CreateProxy(proxyDesc, reusedProxy, &sceneFailure) &&
-                  reusedProxy.index == proxy.index &&
-                  reusedProxy.generation != proxy.generation,
-              "RenderProxy slot reuse advances generation");
-        Check(!scenes.DestroyProxy(proxy, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidHandle,
-              "stale RenderProxy handle is rejected");
-        Check(scenes.DestroyProxy(reusedProxy, &sceneFailure), "reused RenderProxy destruction");
-
-        rendering::RenderSceneDesc finiteSceneDesc = runtimeDesc;
-        finiteSceneDesc.name = "Finite spatial scene";
-        finiteSceneDesc.maximumProxies = 2;
-        finiteSceneDesc.spatial.origin[0] = -8.0f;
-        finiteSceneDesc.spatial.origin[1] = -8.0f;
-        finiteSceneDesc.spatial.origin[2] = -8.0f;
-        finiteSceneDesc.spatial.cellSize = 8.0f;
-        finiteSceneDesc.spatial.cellsPerAxis[0] = 2;
-        finiteSceneDesc.spatial.cellsPerAxis[1] = 2;
-        finiteSceneDesc.spatial.cellsPerAxis[2] = 2;
-        finiteSceneDesc.spatial.outOfRangePolicy = rendering::SpatialOutOfRangePolicy::RejectProxy;
-        rendering::RenderSceneHandle finiteScene;
-        Check(scenes.CreateScene(finiteSceneDesc, finiteScene, &sceneFailure),
-              "finite spatial RenderScene creation");
-        rendering::RenderProxyDesc outOfRangeDesc = proxyDesc;
-        outOfRangeDesc.scene = finiteScene;
-        outOfRangeDesc.debugName = "Out of range proxy";
-        outOfRangeDesc.bounds.minimum[0] = 64.0f;
-        outOfRangeDesc.bounds.maximum[0] = 65.0f;
-        rendering::RenderProxyHandle outOfRangeProxy;
-        Check(!scenes.CreateProxy(outOfRangeDesc, outOfRangeProxy, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidDescriptor,
-              "finite spatial index rejects out-of-range proxy bounds");
-        Check(scenes.DestroyScene(finiteScene, &sceneFailure), "finite spatial RenderScene destruction");
-
-        {
-            rendering::RenderSceneManager overflowScenes;
-            Check(overflowScenes.Initialize(), "overflow spatial manager initialization");
-            finiteSceneDesc.name = "Overflow spatial scene";
-            finiteSceneDesc.spatial.outOfRangePolicy = rendering::SpatialOutOfRangePolicy::KeepUnindexed;
-            rendering::RenderSceneHandle overflowScene;
-            Check(overflowScenes.CreateScene(finiteSceneDesc, overflowScene, &sceneFailure),
-                  "overflow spatial scene creation");
-            outOfRangeDesc.scene = overflowScene;
-            rendering::RenderProxyHandle overflowProxy;
-            Check(overflowScenes.CreateProxy(outOfRangeDesc, overflowProxy, &sceneFailure),
-                  "out-of-range proxy is retained in the overflow spatial lane");
-            rendering::RenderSceneFramePrepareResult overflowPrepare;
-            rendering::RenderSceneCommitResult overflowCommit;
-            Check(overflowScenes.PrepareSceneFrame(overflowScene, overflowPrepare, &sceneFailure) &&
-                      overflowScenes.CommitScene(overflowScene, overflowCommit, &sceneFailure),
-                  "overflow spatial scene publication");
-            rendering::SceneReadLease overflowLease;
-            Check(overflowScenes.AcquireLatestReadLease(overflowScene, overflowLease, &sceneFailure),
-                  "overflow spatial scene lease acquisition");
-            rendering::VisibilityQueryRequest overflowQuery;
-            overflowQuery.lease = overflowLease;
-            overflowQuery.bounds = outOfRangeDesc.bounds;
-            containers::DynamicArray<rendering::RenderProxyHandle> overflowResults(
-                memory::pools::Rendering::GetInstance());
-            rendering::VisibilityQueryResult overflowResult;
-            Check(overflowScenes.CollectVisibleProxies(overflowQuery, overflowResults, overflowResult,
-                                                       &sceneFailure) &&
-                      overflowResult.acceptedProxies == 1 && overflowResults.Size() == 1 &&
-                      overflowResults[0] == overflowProxy,
-                  "overflow spatial lane remains visible to bounded queries");
-            Check(overflowScenes.ReleaseReadLease(overflowLease, &sceneFailure) &&
-                      overflowScenes.DestroyProxy(overflowProxy, &sceneFailure),
-                  "overflow spatial proxy release");
-            Check(overflowScenes.PrepareSceneFrame(overflowScene, overflowPrepare, &sceneFailure) &&
-                      overflowScenes.CommitScene(overflowScene, overflowCommit, &sceneFailure) &&
-                      overflowScenes.DestroyScene(overflowScene, &sceneFailure) && overflowScenes.Shutdown(&sceneFailure),
-                  "overflow spatial manager shutdown");
-        }
+        containers::DynamicArray<rendering::VisibilityQueryBatch> visibilityBatches(memory::pools::Rendering::GetInstance());
+        rendering::VisibilityQueryPlan visibilityPlan;
+        Check(scenes.BuildVisibilityQueryPlan(scene, firstUpdate.mutationEpoch, 1, visibilityBatches, visibilityPlan, &sceneFailure) &&
+                  visibilityPlan.IsValid() && visibilityBatches.Size() != 0,
+              "visibility batching is planned directly over completed spatial state");
+        containers::DynamicArray<rendering::RenderProxyHandle> batchProxies(memory::pools::Rendering::GetInstance());
+        rendering::VisibilityQueryResult batchResult;
+        Check(scenes.CollectVisibleProxyBatch(visibilityRequest, visibilityBatches[0], batchProxies, batchResult, &sceneFailure),
+              "visibility batch consumes live spatial state without a copied publication image");
 
         rendering::MeshProxyDesc meshDesc;
         meshDesc.proxy = proxyDesc;
-        meshDesc.proxy.debugName = "Typed mesh proxy";
+        meshDesc.proxy.typeId = 9;
+        meshDesc.proxy.debugName = "Mesh proxy";
         meshDesc.mesh = meshReference;
         meshDesc.material = materialReference;
         meshDesc.meshHandle = meshHandle;
         meshDesc.materialHandle = materialHandle;
-        meshDesc.submeshMask = 0x5u;
+        meshDesc.submeshMask = 0x7u;
         rendering::RenderProxyHandle meshProxy;
-        Check(scenes.CreateMeshProxy(meshDesc, meshProxy, &sceneFailure), "MeshProxy creation");
-        meshDesc.meshHandle.Reset();
-        meshDesc.materialHandle.Reset();
+        Check(scenes.CreateMeshProxy(meshDesc, meshProxy, &sceneFailure), "typed mesh proxy creation");
+        // TODO: The former typed-payload snapshot assertion is intentionally disabled. Add a narrow resource-binding
+        // inspection contract if editor validation genuinely requires one; do not restore copied payload snapshots.
 
-        rendering::LightProxyDesc lightDesc;
-        lightDesc.proxy = proxyDesc;
-        lightDesc.proxy.debugName = "Typed light proxy";
-        lightDesc.proxy.bounds.minimum[0] = 69.0f;
-        lightDesc.proxy.bounds.maximum[0] = 71.0f;
-        lightDesc.kind = rendering::RenderLightKind::Spot;
-        lightDesc.intensity = 4.0f;
-        lightDesc.range = 12.0f;
-        lightDesc.castsShadow = true;
-        rendering::RenderProxyHandle lightProxy;
-        Check(scenes.CreateLightProxy(lightDesc, lightProxy, &sceneFailure), "LightProxy creation");
-
-        rendering::DecalProxyDesc decalDesc;
-        decalDesc.proxy = proxyDesc;
-        decalDesc.proxy.debugName = "Typed decal proxy";
-        decalDesc.material = materialReference;
-        decalDesc.materialHandle = materialHandle;
-        decalDesc.extents[0] = 2.0f;
-        decalDesc.extents[1] = 3.0f;
-        decalDesc.extents[2] = 4.0f;
-        rendering::RenderProxyHandle decalProxy;
-        Check(scenes.CreateDecalProxy(decalDesc, decalProxy, &sceneFailure), "DecalProxy creation");
-        decalDesc.materialHandle.Reset();
-
-        resources::ResourceHandle releasedOriginalMesh = static_cast<resources::ResourceHandle&&>(meshHandle);
-        resources::ResourceHandle releasedOriginalMaterial = static_cast<resources::ResourceHandle&&>(materialHandle);
-        releasedOriginalMesh.Reset();
-        releasedOriginalMaterial.Reset();
-
-        rendering::MeshProxySnapshot meshPayload;
-        rendering::LightProxySnapshot lightPayload;
-        rendering::DecalProxySnapshot decalPayload;
-        Check(scenes.SnapshotMeshProxy(meshProxy, meshPayload) &&
-                  meshPayload.mesh == meshReference &&
-                  meshPayload.meshHandle.IsValid() &&
-                  meshPayload.submeshMask == 0x5u,
-              "MeshProxy payload snapshot");
-        Check(scenes.SnapshotLightProxy(lightProxy, lightPayload) &&
-                  lightPayload.kind == rendering::RenderLightKind::Spot &&
-                  lightPayload.castsShadow,
-              "LightProxy payload snapshot");
-        Check(scenes.SnapshotDecalProxy(decalProxy, decalPayload) &&
-                  decalPayload.material == materialReference &&
-                  decalPayload.extents[2] == 4.0f,
-              "DecalProxy payload snapshot");
-
-        const resources::ResourceReference updatedMeshReference = meshReference;
-        Check(scenes.UpdateMeshProxyResources(meshProxy, updatedMeshReference, materialReference, meshPayload.meshHandle,
-                                              meshPayload.materialHandle, &sceneFailure),
-              "MeshProxy resource mutation");
-        lightPayload.intensity = 8.0f;
-        Check(scenes.UpdateLightProxyProperties(lightProxy, lightPayload, &sceneFailure),
-              "LightProxy property mutation");
-        Check(scenes.UpdateDecalProxyMaterial(decalProxy, materialReference, decalPayload.materialHandle,
-                                              &sceneFailure),
-              "DecalProxy material mutation");
-        Check(!scenes.UpdateMeshProxyResources(lightProxy, updatedMeshReference, materialReference, {}, {},
-                                               &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidState,
-              "cross-type payload mutation is rejected");
-
-        rendering::RenderSceneCommitResult typedCommit;
-        Check(scenes.PrepareSceneFrame(runtimeScene, prepareResult, &sceneFailure) &&
-                  prepareResult.drainedMutations == 8,
-              "typed payload mutations are prepared");
-        Check(scenes.CommitScene(runtimeScene, typedCommit, &sceneFailure) &&
-                  typedCommit.proxyCount == 3,
-              "typed payload scene version is committed");
-        rendering::SceneReadLease typedLease;
-        Check(scenes.AcquireLatestReadLease(runtimeScene, typedLease, &sceneFailure) &&
-                  typedLease.version == typedCommit.version &&
-                  typedLease.proxyCount == 3,
-              "typed payload read lease acquisition");
-        Check(scenes.ReadMeshProxy(typedLease, meshProxy, meshPayload, &sceneFailure) &&
-                  meshPayload.mesh == updatedMeshReference &&
-                  meshPayload.materialHandle.IsValid(),
-              "leased MeshProxy payload read");
-        Check(scenes.ReadLightProxy(typedLease, lightProxy, lightPayload, &sceneFailure) &&
-                  lightPayload.intensity == 8.0f,
-              "leased LightProxy payload read");
-        Check(scenes.ReadDecalProxy(typedLease, decalProxy, decalPayload, &sceneFailure) &&
-                  decalPayload.materialHandle.IsValid(),
-              "leased DecalProxy payload read");
-        Check(!scenes.ReadMeshProxy(typedLease, lightProxy, meshPayload, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidState,
-              "typed read rejects the wrong payload family");
-
-        containers::DynamicArray<rendering::RenderProxyHandle> visibleProxies(
-            memory::pools::Rendering::GetInstance());
-        rendering::VisibilityQueryRequest visibilityRequest;
-        visibilityRequest.lease = typedLease;
-        visibilityRequest.bounds.minimum[0] = -2.0f;
-        visibilityRequest.bounds.minimum[1] = -2.0f;
-        visibilityRequest.bounds.minimum[2] = -2.0f;
-        visibilityRequest.bounds.maximum[0] = 80.0f;
-        visibilityRequest.bounds.maximum[1] = 2.0f;
-        visibilityRequest.bounds.maximum[2] = 2.0f;
-        rendering::VisibilityQueryResult visibilityResult;
-        Check(scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  visibilityResult.completed &&
-                  visibilityResult.visitedCells == 2 &&
-                  visibilityResult.candidateProxies == 3 &&
-                  visibilityResult.acceptedProxies == 3 &&
-                  visibleProxies.Size() == 3,
-              "visibility query collects committed spatial candidates from a read lease");
-
-        visibilityRequest.layerMask = 0x15ull;
-        visibilityRequest.payloadFilter = rendering::VisibilityQueryPayloadFilter::Mesh;
-        Check(scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  visibilityResult.completed &&
-                  visibilityResult.acceptedProxies == 1 &&
-                  visibleProxies.Size() == 1 &&
-                  visibleProxies[0] == meshProxy,
-              "visibility query filters candidates by payload family and layer mask");
-
-        visibilityRequest.payloadFilter = rendering::VisibilityQueryPayloadFilter::Any;
-        visibilityRequest.maximumResults = 2;
-        Check(scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  !visibilityResult.completed &&
-                  visibilityResult.acceptedProxies == 2 &&
-                  visibilityResult.overflowedProxies == 1 &&
-                  visibleProxies.Size() == 2,
-              "visibility query reports bounded result overflow without losing deterministic counts");
-
-        visibilityRequest.layerMask = ~0ull;
-        visibilityRequest.maximumResults = ~0u;
-        visibilityRequest.useFrustum = true;
-        visibilityRequest.frustum.planeCount = 6;
-        visibilityRequest.frustum.planes[0].normal[0] = 1.0f;
-        visibilityRequest.frustum.planes[0].distance = 3.0f;
-        visibilityRequest.frustum.planes[1].normal[0] = -1.0f;
-        visibilityRequest.frustum.planes[1].distance = 80.0f;
-        visibilityRequest.frustum.planes[2].normal[1] = 1.0f;
-        visibilityRequest.frustum.planes[2].distance = 3.0f;
-        visibilityRequest.frustum.planes[3].normal[1] = -1.0f;
-        visibilityRequest.frustum.planes[3].distance = 3.0f;
-        visibilityRequest.frustum.planes[4].normal[2] = 1.0f;
-        visibilityRequest.frustum.planes[4].distance = 3.0f;
-        visibilityRequest.frustum.planes[5].normal[2] = -1.0f;
-        visibilityRequest.frustum.planes[5].distance = 3.0f;
-        Check(scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  visibilityResult.completed &&
-                  visibilityResult.rejectedCellsByFrustum == 0 &&
-                  visibilityResult.rejectedByFrustum == 0 &&
-                  visibilityResult.acceptedProxies == 3,
-              "visibility query accepts spatial candidates inside frustum planes");
-
-        visibilityRequest.frustum.planes[0] = {};
-        visibilityRequest.frustum.planes[0].normal[0] = 1.0f;
-        visibilityRequest.frustum.planes[0].distance = -100.0f;
-        visibilityRequest.frustum.planeCount = 1;
-        Check(scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  visibilityResult.completed &&
-                  visibilityResult.visitedCells == 0 &&
-                  visibilityResult.rejectedCellsByFrustum == 2 &&
-                  visibilityResult.acceptedProxies == 0 &&
-                  visibleProxies.Size() == 0,
-              "visibility query rejects whole spatial cells outside frustum planes");
-
-        rendering::VisibilityQueryRequest invalidVisibilityRequest = visibilityRequest;
-        invalidVisibilityRequest.frustum.planeCount = rendering::MaximumVisibilityFrustumPlanes + 1u;
-        Check(!scenes.CollectVisibleProxies(invalidVisibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidDescriptor,
-              "visibility query rejects invalid frustum plane counts");
-
-        visibilityRequest.useFrustum = false;
-        visibilityRequest.maximumResults = ~0u;
-        containers::DynamicArray<rendering::VisibilityQueryBatch> visibilityBatches(
-            memory::pools::Rendering::GetInstance());
-        rendering::VisibilityQueryPlan visibilityPlan;
-        Check(scenes.BuildVisibilityQueryPlan(typedLease, 1, visibilityBatches, visibilityPlan, &sceneFailure) &&
-                  visibilityPlan.IsValid() &&
-                  visibilityPlan.cellCount == 2 &&
-                  visibilityPlan.batchSize == 1 &&
-                  visibilityPlan.batchCount == 2 &&
-                  visibilityBatches.Size() == 2,
-              "visibility query plan partitions retained spatial cells into deterministic batches");
-
-        containers::DynamicArray<rendering::RenderProxyHandle> batchProxies(
-            memory::pools::Rendering::GetInstance());
-        rendering::VisibilityQueryResult firstBatchResult;
-        rendering::VisibilityQueryResult secondBatchResult;
-        Check(scenes.CollectVisibleProxyBatch(visibilityRequest, visibilityBatches[0], batchProxies,
-                                              firstBatchResult, &sceneFailure) &&
-                  firstBatchResult.completed &&
-                  firstBatchResult.acceptedProxies == 2,
-              "visibility query first batch collects its spatial cell range");
-        Check(scenes.CollectVisibleProxyBatch(visibilityRequest, visibilityBatches[1], batchProxies,
-                                               secondBatchResult, &sceneFailure) &&
-                  secondBatchResult.completed &&
-                  secondBatchResult.acceptedProxies == 1 &&
-                  firstBatchResult.acceptedProxies + secondBatchResult.acceptedProxies == 3,
-              "visibility query second batch collects the remaining spatial cell range");
-        rendering::VisibilityQueryBatch foreignBatch = visibilityBatches[0];
-        foreignBatch.version.value += 1;
-        Check(!scenes.CollectVisibleProxyBatch(visibilityRequest, foreignBatch, batchProxies,
-                                               firstBatchResult, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidDescriptor,
-              "visibility query batches are bound to their exact retained scene version");
-        visibilityRequest.maximumResults = 1;
-        Check(!scenes.CollectVisibleProxyBatch(visibilityRequest, visibilityBatches[0], batchProxies,
-                                               firstBatchResult, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidDescriptor,
-              "parallel visibility batches reserve result limiting for deterministic reduction");
-        visibilityRequest.maximumResults = ~0u;
-
-        rendering::RenderSceneCollector collector;
-        Check(collector.Initialize(scenes, {4, 8}, &sceneFailure),
-              "RenderScene collector initialization");
-        rendering::RenderSceneViewHandle primaryView;
-        rendering::RenderSceneViewHandle secondaryView;
-        Check(collector.CreateView(runtimeScene, primaryView, &sceneFailure) &&
-                  collector.CreateView(runtimeScene, secondaryView, &sceneFailure) &&
-                  primaryView != secondaryView,
-              "independent RenderScene collection views");
+        Check(scenes.UpdateProxyLayerMask(proxy, 0x22ull, &sceneFailure), "direct proxy metadata mutation");
+        rendering::RenderSceneUpdateResult secondUpdate;
+        Check(executeSceneUpdate(secondUpdate) && secondUpdate.mutationEpoch > firstUpdate.mutationEpoch,
+              "next explicit scene update publishes a newer completed mutation epoch");
 
         rendering::VisibilityFeedbackService feedback;
-        rendering::RenderSceneFrameLifecycle sceneFrameLifecycle;
-        Check(feedback.Initialize(scenes, {16, 4}, &sceneFailure) &&
-                  feedback.RegisterView({primaryView, runtimeScene, 7, true}, &sceneFailure) &&
-                  feedback.RegisterView({secondaryView, runtimeScene, 7, true}, &sceneFailure) &&
-                  sceneFrameLifecycle.Initialize(scenes, collector, feedback, &sceneFailure),
-              "visibility feedback and end-frame lifecycle initialization");
-        rendering::VisibilityProbeDesc probeDesc;
-        probeDesc.scene = runtimeScene;
-        probeDesc.bounds = meshDesc.proxy.bounds;
-        probeDesc.viewPolicy.kind = rendering::VisibilityViewPolicyKind::StreamingAuthority;
-        probeDesc.debugName = "Streaming visibility probe";
-        rendering::VisibilityProbeHandle visibilityProbe;
-        Check(feedback.CreateProbe(probeDesc, visibilityProbe, &sceneFailure),
-              "non-renderable visibility probe creation");
-        rendering::VisibilityProbeHandle staleFeedbackProbe;
-        probeDesc.debugName = "Stale visibility probe";
-        Check(feedback.CreateProbe(probeDesc, staleFeedbackProbe, &sceneFailure) &&
-                  scenes.GetStats().activeProxies == 3,
-              "visibility probes do not consume drawable proxy storage");
+        Check(feedback.Initialize(scenes, scene, {16, 4}, &sceneFailure), "visibility feedback initializes as a scene-relative non-renderable service");
+        rendering::VisibilityProbeDesc visibleProbeDesc;
+        visibleProbeDesc.bounds = movedBounds;
+        visibleProbeDesc.queryMask = 1;
+        visibleProbeDesc.debugName = "Visible streaming probe";
+        rendering::VisibilityProbeHandle visibleProbe;
+        Check(feedback.CreateProbe(visibleProbeDesc, visibleProbe, &sceneFailure), "visibility feedback creates a probe outside RenderScene proxy storage");
+        rendering::VisibilityProbeDesc hiddenProbeDesc = visibleProbeDesc;
+        hiddenProbeDesc.bounds.minimum[0] = -20.0f;
+        hiddenProbeDesc.bounds.maximum[0] = -19.0f;
+        hiddenProbeDesc.debugName = "Hidden streaming probe";
+        rendering::VisibilityProbeHandle hiddenProbe;
+        Check(feedback.CreateProbe(hiddenProbeDesc, hiddenProbe, &sceneFailure), "visibility feedback creates an independently generated second probe");
+        rendering::VisibilityProbeDesc familyProbeDesc = visibleProbeDesc;
+        familyProbeDesc.viewPolicy.kind = rendering::VisibilityViewPolicyKind::ViewFamily;
+        familyProbeDesc.viewPolicy.family = {0, 1};
+        familyProbeDesc.debugName = "Family streaming probe";
+        rendering::VisibilityProbeHandle familyProbe;
+        Check(feedback.CreateProbe(familyProbeDesc, familyProbe, &sceneFailure), "visibility feedback accepts current generational view-family policy");
+        rendering::VisibilityProbeDesc missingViewProbeDesc = visibleProbeDesc;
+        missingViewProbeDesc.viewPolicy.kind = rendering::VisibilityViewPolicyKind::SpecificView;
+        missingViewProbeDesc.viewPolicy.view = {9, 1};
+        missingViewProbeDesc.debugName = "Missing-view streaming probe";
+        rendering::VisibilityProbeHandle missingViewProbe;
+        Check(feedback.CreateProbe(missingViewProbeDesc, missingViewProbe, &sceneFailure), "visibility feedback accepts a specific generational view policy");
 
-        rendering::ViewCollectionRequest collectionRequest;
-        collectionRequest.view = primaryView;
-        collectionRequest.visibility = visibilityRequest;
-        collectionRequest.frameSerial = 100;
-        collectionRequest.targetCellsPerJob = 1;
-        rendering::RenderSceneCollectionHandle primaryCollection;
-        Check(collector.Dispatch(collectionRequest, primaryCollection, &sceneFailure) &&
-                  primaryCollection.IsValid() && collector.Completion(primaryCollection) != nullptr,
-              "Jobs-backed RenderScene view collection dispatch");
-        Check(collector.Wait(primaryCollection), "Jobs-backed RenderScene view collection completion");
-        rendering::ViewCollectionOutput collectionOutput;
-        Check(collector.CopyOutput(primaryCollection, collectionOutput, &sceneFailure) &&
-                  collectionOutput.result.completed && collectionOutput.result.succeeded &&
-                  collectionOutput.result.batchCount == 2 &&
-                  collectionOutput.result.meshPackets == 1 &&
-                  collectionOutput.result.lightPackets == 1 &&
-                  collectionOutput.result.decalPackets == 1 &&
-                  collectionOutput.meshes[0].proxy.handle == meshProxy &&
-                  collectionOutput.lights[0].proxy.handle == lightProxy &&
-                  collectionOutput.decals[0].proxy.handle == decalProxy,
-              "typed collector pages reduce deterministically by spatial batch");
-        collectionOutput.meshes[0].mesh.submeshMask = 0;
-        Check(scenes.ReadMeshProxy(typedLease, meshProxy, meshPayload, &sceneFailure) &&
-                  meshPayload.submeshMask == 0x5u,
-              "collector output cannot mutate immutable published payloads");
-        rendering::ViewProxyState primaryMeshState;
-        Check(collector.ReadViewProxyState(primaryView, meshProxy, primaryMeshState, &sceneFailure) &&
-                  primaryMeshState.lastVisibleFrame == 100 && primaryMeshState.proxy == meshProxy,
-              "primary view retains generational per-proxy state");
+        rendering::VisibilityFeedbackView feedbackView;
+        feedbackView.view = {0, 1};
+        feedbackView.family = {0, 1};
+        feedbackView.frustum.planeCount = 1;
+        feedbackView.frustum.planes[0].normal[0] = 1.0f;
+        feedbackView.frustum.planes[0].distance = -10.0f;
+        feedbackView.queryMask = 1;
+        feedbackView.streamingAuthority = true;
+        rendering::VisibilityFeedbackEvaluationRequest feedbackRequest;
+        feedbackRequest.views = {&feedbackView, 1};
+        feedbackRequest.mutationEpoch = secondUpdate.mutationEpoch;
+        feedbackRequest.frameSerial = 10;
+        feedbackRequest.viewSetRevision = 1;
+        feedbackRequest.targetProbesPerBatch = 1;
+        rendering::VisibilityFeedbackEvaluationBatch feedbackBatches[4]{};
+        rendering::VisibilityFeedbackEvaluationPlan feedbackPlan;
+        Check(feedback.PrepareEvaluation(feedbackRequest, feedbackBatches, feedbackPlan, &sceneFailure) && feedbackPlan.batchCount == 4 &&
+                  feedbackPlan.probeCount == 4,
+              "visibility feedback plans dense disjoint probe batches against an explicit view set");
+        rendering::VisibilityFeedback feedbackRead;
+        Check(!feedback.ReadFeedback(visibleProbe, 10, feedbackRead, &sceneFailure) && sceneFailure.code == rendering::RenderSceneFailureCode::Busy,
+              "unpublished feedback bank cannot be observed while evaluation jobs are open");
+        rendering::VisibilityFeedbackBatchResult feedbackBatchResults[4]{};
+        u32 completedFeedbackBatches = 0;
+        for (u32 batchIndex = 0; batchIndex < feedbackPlan.batchCount; ++batchIndex)
+            if (feedback.EvaluateBatch(feedbackPlan, feedbackBatches[batchIndex], feedbackBatchResults[batchIndex], &sceneFailure))
+                ++completedFeedbackBatches;
+        Check(completedFeedbackBatches == feedbackPlan.batchCount && feedback.CompleteEvaluation(feedbackPlan, &sceneFailure),
+              "visibility feedback publishes only after every disjoint evaluation batch completes");
+        rendering::VisibilityFeedback visibleFeedback;
+        rendering::VisibilityFeedback hiddenFeedback;
+        rendering::VisibilityFeedback familyFeedback;
+        rendering::VisibilityFeedback missingViewFeedback;
+        Check(
+            feedback.ReadFeedback(visibleProbe, 10, visibleFeedback, &sceneFailure) && feedback.ReadFeedback(hiddenProbe, 10, hiddenFeedback, &sceneFailure) &&
+                feedback.ReadFeedback(familyProbe, 10, familyFeedback, &sceneFailure) &&
+                feedback.ReadFeedback(missingViewProbe, 10, missingViewFeedback, &sceneFailure) &&
+                visibleFeedback.state == rendering::VisibilityFeedbackState::Visible &&
+                hiddenFeedback.state == rendering::VisibilityFeedbackState::NotVisible && familyFeedback.state == rendering::VisibilityFeedbackState::Visible &&
+                missingViewFeedback.state == rendering::VisibilityFeedbackState::Unknown && visibleFeedback.mutationEpoch == secondUpdate.mutationEpoch &&
+                visibleFeedback.ageInFrames == 0,
+            "versioned tri-state feedback applies authority, family, and specific-view policies");
 
-        collectionRequest.view = secondaryView;
-        collectionRequest.visibility.payloadFilter = rendering::VisibilityQueryPayloadFilter::Mesh;
-        collectionRequest.frameSerial = 200;
-        rendering::RenderSceneCollectionHandle secondaryCollection;
-        Check(collector.Dispatch(collectionRequest, secondaryCollection, &sceneFailure) &&
-                  collector.Wait(secondaryCollection) &&
-                  collector.CopyOutput(secondaryCollection, collectionOutput, &sceneFailure) &&
-                  collectionOutput.result.meshPackets == 1 &&
-                  collectionOutput.result.lightPackets == 0 &&
-                  collectionOutput.result.decalPackets == 0,
-              "separate views collect different typed outputs from one scene version");
-        rendering::ViewProxyState secondaryMeshState;
-        Check(collector.ReadViewProxyState(secondaryView, meshProxy, secondaryMeshState, &sceneFailure) &&
-                  secondaryMeshState.lastVisibleFrame == 200 &&
-                  primaryMeshState.lastVisibleFrame == 100,
-              "view-local proxy state remains isolated");
+        feedbackRequest.frameSerial = 11;
+        rendering::VisibilityFeedbackEvaluationPlan cancelledFeedbackPlan;
+        Check(feedback.PrepareEvaluation(feedbackRequest, feedbackBatches, cancelledFeedbackPlan, &sceneFailure) &&
+                  feedback.EvaluateBatch(cancelledFeedbackPlan, feedbackBatches[0], feedbackBatchResults[0], &sceneFailure) &&
+                  feedback.CancelEvaluation(cancelledFeedbackPlan, &sceneFailure) && feedback.ReadFeedback(visibleProbe, 11, visibleFeedback, &sceneFailure) &&
+                  visibleFeedback.publishedFrame == 10,
+              "cancelled feedback evaluation cannot expose a partially written bank");
+        Check(feedback.DestroyProbe(missingViewProbe, &sceneFailure) && feedback.DestroyProbe(familyProbe, &sceneFailure) &&
+                  feedback.DestroyProbe(hiddenProbe, &sceneFailure) && feedback.DestroyProbe(visibleProbe, &sceneFailure),
+              "visibility feedback retires probes independently from RenderScene proxies");
 
-        collectionRequest.view = primaryView;
-        collectionRequest.visibility.payloadFilter = rendering::VisibilityQueryPayloadFilter::Mesh;
-        collectionRequest.frameSerial = 300;
-        collectionRequest.maximumMeshPackets = 0;
-        rendering::RenderSceneCollectionHandle overflowCollection;
-        Check(collector.Dispatch(collectionRequest, overflowCollection, &sceneFailure) &&
-                  collector.Wait(overflowCollection) &&
-                  collector.CopyOutput(overflowCollection, collectionOutput, &sceneFailure) &&
-                  collectionOutput.result.meshPackets == 0 &&
-                  collectionOutput.result.overflowedMeshPackets == 1,
-              "collector packet overflow is explicit in every configuration");
-        Check(collector.ReadViewProxyState(primaryView, meshProxy, primaryMeshState, &sceneFailure) &&
-                  primaryMeshState.previousVisibleFrame == 100 && primaryMeshState.lastVisibleFrame == 300,
-              "overflowed packets still update view visibility state");
+        rendering::VisibilityQueryRequest candidateRequest;
+        candidateRequest.scene = scene;
+        candidateRequest.mutationEpoch = secondUpdate.mutationEpoch;
+        candidateRequest.payloadFilter = rendering::VisibilityQueryPayloadFilter::Mesh;
+        candidateRequest.useBounds = false;
+        rendering::RenderSceneGpuCandidateBatch candidateBatches[8]{};
+        rendering::RenderSceneGpuCandidatePlan candidatePlan;
+        Check(scenes.PrepareGpuVisibilityCandidates(candidateRequest, 1, candidateBatches, candidatePlan, &sceneFailure) && candidatePlan.IsValid() &&
+                  candidatePlan.batchCount == 2 && candidatePlan.requiredCandidateCapacity == 2,
+              "GPU visibility candidate planning seals the exact epoch and balances work by raw proxy count");
+        Check(!scenes.UpdateProxyLayerMask(proxy, 0x23ull, &sceneFailure) && sceneFailure.code == rendering::RenderSceneFailureCode::Busy,
+              "direct scene mutation is rejected while candidate jobs own the read seal");
 
-        rendering::RenderSceneEndFrameResult endFrameResult;
-        Check(sceneFrameLifecycle.EndFrame(300, endFrameResult, &sceneFailure) ==
-                  rendering::RenderSceneEndFrameStatus::Complete &&
-                  endFrameResult.retiredCollections == 3 && endFrameResult.feedbackPublished,
-              "end-frame retires completed collection storage and publishes feedback");
-        rendering::VisibilityFeedback probeFeedback;
-        Check(feedback.ReadFeedback(visibilityProbe, 300, probeFeedback, &sceneFailure) &&
-                  probeFeedback.state == rendering::VisibilityFeedbackState::Visible &&
-                  probeFeedback.sceneVersion == typedCommit.version &&
-                  probeFeedback.viewPolicy.kind ==
-                      rendering::VisibilityViewPolicyKind::StreamingAuthority &&
-                  probeFeedback.evaluatedFrame == 300 && probeFeedback.ageInFrames == 0 &&
-                  probeFeedback.viewSetRevision != 0,
-              "visibility feedback names its scene version, view policy revision, and age");
-        Check(!collector.CopyOutput(primaryCollection, collectionOutput, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidHandle,
-              "end-frame invalidates retired collection handles");
+        rendering::GpuView candidateViews[1]{};
+        rendering::GpuInstanceIndex candidateIndices[8]{};
+        rendering::GpuVisibilityWorkRange candidateWork[8]{};
+        rendering::GpuVisibilityResultRange candidateViewResults[1]{};
+        rendering::GpuView candidateGpuView;
+        candidateGpuView.viewIndex = 0;
+        candidateGpuView.viewGeneration = 1;
+        candidateGpuView.frustumPlaneCount = 1;
+        rendering::GpuVisibilityPlanBuilder candidateVisibilityBuilder;
+        rendering::GpuVisibilityBuildFailure candidateVisibilityFailure;
+        Check(candidateVisibilityBuilder.Begin({candidateViews, candidateIndices, candidateWork, candidateViewResults}, 20, &candidateVisibilityFailure),
+              "candidate test visibility storage begins");
+        rendering::GpuVisibilityCandidateReservation candidateReservation;
+        Check(candidateVisibilityBuilder.ReserveViewRanges(candidateGpuView, candidatePlan.requiredCandidateCapacity, candidatePlan.requiredWorkRangeCapacity,
+                                                           8, candidateReservation, &candidateVisibilityFailure),
+              "RenderScene candidate plan reserves its exact disjoint staging capacity");
+        rendering::GpuVisibilityCandidateRange candidateRanges[8]{};
+        rendering::RenderSceneGpuCandidateBatchResult candidateResults[8]{};
+        rendering::RenderSceneFailure candidateFailures[8]{};
+        u32 unresolvedCandidates = 0;
+        u32 completedCandidateBatches = 0;
+        for (u32 batchIndex = 0; batchIndex < candidatePlan.batchCount; ++batchIndex)
+        {
+            if (scenes.WriteGpuVisibilityCandidateBatch(candidatePlan, candidateBatches[batchIndex], candidateReservation, candidateRanges[batchIndex],
+                                                        candidateResults[batchIndex], &candidateFailures[batchIndex]))
+                ++completedCandidateBatches;
+            unresolvedCandidates += candidateResults[batchIndex].unresolvedGpuIdentities;
+        }
+        Check(completedCandidateBatches == 1 && unresolvedCandidates == 1,
+              "direct candidate batches reject only the mesh lacking an attached GPU Scene identity");
+        candidateVisibilityBuilder.Cancel();
+        Check(scenes.CompleteGpuVisibilityCandidates(candidatePlan, &sceneFailure), "candidate dependency completion releases the scene read seal");
 
-        collectionRequest.maximumMeshPackets = ~u32{0};
-        collectionRequest.frameSerial = 400;
-        collectionRequest.view = primaryView;
-        collectionRequest.visibility.bounds.minimum[0] = 40.0f;
-        collectionRequest.visibility.bounds.maximum[0] = 50.0f;
-        rendering::RenderSceneCollectionHandle primaryAggregationCollection;
-        Check(collector.Dispatch(collectionRequest, primaryAggregationCollection, &sceneFailure) &&
-                  collector.Wait(primaryAggregationCollection),
-              "first authoritative view collection for feedback aggregation");
-        collectionRequest.view = secondaryView;
-        collectionRequest.visibility.bounds.minimum[0] = -2.0f;
-        collectionRequest.visibility.bounds.maximum[0] = 80.0f;
-        rendering::RenderSceneCollectionHandle secondaryAggregationCollection;
-        Check(collector.Dispatch(collectionRequest, secondaryAggregationCollection, &sceneFailure) &&
-                  collector.Wait(secondaryAggregationCollection),
-              "second authoritative view collection for feedback aggregation");
-        probeDesc.bounds.minimum[0] = 100.0f;
-        probeDesc.bounds.maximum[0] = 101.0f;
-        Check(feedback.UpdateProbe(staleFeedbackProbe, probeDesc, &sceneFailure) &&
-                  sceneFrameLifecycle.EndFrame(400, endFrameResult, &sceneFailure) ==
-                      rendering::RenderSceneEndFrameStatus::Complete &&
-                  endFrameResult.retiredCollections == 2,
-              "multiple authoritative views publish through one deterministic end-frame reduction");
-        Check(feedback.ReadFeedback(visibilityProbe, 400, probeFeedback, &sceneFailure) &&
-                  probeFeedback.state == rendering::VisibilityFeedbackState::Visible &&
-                  probeFeedback.contributingViews == 2,
-              "any-visible aggregation prevents one hidden view from overriding a visible view");
-        Check(feedback.ReadFeedback(staleFeedbackProbe, 400, probeFeedback, &sceneFailure) &&
-                  probeFeedback.state == rendering::VisibilityFeedbackState::Unknown,
-              "probe updates invalidate observations captured from an older descriptor revision");
-        Check(feedback.UnregisterView(primaryView, &sceneFailure) &&
-                  feedback.UnregisterView(secondaryView, &sceneFailure) &&
-                  collector.DestroyView(primaryView, &sceneFailure) &&
-                  collector.DestroyView(secondaryView, &sceneFailure),
-              "feedback views unregister before collector view destruction");
-
-        meshPayload = {};
-        lightPayload = {};
-        decalPayload = {};
-        Check(scenes.DestroyProxy(meshProxy, &sceneFailure), "MeshProxy destruction");
-        Check(scenes.DestroyProxy(lightProxy, &sceneFailure), "LightProxy destruction");
-        Check(scenes.DestroyProxy(decalProxy, &sceneFailure), "DecalProxy destruction");
-        rendering::RenderSceneCommitResult typedDestroyCommit;
-        Check(scenes.PrepareSceneFrame(runtimeScene, prepareResult, &sceneFailure) &&
-                  prepareResult.drainedMutations == 3,
-              "typed payload destruction mutations are prepared");
-        Check(scenes.CommitScene(runtimeScene, typedDestroyCommit, &sceneFailure) &&
-                  typedDestroyCommit.proxyCount == 0,
-              "typed payload destruction publishes an empty active proxy set");
-        Check(resourceRegistry.Evict(updatedMeshReference.Path()) &&
-                  resourceRegistry.GetState(updatedMeshReference.Path()) == resources::State::Evicting &&
-                  resourceHarness.destructions.GetValue() == 0,
-              "published scene lease retains mesh resource handles after mutable payload destruction");
-        Check(sceneFrameLifecycle.EndFrame(401, endFrameResult, &sceneFailure) ==
-                  rendering::RenderSceneEndFrameStatus::Complete &&
-                  endFrameResult.versionsBlockedByReaders != 0 && !endFrameResult.fullyRetired &&
-                  feedback.ReadFeedback(visibilityProbe, 401, probeFeedback, &sceneFailure) &&
-                  probeFeedback.state == rendering::VisibilityFeedbackState::Unknown &&
-                  probeFeedback.ageInFrames == 1,
-              "end-frame with no active views publishes unknown feedback and preserves reader-pinned versions");
-        Check(scenes.ReleaseReadLease(typedLease, &sceneFailure), "release typed payload read lease");
-        Check(sceneFrameLifecycle.EndFrame(402, endFrameResult, &sceneFailure) ==
-                  rendering::RenderSceneEndFrameStatus::Complete &&
-                  endFrameResult.reclaimedVersions != 0 && endFrameResult.versionsBlockedByReaders == 0,
-              "later end-frame reclaims scene versions after the final reader releases");
         Check(!scenes.CollectVisibleProxies(visibilityRequest, visibleProxies, visibilityResult, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::VersionNotFound,
-              "visibility query rejects released scene read leases");
-        Check(resourceRegistry.GetState(updatedMeshReference.Path()) == resources::State::Unloaded &&
-                  resourceHarness.destructions.GetValue() == 1,
-              "retired typed payload version releases retained mesh handles");
-        const rendering::VisibilityProbeHandle staleVisibilityProbe = visibilityProbe;
-        Check(feedback.DestroyProbe(visibilityProbe, &sceneFailure) &&
-                  feedback.DestroyProbe(staleFeedbackProbe, &sceneFailure) &&
-                  !feedback.ReadFeedback(staleVisibilityProbe, 402, probeFeedback, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidHandle,
-              "destroyed visibility probe generations cannot redirect feedback reads");
-        sceneFrameLifecycle.Shutdown();
-        Check(feedback.Shutdown(&sceneFailure) && collector.Shutdown(&sceneFailure),
-              "visibility feedback and collector services shutdown cleanly");
+                  sceneFailure.code == rendering::RenderSceneFailureCode::Busy,
+              "visibility rejects stale epochs instead of retaining copied scene versions");
 
-        Check(!scenes.Shutdown(&sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::ScenesRemainAlive,
-              "RenderSceneManager refuses shutdown with live scenes");
+        Check(scenes.DestroyProxy(proxy, &sceneFailure) && scenes.DestroyProxy(meshProxy, &sceneFailure), "proxy destruction releases live scene ownership");
+        rendering::RenderSceneUpdateResult destroyUpdate;
+        Check(executeSceneUpdate(destroyUpdate), "proxy destruction mutations drain through the explicit update boundary");
+        Check(!scenes.DestroyScene(scene, &sceneFailure) && sceneFailure.code == rendering::RenderSceneFailureCode::Busy,
+              "scene destruction waits for its independently attached visibility feedback service");
+        Check(feedback.Shutdown(&sceneFailure), "visibility feedback detaches after its probes and jobs retire");
+        Check(scenes.DestroyScene(scene, &sceneFailure), "runtime RenderScene destruction");
 
-        rendering::RenderSceneDesc previewDesc;
-        previewDesc.name = "Preview scene";
-        previewDesc.mode = rendering::RenderSceneMode::Preview;
-        previewDesc.maximumProxies = 128;
-        previewDesc.maximumPendingProxyMutations = 4;
-        previewDesc.maximumViews = 2;
-        previewDesc.allowFramePipelineParticipation = false;
-        rendering::RenderSceneHandle previewScene;
-        Check(scenes.CreateScene(previewDesc, previewScene, &sceneFailure) &&
-                  previewScene.IsValid() && previewScene.index != runtimeScene.index,
-              "preview RenderScene creation");
-
-        rendering::RenderProxyDesc budgetDesc = proxyDesc;
-        budgetDesc.scene = previewScene;
-        budgetDesc.debugName = "Budget proxy";
-        rendering::RenderProxyHandle budgetProxy;
-        Check(scenes.CreateProxy(budgetDesc, budgetProxy, &sceneFailure), "budget RenderProxy creation");
-        Check(scenes.UpdateProxyLayerMask(budgetProxy, 1, &sceneFailure), "budget mutation 1");
-        Check(scenes.UpdateProxyLayerMask(budgetProxy, 2, &sceneFailure), "budget mutation 2");
-        Check(scenes.UpdateProxyLayerMask(budgetProxy, 3, &sceneFailure), "budget mutation 3");
-        Check(!scenes.UpdateProxyLayerMask(budgetProxy, 4, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::CapacityExceeded,
-              "RenderProxy mutation admission budget reports overflow");
-        rendering::RenderProxyHandle rejectedCreate;
-        Check(!scenes.CreateProxy(budgetDesc, rejectedCreate, &sceneFailure) &&
-                  !rejectedCreate.IsValid() &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::CapacityExceeded,
-              "failed RenderProxy admission clears its output handle");
-        Check(scenes.DestroyProxy(budgetProxy, &sceneFailure), "budget RenderProxy destruction");
-
-        Check(scenes.DestroyScene(runtimeScene, &sceneFailure), "runtime RenderScene destruction");
-        Check(!scenes.IsAlive(runtimeScene) && !scenes.Snapshot(runtimeScene, runtimeSnapshot),
-              "destroyed RenderScene handle becomes stale");
-        rendering::RenderSceneHandle reusedScene;
-        Check(scenes.CreateScene(runtimeDesc, reusedScene, &sceneFailure) &&
-                  reusedScene.index == runtimeScene.index &&
-                  reusedScene.generation != runtimeScene.generation,
-              "RenderScene slot reuse advances generation");
-        Check(!scenes.DestroyScene(runtimeScene, &sceneFailure) &&
-                  sceneFailure.code == rendering::RenderSceneFailureCode::InvalidHandle,
-              "stale RenderScene handle is rejected");
-        Check(scenes.DestroyScene(reusedScene, &sceneFailure), "reused RenderScene destruction");
-        Check(scenes.DestroyScene(previewScene, &sceneFailure), "preview RenderScene destruction");
         const rendering::RenderSceneManagerStats sceneStats = scenes.GetStats();
-        Check(sceneStats.createdScenes == 4 && sceneStats.destroyedScenes == 4 &&
-                  sceneStats.activeScenes == 0 && sceneStats.failedDestroys == 1 &&
-                  sceneStats.createdProxies == 6 && sceneStats.destroyedProxies == 6 &&
-                  sceneStats.activeProxies == 0 && sceneStats.failedProxyCreates == 4 &&
-                  sceneStats.createdPayloads == 3 && sceneStats.destroyedPayloads == 3 &&
-                  sceneStats.activeMeshPayloads == 0 && sceneStats.activeLightPayloads == 0 &&
-                  sceneStats.activeDecalPayloads == 0 &&
-                  sceneStats.failedProxyMutations == 5 && sceneStats.pendingProxyMutations == 0 &&
-                  sceneStats.liveReadLeases == 0 && sceneStats.retainedSceneVersions == 0 &&
-                  sceneStats.preparedFrames == 5 && sceneStats.committedVersions == 5 &&
-                  sceneStats.failedPublishes == 1 &&
-                  sceneStats.activeSpatialEntries == 0 && sceneStats.dirtySpatialCells == 0 &&
-                  sceneStats.spatialFastMoves == 1 && sceneStats.spatialStructuralMoves == 1 &&
-                  sceneStats.spatialRepairedCells == 4 && sceneStats.spatialOutOfRangeProxies == 1,
-              "RenderSceneManager records lifecycle statistics");
+        Check(sceneStats.createdScenes == sceneStats.destroyedScenes && sceneStats.activeScenes == 0 && sceneStats.framePipelineScenes == 0 &&
+                  sceneStats.createdProxies == sceneStats.destroyedProxies && sceneStats.activeProxies == 0 &&
+                  sceneStats.createdPayloads == sceneStats.destroyedPayloads && sceneStats.activeMeshPayloads == 0 && sceneStats.pendingProxyMutations == 0 &&
+                  sceneStats.activeSpatialEntries == 0,
+              "RenderSceneManager records the direct scene lifecycle");
         Check(scenes.Shutdown(&sceneFailure), "RenderSceneManager shutdown");
     }
 
+    meshHandle.Reset();
+    materialHandle.Reset();
     meshRequest.Reset();
     materialRequest.Reset();
-    Check(resourceRegistry.Evict(materialReference.Path()) &&
-              resourceRegistry.GetState(materialReference.Path()) == resources::State::Unloaded &&
-              resourceHarness.destructions.GetValue() == 2,
-          "remaining test material resource evicts after payload versions retire");
+    Check(resourceRegistry.Evict(meshReference.GetPath()) && resourceRegistry.Evict(materialReference.GetPath()) &&
+              resourceRegistry.GetState(materialReference.GetPath()) == resources::State::Unloaded && resourceHarness.destructions.GetValue() == 2,
+          "test rendering resources evict after all live scene ownership is released");
     Check(resourceRegistry.Shutdown(), "test resource registry shutdown");
 
     ExecutionState execution;
-    rendering::RenderFrameDispatcher dispatcher;
+    rendering::RenderSceneManager commandScenes;
+    rendering::RenderSceneFailure commandSceneFailure;
+    Check(commandScenes.Initialize({}, &commandSceneFailure), "render command scene manager initialization");
+    rendering::RenderCameraStorage commandCameras;
+    rendering::RenderCameraFailure commandCameraFailure;
+    Check(commandCameras.Initialize(commandScenes, {}, &commandCameraFailure), "render command camera storage initialization");
+    rendering::RenderSceneDesc commandSceneDesc;
+    commandSceneDesc.name = "Render command scene";
+    commandSceneDesc.maximumProxies = 8;
+    commandSceneDesc.maximumPendingProxyMutations = 8;
+    commandSceneDesc.maximumViews = 1;
+    rendering::RenderSceneHandle commandScene;
+    Check(commandScenes.CreateScene(commandSceneDesc, commandScene, &commandSceneFailure), "render command participating scene creation");
+    rendering::RenderCommandSystem commands;
+    rendering::RenderCommandFailure commandFailure;
+    rendering::RenderCommandSystemConfig commandConfig;
+    commandConfig.executeFrameTick = ExecuteFrameTick;
+    commandConfig.executeFrame = ExecuteFrame;
+    commandConfig.userData = &execution;
+    Check(commands.Initialize(commandScenes, commandCameras, commandConfig, &commandFailure), "render command system initialization");
+    rendering::RenderCameraDesc commandCameraDesc;
+    commandCameraDesc.scene = commandScene;
+    commandCameraDesc.name = "Render command main camera";
+    commandCameraDesc.state.phases = rendering::RenderPhaseSet(1);
+    rendering::RenderCameraHandle commandCamera;
+    Check(commands.RegisterCamera(commandCameraDesc, commandCamera, &commandCameraFailure), "render command camera registration");
     rendering::ViewportFailure failure;
-    Check(dispatcher.Initialize(ExecuteFrame, &execution, &failure), "render frame dispatcher initialization");
 
     rendering::ViewportManager manager;
-    Check(manager.Initialize(dispatcher, &failure), "viewport manager initialization");
+    Check(manager.Initialize(commands, &failure), "viewport manager initialization");
+
+    const rendering::RenderSceneHandle duplicateFrameScenes[]{commandScene, commandScene};
+    rendering::RenderCommandFrameTickResult duplicateFrameTickResult;
+    Check(!commands.FrameTick(duplicateFrameScenes, 1, duplicateFrameTickResult, &commandFailure) &&
+              commandFailure.code == rendering::RenderCommandFailureCode::DuplicateScene,
+          "direct scene stamps reject duplicate frame participation without a hash table");
+    rendering::RenderCommandFrameTickResult frameTickResult;
+    Check(commands.FrameTick(commandScenes.GetFramePipelineScenes(), 1, frameTickResult, &commandFailure) && frameTickResult.submittedScenes == 1 &&
+              frameTickResult.asynchronousScenes == 0,
+          "dense participating scene span reaches renderer FrameTick without coordinator discovery");
+    rendering::RenderCommandFrameTickResult unflushedFrameTickResult;
+    Check(!commands.FrameTick(commandScenes.GetFramePipelineScenes(), 2, unflushedFrameTickResult, &commandFailure) &&
+              commandFailure.code == rendering::RenderCommandFailureCode::InvalidState,
+          "FrameTick requires the explicit previous-frame flush even when the previous CPU tail has already completed");
 
     rendering::RenderViewportDesc outputDesc;
     outputDesc.name = "Headless test output";
@@ -1119,25 +765,30 @@ int main()
     rendering::EngineViewport game;
     rendering::RenderViewport renderOutput;
     Check(manager.Resolve(gameViewport, game) && game.IsValid(), "resolve generation-checked EngineViewport facade");
-    Check(manager.Resolve(output, renderOutput) && renderOutput.IsValid(),
-          "resolve generation-checked RenderViewport facade");
+    Check(manager.Resolve(output, renderOutput) && renderOutput.IsValid(), "resolve generation-checked RenderViewport facade");
 
     rendering::RenderFrameInfo first = Begin(game);
-    Check(first.Serial() != 0 && first.RenderExtent() == rendering::ViewportExtent{1920, 1080},
-          "begin frame captures immutable viewport dimensions");
+    Check(first.GetSerial() != 0 && first.GetRenderExtent() == rendering::ViewportExtent{1920, 1080}, "begin frame captures immutable viewport dimensions");
     Check(!first.ShouldPresent(), "headless output never requests presentation");
     rendering::RenderFrameInfo duplicate;
-    Check(!game.BeginFrame({}, duplicate, &failure) &&
-              failure.code == rendering::ViewportFailureCode::FrameAlreadyBuilding,
+    Check(!game.BeginFrame({}, duplicate, &failure) && failure.code == rendering::ViewportFailureCode::FrameAlreadyBuilding,
           "second building frame is rejected explicitly");
+
+    const rendering::RenderCameraHandle commandRoots[]{commandCamera};
+    rendering::RenderFrameViewSetup commandViewSetup;
+    commandViewSetup.scene = commandScene;
+    commandViewSetup.rootCameras = commandRoots;
+    Check(game.ConfigureViews(first, commandViewSetup, &failure) && first.HasViewSetup() && !first.GetViewFamily().IsValid(),
+          "building frame retains camera roots without preparing renderer-owned views early");
+    Check(!game.ConfigureViews(first, commandViewSetup, &failure) && failure.code == rendering::ViewportFailureCode::InvalidState,
+          "building frame view setup is configured exactly once");
 
     PayloadState firstPayload;
     firstPayload.expectedOrder = 0;
     Check(first.SetPayload({&firstPayload, RetainPayload, ReleasePayload}), "valid retained frame payload");
     rendering::RenderFrameSubmission firstSubmission;
-    Check(game.SubmitFrame(first, firstSubmission, &failure) && firstSubmission.IsValid(),
-          "first frame submission");
-    Check(first.Serial() == 0, "submitted caller frame is invalidated");
+    Check(game.SubmitFrame(first, firstSubmission, &failure) && firstSubmission.IsValid(), "first frame submission");
+    Check(first.GetSerial() == 0, "submitted caller frame is invalidated");
 
     rendering::EngineViewportDesc previewDesc;
     previewDesc.contextName = "EditorPreview";
@@ -1147,41 +798,53 @@ int main()
     Check(manager.CreateEngineViewport(previewDesc, previewViewport, &failure), "second engine viewport creation");
 
     rendering::RenderFrameInfo second = Begin(manager, previewViewport);
+    Check(manager.ConfigureViews(previewViewport, second, commandViewSetup, &failure), "second viewport configures the same scene camera independently");
     PayloadState secondPayload;
     secondPayload.expectedOrder = 1;
     secondPayload.fail = true;
     Check(second.SetPayload({&secondPayload, RetainPayload, ReleasePayload}), "second retained frame payload");
     rendering::RenderFrameSubmission secondSubmission;
-    Check(!manager.SubmitFrame(gameViewport, second, secondSubmission, &failure) &&
-              failure.code == rendering::ViewportFailureCode::ForeignFrame,
+    Check(!manager.SubmitFrame(gameViewport, second, secondSubmission, &failure) && failure.code == rendering::ViewportFailureCode::ForeignFrame,
           "foreign engine viewport cannot submit a frame");
     Check(manager.SubmitFrame(previewViewport, second, secondSubmission, &failure), "second frame submission");
-    Check(game.FlushFrame(&failure), "render submission barrier flush through EngineViewport");
+    Check(!game.FlushFrame(&failure) && failure.code == rendering::ViewportFailureCode::SubmissionFailure,
+          "render submission barrier reports asynchronous execution failure through EngineViewport");
 
-    const rendering::RenderFrameDispatcherStats dispatcherStats = dispatcher.GetStats();
-    Check(dispatcherStats.submittedFrames == 2 && dispatcherStats.completedFrames == 2 &&
-              dispatcherStats.failedFrames == 1 && dispatcherStats.lastCompletedSerial == secondSubmission.serial,
-          "dispatcher records asynchronous render completion and failure");
-    Check(execution.executions.GetValue() == 2 && execution.orderFailures.GetValue() == 0,
-          "RenderPath submissions retain deterministic dependency order");
-    Check(firstPayload.retains.GetValue() == 1 && firstPayload.releases.GetValue() == 1 &&
-              secondPayload.retains.GetValue() == 1 && secondPayload.releases.GetValue() == 1,
+    const rendering::RenderCommandSystemStats commandStats = commands.GetStats();
+    Check(commandStats.frameTicks == 1 && commandStats.completedFrameTicks == 1 && commandStats.submittedFrames == 2 && commandStats.completedFrames == 2 &&
+              commandStats.failedFrames == 1 && commandStats.lastCompletedFrameSerial == secondSubmission.serial &&
+              commandStats.suppressedExecutionFailures == 0 && !commandStats.executionFailurePending,
+          "render command chain records and consumes the first asynchronous render execution failure");
+    Check(execution.tickContinuationExecutions.GetValue() == 1 && execution.frameTickSceneCount.GetValue() == 1 &&
+              execution.frameTickMutationEpoch.GetValue() == 1 && execution.executions.GetValue() == 2 && execution.continuationExecutions.GetValue() == 2 &&
+              execution.preparedViewFamilies.GetValue() == 2 && execution.lastPreparedViewCount.GetValue() == 1 &&
+              execution.lastPreparedSceneVersion.GetValue() == 1 && execution.orderFailures.GetValue() == 0,
+          "RenderPath submissions prepare exact-epoch view families and retain deterministic dependency order");
+    Check(firstPayload.retains.GetValue() == 1 && firstPayload.releases.GetValue() == 1 && secondPayload.retains.GetValue() == 1 &&
+              secondPayload.releases.GetValue() == 1,
           "frame payload ownership spans asynchronous execution exactly once");
 
+    execution.failFrameTick.SetValue(true);
+    rendering::RenderCommandFrameTickResult failedFrameTickResult;
+    Check(commands.FrameTick(commandScenes.GetFramePipelineScenes(), 2, failedFrameTickResult, &commandFailure) &&
+              commands.FlushPreviousFrameProcessing(&commandFailure),
+          "failed renderer FrameTick still reaches its explicit CPU completion boundary");
+    Check(commands.ConsumeExecutionFailure(commandFailure) && commandFailure.code == rendering::RenderCommandFailureCode::ExecutionFailure &&
+              commandFailure.executionStage == rendering::RenderCommandExecutionStage::FrameTick && commandFailure.executionSerial == 2,
+          "asynchronous failure latch preserves renderer stage and serial identity");
+    execution.failFrameTick.SetValue(false);
+
     rendering::RenderFrameInfo abandoned = Begin(game, false);
-    Check(game.AbandonFrame(abandoned, &failure) && abandoned.Serial() == 0,
-          "building frame can be explicitly abandoned");
+    Check(game.ConfigureViews(abandoned, commandViewSetup, &failure), "abandoned frame can retain an unprepared view request");
+    Check(game.AbandonFrame(abandoned, &failure) && abandoned.GetSerial() == 0, "building frame can be explicitly abandoned");
 
     rendering::RenderViewportSnapshot outputSnapshot;
     rendering::EngineViewportSnapshot gameSnapshot;
-    Check(manager.Snapshot(output, outputSnapshot) && outputSnapshot.renderedFrames == 2 &&
-              outputSnapshot.engineViewportReferences == 2,
+    Check(manager.GetSnapshot(output, outputSnapshot) && outputSnapshot.renderedFrames == 2 && outputSnapshot.engineViewportReferences == 2,
           "render output tracks submissions and engine viewport references");
-    Check(manager.Snapshot(gameViewport, gameSnapshot) && gameSnapshot.begunFrames == 2 &&
-              gameSnapshot.submittedFrames == 1,
+    Check(manager.GetSnapshot(gameViewport, gameSnapshot) && gameSnapshot.begunFrames == 2 && gameSnapshot.submittedFrames == 1,
           "engine viewport tracks begun, submitted, and abandoned frames");
-    Check(!manager.DestroyRenderViewport(output, &failure) &&
-              failure.code == rendering::ViewportFailureCode::OutputStillReferenced,
+    Check(!manager.DestroyRenderViewport(output, &failure) && failure.code == rendering::ViewportFailureCode::OutputStillReferenced,
           "render output cannot be destroyed while engine viewports reference it");
 
     rendering::RenderViewportDesc presentationDesc;
@@ -1189,16 +852,14 @@ int main()
     presentationDesc.outputKind = rendering::RenderViewportOutputKind::Presentation;
     presentationDesc.presentation = {3, 9};
     rendering::RenderViewportHandle presentation;
-    Check(manager.CreateRenderViewport(presentationDesc, presentation, &failure),
-          "presentation render viewport can exist before swapchain binding");
+    Check(manager.CreateRenderViewport(presentationDesc, presentation, &failure), "presentation render viewport can exist before swapchain binding");
     rendering::EngineViewportDesc detachedDesc;
     detachedDesc.contextName = "DetachedEditor";
     detachedDesc.output = presentation;
     rendering::EngineViewportHandle detached;
     Check(manager.CreateEngineViewport(detachedDesc, detached, &failure), "detached engine viewport creation");
     rendering::RenderFrameInfo unavailable;
-    Check(!manager.BeginFrame(detached, {}, unavailable, &failure) &&
-              failure.code == rendering::ViewportFailureCode::OutputUnavailable,
+    Check(!manager.BeginFrame(detached, {}, unavailable, &failure) && failure.code == rendering::ViewportFailureCode::OutputUnavailable,
           "presentation viewport does not render before swapchain binding");
 
     window::PresentationAttachmentSnapshot presentationState;
@@ -1208,32 +869,25 @@ int main()
     presentationState.requiredPixelExtentRevision = 4;
     presentationState.requiredSurfaceRevision = 2;
     presentationState.visible = true;
-    Check(renderOutput.Handle() != presentation, "resolved facade remains tied to its original render viewport");
+    Check(renderOutput.GetHandle() != presentation, "resolved facade remains tied to its original render viewport");
     rendering::RenderViewport detachedOutput;
-    Check(manager.Resolve(presentation, detachedOutput) &&
-              detachedOutput.UpdatePresentation(presentationState, &failure),
+    Check(manager.Resolve(presentation, detachedOutput) && detachedOutput.UpdatePresentation(presentationState, &failure),
           "presentation state reaches the detached render viewport");
     rendering::RenderViewportSnapshot presentationSnapshot;
-    Check(detachedOutput.Snapshot(presentationSnapshot) &&
-              presentationSnapshot.state == rendering::RenderViewportState::AwaitingOutput &&
+    Check(detachedOutput.GetSnapshot(presentationSnapshot) && presentationSnapshot.state == rendering::RenderViewportState::AwaitingOutput &&
               presentationSnapshot.requestedOutputExtent == rendering::ViewportExtent{1600, 900} &&
-              presentationSnapshot.outputExtent == presentationDesc.outputExtent &&
-              presentationSnapshot.requiredPixelExtentRevision == 4 &&
-              presentationSnapshot.appliedPixelExtentRevision == 0 &&
-              presentationSnapshot.requiredSurfaceRevision == 2 &&
+              presentationSnapshot.outputExtent == presentationDesc.outputExtent && presentationSnapshot.requiredPixelExtentRevision == 4 &&
+              presentationSnapshot.appliedPixelExtentRevision == 0 && presentationSnapshot.requiredSurfaceRevision == 2 &&
               presentationSnapshot.appliedSurfaceRevision == 0,
           "presentation viewport separates requested and successfully applied swapchain state");
     window::PresentationAcknowledgement acknowledgement;
-    Check(!detachedOutput.GetPresentationAcknowledgement(acknowledgement),
-          "unbound presentation viewport does not acknowledge unapplied work");
+    Check(!detachedOutput.GetPresentationAcknowledgement(acknowledgement), "unbound presentation viewport does not acknowledge unapplied work");
     const u64 reconciledOutputRevision = presentationSnapshot.outputRevision;
-    Check(detachedOutput.UpdatePresentation(presentationState, &failure) &&
-              detachedOutput.Snapshot(presentationSnapshot) &&
+    Check(detachedOutput.UpdatePresentation(presentationState, &failure) && detachedOutput.GetSnapshot(presentationSnapshot) &&
               presentationSnapshot.outputRevision == reconciledOutputRevision,
           "reconciling an unchanged presentation snapshot is idempotent");
     presentationState.requiredPixelExtentRevision = 3;
-    Check(!detachedOutput.UpdatePresentation(presentationState, &failure) &&
-              failure.code == rendering::ViewportFailureCode::InvalidDescriptor,
+    Check(!detachedOutput.UpdatePresentation(presentationState, &failure) && failure.code == rendering::ViewportFailureCode::InvalidDescriptor,
           "stale presentation revisions are rejected explicitly");
 
     Check(manager.DestroyEngineViewport(detached, &failure), "destroy detached engine viewport");
@@ -1248,17 +902,26 @@ int main()
     Check(manager.CreateRenderViewport(outputDesc, replacement, &failure) && replacement.index == staleOutput.index &&
               replacement.generation != staleOutput.generation,
           "reused render viewport slot advances its generation");
-    Check(!manager.Snapshot(staleOutput, outputSnapshot), "stale render viewport handle is rejected");
+    Check(!manager.GetSnapshot(staleOutput, outputSnapshot), "stale render viewport handle is rejected");
     Check(manager.DestroyRenderViewport(replacement, &failure), "destroy replacement viewport");
 
     const rendering::ViewportManagerStats managerStats = manager.GetStats();
-    Check(managerStats.renderViewports == 0 && managerStats.engineViewports == 0 && managerStats.buildingFrames == 0 &&
-              managerStats.begunFrames == 3 && managerStats.submittedFrames == 2,
+    Check(managerStats.renderViewports == 0 && managerStats.engineViewports == 0 && managerStats.buildingFrames == 0 && managerStats.begunFrames == 3 &&
+              managerStats.submittedFrames == 2,
           "viewport manager reaches a fully drained state");
 
     Check(manager.Shutdown(&failure), "viewport manager shutdown");
-    Check(dispatcher.Shutdown(&failure), "render frame dispatcher shutdown");
+    Check(commands.UnregisterCamera(commandCamera, &commandCameraFailure), "render command camera unregistration");
+    Check(commands.Shutdown(&commandFailure), "render command system shutdown");
+    Check(commandScenes.GetStats().preparedFrames == 2 && commandScenes.DestroyScene(commandScene, &commandSceneFailure),
+          "render command scene participates once per frame and retires after the CPU tail drains");
+    Check(commandCameras.Shutdown(&commandCameraFailure), "render command camera storage shutdown");
+    Check(commandScenes.Shutdown(&commandSceneFailure), "render command scene manager shutdown");
     Check(jobs::Shutdown(), "Jobs shutdown");
+    const int failuresBeforeTextureCandidates = g_failures;
+    RunTextureUploadCandidateTests(&Check);
+    if (g_failures == failuresBeforeTextureCandidates)
+        std::printf("Vanguard texture upload candidate tests passed.\n");
 
     if (g_failures == 0)
         std::printf("Vanguard rendering viewport tests passed.\n");

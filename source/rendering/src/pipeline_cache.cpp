@@ -20,10 +20,8 @@ namespace vanguard::rendering
 
             CreationPayload() noexcept
                 : bindingLayouts(memory::pools::Rendering::GetInstance()), descriptorDomains(memory::pools::Rendering::GetInstance()),
-                  rayTracingShaders(memory::pools::Rendering::GetInstance()),
-                  rayTracingShaderNames(memory::pools::Rendering::GetInstance()),
-                  rayTracingHitGroups(memory::pools::Rendering::GetInstance()),
-                  rayTracingHitGroupNames(memory::pools::Rendering::GetInstance())
+                  rayTracingShaders(memory::pools::Rendering::GetInstance()), rayTracingShaderNames(memory::pools::Rendering::GetInstance()),
+                  rayTracingHitGroups(memory::pools::Rendering::GetInstance()), rayTracingHitGroupNames(memory::pools::Rendering::GetInstance())
             {
             }
 
@@ -175,8 +173,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] CreationPayload* CopyGraphics(const rhi::GraphicsPipelineDesc& source) noexcept
         {
-            const rhi::ShaderRef shaders[] = {source.vertexShader, source.hullShader, source.domainShader, source.geometryShader,
-                                              source.pixelShader};
+            const rhi::ShaderRef shaders[] = {source.vertexShader, source.hullShader, source.domainShader, source.geometryShader, source.pixelShader};
             if (!source.vertexShader || (source.vertexLayout && !rhi::IsResourceReferenceValid(rhi::ResourceRef(source.vertexLayout))))
                 return nullptr;
             for (const rhi::ShaderRef shader : shaders)
@@ -266,8 +263,7 @@ namespace vanguard::rendering
             payload->rayTracingHitGroups.Resize(source.hitGroupCount);
             payload->rayTracingHitGroupNames.Resize(source.hitGroupCount);
             if (payload->rayTracingShaders.Size() != source.shaderCount || payload->rayTracingShaderNames.Size() != source.shaderCount ||
-                payload->rayTracingHitGroups.Size() != source.hitGroupCount ||
-                payload->rayTracingHitGroupNames.Size() != source.hitGroupCount)
+                payload->rayTracingHitGroups.Size() != source.hitGroupCount || payload->rayTracingHitGroupNames.Size() != source.hitGroupCount)
             {
                 VANGUARD_DELETE(payload);
                 return nullptr;
@@ -325,8 +321,7 @@ namespace vanguard::rendering
         }
 
         [[nodiscard]] bool CreateNativePipeline(const pipelines::PipelineKind kind, const crypto::Digest256&, void* const address,
-                                                pipeline_cache::NativePipeline& output, pipeline_cache::FailureEvidence& evidence,
-                                                void*) noexcept
+                                                pipeline_cache::NativePipeline& output, pipeline_cache::FailureEvidence& evidence, void*) noexcept
         {
             auto* const payload = static_cast<CreationPayload*>(address);
             if (payload == nullptr || payload->kind != kind)
@@ -346,8 +341,7 @@ namespace vanguard::rendering
             {
                 evidence.failure = pipeline_cache::Failure::BackendRejected;
                 evidence.backendCode = failure.backendCode;
-                static_cast<void>(
-                    CopyName(evidence.message, failure.message[0] != '\0' ? failure.message : "RHI rejected pipeline creation"));
+                static_cast<void>(CopyName(evidence.message, failure.message[0] != '\0' ? failure.message : "RHI rejected pipeline creation"));
                 return false;
             }
             CachedPipeline* const cached = VANGUARD_NEW(CachedPipeline);
@@ -386,9 +380,9 @@ namespace vanguard::rendering
     {
         return IsValid();
     }
-    pipeline_cache::State PipelineRequest::Status() const noexcept
+    pipeline_cache::State PipelineRequest::GetStatus() const noexcept
     {
-        return m_request.Status();
+        return m_request.GetStatus();
     }
     bool PipelineRequest::HasFinished() const noexcept
     {
@@ -406,19 +400,19 @@ namespace vanguard::rendering
     {
         return m_request.TryWait(timeoutMilliseconds);
     }
-    rhi::PipelineRef PipelineRequest::Pipeline() const noexcept
+    rhi::PipelineRef PipelineRequest::GetPipeline() const noexcept
     {
-        const pipeline_cache::NativePipeline native = m_request.NativeObject();
+        const pipeline_cache::NativePipeline native = m_request.GetNativeObject();
         const auto* const cached = static_cast<const CachedPipeline*>(native.object);
         return cached != nullptr ? cached->pipeline : rhi::PipelineRef{};
     }
-    pipeline_cache::FailureEvidence PipelineRequest::Error() const noexcept
+    pipeline_cache::FailureEvidence PipelineRequest::GetError() const noexcept
     {
-        return m_request.Error();
+        return m_request.GetError();
     }
-    u64 PipelineRequest::Generation() const noexcept
+    u64 PipelineRequest::GetGeneration() const noexcept
     {
-        return m_request.Generation();
+        return m_request.GetGeneration();
     }
     void PipelineRequest::Reset() noexcept
     {
@@ -444,39 +438,36 @@ namespace vanguard::rendering
         return m_cache.IsInitialized();
     }
 
-    pipeline_cache::Result PipelineCache::RequestGraphics(const crypto::Digest256& key, const rhi::GraphicsPipelineDesc& desc,
-                                                          PipelineRequest& output, const pipeline_cache::Priority priority) noexcept
+    pipeline_cache::Result PipelineCache::RequestGraphics(const crypto::Digest256& key, const rhi::GraphicsPipelineDesc& desc, PipelineRequest& output,
+                                                          const pipeline_cache::Priority priority) noexcept
     {
         output.Reset();
         CreationPayload* const payload = CopyGraphics(desc);
         if (payload == nullptr)
             return pipeline_cache::Result::InvalidArgument;
-        const pipeline_cache::Result result =
-            m_cache.Request(key, pipelines::PipelineKind::Graphics, MakePayload(*payload), output.m_request, priority);
+        const pipeline_cache::Result result = m_cache.Request(key, pipelines::PipelineKind::Graphics, MakePayload(*payload), output.m_request, priority);
         ReleasePayload(payload);
         return result;
     }
-    pipeline_cache::Result PipelineCache::RequestCompute(const crypto::Digest256& key, const rhi::ComputePipelineDesc& desc,
-                                                         PipelineRequest& output, const pipeline_cache::Priority priority) noexcept
+    pipeline_cache::Result PipelineCache::RequestCompute(const crypto::Digest256& key, const rhi::ComputePipelineDesc& desc, PipelineRequest& output,
+                                                         const pipeline_cache::Priority priority) noexcept
     {
         output.Reset();
         CreationPayload* const payload = CopyCompute(desc);
         if (payload == nullptr)
             return pipeline_cache::Result::InvalidArgument;
-        const pipeline_cache::Result result =
-            m_cache.Request(key, pipelines::PipelineKind::Compute, MakePayload(*payload), output.m_request, priority);
+        const pipeline_cache::Result result = m_cache.Request(key, pipelines::PipelineKind::Compute, MakePayload(*payload), output.m_request, priority);
         ReleasePayload(payload);
         return result;
     }
-    pipeline_cache::Result PipelineCache::RequestRayTracing(const crypto::Digest256& key, const rhi::RayTracingPipelineDesc& desc,
-                                                            PipelineRequest& output, const pipeline_cache::Priority priority) noexcept
+    pipeline_cache::Result PipelineCache::RequestRayTracing(const crypto::Digest256& key, const rhi::RayTracingPipelineDesc& desc, PipelineRequest& output,
+                                                            const pipeline_cache::Priority priority) noexcept
     {
         output.Reset();
         CreationPayload* const payload = CopyRayTracing(desc);
         if (payload == nullptr)
             return pipeline_cache::Result::InvalidArgument;
-        const pipeline_cache::Result result =
-            m_cache.Request(key, pipelines::PipelineKind::RayTracing, MakePayload(*payload), output.m_request, priority);
+        const pipeline_cache::Result result = m_cache.Request(key, pipelines::PipelineKind::RayTracing, MakePayload(*payload), output.m_request, priority);
         ReleasePayload(payload);
         return result;
     }

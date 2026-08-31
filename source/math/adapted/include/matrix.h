@@ -18,9 +18,8 @@ namespace vanguard::math
         Matrix(const Float f[16]);
         Matrix(const Matrix& m);
 
-        Matrix(const Float _00, const Float _01, const Float _02, const Float _03, const Float _10, const Float _11, const Float _12,
-               const Float _13, const Float _20, const Float _21, const Float _22, const Float _23, const Float _30, const Float _31,
-               const Float _32, const Float _33);
+        Matrix(const Float _00, const Float _01, const Float _02, const Float _03, const Float _10, const Float _11, const Float _12, const Float _13,
+               const Float _20, const Float _21, const Float _22, const Float _23, const Float _30, const Float _31, const Float _32, const Float _33);
 
         RED_INLINE const Float* AsFloat() const
         {
@@ -209,8 +208,7 @@ namespace vanguard::math
         static Matrix ZEROS();
         static Matrix IDENTITY();
 
-        static const Matrix
-            IDENTITY_CONSTANT; // ctremblay: Mostly use for rendering where a pointer is required or matrix is only copied on submit
+        static const Matrix IDENTITY_CONSTANT; // ctremblay: Mostly use for rendering where a pointer is required or matrix is only copied on submit
 
         Vector4 X = Vector4::EX();
         Vector4 Y = Vector4::EY();

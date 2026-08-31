@@ -32,6 +32,13 @@ namespace vanguard::resources
     {
     public:
         [[nodiscard]] bool Add(ResourceReference reference, DependencyRequirement requirement = DependencyRequirement::Required) noexcept;
+        // Loader-owned state follows the pipeline operation through dependency
+        // discovery, preparation, construction, and cancellation. A loader
+        // that installs state must take and destroy it on exactly one terminal
+        // path; Shutdown refuses operations that still retain state.
+        [[nodiscard]] bool SetLoaderState(void* state) noexcept;
+        [[nodiscard]] void* GetLoaderState() const noexcept;
+        [[nodiscard]] void* TakeLoaderState() noexcept;
         [[nodiscard]] u32 Count() const noexcept;
 
     private:
@@ -48,11 +55,13 @@ namespace vanguard::resources
         [[nodiscard]] ResourceReference Reference() const noexcept;
         [[nodiscard]] LoadPriority Priority() const noexcept;
         [[nodiscard]] bool IsCancellationRequested() const noexcept;
-        [[nodiscard]] u32 DependencyCount() const noexcept;
-        [[nodiscard]] ResourceReference DependencyReference(u32 index) const noexcept;
-        [[nodiscard]] DependencyRequirement DependencyRequirementAt(u32 index) const noexcept;
-        [[nodiscard]] Failure DependencyError(u32 index) const noexcept;
-        [[nodiscard]] const ResourceHandle& Dependency(u32 index) const noexcept;
+        [[nodiscard]] u32 GetDependencyCount() const noexcept;
+        [[nodiscard]] ResourceReference GetDependencyReference(u32 index) const noexcept;
+        [[nodiscard]] DependencyRequirement GetDependencyRequirementAt(u32 index) const noexcept;
+        [[nodiscard]] Failure GetDependencyError(u32 index) const noexcept;
+        [[nodiscard]] const ResourceHandle& GetDependency(u32 index) const noexcept;
+        [[nodiscard]] void* GetLoaderState() const noexcept;
+        [[nodiscard]] void* TakeLoaderState() const noexcept;
 
     private:
         explicit LoadContext(void* state) noexcept;
@@ -70,6 +79,8 @@ namespace vanguard::resources
         [[nodiscard]] ResourceReference Reference() const noexcept;
         [[nodiscard]] LoadPriority Priority() const noexcept;
         [[nodiscard]] bool IsCancellationRequested() const noexcept;
+        [[nodiscard]] void* GetLoaderState() const noexcept;
+        [[nodiscard]] void* TakeLoaderState() const noexcept;
 
         // Must be called exactly once by a successfully started preparation,
         // including after its asynchronous cancellation callback runs.
@@ -102,8 +113,8 @@ namespace vanguard::resources
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return type != InvalidResourceTypeId && name != nullptr && name[0] != '\0' && discoverDependencies != nullptr &&
-                   constructResource != nullptr && destroyResource != nullptr;
+            return type != InvalidResourceTypeId && name != nullptr && name[0] != '\0' && discoverDependencies != nullptr && constructResource != nullptr &&
+                   destroyResource != nullptr;
         }
     };
 
@@ -152,8 +163,8 @@ namespace vanguard::resources
 
         [[nodiscard]] ResourceReference Reference() const noexcept;
         [[nodiscard]] LoadPriority Priority() const noexcept;
-        [[nodiscard]] State Status() const noexcept;
-        [[nodiscard]] Failure Error() const noexcept;
+        [[nodiscard]] State GetStatus() const noexcept;
+        [[nodiscard]] Failure GetError() const noexcept;
         [[nodiscard]] bool HasFinished() const noexcept;
         [[nodiscard]] bool HasLoaded() const noexcept;
         [[nodiscard]] bool HasFailed() const noexcept;
@@ -220,6 +231,7 @@ namespace vanguard::resources
         [[nodiscard]] bool PromoteRequest(PipelineOperation* operation, LoadPriority priority) noexcept;
         [[nodiscard]] bool BuildFailureTrace(const PipelineOperation* operation, FailureTrace& trace) const noexcept;
         [[nodiscard]] bool CompletePreparation(PipelineOperation* operation, Failure failure) noexcept;
+        [[nodiscard]] void* TakeLoaderState(PipelineOperation* operation) noexcept;
 
         friend class PipelineRequest;
         friend class PreparationRequest;

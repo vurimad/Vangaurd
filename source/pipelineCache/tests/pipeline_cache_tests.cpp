@@ -65,8 +65,8 @@ namespace
         }
     }
 
-    bool CreatePipeline(const vanguard::pipelines::PipelineKind, const vanguard::crypto::Digest256&, void* const payloadData,
-                        cache::NativePipeline& output, cache::FailureEvidence& failure, void* const userData) noexcept
+    bool CreatePipeline(const vanguard::pipelines::PipelineKind, const vanguard::crypto::Digest256&, void* const payloadData, cache::NativePipeline& output,
+                        cache::FailureEvidence& failure, void* const userData) noexcept
     {
         auto& state = *static_cast<BackendState*>(userData);
         auto& payload = *static_cast<Payload*>(payloadData);
@@ -123,8 +123,7 @@ namespace
         return false;
     }
 
-    bool EqualBlob(const vanguard::containers::ArraySpan<const vanguard::u8> left,
-                   const vanguard::containers::ArraySpan<const vanguard::u8> right) noexcept
+    bool EqualBlob(const vanguard::containers::ArraySpan<const vanguard::u8> left, const vanguard::containers::ArraySpan<const vanguard::u8> right) noexcept
     {
         if (left.Size() != right.Size())
         {
@@ -186,8 +185,8 @@ namespace
     class RequestThread final : public vanguard::concurrency::Thread
     {
     public:
-        RequestThread(const char* const name, cache::PipelineCache& cacheValue, const vanguard::crypto::Digest256& keyValue,
-                      Payload& payloadValue, vanguard::concurrency::ManualResetEvent& startValue) noexcept
+        RequestThread(const char* const name, cache::PipelineCache& cacheValue, const vanguard::crypto::Digest256& keyValue, Payload& payloadValue,
+                      vanguard::concurrency::ManualResetEvent& startValue) noexcept
             : Thread(name), pipelineCache(cacheValue), key(keyValue), payload(payloadValue), start(startValue)
         {
         }
@@ -251,12 +250,11 @@ int main()
     const vanguard::u8 firstNativeBlob[] = {0x44, 0x58, 0x31, 0x32, 1, 2, 3, 4, 5};
     Check(nativeStore.Publish(firstNativeBlob) == cache::StoreResult::Success && manager.FileExist(nativeStore.RecordPath()),
           "publish checksummed native cache atomically");
-    Check(nativeStore.Load(loadedBlob) == cache::StoreResult::Success &&
-              EqualBlob({loadedBlob.TypedData(), loadedBlob.Size()}, firstNativeBlob),
+    Check(nativeStore.Load(loadedBlob) == cache::StoreResult::Success && EqualBlob({loadedBlob.TypedData(), loadedBlob.Size()}, firstNativeBlob),
           "load compatible native cache");
-    const vanguard::crypto::Digest256 identityFingerprint = nativeStore.IdentityFingerprint();
+    const vanguard::crypto::Digest256 identityFingerprint = nativeStore.GetIdentityFingerprint();
     nativeStore.Shutdown();
-    Check(nativeStore.Initialize(nativeConfig) && nativeStore.IdentityFingerprint() == identityFingerprint &&
+    Check(nativeStore.Initialize(nativeConfig) && nativeStore.GetIdentityFingerprint() == identityFingerprint &&
               nativeStore.Load(loadedBlob) == cache::StoreResult::Success,
           "native cache survives store restart");
 
@@ -267,8 +265,7 @@ int main()
     const vanguard::u8 secondNativeBlob[] = {0x44, 0x58, 0x31, 0x32, 9, 8, 7, 6, 5, 4, 3};
     blobBackend.exported = secondNativeBlob;
     Check(nativeStore.CaptureAndPublish(ExportNativeBlob, &blobBackend) == cache::StoreResult::Success && blobBackend.exportCalls == 1 &&
-              nativeStore.Load(loadedBlob) == cache::StoreResult::Success &&
-              EqualBlob({loadedBlob.TypedData(), loadedBlob.Size()}, secondNativeBlob),
+              nativeStore.Load(loadedBlob) == cache::StoreResult::Success && EqualBlob({loadedBlob.TypedData(), loadedBlob.Size()}, secondNativeBlob),
           "capture publishes backend-exported bytes");
 
     {
@@ -309,11 +306,9 @@ int main()
     Check(nativeStore.Publish(firstNativeBlob) == cache::StoreResult::Success, "publish cache for backend rejection");
     blobBackend.rejectImport = true;
     blobBackend.expectedImport = firstNativeBlob;
-    Check(nativeStore.Restore(ImportNativeBlob, &blobBackend) == cache::StoreResult::BackendRejected &&
-              !manager.FileExist(nativeStore.RecordPath()),
+    Check(nativeStore.Restore(ImportNativeBlob, &blobBackend) == cache::StoreResult::BackendRejected && !manager.FileExist(nativeStore.RecordPath()),
           "backend rejection triggers cache recovery");
-    Check(nativeStore.GetStats().incompatibleRecords == 1 && nativeStore.GetStats().backendRejections == 1 &&
-              nativeStore.GetStats().recoveries == 2,
+    Check(nativeStore.GetStats().incompatibleRecords == 1 && nativeStore.GetStats().backendRejections == 1 && nativeStore.GetStats().recoveries == 2,
           "identity and backend rejection telemetry");
     nativeStore.Shutdown();
 
@@ -369,12 +364,9 @@ int main()
     cache::PipelineRequest second;
     cache::PipelineRequest third;
     Check(pipelineCache.Request(firstKey, pipelines::PipelineKind::Graphics, MakePayload(firstPayload), first) == cache::Result::Success &&
-              pipelineCache.Request(firstKey, pipelines::PipelineKind::Graphics, MakePayload(firstPayload), duplicate) ==
-                  cache::Result::Success &&
-              pipelineCache.Request(secondKey, pipelines::PipelineKind::Compute, MakePayload(secondPayload), second) ==
-                  cache::Result::Success &&
-              pipelineCache.Request(thirdKey, pipelines::PipelineKind::RayTracing, MakePayload(thirdPayload), third) ==
-                  cache::Result::Success,
+              pipelineCache.Request(firstKey, pipelines::PipelineKind::Graphics, MakePayload(firstPayload), duplicate) == cache::Result::Success &&
+              pipelineCache.Request(secondKey, pipelines::PipelineKind::Compute, MakePayload(secondPayload), second) == cache::Result::Success &&
+              pipelineCache.Request(thirdKey, pipelines::PipelineKind::RayTracing, MakePayload(thirdPayload), third) == cache::Result::Success,
           "request pipelines");
     Check(first.IsSameGeneration(duplicate), "duplicate requests coalesce to one generation");
     Check(WaitForActive(backendState, 2), "bounded workers entered backend");
@@ -386,8 +378,7 @@ int main()
     third.Wait();
     Check(first.HasSucceeded() && second.HasSucceeded() && third.HasSucceeded(), "asynchronous pipelines become valid");
     Check(backendState.createCalls.GetValue() == 3, "coalesced request creates one native object");
-    Check(first.NativeObject().object == reinterpret_cast<void*>(static_cast<vanguard::usize>(0x1001)),
-          "valid request exposes backend object");
+    Check(first.GetNativeObject().object == reinterpret_cast<void*>(static_cast<vanguard::usize>(0x1001)), "valid request exposes backend object");
 
     vanguard::concurrency::ManualResetEvent concurrentStart;
     vanguard::concurrency::ManualResetEvent concurrentCreation;
@@ -408,10 +399,9 @@ int main()
     concurrentB.JoinThread();
     concurrentC.JoinThread();
     concurrentD.JoinThread();
-    Check(concurrentA.result == cache::Result::Success && concurrentB.result == cache::Result::Success &&
-              concurrentC.result == cache::Result::Success && concurrentD.result == cache::Result::Success &&
-              concurrentA.request.IsSameGeneration(concurrentB.request) && concurrentA.request.IsSameGeneration(concurrentC.request) &&
-              concurrentA.request.IsSameGeneration(concurrentD.request),
+    Check(concurrentA.result == cache::Result::Success && concurrentB.result == cache::Result::Success && concurrentC.result == cache::Result::Success &&
+              concurrentD.result == cache::Result::Success && concurrentA.request.IsSameGeneration(concurrentB.request) &&
+              concurrentA.request.IsSameGeneration(concurrentC.request) && concurrentA.request.IsSameGeneration(concurrentD.request),
           "concurrent callers coalesce to one generation");
     Check(WaitForActive(backendState, 1), "concurrent coalesced generation entered backend once");
     concurrentCreation.Signal();
@@ -423,26 +413,23 @@ int main()
     failingPayload.fail = true;
     cache::PipelineRequest failed;
     const vanguard::crypto::Digest256 failedKey = vanguard::crypto::Sha256("pipeline-failure", 16);
-    Check(pipelineCache.Request(failedKey, pipelines::PipelineKind::Graphics, MakePayload(failingPayload), failed) ==
-              cache::Result::Success,
+    Check(pipelineCache.Request(failedKey, pipelines::PipelineKind::Graphics, MakePayload(failingPayload), failed) == cache::Result::Success,
           "schedule failing pipeline");
     failed.Wait();
-    Check(failed.Status() == cache::State::Invalid && failed.Error().failure == cache::Failure::BackendRejected &&
-              failed.Error().backendCode == -42,
+    Check(failed.GetStatus() == cache::State::Invalid && failed.GetError().failure == cache::Failure::BackendRejected && failed.GetError().backendCode == -42,
           "backend failure evidence is retained");
 
-    const vanguard::u64 oldGeneration = first.Generation();
+    const vanguard::u64 oldGeneration = first.GetGeneration();
     Check(pipelineCache.Invalidate(firstKey), "invalidate valid generation");
     Check(first.HasSucceeded() && duplicate.HasSucceeded() && backendState.destroyCalls.GetValue() == 0,
           "old valid object remains alive while generation handles exist");
     Payload replacementPayload;
     replacementPayload.objectIdentity = 0x3001;
     cache::PipelineRequest replacement;
-    Check(pipelineCache.Request(firstKey, pipelines::PipelineKind::Graphics, MakePayload(replacementPayload), replacement) ==
-              cache::Result::Success,
+    Check(pipelineCache.Request(firstKey, pipelines::PipelineKind::Graphics, MakePayload(replacementPayload), replacement) == cache::Result::Success,
           "request replacement generation");
     replacement.Wait();
-    Check(replacement.HasSucceeded() && replacement.Generation() != oldGeneration && !replacement.IsSameGeneration(first),
+    Check(replacement.HasSucceeded() && replacement.GetGeneration() != oldGeneration && !replacement.IsSameGeneration(first),
           "invalidation creates a new generation");
     first.Reset();
     Check(backendState.destroyCalls.GetValue() == 0, "old native object waits for last old-generation handle");
@@ -455,11 +442,10 @@ int main()
     pendingPayload.objectIdentity = 0x4001;
     const vanguard::crypto::Digest256 pendingKey = vanguard::crypto::Sha256("pipeline-pending", 16);
     cache::PipelineRequest invalidated;
-    Check(pipelineCache.Request(pendingKey, pipelines::PipelineKind::Graphics, MakePayload(pendingPayload), invalidated) ==
-              cache::Result::Success,
+    Check(pipelineCache.Request(pendingKey, pipelines::PipelineKind::Graphics, MakePayload(pendingPayload), invalidated) == cache::Result::Success,
           "schedule pipeline for pending invalidation");
     Check(WaitForActive(backendState, 1) && pipelineCache.Invalidate(pendingKey), "invalidate creating pipeline");
-    Check(invalidated.Status() == cache::State::Invalid && invalidated.Error().failure == cache::Failure::Invalidated,
+    Check(invalidated.GetStatus() == cache::State::Invalid && invalidated.GetError().failure == cache::Failure::Invalidated,
           "creating generation reports explicit invalidation");
     invalidationGate.Signal();
     pipelineCache.WaitIdle();
@@ -492,12 +478,10 @@ int main()
     concurrentD.request.Reset();
     Check(pipelineCache.InvalidateAll() >= 6, "invalidate all current generations");
     Check(pipelineCache.Shutdown(), "pipeline cache shutdown");
-    Check(backendState.destroyCalls.GetValue() == backendState.createCalls.GetValue() - 1,
-          "every successfully created native object is destroyed");
+    Check(backendState.destroyCalls.GetValue() == backendState.createCalls.GetValue() - 1, "every successfully created native object is destroyed");
     Check(firstPayload.references.GetValue() == 1 && secondPayload.references.GetValue() == 1 && thirdPayload.references.GetValue() == 1 &&
-              failingPayload.references.GetValue() == 1 && replacementPayload.references.GetValue() == 1 &&
-              pendingPayload.references.GetValue() == 1 && warmupPayload.references.GetValue() == 1 &&
-              concurrentPayload.references.GetValue() == 1,
+              failingPayload.references.GetValue() == 1 && replacementPayload.references.GetValue() == 1 && pendingPayload.references.GetValue() == 1 &&
+              warmupPayload.references.GetValue() == 1 && concurrentPayload.references.GetValue() == 1,
           "all asynchronous payload references are released");
 
     Check(jobs::Shutdown(), "jobs shutdown");

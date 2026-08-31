@@ -33,8 +33,7 @@ namespace vanguard::math
         {
             const red::Float t_cubed = t * t * t;
             const red::Float t_sq = t * t;
-            return p0 * (2.f * t_cubed - 3.f * t_sq + 1.f) + t0 * (t_cubed - 2.f * t_sq + t) + p1 * (-2.f * t_cubed + 3.f * t_sq) +
-                   t1 * (t_cubed - t_sq);
+            return p0 * (2.f * t_cubed - 3.f * t_sq + 1.f) + t0 * (t_cubed - 2.f * t_sq + t) + p1 * (-2.f * t_cubed + 3.f * t_sq) + t1 * (t_cubed - t_sq);
         }
 
         static T QuadraticBezier(const T& p0, const T& c0, const T& p1, const red::Float t)
@@ -74,10 +73,8 @@ namespace vanguard::math
     };
 
     extern REDMATH_API void Linear_SIMD(Float out[4], const Float src[4], const Float dst[4], const Float t[4]);
-    extern REDMATH_API void CubicHermite_SIMD(Float out[4], const Float A[4], const Float B[4], const Float C[4], const Float D[4],
-                                              const Float t[4]);
+    extern REDMATH_API void CubicHermite_SIMD(Float out[4], const Float A[4], const Float B[4], const Float C[4], const Float D[4], const Float t[4]);
     extern REDMATH_API void QuadraticBezier_SIMD(Float out[4], const Float p0[4], const Float p1[4], const Float p2[4], const Float t[4]);
-    extern REDMATH_API void CubicBezier_SIMD(Float out[4], const Float p0[4], const Float p1[4], const Float p2[4], const Float p3[4],
-                                             const Float t[4]);
+    extern REDMATH_API void CubicBezier_SIMD(Float out[4], const Float p0[4], const Float p1[4], const Float p2[4], const Float p3[4], const Float t[4]);
 
 } // namespace vanguard::math

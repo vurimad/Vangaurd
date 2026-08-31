@@ -8,7 +8,10 @@ namespace vanguard::window
     {
         u64 value = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return value != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
         [[nodiscard]] friend constexpr bool operator==(const BackendWindowId&, const BackendWindowId&) noexcept = default;
     };
 
@@ -16,7 +19,10 @@ namespace vanguard::window
     {
         u64 value = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return value != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
         [[nodiscard]] friend constexpr bool operator==(const BackendDisplayId&, const BackendDisplayId&) noexcept = default;
     };
 
@@ -116,12 +122,18 @@ namespace vanguard::window
         i32 code = 0;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr BackendStatus Success() noexcept { return {}; }
+        [[nodiscard]] static constexpr BackendStatus Success() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr BackendStatus Failure(const i32 code, const char* const message) noexcept
         {
             return {false, code, message};
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return success; }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return success;
+        }
     };
 
     enum class NativePresentationSurfaceKind : u8
@@ -156,17 +168,12 @@ namespace vanguard::window
         // Backend commands are synchronous and must not call WindowManager or deliver native events while they run.
         // Native events are queued by the platform layer and delivered later through IWindowEventSink, in pump order.
         // A successful DestroyWindow call means native destruction is complete; no later destruction event is emitted.
-        [[nodiscard]] virtual BackendStatus EnumerateDisplays(BackendDisplaySnapshot* displays, u32 capacity,
-                                                               u32& count) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus Create(const BackendWindowDescriptor& descriptor,
-                                                   BackendWindowId& window,
-                                                   BackendWindowState& state) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ApplyWindowState(BackendWindowId window,
-                                                             const BackendWindowRequest& request,
+        [[nodiscard]] virtual BackendStatus EnumerateDisplays(BackendDisplaySnapshot* displays, u32 capacity, u32& count) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus Create(const BackendWindowDescriptor& descriptor, BackendWindowId& window, BackendWindowState& state) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ApplyWindowState(BackendWindowId window, const BackendWindowRequest& request,
                                                              BackendWindowState& state) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetWindowTitle(BackendWindowId window, const char* title) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ResolvePresentationSurface(BackendWindowId window,
-                                                                       NativePresentationSurface& surface) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ResolvePresentationSurface(BackendWindowId window, NativePresentationSurface& surface) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DestroyWindow(BackendWindowId window) noexcept = 0;
 
     protected:
@@ -184,7 +191,10 @@ namespace vanguard::window
         BackendStatus status;
         WindowEventSinkAction action = WindowEventSinkAction::Continue;
 
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return static_cast<bool>(status); }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return static_cast<bool>(status);
+        }
     };
 
     // Platform event pumps use this narrow bridge to deliver native window changes without owning WindowManager

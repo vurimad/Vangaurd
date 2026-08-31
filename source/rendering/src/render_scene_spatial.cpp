@@ -22,8 +22,7 @@ namespace vanguard::rendering::spatial
             return (ux * 73856093u) ^ (uy * 19349663u) ^ (uz * 83492791u);
         }
 
-        void AddBounds(RenderProxyBounds& aggregate, const RenderProxyBounds& bounds,
-                       const bool first) noexcept
+        void AddBounds(RenderProxyBounds& aggregate, const RenderProxyBounds& bounds, const bool first) noexcept
         {
             if (first)
             {
@@ -32,21 +31,26 @@ namespace vanguard::rendering::spatial
             }
             for (u32 axis = 0; axis < 3; ++axis)
             {
-                if (bounds.minimum[axis] < aggregate.minimum[axis]) aggregate.minimum[axis] = bounds.minimum[axis];
-                if (bounds.maximum[axis] > aggregate.maximum[axis]) aggregate.maximum[axis] = bounds.maximum[axis];
+                if (bounds.minimum[axis] < aggregate.minimum[axis])
+                    aggregate.minimum[axis] = bounds.minimum[axis];
+                if (bounds.maximum[axis] > aggregate.maximum[axis])
+                    aggregate.maximum[axis] = bounds.maximum[axis];
             }
         }
 
-        [[nodiscard]] bool BoundsOverlap(const RenderProxyBounds& left,
-                                         const RenderProxyBounds& right) noexcept
+        [[nodiscard]] bool BoundsOverlap(const RenderProxyBounds& left, const RenderProxyBounds& right) noexcept
         {
-            return left.minimum[0] <= right.maximum[0] && left.maximum[0] >= right.minimum[0] &&
-                   left.minimum[1] <= right.maximum[1] && left.maximum[1] >= right.minimum[1] &&
-                   left.minimum[2] <= right.maximum[2] && left.maximum[2] >= right.minimum[2];
+            return left.minimum[0] <= right.maximum[0] && left.maximum[0] >= right.minimum[0] && left.minimum[1] <= right.maximum[1] &&
+                   left.maximum[1] >= right.minimum[1] && left.minimum[2] <= right.maximum[2] && left.maximum[2] >= right.minimum[2];
         }
 
-        [[nodiscard]] bool BoundsIntersectsFrustum(const RenderProxyBounds& bounds,
-                                                   const VisibilityFrustum& frustum) noexcept
+        [[nodiscard]] bool BoundsContains(const RenderProxyBounds& outer, const RenderProxyBounds& inner) noexcept
+        {
+            return outer.minimum[0] <= inner.minimum[0] && outer.maximum[0] >= inner.maximum[0] && outer.minimum[1] <= inner.minimum[1] &&
+                   outer.maximum[1] >= inner.maximum[1] && outer.minimum[2] <= inner.minimum[2] && outer.maximum[2] >= inner.maximum[2];
+        }
+
+        [[nodiscard]] bool BoundsIntersectsFrustum(const RenderProxyBounds& bounds, const VisibilityFrustum& frustum) noexcept
         {
             for (u32 planeIndex = 0; planeIndex < frustum.planeCount; ++planeIndex)
             {
@@ -60,20 +64,17 @@ namespace vanguard::rendering::spatial
             return true;
         }
 
-        [[nodiscard]] bool HasAllFlags(const RenderProxyVisibilityFlags value,
-                                       const RenderProxyVisibilityFlags flags) noexcept
+        [[nodiscard]] bool HasAllFlags(const RenderProxyVisibilityFlags value, const RenderProxyVisibilityFlags flags) noexcept
         {
             return (static_cast<u32>(value) & static_cast<u32>(flags)) == static_cast<u32>(flags);
         }
 
-        [[nodiscard]] bool HasAnyFlags(const RenderProxyVisibilityFlags value,
-                                       const RenderProxyVisibilityFlags flags) noexcept
+        [[nodiscard]] bool HasAnyFlags(const RenderProxyVisibilityFlags value, const RenderProxyVisibilityFlags flags) noexcept
         {
             return (static_cast<u32>(value) & static_cast<u32>(flags)) != 0;
         }
 
-        [[nodiscard]] bool PayloadMatches(const RenderProxyPayloadKind payload,
-                                          const VisibilityQueryPayloadFilter filter) noexcept
+        [[nodiscard]] bool PayloadMatches(const RenderProxyPayloadKind payload, const VisibilityQueryPayloadFilter filter) noexcept
         {
             switch (filter)
             {
@@ -93,7 +94,8 @@ namespace vanguard::rendering::spatial
 
         void AddDelta(CounterDelta* const delta, const CounterDelta& value) noexcept
         {
-            if (delta == nullptr) return;
+            if (delta == nullptr)
+                return;
             delta->activeEntries += value.activeEntries;
             delta->dirtyCells += value.dirtyCells;
             delta->fastMoves += value.fastMoves;
@@ -102,8 +104,7 @@ namespace vanguard::rendering::spatial
             delta->outOfRangeProxies += value.outOfRangeProxies;
         }
 
-        void ComputeCellKey(const WriteIndex& index, const RenderProxyBounds& bounds,
-                             i32& x, i32& y, i32& z) noexcept
+        void ComputeCellKey(const WriteIndex& index, const RenderProxyBounds& bounds, i32& x, i32& y, i32& z) noexcept
         {
             const f64 centerX = (static_cast<f64>(bounds.minimum[0]) + bounds.maximum[0]) * 0.5;
             const f64 centerY = (static_cast<f64>(bounds.minimum[1]) + bounds.maximum[1]) * 0.5;
@@ -113,15 +114,13 @@ namespace vanguard::rendering::spatial
             z = FloorToI32((centerZ - index.config.origin[2]) / index.config.cellSize);
         }
 
-        [[nodiscard]] bool CellKeyRepresentable(const WriteIndex& index,
-                                                const RenderProxyBounds& bounds) noexcept
+        [[nodiscard]] bool CellKeyRepresentable(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept
         {
             for (u32 axis = 0; axis < 3; ++axis)
             {
                 const f64 center = (static_cast<f64>(bounds.minimum[axis]) + bounds.maximum[axis]) * 0.5;
                 const f64 coordinate = (center - index.config.origin[axis]) / index.config.cellSize;
-                if (coordinate < static_cast<f64>(std::numeric_limits<i32>::min()) ||
-                    coordinate >= static_cast<f64>(std::numeric_limits<i32>::max()))
+                if (coordinate < static_cast<f64>(std::numeric_limits<i32>::min()) || coordinate >= static_cast<f64>(std::numeric_limits<i32>::max()))
                     return false;
             }
             return true;
@@ -130,44 +129,43 @@ namespace vanguard::rendering::spatial
         void RebuildBuckets(WriteIndex& index) noexcept
         {
             u32 bucketCount = 64;
-            while (bucketCount < index.cells.Size() * 2u) bucketCount *= 2u;
+            while (bucketCount < index.activeCellIndices.Size() * 2u)
+                bucketCount *= 2u;
             index.buckets.Resize(bucketCount);
-            for (u32 bucket = 0; bucket < index.buckets.Size(); ++bucket) index.buckets[bucket] = -1;
-            for (u32 cellIndex = 0; cellIndex < index.cells.Size(); ++cellIndex)
+            for (u32 bucket = 0; bucket < index.buckets.Size(); ++bucket)
+                index.buckets[bucket] = -1;
+            for (const u32 cellIndex : index.activeCellIndices)
             {
                 Cell& cell = index.cells[cellIndex];
-                if (!cell.allocated)
-                {
-                    cell.nextInBucket = -1;
-                    continue;
-                }
                 const u32 bucket = HashCellKey(cell.x, cell.y, cell.z) & (index.buckets.Size() - 1u);
                 cell.nextInBucket = index.buckets[bucket];
                 index.buckets[bucket] = static_cast<i32>(cellIndex);
             }
         }
 
-        [[nodiscard]] u32 FindCell(const WriteIndex& index,
-                                   const i32 x, const i32 y, const i32 z) noexcept
+        [[nodiscard]] u32 FindCell(const WriteIndex& index, const i32 x, const i32 y, const i32 z) noexcept
         {
-            if (index.buckets.Size() == 0) return ~u32{0};
+            if (index.buckets.Size() == 0)
+                return ~u32{0};
             const u32 bucket = HashCellKey(x, y, z) & (index.buckets.Size() - 1u);
             i32 cellIndex = index.buckets[bucket];
             while (cellIndex >= 0)
             {
                 const Cell& cell = index.cells[static_cast<u32>(cellIndex)];
-                if (cell.x == x && cell.y == y && cell.z == z) return static_cast<u32>(cellIndex);
+                if (cell.x == x && cell.y == y && cell.z == z)
+                    return static_cast<u32>(cellIndex);
                 cellIndex = cell.nextInBucket;
             }
             return ~u32{0};
         }
 
-        [[nodiscard]] u32 FindOrCreateCell(WriteIndex& index,
-                                            const i32 x, const i32 y, const i32 z) noexcept
+        [[nodiscard]] u32 FindOrCreateCell(WriteIndex& index, const i32 x, const i32 y, const i32 z) noexcept
         {
             u32 cellIndex = FindCell(index, x, y, z);
-            if (cellIndex != ~u32{0}) return cellIndex;
-            if (index.buckets.Size() == 0) RebuildBuckets(index);
+            if (cellIndex != ~u32{0})
+                return cellIndex;
+            if (index.buckets.Size() == 0)
+                RebuildBuckets(index);
             if (index.freeCells.Size() != 0)
             {
                 cellIndex = index.freeCells[index.freeCells.Size() - 1u];
@@ -185,8 +183,10 @@ namespace vanguard::rendering::spatial
             cell.allocated = true;
             cell.occupied = false;
             cell.dirty = false;
+            cell.activeIndex = index.activeCellIndices.Size();
             cell.aggregate = {};
             cell.proxies.Clear();
+            index.activeCellIndices.PushBack(cellIndex);
             ++index.stats.cells;
             if (index.stats.cells * 2u > index.buckets.Size())
             {
@@ -219,8 +219,15 @@ namespace vanguard::rendering::spatial
             {
                 cell.dirty = false;
                 --index.stats.dirtyCells;
-                if (delta != nullptr) --delta->dirtyCells;
+                if (delta != nullptr)
+                    --delta->dirtyCells;
             }
+            const u32 lastActiveIndex = index.activeCellIndices.Size() - 1u;
+            const u32 movedCellIndex = index.activeCellIndices[lastActiveIndex];
+            index.activeCellIndices[cell.activeIndex] = movedCellIndex;
+            index.cells[movedCellIndex].activeIndex = cell.activeIndex;
+            index.activeCellIndices.PopBack();
+            cell.activeIndex = ~u32{0};
             cell.allocated = false;
             cell.occupied = false;
             cell.nextInBucket = -1;
@@ -230,42 +237,30 @@ namespace vanguard::rendering::spatial
             --index.stats.cells;
         }
 
-        void MarkCellDirty(WriteIndex& index, Cell& cell, CounterDelta* const delta) noexcept
+        void MarkCellDirty(WriteIndex& index, const u32 cellIndex, CounterDelta* const delta) noexcept
         {
-            if (cell.dirty) return;
+            Cell& cell = index.cells[cellIndex];
+            if (cell.dirty)
+                return;
             cell.dirty = true;
+            index.dirtyCellIndices.PushBack(cellIndex);
             ++index.stats.dirtyCells;
-            if (delta != nullptr) ++delta->dirtyCells;
+            if (delta != nullptr)
+                ++delta->dirtyCells;
         }
 
-        [[nodiscard]] const RenderProxySnapshot* ResolvePublishedProxy(
-            const containers::DynamicArray<u32>& proxyLookup,
-            const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-            const RenderProxyHandle proxy) noexcept
-        {
-            if (proxy.index >= proxyLookup.Size()) return nullptr;
-            const u32 publishedIndex = proxyLookup[proxy.index];
-            if (publishedIndex >= publishedProxies.Size()) return nullptr;
-            const RenderProxySnapshot& snapshot = publishedProxies[publishedIndex];
-            return snapshot.handle == proxy ? &snapshot : nullptr;
-        }
     } // namespace
 
-    Cell::Cell() noexcept
-        : proxies(memory::pools::Rendering::GetInstance())
-    {
-    }
+    Cell::Cell() noexcept : proxies(memory::pools::Rendering::GetInstance()) {}
 
     WriteIndex::WriteIndex() noexcept
-        : cells(memory::pools::Rendering::GetInstance()),
-          buckets(memory::pools::Rendering::GetInstance()),
-          freeCells(memory::pools::Rendering::GetInstance()),
+        : cells(memory::pools::Rendering::GetInstance()), buckets(memory::pools::Rendering::GetInstance()), freeCells(memory::pools::Rendering::GetInstance()),
+          activeCellIndices(memory::pools::Rendering::GetInstance()), dirtyCellIndices(memory::pools::Rendering::GetInstance()),
           unindexedProxies(memory::pools::Rendering::GetInstance())
     {
     }
 
-    void Reset(WriteIndex& index, const SpatialWriteIndexConfig& config,
-               CounterDelta* const delta) noexcept
+    void Reset(WriteIndex& index, const SpatialWriteIndexConfig& config, CounterDelta* const delta) noexcept
     {
         if (delta != nullptr)
         {
@@ -278,39 +273,47 @@ namespace vanguard::rendering::spatial
         index.cells.Clear();
         index.buckets.Clear();
         index.freeCells.Clear();
+        index.activeCellIndices.Clear();
+        index.dirtyCellIndices.Clear();
         index.unindexedProxies.Clear();
         index.buckets.Resize(64);
-        for (u32 bucket = 0; bucket < index.buckets.Size(); ++bucket) index.buckets[bucket] = -1;
+        for (u32 bucket = 0; bucket < index.buckets.Size(); ++bucket)
+            index.buckets[bucket] = -1;
     }
 
     bool BoundsInFiniteExtent(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept
     {
-        if (!index.config.HasFiniteExtent()) return true;
+        if (!index.config.HasFiniteExtent())
+            return true;
         for (u32 axis = 0; axis < 3; ++axis)
         {
             const f32 min = index.config.origin[axis];
             const f32 max = min + static_cast<f32>(index.config.cellsPerAxis[axis]) * index.config.cellSize;
-            if (bounds.minimum[axis] < min || bounds.maximum[axis] > max) return false;
+            if (bounds.minimum[axis] < min || bounds.maximum[axis] > max)
+                return false;
         }
         return true;
     }
 
     bool BoundsAccepted(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept
     {
-        if (!index.stats.valid) return false;
-        if (BoundsInFiniteExtent(index, bounds) && CellKeyRepresentable(index, bounds)) return true;
+        if (!index.stats.valid)
+            return false;
+        if (BoundsInFiniteExtent(index, bounds) && CellKeyRepresentable(index, bounds))
+            return true;
         return index.config.outOfRangePolicy == SpatialOutOfRangePolicy::KeepUnindexed;
     }
 
-    InsertResult Insert(WriteIndex& index, const RenderProxyHandle proxy,
-                        const RenderProxyBounds& bounds, const RenderProxySpatialMode mode,
+    InsertResult Insert(WriteIndex& index, const RenderProxyHandle proxy, const RenderProxyBounds& bounds, const RenderProxySpatialMode mode,
                         EntryHandle& entry, CounterDelta* const delta) noexcept
     {
-        if (mode != RenderProxySpatialMode::Bounds) return InsertResult::KeptUnindexed;
+        if (mode != RenderProxySpatialMode::Bounds)
+            return InsertResult::KeptUnindexed;
         if (!BoundsInFiniteExtent(index, bounds) || !CellKeyRepresentable(index, bounds))
         {
             ++index.stats.outOfRangeProxies;
-            if (delta != nullptr) ++delta->outOfRangeProxies;
+            if (delta != nullptr)
+                ++delta->outOfRangeProxies;
             if (index.config.outOfRangePolicy == SpatialOutOfRangePolicy::RejectProxy)
             {
                 entry = {};
@@ -322,7 +325,8 @@ namespace vanguard::rendering::spatial
             index.unindexedProxies.PushBack(proxy);
             ++index.stats.activeEntries;
             ++index.stats.insertedEntries;
-            if (delta != nullptr) ++delta->activeEntries;
+            if (delta != nullptr)
+                ++delta->activeEntries;
             return InsertResult::KeptUnindexed;
         }
         i32 x = 0;
@@ -335,26 +339,29 @@ namespace vanguard::rendering::spatial
         entry.objectIndex = cell.proxies.Size();
         entry.unindexed = false;
         cell.proxies.PushBack(proxy);
+        AddBounds(cell.aggregate, bounds, cell.proxies.Size() == 1u);
         if (!cell.occupied)
         {
             cell.occupied = true;
             ++index.stats.occupiedCells;
         }
-        MarkCellDirty(index, cell, delta);
         ++index.stats.activeEntries;
         ++index.stats.insertedEntries;
-        if (delta != nullptr) ++delta->activeEntries;
+        if (delta != nullptr)
+            ++delta->activeEntries;
         return InsertResult::Inserted;
     }
 
-    void Remove(WriteIndex& index, EntryHandle& entry, RemoveResult* const result,
-                CounterDelta* const delta) noexcept
+    void Remove(WriteIndex& index, EntryHandle& entry, RemoveResult* const result, CounterDelta* const delta) noexcept
     {
-        if (result != nullptr) *result = {};
-        if (!entry.IsValid()) return;
+        if (result != nullptr)
+            *result = {};
+        if (!entry.IsValid())
+            return;
         if (entry.unindexed)
         {
-            if (entry.objectIndex >= index.unindexedProxies.Size()) return;
+            if (entry.objectIndex >= index.unindexedProxies.Size())
+                return;
             const u32 removedIndex = entry.objectIndex;
             const u32 lastIndex = index.unindexedProxies.Size() - 1u;
             const RenderProxyHandle moved = index.unindexedProxies[lastIndex];
@@ -369,10 +376,12 @@ namespace vanguard::rendering::spatial
             entry = {};
             --index.stats.activeEntries;
             ++index.stats.removedEntries;
-            if (delta != nullptr) --delta->activeEntries;
+            if (delta != nullptr)
+                --delta->activeEntries;
             return;
         }
-        if (entry.cellIndex >= index.cells.Size()) return;
+        if (entry.cellIndex >= index.cells.Size())
+            return;
         Cell& cell = index.cells[entry.cellIndex];
         if (entry.objectIndex < cell.proxies.Size())
         {
@@ -396,20 +405,20 @@ namespace vanguard::rendering::spatial
         }
         else
         {
-            MarkCellDirty(index, cell, delta);
+            MarkCellDirty(index, entry.cellIndex, delta);
         }
         entry = {};
         --index.stats.activeEntries;
         ++index.stats.removedEntries;
-        if (delta != nullptr) --delta->activeEntries;
+        if (delta != nullptr)
+            --delta->activeEntries;
     }
 
-    void Move(WriteIndex& index, const RenderProxyHandle proxy,
-              const RenderProxyBounds& oldBounds, const RenderProxyBounds& newBounds,
-              const RenderProxySpatialMode mode, EntryHandle& entry,
-              RemoveResult* const result, CounterDelta* const delta) noexcept
+    void Move(WriteIndex& index, const RenderProxyHandle proxy, const RenderProxyBounds& oldBounds, const RenderProxyBounds& newBounds,
+              const RenderProxySpatialMode mode, EntryHandle& entry, RemoveResult* const result, CounterDelta* const delta) noexcept
     {
-        if (result != nullptr) *result = {};
+        if (result != nullptr)
+            *result = {};
         if (mode != RenderProxySpatialMode::Bounds)
         {
             Remove(index, entry, result, delta);
@@ -419,7 +428,8 @@ namespace vanguard::rendering::spatial
         {
             if (index.config.outOfRangePolicy == SpatialOutOfRangePolicy::KeepUnindexed)
             {
-                if (entry.unindexed) return;
+                if (entry.unindexed)
+                    return;
                 CounterDelta structuralDelta;
                 Remove(index, entry, result, &structuralDelta);
                 static_cast<void>(Insert(index, proxy, newBounds, mode, entry, &structuralDelta));
@@ -429,7 +439,8 @@ namespace vanguard::rendering::spatial
                 return;
             }
             ++index.stats.outOfRangeProxies;
-            if (delta != nullptr) ++delta->outOfRangeProxies;
+            if (delta != nullptr)
+                ++delta->outOfRangeProxies;
             Remove(index, entry, result, delta);
             return;
         }
@@ -458,9 +469,11 @@ namespace vanguard::rendering::spatial
         ComputeCellKey(index, newBounds, newX, newY, newZ);
         if (oldX == newX && oldY == newY && oldZ == newZ)
         {
-            if (entry.cellIndex < index.cells.Size()) MarkCellDirty(index, index.cells[entry.cellIndex], delta);
+            if (entry.cellIndex < index.cells.Size())
+                MarkCellDirty(index, entry.cellIndex, delta);
             ++index.stats.fastMoves;
-            if (delta != nullptr) ++delta->fastMoves;
+            if (delta != nullptr)
+                ++delta->fastMoves;
             return;
         }
         CounterDelta structuralDelta;
@@ -471,22 +484,45 @@ namespace vanguard::rendering::spatial
         AddDelta(delta, structuralDelta);
     }
 
-    void Repair(WriteIndex& index, void* const userData,
-                const ResolveProxyBoundsFunction resolveBounds,
-                CounterDelta* const delta) noexcept
+    bool QuickConditionalMove(const WriteIndex& index, const EntryHandle& entry, const RenderProxyBounds& newBounds) noexcept
     {
-        if (resolveBounds == nullptr) return;
-        for (u32 cellIndex = 0; cellIndex < index.cells.Size(); ++cellIndex)
+        if (!entry.IsValid() || entry.unindexed || entry.cellIndex >= index.cells.Size())
+            return true;
+        const Cell& cell = index.cells[entry.cellIndex];
+        if (!cell.allocated || entry.objectIndex >= cell.proxies.Size())
+            return true;
+
+        i32 x = 0;
+        i32 y = 0;
+        i32 z = 0;
+        ComputeCellKey(index, newBounds, x, y, z);
+        if (cell.x != x || cell.y != y || cell.z != z)
+            return true;
+
+        // The aggregate is intentionally conservative between repair boundaries. A proxy-local
+        // bounds write is safe while it remains covered; expanding it requires serialized movement.
+        return !BoundsContains(cell.aggregate, newBounds);
+    }
+
+    void Repair(WriteIndex& index, void* const userData, const ResolveProxyBoundsFunction resolveBounds, CounterDelta* const delta) noexcept
+    {
+        if (resolveBounds == nullptr)
+            return;
+        for (u32 dirtyIndex = 0; dirtyIndex < index.dirtyCellIndices.Size(); ++dirtyIndex)
         {
+            const u32 cellIndex = index.dirtyCellIndices[dirtyIndex];
+            if (cellIndex >= index.cells.Size())
+                continue;
             Cell& cell = index.cells[cellIndex];
-            if (!cell.allocated) continue;
-            if (!cell.dirty) continue;
+            if (!cell.allocated || !cell.dirty)
+                continue;
             RenderProxyBounds aggregate;
             bool first = true;
             for (u32 proxyIndex = 0; proxyIndex < cell.proxies.Size(); ++proxyIndex)
             {
                 RenderProxyBounds bounds;
-                if (!resolveBounds(userData, cell.proxies[proxyIndex], bounds)) continue;
+                if (!resolveBounds(userData, cell.proxies[proxyIndex], bounds))
+                    continue;
                 AddBounds(aggregate, bounds, first);
                 first = false;
             }
@@ -500,10 +536,10 @@ namespace vanguard::rendering::spatial
                 ++delta->repairedCells;
             }
         }
+        index.dirtyCellIndices.Clear();
     }
 
-    bool Validate(const WriteIndex& index, void* const userData,
-                  const ValidateProxyEntryFunction validateProxy,
+    bool Validate(const WriteIndex& index, void* const userData, const ValidateProxyEntryFunction validateProxy,
                   SpatialWriteIndexStats* const outStats) noexcept
     {
         SpatialWriteIndexStats copy = index.stats;
@@ -512,31 +548,41 @@ namespace vanguard::rendering::spatial
         u32 allocatedCells = 0;
         u32 occupiedCells = 0;
         u32 dirtyCells = 0;
-        if (validateProxy == nullptr) return false;
+        if (validateProxy == nullptr)
+            return false;
         for (u32 cellIndex = 0; cellIndex < index.cells.Size(); ++cellIndex)
         {
             const Cell& cell = index.cells[cellIndex];
             if (!cell.allocated)
             {
-                if (cell.proxies.Size() != 0 || cell.dirty || cell.occupied) return false;
+                if (cell.proxies.Size() != 0 || cell.dirty || cell.occupied || cell.activeIndex != ~u32{0})
+                    return false;
                 continue;
             }
+            if (cell.activeIndex >= index.activeCellIndices.Size() || index.activeCellIndices[cell.activeIndex] != cellIndex)
+                return false;
             ++allocatedCells;
-            if (cell.dirty) ++dirtyCells;
-            if (cell.proxies.Size() != 0) ++occupiedCells;
+            if (cell.dirty)
+                ++dirtyCells;
+            if (cell.proxies.Size() != 0)
+                ++occupiedCells;
             for (u32 objectIndex = 0; objectIndex < cell.proxies.Size(); ++objectIndex)
             {
                 EntryHandle entry;
                 RenderProxyBounds bounds;
                 const RenderProxyHandle proxy = cell.proxies[objectIndex];
-                if (!validateProxy(userData, proxy, entry, bounds)) return false;
-                if (entry.cellIndex != cellIndex || entry.objectIndex != objectIndex) return false;
-                if (!BoundsInFiniteExtent(index, bounds)) return false;
+                if (!validateProxy(userData, proxy, entry, bounds))
+                    return false;
+                if (entry.cellIndex != cellIndex || entry.objectIndex != objectIndex)
+                    return false;
+                if (!BoundsInFiniteExtent(index, bounds))
+                    return false;
                 i32 x = 0;
                 i32 y = 0;
                 i32 z = 0;
                 ComputeCellKey(index, bounds, x, y, z);
-                if (cell.x != x || cell.y != y || cell.z != z) return false;
+                if (cell.x != x || cell.y != y || cell.z != z)
+                    return false;
                 ++countedEntries;
             }
         }
@@ -545,76 +591,38 @@ namespace vanguard::rendering::spatial
         {
             EntryHandle entry;
             RenderProxyBounds bounds;
-            if (!validateProxy(userData, index.unindexedProxies[objectIndex], entry, bounds)) return false;
-            if (!entry.unindexed || entry.objectIndex != objectIndex) return false;
-            if (BoundsInFiniteExtent(index, bounds) && CellKeyRepresentable(index, bounds)) return false;
+            if (!validateProxy(userData, index.unindexedProxies[objectIndex], entry, bounds))
+                return false;
+            if (!entry.unindexed || entry.objectIndex != objectIndex)
+                return false;
+            if (BoundsInFiniteExtent(index, bounds) && CellKeyRepresentable(index, bounds))
+                return false;
         }
         copy.activeEntries = countedEntries;
         copy.cells = index.stats.cells;
         copy.occupiedCells = occupiedCells;
         copy.dirtyCells = dirtyCells;
-        if (outStats != nullptr) *outStats = copy;
-        return countedEntries == index.stats.activeEntries &&
-               allocatedCells == index.stats.cells &&
-               occupiedCells == index.stats.occupiedCells &&
-               dirtyCells == index.stats.dirtyCells;
+        if (outStats != nullptr)
+            *outStats = copy;
+        return countedEntries == index.stats.activeEntries && allocatedCells == index.stats.cells && allocatedCells == index.activeCellIndices.Size() &&
+               occupiedCells == index.stats.occupiedCells && dirtyCells == index.stats.dirtyCells;
     }
 
-    void PublishCells(const WriteIndex& index, const containers::DynamicArray<u32>& proxyLookup,
-                       const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-                       containers::DynamicArray<CellSnapshot>& cells,
-                       containers::DynamicArray<RenderProxyHandle>& cellProxies) noexcept
-    {
-        cells.Clear();
-        cellProxies.Clear();
-        for (u32 cellIndex = 0; cellIndex < index.cells.Size(); ++cellIndex)
-        {
-            const Cell& cell = index.cells[cellIndex];
-            if (!cell.allocated || cell.proxies.Size() == 0) continue;
-            cells.PushBack({});
-            CellSnapshot& snapshot = cells[cells.Size() - 1u];
-            snapshot.x = cell.x;
-            snapshot.y = cell.y;
-            snapshot.z = cell.z;
-            snapshot.aggregate = cell.aggregate;
-            snapshot.firstProxy = cellProxies.Size();
-            for (u32 proxyIndex = 0; proxyIndex < cell.proxies.Size(); ++proxyIndex)
-            {
-                const RenderProxyHandle proxy = cell.proxies[proxyIndex];
-                if (ResolvePublishedProxy(proxyLookup, publishedProxies, proxy) != nullptr) cellProxies.PushBack(proxy);
-            }
-            snapshot.proxyCount = cellProxies.Size() - snapshot.firstProxy;
-        }
-        if (index.unindexedProxies.Size() != 0)
-        {
-            cells.PushBack({});
-            CellSnapshot& snapshot = cells[cells.Size() - 1u];
-            snapshot.firstProxy = cellProxies.Size();
-            snapshot.alwaysTraverse = true;
-            for (u32 proxyIndex = 0; proxyIndex < index.unindexedProxies.Size(); ++proxyIndex)
-            {
-                const RenderProxyHandle proxy = index.unindexedProxies[proxyIndex];
-                if (ResolvePublishedProxy(proxyLookup, publishedProxies, proxy) != nullptr) cellProxies.PushBack(proxy);
-            }
-            snapshot.proxyCount = cellProxies.Size() - snapshot.firstProxy;
-        }
-    }
-
-    void BuildBatches(const u32 cellCount, const u32 targetCellsPerBatch,
-                      containers::DynamicArray<VisibilityQueryBatch>& batches,
+    void BuildBatches(const u32 cellCount, const u32 targetCellsPerBatch, containers::DynamicArray<VisibilityQueryBatch>& batches,
                       VisibilityQueryPlan& plan) noexcept
     {
         batches.Clear();
         plan.cellCount = cellCount;
         plan.batchSize = targetCellsPerBatch != 0 ? targetCellsPerBatch : cellCount;
-        if (plan.batchSize == 0) plan.batchSize = 1;
+        if (plan.batchSize == 0)
+            plan.batchSize = 1;
         for (u32 firstCell = 0; firstCell < cellCount;)
         {
             const u32 remaining = cellCount - firstCell;
             const u32 count = remaining < plan.batchSize ? remaining : plan.batchSize;
             VisibilityQueryBatch batch;
             batch.scene = plan.scene;
-            batch.version = plan.version;
+            batch.mutationEpoch = plan.mutationEpoch;
             batch.firstCell = firstCell;
             batch.cellCount = count;
             batches.PushBack(batch);
@@ -623,72 +631,246 @@ namespace vanguard::rendering::spatial
         plan.batchCount = batches.Size();
     }
 
-    void CollectRange(const VisibilityQueryRequest& request,
-                       const containers::DynamicArray<CellSnapshot>& cells,
-                       const containers::DynamicArray<RenderProxyHandle>& cellProxies,
-                       const containers::DynamicArray<u32>& proxyLookup,
-                      const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-                      const VisibilityQueryBatch batch,
-                      containers::DynamicArray<RenderProxyHandle>& proxies,
-                      VisibilityQueryResult& result) noexcept
+    void BuildLiveBatches(const WriteIndex& index, const RenderSceneHandle scene, const u64 mutationEpoch, const u32 targetCellsPerBatch,
+                          containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan) noexcept
+    {
+        plan = {};
+        plan.scene = scene;
+        plan.mutationEpoch = mutationEpoch;
+        const u32 traversalSlots = index.activeCellIndices.Size() + (index.unindexedProxies.Size() != 0 ? 1u : 0u);
+        BuildBatches(traversalSlots, targetCellsPerBatch, batches, plan);
+    }
+
+    bool BuildGpuCandidateBatches(const WriteIndex& index, const RenderSceneHandle scene, const u64 mutationEpoch, const u64 planSerial,
+                                  const u32 targetCandidatesPerBatch, const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
+                                  RenderSceneGpuCandidatePlan& plan) noexcept
+    {
+        plan = {};
+        plan.scene = scene;
+        plan.mutationEpoch = mutationEpoch;
+        plan.serial = planSerial;
+        if (targetCandidatesPerBatch == 0)
+            return false;
+
+        u32 traversalCandidateCount = index.unindexedProxies.Size();
+        for (const u32 cellIndex : index.activeCellIndices)
+            traversalCandidateCount += index.cells[cellIndex].proxies.Size();
+        const u32 requiredBatches = traversalCandidateCount / targetCandidatesPerBatch + (traversalCandidateCount % targetCandidatesPerBatch != 0 ? 1u : 0u);
+        plan.traversalCandidateCount = traversalCandidateCount;
+        plan.requiredCandidateCapacity = traversalCandidateCount;
+        plan.batchCount = requiredBatches;
+        if (requiredBatches > batchStorage.Size())
+            return false;
+
+        const u32 traversalSourceCount = index.activeCellIndices.Size() + (index.unindexedProxies.Empty() ? 0u : 1u);
+        u32 traversal = 0;
+        u32 firstProxy = 0;
+        u32 destinationOffset = 0;
+        for (u32 batchIndex = 0; batchIndex < requiredBatches; ++batchIndex)
+        {
+            const u32 remainingCandidates = traversalCandidateCount - destinationOffset;
+            const u32 batchCandidateCount = remainingCandidates < targetCandidatesPerBatch ? remainingCandidates : targetCandidatesPerBatch;
+            batchStorage[batchIndex] = {scene, mutationEpoch, planSerial, traversal, firstProxy, batchCandidateCount, destinationOffset};
+            plan.requiredWorkRangeCapacity +=
+                batchCandidateCount / GpuVisibilityThreadsPerGroup + (batchCandidateCount % GpuVisibilityThreadsPerGroup != 0 ? 1u : 0u);
+
+            u32 advance = batchCandidateCount;
+            while (advance != 0 && traversal < traversalSourceCount)
+            {
+                const containers::DynamicArray<RenderProxyHandle>& source =
+                    traversal < index.activeCellIndices.Size() ? index.cells[index.activeCellIndices[traversal]].proxies : index.unindexedProxies;
+                const u32 available = source.Size() - firstProxy;
+                const u32 count = advance < available ? advance : available;
+                firstProxy += count;
+                advance -= count;
+                if (firstProxy == source.Size())
+                {
+                    ++traversal;
+                    firstProxy = 0;
+                }
+            }
+            destinationOffset += batchCandidateCount;
+        }
+        return true;
+    }
+
+    void WriteGpuCandidateRange(const WriteIndex& index, const VisibilityQueryRequest& request, const RenderSceneGpuCandidateBatch& batch, void* const userData,
+                                const ResolveVisibilityProxyFunction resolveProxy, GpuInstanceIndex* const destination, GpuVisibilityCandidateRange& range,
+                                RenderSceneGpuCandidateBatchResult& result) noexcept
+    {
+        result = {};
+        range = {};
+        result.visibility.scene = request.scene;
+        result.visibility.mutationEpoch = request.mutationEpoch;
+        range.offset = batch.destinationOffset;
+        if (!batch.IsValid() || resolveProxy == nullptr || destination == nullptr)
+            return;
+
+        const u32 traversalSourceCount = index.activeCellIndices.Size() + (index.unindexedProxies.Empty() ? 0u : 1u);
+        u32 traversal = batch.firstTraversal;
+        u32 firstProxy = batch.firstProxy;
+        u32 remaining = batch.traversalCandidateCount;
+        while (remaining != 0 && traversal < traversalSourceCount)
+        {
+            const Cell* cell = nullptr;
+            const containers::DynamicArray<RenderProxyHandle>* source = nullptr;
+            if (traversal < index.activeCellIndices.Size())
+            {
+                cell = &index.cells[index.activeCellIndices[traversal]];
+                source = &cell->proxies;
+            }
+            else
+            {
+                source = &index.unindexedProxies;
+            }
+
+            const u32 available = source->Size() - firstProxy;
+            const u32 sourceCount = remaining < available ? remaining : available;
+            bool rejectedCell = false;
+            if (cell != nullptr && request.useBounds && !BoundsOverlap(cell->aggregate, request.bounds))
+            {
+                if (firstProxy == 0)
+                    ++result.visibility.rejectedCellsByBounds;
+                rejectedCell = true;
+            }
+            else if (cell != nullptr && request.useFrustum && !BoundsIntersectsFrustum(cell->aggregate, request.frustum))
+            {
+                if (firstProxy == 0)
+                    ++result.visibility.rejectedCellsByFrustum;
+                rejectedCell = true;
+            }
+
+            if (!rejectedCell)
+            {
+                if (firstProxy == 0)
+                    ++result.visibility.visitedCells;
+                const u32 endProxy = firstProxy + sourceCount;
+                for (u32 proxyIndex = firstProxy; proxyIndex < endProxy; ++proxyIndex)
+                {
+                    ++result.visibility.candidateProxies;
+                    VisibilityProxyReadView view;
+                    if (!resolveProxy(userData, (*source)[proxyIndex], view) || !view.IsValid())
+                        continue;
+                    if (request.useBounds && !BoundsOverlap(*view.bounds, request.bounds))
+                    {
+                        ++result.visibility.rejectedByBounds;
+                        continue;
+                    }
+                    if (request.useFrustum && !BoundsIntersectsFrustum(*view.bounds, request.frustum))
+                    {
+                        ++result.visibility.rejectedByFrustum;
+                        continue;
+                    }
+                    if ((*view.layerMask & request.layerMask) == 0)
+                    {
+                        ++result.visibility.rejectedByLayer;
+                        continue;
+                    }
+                    if ((*view.visibilityMask & request.visibilityMask) == 0 || !HasAllFlags(*view.visibility, request.requiredFlags) ||
+                        HasAnyFlags(*view.visibility, request.excludedFlags))
+                    {
+                        ++result.visibility.rejectedByVisibility;
+                        continue;
+                    }
+                    if (*view.payloadKind != RenderProxyPayloadKind::Mesh)
+                    {
+                        ++result.visibility.rejectedByPayload;
+                        continue;
+                    }
+                    if (view.gpuInstanceIndex == nullptr || *view.gpuInstanceIndex == InvalidGpuSceneIndex)
+                    {
+                        ++result.unresolvedGpuIdentities;
+                        continue;
+                    }
+                    destination[result.visibility.acceptedProxies++] = *view.gpuInstanceIndex;
+                }
+            }
+
+            remaining -= sourceCount;
+            ++traversal;
+            firstProxy = 0;
+        }
+        range.count = result.visibility.acceptedProxies;
+        result.visibility.completed = remaining == 0;
+        result.completed = remaining == 0 && result.unresolvedGpuIdentities == 0;
+    }
+
+    void CollectLiveRange(const WriteIndex& index, const VisibilityQueryRequest& request, const VisibilityQueryBatch& batch, void* const userData,
+                          const ResolveVisibilityProxyFunction resolveProxy, containers::DynamicArray<RenderProxyHandle>& proxies,
+                          VisibilityQueryResult& result) noexcept
     {
         proxies.Clear();
         result = {};
-        result.scene = request.lease.scene;
-        result.version = request.lease.version;
-        if (!batch.IsValid() || batch.firstCell >= cells.Size())
+        result.scene = request.scene;
+        result.mutationEpoch = request.mutationEpoch;
+        if (!batch.IsValid() || resolveProxy == nullptr)
         {
             result.completed = true;
             return;
         }
-        const u32 availableCells = cells.Size() - batch.firstCell;
-        const u32 endCell = batch.firstCell + (batch.cellCount < availableCells ? batch.cellCount : availableCells);
-        for (u32 cellIndex = batch.firstCell; cellIndex < endCell; ++cellIndex)
+
+        const u32 traversalSlots = index.activeCellIndices.Size() + (index.unindexedProxies.Size() != 0 ? 1u : 0u);
+        if (batch.firstCell >= traversalSlots)
         {
-            const CellSnapshot& cell = cells[cellIndex];
-            if (!cell.alwaysTraverse && request.useBounds && !BoundsOverlap(cell.aggregate, request.bounds))
+            result.completed = true;
+            return;
+        }
+        const u32 available = traversalSlots - batch.firstCell;
+        const u32 end = batch.firstCell + (batch.cellCount < available ? batch.cellCount : available);
+        for (u32 traversalIndex = batch.firstCell; traversalIndex < end; ++traversalIndex)
+        {
+            const containers::DynamicArray<RenderProxyHandle>* cellProxies = nullptr;
+            const Cell* cell = nullptr;
+            if (traversalIndex < index.activeCellIndices.Size())
             {
-                ++result.rejectedCellsByBounds;
-                continue;
+                cell = &index.cells[index.activeCellIndices[traversalIndex]];
+                if (request.useBounds && !BoundsOverlap(cell->aggregate, request.bounds))
+                {
+                    ++result.rejectedCellsByBounds;
+                    continue;
+                }
+                if (request.useFrustum && !BoundsIntersectsFrustum(cell->aggregate, request.frustum))
+                {
+                    ++result.rejectedCellsByFrustum;
+                    continue;
+                }
+                cellProxies = &cell->proxies;
             }
-            if (!cell.alwaysTraverse && request.useFrustum && !BoundsIntersectsFrustum(cell.aggregate, request.frustum))
+            else
             {
-                ++result.rejectedCellsByFrustum;
-                continue;
+                cellProxies = &index.unindexedProxies;
             }
+
             ++result.visitedCells;
-            if (cell.firstProxy > cellProxies.Size() || cell.proxyCount > cellProxies.Size() - cell.firstProxy)
-                continue;
-            const u32 proxyEnd = cell.firstProxy + cell.proxyCount;
-            for (u32 proxyIndex = cell.firstProxy; proxyIndex < proxyEnd; ++proxyIndex)
+            for (u32 proxyIndex = 0; proxyIndex < cellProxies->Size(); ++proxyIndex)
             {
                 ++result.candidateProxies;
-                const RenderProxySnapshot* const proxy =
-                    ResolvePublishedProxy(proxyLookup, publishedProxies, cellProxies[proxyIndex]);
-                if (proxy == nullptr) continue;
-                if (request.useBounds && !BoundsOverlap(proxy->bounds, request.bounds))
+                const RenderProxyHandle proxy = (*cellProxies)[proxyIndex];
+                VisibilityProxyReadView view;
+                if (!resolveProxy(userData, proxy, view) || !view.IsValid())
+                    continue;
+                if (request.useBounds && !BoundsOverlap(*view.bounds, request.bounds))
                 {
                     ++result.rejectedByBounds;
                     continue;
                 }
-                if (request.useFrustum && !BoundsIntersectsFrustum(proxy->bounds, request.frustum))
+                if (request.useFrustum && !BoundsIntersectsFrustum(*view.bounds, request.frustum))
                 {
                     ++result.rejectedByFrustum;
                     continue;
                 }
-                if ((proxy->layerMask & request.layerMask) == 0)
+                if ((*view.layerMask & request.layerMask) == 0)
                 {
                     ++result.rejectedByLayer;
                     continue;
                 }
-                if ((proxy->visibilityMask & request.visibilityMask) == 0 ||
-                    !HasAllFlags(proxy->visibility, request.requiredFlags) ||
-                    HasAnyFlags(proxy->visibility, request.excludedFlags))
+                if ((*view.visibilityMask & request.visibilityMask) == 0 || !HasAllFlags(*view.visibility, request.requiredFlags) ||
+                    HasAnyFlags(*view.visibility, request.excludedFlags))
                 {
                     ++result.rejectedByVisibility;
                     continue;
                 }
-                if (!PayloadMatches(proxy->payloadKind, request.payloadFilter))
+                if (!PayloadMatches(*view.payloadKind, request.payloadFilter))
                 {
                     ++result.rejectedByPayload;
                     continue;
@@ -698,26 +880,21 @@ namespace vanguard::rendering::spatial
                     ++result.overflowedProxies;
                     continue;
                 }
-                proxies.PushBack(proxy->handle);
+                proxies.PushBack(proxy);
                 ++result.acceptedProxies;
             }
         }
         result.completed = result.overflowedProxies == 0;
     }
 
-    void Collect(const VisibilityQueryRequest& request,
-                  const containers::DynamicArray<CellSnapshot>& cells,
-                  const containers::DynamicArray<RenderProxyHandle>& cellProxies,
-                  const containers::DynamicArray<u32>& proxyLookup,
-                 const containers::DynamicArray<RenderProxySnapshot>& publishedProxies,
-                 containers::DynamicArray<RenderProxyHandle>& proxies,
-                 VisibilityQueryResult& result) noexcept
+    void CollectLive(const WriteIndex& index, const VisibilityQueryRequest& request, void* const userData, const ResolveVisibilityProxyFunction resolveProxy,
+                     containers::DynamicArray<RenderProxyHandle>& proxies, VisibilityQueryResult& result) noexcept
     {
         VisibilityQueryBatch batch;
-        batch.scene = request.lease.scene;
-        batch.version = request.lease.version;
+        batch.scene = request.scene;
+        batch.mutationEpoch = request.mutationEpoch;
         batch.firstCell = 0;
-        batch.cellCount = cells.Size();
-        CollectRange(request, cells, cellProxies, proxyLookup, publishedProxies, batch, proxies, result);
+        batch.cellCount = index.activeCellIndices.Size() + (index.unindexedProxies.Size() != 0 ? 1u : 0u);
+        CollectLiveRange(index, request, batch, userData, resolveProxy, proxies, result);
     }
 } // namespace vanguard::rendering::spatial

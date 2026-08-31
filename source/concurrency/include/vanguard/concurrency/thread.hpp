@@ -21,7 +21,7 @@ namespace vanguard::concurrency
             return value;
         }
 
-        [[nodiscard]] static ThreadId CurrentThread() noexcept;
+        [[nodiscard]] static ThreadId GetCurrentThread() noexcept;
 
         [[nodiscard]] friend constexpr bool operator==(ThreadId lhs, ThreadId rhs) noexcept
         {

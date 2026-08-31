@@ -20,14 +20,14 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] explicit operator bool() const noexcept;
-        [[nodiscard]] pipeline_cache::State Status() const noexcept;
+        [[nodiscard]] pipeline_cache::State GetStatus() const noexcept;
         [[nodiscard]] bool HasFinished() const noexcept;
         [[nodiscard]] bool HasSucceeded() const noexcept;
         void Wait() const noexcept;
         [[nodiscard]] bool TryWait(u32 timeoutMilliseconds = 0) const noexcept;
-        [[nodiscard]] rhi::PipelineRef Pipeline() const noexcept;
-        [[nodiscard]] pipeline_cache::FailureEvidence Error() const noexcept;
-        [[nodiscard]] u64 Generation() const noexcept;
+        [[nodiscard]] rhi::PipelineRef GetPipeline() const noexcept;
+        [[nodiscard]] pipeline_cache::FailureEvidence GetError() const noexcept;
+        [[nodiscard]] u64 GetGeneration() const noexcept;
         void Reset() noexcept;
 
     private:
@@ -50,12 +50,11 @@ namespace vanguard::rendering
         [[nodiscard]] pipeline_cache::Result RequestGraphics(const crypto::Digest256& concreteKey, const rhi::GraphicsPipelineDesc& desc,
                                                              PipelineRequest& output,
                                                              pipeline_cache::Priority priority = pipeline_cache::Priority::Normal) noexcept;
-        [[nodiscard]] pipeline_cache::Result RequestCompute(const crypto::Digest256& concreteKey, const rhi::ComputePipelineDesc& desc,
-                                                            PipelineRequest& output,
+        [[nodiscard]] pipeline_cache::Result RequestCompute(const crypto::Digest256& concreteKey, const rhi::ComputePipelineDesc& desc, PipelineRequest& output,
                                                             pipeline_cache::Priority priority = pipeline_cache::Priority::Normal) noexcept;
-        [[nodiscard]] pipeline_cache::Result RequestRayTracing(
-            const crypto::Digest256& concreteKey, const rhi::RayTracingPipelineDesc& desc, PipelineRequest& output,
-            pipeline_cache::Priority priority = pipeline_cache::Priority::Normal) noexcept;
+        [[nodiscard]] pipeline_cache::Result RequestRayTracing(const crypto::Digest256& concreteKey, const rhi::RayTracingPipelineDesc& desc,
+                                                               PipelineRequest& output,
+                                                               pipeline_cache::Priority priority = pipeline_cache::Priority::Normal) noexcept;
 
         [[nodiscard]] bool Invalidate(const crypto::Digest256& concreteKey) noexcept;
         [[nodiscard]] u32 InvalidateAll() noexcept;

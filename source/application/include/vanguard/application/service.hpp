@@ -27,8 +27,7 @@ namespace vanguard::application
         All = (1u << 6u) - 1u
     };
 
-    [[nodiscard]] constexpr ApplicationProfile operator|(const ApplicationProfile left,
-                                                          const ApplicationProfile right) noexcept
+    [[nodiscard]] constexpr ApplicationProfile operator|(const ApplicationProfile left, const ApplicationProfile right) noexcept
     {
         return static_cast<ApplicationProfile>(static_cast<u32>(left) | static_cast<u32>(right));
     }
@@ -126,12 +125,18 @@ namespace vanguard::application
         LifecycleResult result = LifecycleResult::Success;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr LifecycleStatus Success() noexcept { return {}; }
+        [[nodiscard]] static constexpr LifecycleStatus Success() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr LifecycleStatus Failure(const char* const message) noexcept
         {
             return {LifecycleResult::Failure, message};
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return result == LifecycleResult::Success; }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return result == LifecycleResult::Success;
+        }
     };
 
     enum class ServiceState : u8

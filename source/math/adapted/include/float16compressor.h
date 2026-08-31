@@ -115,8 +115,7 @@ public:
 
         __m128 fnosticky = _mm_and_ps(absf, mround);
         __m128 scaled = _mm_mul_ps(fnosticky, _mm_castsi128_ps(c_magic));
-        __m128 clamped =
-            _mm_min_ps(scaled, _mm_castsi128_ps(c_clamp)); // logically, we want PMINSD on "biased", but this should gen better code
+        __m128 clamped = _mm_min_ps(scaled, _mm_castsi128_ps(c_clamp)); // logically, we want PMINSD on "biased", but this should gen better code
         __m128i biased = _mm_sub_epi32(_mm_castps_si128(clamped), _mm_castps_si128(mround));
         __m128i shifted = _mm_srli_epi32(biased, 13);
         __m128i normal = _mm_and_si128(shifted, b_isnormal);

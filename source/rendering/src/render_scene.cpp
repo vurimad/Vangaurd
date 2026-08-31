@@ -1,7 +1,11 @@
 #include <vanguard/rendering/render_scene.hpp>
+#include <vanguard/rendering/render_camera.hpp>
+#include <vanguard/rendering/render_scene_gpu.hpp>
+#include <vanguard/rendering/render_scene_gpu_read.hpp>
 
 #include <vanguard/rendering/render_scene_spatial.hpp>
 
+#include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/synchronization.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -17,12 +21,12 @@ namespace vanguard::rendering
     {
         void ClearFailure(RenderSceneFailure* const failure) noexcept
         {
-            if (failure != nullptr) *failure = {};
+            if (failure != nullptr)
+                *failure = {};
         }
 
-        [[nodiscard]] bool Fail(RenderSceneFailure* const failure, const RenderSceneFailureCode code,
-                                const char* const message, const RenderSceneHandle scene = {},
-                                const RenderProxyHandle proxy = {}) noexcept
+        [[nodiscard]] bool Fail(RenderSceneFailure* const failure, const RenderSceneFailureCode code, const char* const message,
+                                const RenderSceneHandle scene = {}, const RenderProxyHandle proxy = {}) noexcept
         {
             if (failure != nullptr)
             {
@@ -49,23 +53,23 @@ namespace vanguard::rendering
             return static_cast<u32>(mode) <= static_cast<u32>(RenderProxySpatialMode::Bounds);
         }
 
-        [[nodiscard]] bool CopyName(char* const destination, const u32 capacity,
-                                    const char* const source) noexcept
+        [[nodiscard]] bool CopyName(char* const destination, const u32 capacity, const char* const source) noexcept
         {
-            if (source == nullptr || source[0] == '\0') return false;
+            if (source == nullptr || source[0] == '\0')
+                return false;
             u32 index = 0;
             while (index + 1u < capacity && source[index] != '\0')
             {
                 destination[index] = source[index];
                 ++index;
             }
-            if (source[index] != '\0') return false;
+            if (source[index] != '\0')
+                return false;
             destination[index] = '\0';
             return true;
         }
 
-        void CopyNameUnchecked(char* const destination, const u32 capacity,
-                               const char* const source) noexcept
+        void CopyNameUnchecked(char* const destination, const u32 capacity, const char* const source) noexcept
         {
             u32 index = 0;
             while (index + 1u < capacity && source[index] != '\0')
@@ -86,8 +90,7 @@ namespace vanguard::rendering
         {
             for (u32 axis = 0; axis < 3; ++axis)
             {
-                if (!std::isfinite(bounds.minimum[axis]) || !std::isfinite(bounds.maximum[axis]) ||
-                    bounds.minimum[axis] > bounds.maximum[axis])
+                if (!std::isfinite(bounds.minimum[axis]) || !std::isfinite(bounds.maximum[axis]) || bounds.minimum[axis] > bounds.maximum[axis])
                     return false;
             }
             return true;
@@ -97,27 +100,44 @@ namespace vanguard::rendering
         {
             for (u32 index = 0; index < 4; ++index)
             {
-                if (!std::isfinite(transform.row0[index]) || !std::isfinite(transform.row1[index]) ||
-                    !std::isfinite(transform.row2[index]))
+                if (!std::isfinite(transform.row0[index]) || !std::isfinite(transform.row1[index]) || !std::isfinite(transform.row2[index]))
                     return false;
             }
             return true;
         }
 
+        [[nodiscard]] bool SameTransform(const RenderProxyTransform& left, const RenderProxyTransform& right) noexcept
+        {
+            for (u32 component = 0; component < 4; ++component)
+                if (left.row0[component] != right.row0[component] || left.row1[component] != right.row1[component] ||
+                    left.row2[component] != right.row2[component])
+                    return false;
+            return true;
+        }
+
+        [[nodiscard]] bool SameBounds(const RenderProxyBounds& left, const RenderProxyBounds& right) noexcept
+        {
+            for (u32 axis = 0; axis < 3; ++axis)
+                if (left.minimum[axis] != right.minimum[axis] || left.maximum[axis] != right.maximum[axis])
+                    return false;
+            return true;
+        }
+
         [[nodiscard]] bool ValidSpatialConfig(const SpatialWriteIndexConfig& config) noexcept
         {
-            if (!std::isfinite(config.cellSize) || config.cellSize <= 0.0f) return false;
-            const bool anyExtent = config.cellsPerAxis[0] != 0 || config.cellsPerAxis[1] != 0 ||
-                                   config.cellsPerAxis[2] != 0;
-            if (anyExtent && !config.HasFiniteExtent()) return false;
+            if (!std::isfinite(config.cellSize) || config.cellSize <= 0.0f)
+                return false;
+            const bool anyExtent = config.cellsPerAxis[0] != 0 || config.cellsPerAxis[1] != 0 || config.cellsPerAxis[2] != 0;
+            if (anyExtent && !config.HasFiniteExtent())
+                return false;
             for (u32 axis = 0; axis < 3; ++axis)
             {
-                if (!std::isfinite(config.origin[axis])) return false;
+                if (!std::isfinite(config.origin[axis]))
+                    return false;
                 if (config.HasFiniteExtent())
                 {
                     const f64 extent = static_cast<f64>(config.cellsPerAxis[axis]) * config.cellSize;
-                    if (!std::isfinite(extent) ||
-                        static_cast<f64>(config.origin[axis]) + extent > std::numeric_limits<f32>::max())
+                    if (!std::isfinite(extent) || static_cast<f64>(config.origin[axis]) + extent > std::numeric_limits<f32>::max())
                         return false;
                 }
             }
@@ -126,36 +146,76 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool ValidFrustum(const VisibilityFrustum& frustum) noexcept
         {
-            if (frustum.planeCount == 0 || frustum.planeCount > MaximumVisibilityFrustumPlanes) return false;
+            if (frustum.planeCount == 0 || frustum.planeCount > MaximumVisibilityFrustumPlanes)
+                return false;
             for (u32 planeIndex = 0; planeIndex < frustum.planeCount; ++planeIndex)
             {
                 const VisibilityPlane& plane = frustum.planes[planeIndex];
-                if (!std::isfinite(plane.normal[0]) || !std::isfinite(plane.normal[1]) ||
-                    !std::isfinite(plane.normal[2]) || !std::isfinite(plane.distance))
+                if (!std::isfinite(plane.normal[0]) || !std::isfinite(plane.normal[1]) || !std::isfinite(plane.normal[2]) || !std::isfinite(plane.distance))
                     return false;
-                const f32 magnitudeSquared = plane.normal[0] * plane.normal[0] +
-                                             plane.normal[1] * plane.normal[1] +
-                                             plane.normal[2] * plane.normal[2];
-                if (!std::isfinite(magnitudeSquared) || magnitudeSquared <= 0.0f) return false;
+                const f32 magnitudeSquared = plane.normal[0] * plane.normal[0] + plane.normal[1] * plane.normal[1] + plane.normal[2] * plane.normal[2];
+                if (!std::isfinite(magnitudeSquared) || magnitudeSquared <= 0.0f)
+                    return false;
             }
             return true;
         }
 
-        [[nodiscard]] bool ValidLightProperties(const RenderLightKind kind, const f32* const color,
-                                                const f32 intensity, const f32 range,
-                                                const f32 innerCone, const f32 outerCone) noexcept
+        [[nodiscard]] bool ValidLightProperties(const RenderLightKind kind, const f32* const color, const f32 intensity, const f32 range, const f32 innerCone,
+                                                const f32 outerCone) noexcept
         {
-            if (static_cast<u32>(kind) > static_cast<u32>(RenderLightKind::Spot) ||
-                !std::isfinite(intensity) || !std::isfinite(range) || intensity < 0.0f || range < 0.0f ||
-                !std::isfinite(innerCone) || !std::isfinite(outerCone) || innerCone < 0.0f ||
-                outerCone < innerCone)
+            if (static_cast<u32>(kind) > static_cast<u32>(RenderLightKind::Spot) || !std::isfinite(intensity) || !std::isfinite(range) || intensity < 0.0f ||
+                range < 0.0f || !std::isfinite(innerCone) || !std::isfinite(outerCone) || innerCone < 0.0f || outerCone < innerCone)
                 return false;
             return std::isfinite(color[0]) && std::isfinite(color[1]) && std::isfinite(color[2]);
+        }
+
+        [[nodiscard]] bool SameResourceHandle(const resources::ResourceHandle& left, const resources::ResourceHandle& right) noexcept
+        {
+            if (left.IsValid() != right.IsValid())
+                return false;
+            return !left.IsValid() || (left.GetPath() == right.GetPath() && left.GetType() == right.GetType() && left.GetGeneration() == right.GetGeneration());
+        }
+
+        [[nodiscard]] constexpr bool HasField(const MeshProxyUpdateFields fields, const MeshProxyUpdateFields field) noexcept
+        {
+            return (fields & field) != MeshProxyUpdateFields::None;
+        }
+
+        [[nodiscard]] constexpr bool HasField(const LightProxyUpdateFields fields, const LightProxyUpdateFields field) noexcept
+        {
+            return (fields & field) != LightProxyUpdateFields::None;
+        }
+
+        [[nodiscard]] constexpr bool HasField(const DecalProxyUpdateFields fields, const DecalProxyUpdateFields field) noexcept
+        {
+            return (fields & field) != DecalProxyUpdateFields::None;
+        }
+
+        [[nodiscard]] constexpr bool ValidFields(const MeshProxyUpdateFields fields) noexcept
+        {
+            return fields != MeshProxyUpdateFields::None && (static_cast<u8>(fields) & ~static_cast<u8>(MeshProxyUpdateFields::All)) == 0;
+        }
+
+        [[nodiscard]] constexpr bool ValidFields(const LightProxyUpdateFields fields) noexcept
+        {
+            return fields != LightProxyUpdateFields::None && (static_cast<u8>(fields) & ~static_cast<u8>(LightProxyUpdateFields::All)) == 0;
+        }
+
+        [[nodiscard]] constexpr bool ValidFields(const DecalProxyUpdateFields fields) noexcept
+        {
+            return fields != DecalProxyUpdateFields::None && (static_cast<u8>(fields) & ~static_cast<u8>(DecalProxyUpdateFields::All)) == 0;
         }
 
         inline constexpr u32 MeshProxyTypeId = 1;
         inline constexpr u32 LightProxyTypeId = 2;
         inline constexpr u32 DecalProxyTypeId = 3;
+        inline constexpr u32 InvalidSlotIndex = ~u32{0};
+        inline constexpr u32 ProducerPageShift = 12;
+        inline constexpr u32 ProducerSlotsPerPage = 1u << ProducerPageShift;
+        inline constexpr u32 ProducerPageMask = ProducerSlotsPerPage - 1u;
+        inline constexpr u32 RelinkPageShift = 12;
+        inline constexpr u32 RelinkSlotsPerPage = 1u << RelinkPageShift;
+        inline constexpr u32 RelinkPageMask = RelinkSlotsPerPage - 1u;
     } // namespace
 
     struct RenderSceneManager::Impl
@@ -168,10 +228,16 @@ namespace vanguard::rendering
             u32 generation = 0;
             u32 typeId = 0;
             RenderProxyPayloadKind payloadKind = RenderProxyPayloadKind::None;
-            u32 payloadIndex = ~u32{0};
+            u32 payloadIndex = InvalidSlotIndex;
             u32 payloadGeneration = 0;
+            GpuInstanceIndex gpuInstanceIndex = InvalidGpuSceneIndex;
+            u32 nextFree = InvalidSlotIndex;
             u64 producerId = 0;
             u64 producerGeneration = 0;
+            RenderProducerHandle producer;
+            RenderContributorId contributor;
+            u32 previousProducerProxy = InvalidSlotIndex;
+            u32 nextProducerProxy = InvalidSlotIndex;
             RenderProxyTransform transform;
             RenderProxyBounds bounds;
             RenderProxySpatialMode spatialMode = RenderProxySpatialMode::None;
@@ -180,53 +246,215 @@ namespace vanguard::rendering
             u64 layerMask = 0;
             u32 visibilityMask = 0;
             u64 userDataEpoch = 0;
+            u64 teleportRevision = 0;
             u64 createdSerial = 0;
             u64 lifecycleRevision = 0;
             char debugName[MaximumRenderProxyNameBytes]{};
         };
 
-        struct ProxyMutationPacket
+        struct PendingRelinkRequest
         {
-            RenderProxyMutationKind kind = RenderProxyMutationKind::Create;
-            RenderProxyHandle proxy;
-            u64 serial = 0;
-            u64 lifecycleRevision = 0;
+            RenderProxyRelinkRequest input;
+            RenderProxyBounds oldBounds;
+            bool active = false;
+            bool structuralMove = false;
         };
 
-        struct PublishedSceneVersion
+        struct RelinkState
         {
-            PublishedSceneVersion() noexcept
-                : proxies(memory::pools::Rendering::GetInstance()),
-                  proxyLookup(memory::pools::Rendering::GetInstance()),
-                  spatialCells(memory::pools::Rendering::GetInstance()),
-                  spatialCellProxies(memory::pools::Rendering::GetInstance()),
-                  meshPayloads(memory::pools::Rendering::GetInstance()),
-                  lightPayloads(memory::pools::Rendering::GetInstance()),
-                  decalPayloads(memory::pools::Rendering::GetInstance()),
-                  meshPayloadLookup(memory::pools::Rendering::GetInstance()),
-                  lightPayloadLookup(memory::pools::Rendering::GetInstance()),
-                  decalPayloadLookup(memory::pools::Rendering::GetInstance()),
-                  readerEpochs(memory::pools::Rendering::GetInstance())
+            inline static constexpr u64 OutstandingMask = (u64{1} << 31u) - 1u;
+            inline static constexpr u64 AdmissionClosed = u64{1} << 31u;
+            inline static constexpr u32 GenerationShift = 32u;
+
+            struct ProxyRelinkMetadata
             {
+                // High 32 bits: proxy generation. Low 31 bits: outstanding requests. Bit 31: admission closed.
+                concurrency::Atomic<u64> admission{0};
+                u32 dedupStamp = 0;
+            };
+
+            enum class CloseProxyResult : u8
+            {
+                Closed,
+                Outstanding,
+                Stale
+            };
+
+            enum class AcquireProxyResult : u8
+            {
+                Acquired,
+                Closed,
+                CapacityExceeded,
+                Stale
+            };
+
+            struct ProxyRelinkPage
+            {
+                VANGUARD_USE_MEMORY_POOL(memory::pools::Rendering);
+
+                ProxyRelinkMetadata slots[RelinkSlotsPerPage];
+            };
+
+            RelinkState(const u32 capacity, const u32 maximumProxies) noexcept
+                : pendingA(memory::pools::Rendering::GetInstance()), pendingB(memory::pools::Rendering::GetInstance()),
+                  proxyPages(memory::pools::Rendering::GetInstance())
+            {
+                pendingA.Resize(capacity);
+                pendingB.Resize(capacity);
+                proxyPages.Resize((maximumProxies + RelinkPageMask) >> RelinkPageShift);
+                for (u32 index = 0; index < proxyPages.Size(); ++index)
+                    proxyPages[index] = nullptr;
             }
 
-            RenderSceneVersion version;
-            RenderSceneHandle scene;
-            u64 mutationEpoch = 0;
-            u64 lifecycleRevision = 0;
-            u32 readerCount = 0;
-            bool retired = false;
-            containers::DynamicArray<RenderProxySnapshot> proxies;
-            containers::DynamicArray<u32> proxyLookup;
-            containers::DynamicArray<spatial::CellSnapshot> spatialCells;
-            containers::DynamicArray<RenderProxyHandle> spatialCellProxies;
-            containers::DynamicArray<MeshProxySnapshot> meshPayloads;
-            containers::DynamicArray<LightProxySnapshot> lightPayloads;
-            containers::DynamicArray<DecalProxySnapshot> decalPayloads;
-            containers::DynamicArray<u32> meshPayloadLookup;
-            containers::DynamicArray<u32> lightPayloadLookup;
-            containers::DynamicArray<u32> decalPayloadLookup;
-            containers::DynamicArray<u64> readerEpochs;
+            ~RelinkState()
+            {
+                for (u32 index = 0; index < proxyPages.Size(); ++index)
+                    if (proxyPages[index] != nullptr)
+                        VANGUARD_DELETE(proxyPages[index]);
+            }
+
+            [[nodiscard]] containers::DynamicArray<PendingRelinkRequest>& Queue(const u32 index) noexcept
+            {
+                return index == 0 ? pendingA : pendingB;
+            }
+
+            [[nodiscard]] const containers::DynamicArray<PendingRelinkRequest>& Queue(const u32 index) const noexcept
+            {
+                return index == 0 ? pendingA : pendingB;
+            }
+
+            [[nodiscard]] bool MaterializeProxyPage(const u32 proxyIndex) noexcept
+            {
+                const u32 pageIndex = proxyIndex >> RelinkPageShift;
+                if (pageIndex >= proxyPages.Size())
+                    return false;
+                if (proxyPages[pageIndex] == nullptr)
+                    proxyPages[pageIndex] = VANGUARD_NEW(ProxyRelinkPage);
+                return proxyPages[pageIndex] != nullptr;
+            }
+
+            [[nodiscard]] ProxyRelinkMetadata* ResolveProxyMetadata(const u32 proxyIndex) noexcept
+            {
+                const u32 pageIndex = proxyIndex >> RelinkPageShift;
+                if (pageIndex >= proxyPages.Size() || proxyPages[pageIndex] == nullptr)
+                    return nullptr;
+                return &proxyPages[pageIndex]->slots[proxyIndex & RelinkPageMask];
+            }
+
+            [[nodiscard]] const ProxyRelinkMetadata* ResolveProxyMetadata(const u32 proxyIndex) const noexcept
+            {
+                const u32 pageIndex = proxyIndex >> RelinkPageShift;
+                if (pageIndex >= proxyPages.Size() || proxyPages[pageIndex] == nullptr)
+                    return nullptr;
+                return &proxyPages[pageIndex]->slots[proxyIndex & RelinkPageMask];
+            }
+
+            [[nodiscard]] bool InitializeProxyMetadata(const RenderProxyHandle proxy) noexcept
+            {
+                ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy.index);
+                if (metadata == nullptr || (metadata->admission.GetValue() & OutstandingMask) != 0)
+                    return false;
+                metadata->admission.SetValue(static_cast<u64>(proxy.generation) << GenerationShift);
+                metadata->dedupStamp = 0;
+                return true;
+            }
+
+            [[nodiscard]] ProxyRelinkMetadata* ResolveProxyMetadata(const RenderProxyHandle proxy) noexcept
+            {
+                ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy.index);
+                return metadata != nullptr && static_cast<u32>(metadata->admission.GetValue() >> GenerationShift) == proxy.generation ? metadata : nullptr;
+            }
+
+            [[nodiscard]] const ProxyRelinkMetadata* ResolveProxyMetadata(const RenderProxyHandle proxy) const noexcept
+            {
+                const ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy.index);
+                return metadata != nullptr && static_cast<u32>(metadata->admission.GetValue() >> GenerationShift) == proxy.generation ? metadata : nullptr;
+            }
+
+            [[nodiscard]] AcquireProxyResult AcquireOutstanding(const RenderProxyHandle proxy, bool& alreadyOutstanding) noexcept
+            {
+                alreadyOutstanding = false;
+                ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy.index);
+                if (metadata == nullptr)
+                    return AcquireProxyResult::Stale;
+                u64 admission = metadata->admission.GetValue();
+                for (;;)
+                {
+                    if (static_cast<u32>(admission >> GenerationShift) != proxy.generation)
+                        return AcquireProxyResult::Stale;
+                    if ((admission & AdmissionClosed) != 0)
+                        return AcquireProxyResult::Closed;
+                    if ((admission & OutstandingMask) == OutstandingMask)
+                        return AcquireProxyResult::CapacityExceeded;
+                    const u64 observed = metadata->admission.CompareExchange(admission + 1u, admission);
+                    if (observed == admission)
+                    {
+                        alreadyOutstanding = (admission & OutstandingMask) != 0;
+                        return AcquireProxyResult::Acquired;
+                    }
+                    admission = observed;
+                }
+            }
+
+            void ReleaseOutstanding(const RenderProxyHandle proxy) noexcept
+            {
+                ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy);
+                if (metadata != nullptr)
+                    static_cast<void>(metadata->admission.PostDecrement());
+            }
+
+            [[nodiscard]] CloseProxyResult CloseProxy(const RenderProxyHandle proxy) noexcept
+            {
+                ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy.index);
+                if (metadata == nullptr)
+                    return CloseProxyResult::Stale;
+                u64 admission = metadata->admission.GetValue();
+                for (;;)
+                {
+                    if (static_cast<u32>(admission >> GenerationShift) != proxy.generation)
+                        return CloseProxyResult::Stale;
+                    if ((admission & OutstandingMask) != 0)
+                        return CloseProxyResult::Outstanding;
+                    if ((admission & AdmissionClosed) != 0)
+                        return CloseProxyResult::Closed;
+                    const u64 observed = metadata->admission.CompareExchange(admission | AdmissionClosed, admission);
+                    if (observed == admission)
+                        return CloseProxyResult::Closed;
+                    admission = observed;
+                }
+            }
+
+            void ReopenProxy(const RenderProxyHandle proxy) noexcept
+            {
+                ProxyRelinkMetadata* const metadata = ResolveProxyMetadata(proxy);
+                if (metadata != nullptr)
+                    static_cast<void>(metadata->admission.And(~AdmissionClosed));
+            }
+
+            void ClearDedupStamps() noexcept
+            {
+                for (u32 pageIndex = 0; pageIndex < proxyPages.Size(); ++pageIndex)
+                    if (proxyPages[pageIndex] != nullptr)
+                        for (u32 index = 0; index < RelinkSlotsPerPage; ++index)
+                            proxyPages[pageIndex]->slots[index].dedupStamp = 0;
+            }
+
+            containers::DynamicArray<PendingRelinkRequest> pendingA;
+            containers::DynamicArray<PendingRelinkRequest> pendingB;
+            containers::DynamicArray<ProxyRelinkPage*> proxyPages;
+            concurrency::RWSpinLock pendingIndexLock;
+            concurrency::Atomic<u32> pendingCount{0};
+            u32 pendingIndex = 0;
+            u32 processIndex = 0;
+            u32 processCount = 0;
+            u32 uniqueCount = 0;
+            u32 structuralMoveCount = 0;
+            u32 dedupStamp = 0;
+            u64 lastPreparedTick = ~u64{0};
+            u64 candidateSerial = 0;
+            bool prepared = false;
+            concurrency::Atomic<bool> dispatched{false};
+            concurrency::Atomic<bool> candidateProduction{false};
         };
 
         struct MeshPayloadSlot
@@ -234,6 +462,7 @@ namespace vanguard::rendering
             RenderProxyState state = RenderProxyState::Vacant;
             RenderProxyHandle proxy;
             u32 generation = 0;
+            u32 nextFree = InvalidSlotIndex;
             resources::ResourceReference mesh;
             resources::ResourceReference material;
             resources::ResourceHandle meshHandle;
@@ -247,6 +476,7 @@ namespace vanguard::rendering
             RenderProxyState state = RenderProxyState::Vacant;
             RenderProxyHandle proxy;
             u32 generation = 0;
+            u32 nextFree = InvalidSlotIndex;
             RenderLightKind kind = RenderLightKind::Point;
             f32 color[3]{};
             f32 intensity = 0.0f;
@@ -261,6 +491,7 @@ namespace vanguard::rendering
             RenderProxyState state = RenderProxyState::Vacant;
             RenderProxyHandle proxy;
             u32 generation = 0;
+            u32 nextFree = InvalidSlotIndex;
             resources::ResourceReference material;
             resources::ResourceHandle materialHandle;
             f32 extents[3]{};
@@ -268,15 +499,25 @@ namespace vanguard::rendering
             u32 sortKey = 0;
         };
 
+        struct ProducerSlot
+        {
+            u32 generation = 0;
+            u32 firstProxy = InvalidSlotIndex;
+            u32 proxyCount = 0;
+            bool occupied = false;
+        };
+
+        struct ProducerPage
+        {
+            ProducerSlot slots[ProducerSlotsPerPage]{};
+        };
+
         struct SceneSlot
         {
             SceneSlot() noexcept
-                : proxies(memory::pools::Rendering::GetInstance()),
-                  mutations(memory::pools::Rendering::GetInstance()),
-                  publishedVersions(memory::pools::Rendering::GetInstance()),
-                  meshPayloads(memory::pools::Rendering::GetInstance()),
-                  lightPayloads(memory::pools::Rendering::GetInstance()),
-                  decalPayloads(memory::pools::Rendering::GetInstance())
+                : proxies(memory::pools::Rendering::GetInstance()), meshPayloads(memory::pools::Rendering::GetInstance()),
+                  lightPayloads(memory::pools::Rendering::GetInstance()), decalPayloads(memory::pools::Rendering::GetInstance()),
+                  producerPages(memory::pools::Rendering::GetInstance())
             {
             }
 
@@ -288,36 +529,190 @@ namespace vanguard::rendering
             u32 maximumPendingProxyMutations = 0;
             u32 maximumViews = 0;
             u32 activeProxies = 0;
+            u32 firstFreeProxy = InvalidSlotIndex;
+            u32 firstFreeMeshPayload = InvalidSlotIndex;
+            u32 firstFreeLightPayload = InvalidSlotIndex;
+            u32 firstFreeDecalPayload = InvalidSlotIndex;
+            u32 framePipelineSceneIndex = InvalidSlotIndex;
             u64 createdSerial = 0;
             u64 lifecycleRevision = 0;
             u64 currentMutationEpoch = 0;
             u64 preparedMutationEpoch = 0;
+            u64 completedMutationEpoch = 0;
+            u32 pendingMutationCount = 0;
             u32 preparedMutationCount = 0;
             bool framePrepared = false;
             bool allowFramePipelineParticipation = false;
+            bool visibilityFeedbackAttached = false;
             char name[MaximumRenderSceneNameBytes]{};
             containers::DynamicArray<ProxySlot> proxies;
-            containers::DynamicArray<ProxyMutationPacket> mutations;
-            containers::DynamicArray<PublishedSceneVersion> publishedVersions;
             containers::DynamicArray<MeshPayloadSlot> meshPayloads;
             containers::DynamicArray<LightPayloadSlot> lightPayloads;
             containers::DynamicArray<DecalPayloadSlot> decalPayloads;
+            containers::DynamicArray<ProducerPage*> producerPages;
             spatial::WriteIndex spatial;
         };
 
+        template <typename Slot> [[nodiscard]] static u32 AcquireSlot(containers::DynamicArray<Slot>& slots, u32& firstFree) noexcept
+        {
+            if (firstFree == InvalidSlotIndex)
+            {
+                const u32 index = slots.Size();
+                slots.PushBack({});
+                return index;
+            }
+
+            const u32 index = firstFree;
+            firstFree = slots[index].nextFree;
+            slots[index].nextFree = InvalidSlotIndex;
+            return index;
+        }
+
+        template <typename Slot> static void ReleasePayloadSlot(containers::DynamicArray<Slot>& slots, u32& firstFree, const u32 index) noexcept
+        {
+            slots[index] = {};
+            slots[index].state = RenderProxyState::Retired;
+            slots[index].nextFree = firstFree;
+            firstFree = index;
+        }
+
+        static void ReleaseProxySlot(SceneSlot& scene, const u32 index) noexcept
+        {
+            ProxySlot& slot = scene.proxies[index];
+            slot.state = RenderProxyState::Retired;
+            slot.nextFree = scene.firstFreeProxy;
+            scene.firstFreeProxy = index;
+        }
+
+        [[nodiscard]] static ProducerSlot* ResolveProducer(SceneSlot& scene, const RenderProducerHandle producer, const bool materialize) noexcept
+        {
+            if (!producer.IsValid())
+                return nullptr;
+            const u32 pageIndex = producer.index >> ProducerPageShift;
+            if (pageIndex >= scene.producerPages.Size())
+            {
+                if (!materialize)
+                    return nullptr;
+                scene.producerPages.Resize(pageIndex + 1u);
+            }
+            ProducerPage*& page = scene.producerPages[pageIndex];
+            if (page == nullptr)
+            {
+                if (!materialize)
+                    return nullptr;
+                memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(ProducerPage), alignof(ProducerPage));
+                if (!block)
+                    return nullptr;
+                page = ::new (block.address) ProducerPage{};
+            }
+            ProducerSlot& slot = page->slots[producer.index & ProducerPageMask];
+            if (!slot.occupied)
+            {
+                if (!materialize)
+                    return nullptr;
+                slot = {};
+                slot.generation = producer.generation;
+                slot.occupied = true;
+            }
+            return slot.generation == producer.generation ? &slot : nullptr;
+        }
+
+        [[nodiscard]] static const ProducerSlot* ResolveProducer(const SceneSlot& scene, const RenderProducerHandle producer) noexcept
+        {
+            if (!producer.IsValid())
+                return nullptr;
+            const u32 pageIndex = producer.index >> ProducerPageShift;
+            if (pageIndex >= scene.producerPages.Size() || scene.producerPages[pageIndex] == nullptr)
+                return nullptr;
+            const ProducerSlot& slot = scene.producerPages[pageIndex]->slots[producer.index & ProducerPageMask];
+            return slot.occupied && slot.generation == producer.generation ? &slot : nullptr;
+        }
+
+        static void ResetProducerDirectory(SceneSlot& scene) noexcept
+        {
+            for (ProducerPage* const page : scene.producerPages)
+            {
+                if (page == nullptr)
+                    continue;
+                page->~ProducerPage();
+                memory::MemoryBlock block{page, sizeof(ProducerPage), memory::PoolId::Rendering};
+                memory::Free(block);
+            }
+            scene.producerPages.Clear();
+        }
+
+        [[nodiscard]] static u32 FindProducerProxyIndex(const SceneSlot& scene, const RenderProducerHandle producer,
+                                                        const RenderContributorId contributor) noexcept
+        {
+            const ProducerSlot* const owner = ResolveProducer(scene, producer);
+            if (owner == nullptr || !contributor.IsValid())
+                return InvalidSlotIndex;
+            u32 proxyIndex = owner->firstProxy;
+            while (proxyIndex != InvalidSlotIndex)
+            {
+                const ProxySlot& proxy = scene.proxies[proxyIndex];
+                if (proxy.state == RenderProxyState::Alive && proxy.producer == producer && proxy.contributor == contributor)
+                    return proxyIndex;
+                proxyIndex = proxy.nextProducerProxy;
+            }
+            return InvalidSlotIndex;
+        }
+
+        [[nodiscard]] static bool LinkProducerProxy(SceneSlot& scene, const RenderProxyHandle proxyHandle) noexcept
+        {
+            ProxySlot& proxy = scene.proxies[proxyHandle.index];
+            ProducerSlot* const producer = ResolveProducer(scene, proxy.producer, true);
+            if (producer == nullptr || FindProducerProxyIndex(scene, proxy.producer, proxy.contributor) != InvalidSlotIndex)
+                return false;
+            proxy.previousProducerProxy = InvalidSlotIndex;
+            proxy.nextProducerProxy = producer->firstProxy;
+            if (producer->firstProxy != InvalidSlotIndex)
+                scene.proxies[producer->firstProxy].previousProducerProxy = proxyHandle.index;
+            producer->firstProxy = proxyHandle.index;
+            ++producer->proxyCount;
+            return true;
+        }
+
+        static void UnlinkProducerProxy(SceneSlot& scene, ProxySlot& proxy) noexcept
+        {
+            if (!proxy.producer.IsValid())
+                return;
+            ProducerSlot* const producer = ResolveProducer(scene, proxy.producer, false);
+            if (producer == nullptr)
+                return;
+            if (proxy.previousProducerProxy != InvalidSlotIndex)
+                scene.proxies[proxy.previousProducerProxy].nextProducerProxy = proxy.nextProducerProxy;
+            else
+                producer->firstProxy = proxy.nextProducerProxy;
+            if (proxy.nextProducerProxy != InvalidSlotIndex)
+                scene.proxies[proxy.nextProducerProxy].previousProducerProxy = proxy.previousProducerProxy;
+            if (producer->proxyCount != 0)
+                --producer->proxyCount;
+            if (producer->proxyCount == 0)
+                *producer = {};
+            proxy.producer = {};
+            proxy.contributor = {};
+            proxy.previousProducerProxy = InvalidSlotIndex;
+            proxy.nextProducerProxy = InvalidSlotIndex;
+        }
+
         explicit Impl(const RenderSceneManagerConfig& value) noexcept
-            : slots(memory::pools::Rendering::GetInstance())
+            : slots(memory::pools::Rendering::GetInstance()), relinkStates(memory::pools::Rendering::GetInstance())
         {
             slots.Reserve(value.maximumScenes);
-            for (u32 index = 0; index < value.maximumScenes; ++index) slots.PushBack({});
+            relinkStates.Reserve(value.maximumScenes);
+            for (u32 index = 0; index < value.maximumScenes; ++index)
+            {
+                slots.PushBack({});
+                relinkStates.PushBack(nullptr);
+            }
             stats.capacity = value.maximumScenes;
             stats.initialized = true;
         }
 
         [[nodiscard]] bool ValidHandle(const RenderSceneHandle scene) const noexcept
         {
-            return scene.index < slots.Size() && scene.generation != 0 &&
-                   slots[scene.index].generation == scene.generation &&
+            return scene.index < slots.Size() && scene.generation != 0 && slots[scene.index].generation == scene.generation &&
                    slots[scene.index].state != RenderSceneState::Vacant;
         }
 
@@ -326,27 +721,71 @@ namespace vanguard::rendering
             return ValidHandle(scene) && slots[scene.index].state == RenderSceneState::Alive;
         }
 
+        [[nodiscard]] bool ValidFramePipelineScene(const RenderSceneHandle scene, const SceneSlot& slot) const noexcept
+        {
+            if (!slot.allowFramePipelineParticipation)
+                return slot.framePipelineSceneIndex == InvalidSlotIndex;
+            return slot.framePipelineSceneIndex < framePipelineSceneCount && framePipelineScenes[slot.framePipelineSceneIndex] == scene;
+        }
+
+        [[nodiscard]] bool AddFramePipelineScene(const RenderSceneHandle scene, SceneSlot& slot) noexcept
+        {
+            if (!slot.allowFramePipelineParticipation)
+            {
+                slot.framePipelineSceneIndex = InvalidSlotIndex;
+                return true;
+            }
+            if (slot.framePipelineSceneIndex != InvalidSlotIndex || framePipelineSceneCount >= stats.capacity)
+                return false;
+            slot.framePipelineSceneIndex = framePipelineSceneCount;
+            framePipelineScenes[framePipelineSceneCount++] = scene;
+            stats.framePipelineScenes = framePipelineSceneCount;
+            return true;
+        }
+
+        void RemoveFramePipelineScene(SceneSlot& slot) noexcept
+        {
+            if (!slot.allowFramePipelineParticipation)
+            {
+                slot.framePipelineSceneIndex = InvalidSlotIndex;
+                return;
+            }
+
+            const u32 removedIndex = slot.framePipelineSceneIndex;
+            const u32 lastIndex = framePipelineSceneCount - 1u;
+            if (removedIndex != lastIndex)
+            {
+                const RenderSceneHandle movedScene = framePipelineScenes[lastIndex];
+                framePipelineScenes[removedIndex] = movedScene;
+                slots[movedScene.index].framePipelineSceneIndex = removedIndex;
+            }
+            framePipelineScenes[lastIndex] = {};
+            --framePipelineSceneCount;
+            stats.framePipelineScenes = framePipelineSceneCount;
+            slot.framePipelineSceneIndex = InvalidSlotIndex;
+        }
+
         [[nodiscard]] bool ValidProxy(const RenderProxyHandle proxy) const noexcept
         {
-            if (!ValidAliveScene(proxy.scene)) return false;
+            if (!ValidAliveScene(proxy.scene))
+                return false;
             const SceneSlot& scene = slots[proxy.scene.index];
-            return proxy.index < scene.proxies.Size() && proxy.generation != 0 &&
-                   scene.proxies[proxy.index].generation == proxy.generation &&
+            return proxy.index < scene.proxies.Size() && proxy.generation != 0 && scene.proxies[proxy.index].generation == proxy.generation &&
                    scene.proxies[proxy.index].state != RenderProxyState::Vacant;
         }
 
         [[nodiscard]] bool ValidAliveProxy(const RenderProxyHandle proxy) const noexcept
         {
-            return ValidProxy(proxy) &&
-                   slots[proxy.scene.index].proxies[proxy.index].state == RenderProxyState::Alive;
+            return ValidProxy(proxy) && slots[proxy.scene.index].proxies[proxy.index].state == RenderProxyState::Alive;
         }
 
-        [[nodiscard]] bool ValidAlivePayload(const RenderProxyHandle proxy,
-                                             const RenderProxyPayloadKind kind) const noexcept
+        [[nodiscard]] bool ValidAlivePayload(const RenderProxyHandle proxy, const RenderProxyPayloadKind kind) const noexcept
         {
-            if (!ValidAliveProxy(proxy)) return false;
+            if (!ValidAliveProxy(proxy))
+                return false;
             const ProxySlot& slot = slots[proxy.scene.index].proxies[proxy.index];
-            if (slot.payloadKind != kind || slot.payloadGeneration != proxy.generation) return false;
+            if (slot.payloadKind != kind || slot.payloadGeneration != proxy.generation)
+                return false;
             switch (kind)
             {
             case RenderProxyPayloadKind::Mesh:
@@ -370,165 +809,82 @@ namespace vanguard::rendering
             return false;
         }
 
-        [[nodiscard]] bool AppendMutation(SceneSlot& scene, const RenderProxyHandle proxy,
-                                          const RenderProxyMutationKind kind) noexcept
+        [[nodiscard]] bool RegisterMutation(const RenderSceneHandle sceneHandle, SceneSlot& scene, const bool bypassBudget = false) noexcept
         {
-            if (scene.framePrepared) return false;
-            if (scene.mutations.Size() >= scene.maximumPendingProxyMutations &&
-                kind != RenderProxyMutationKind::Destroy)
+            if (scene.framePrepared || CandidateProductionOpen(sceneHandle))
+                return false;
+            if (scene.pendingMutationCount >= scene.maximumPendingProxyMutations && !bypassBudget)
                 return false;
             ++scene.currentMutationEpoch;
-            scene.mutations.PushBack({kind, proxy, nextMutationSerial++, scene.lifecycleRevision});
+            ++scene.pendingMutationCount;
             ++stats.pendingProxyMutations;
             return true;
         }
 
-        void RecomputeRetainedSceneVersions() noexcept
+        [[nodiscard]] bool CandidateProductionOpen(const RenderSceneHandle scene) const noexcept
         {
-            u32 retained = 0;
-            for (u32 sceneIndex = 0; sceneIndex < slots.Size(); ++sceneIndex)
-                retained += slots[sceneIndex].publishedVersions.Size();
-            stats.retainedSceneVersions = retained;
+            return scene.index < relinkStates.Size() && relinkStates[scene.index] != nullptr && relinkStates[scene.index]->candidateProduction.GetValue();
         }
 
-        [[nodiscard]] PublishedSceneVersion* FindPublishedVersion(SceneSlot& scene,
-                                                                  const RenderSceneVersion version) noexcept
+        void RollbackMutation(SceneSlot& scene) noexcept
         {
-            for (u32 index = 0; index < scene.publishedVersions.Size(); ++index)
-                if (scene.publishedVersions[index].version == version) return &scene.publishedVersions[index];
-            return nullptr;
+            --scene.pendingMutationCount;
+            --stats.pendingProxyMutations;
         }
 
-        [[nodiscard]] const PublishedSceneVersion* FindPublishedVersion(const SceneSlot& scene,
-                                                                         const RenderSceneVersion version) const noexcept
+        [[nodiscard]] RelinkState* CreateRelinkState(const u32 capacity, const u32 maximumProxies) noexcept
         {
-            for (u32 index = 0; index < scene.publishedVersions.Size(); ++index)
-                if (scene.publishedVersions[index].version == version) return &scene.publishedVersions[index];
-            return nullptr;
+            memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(RelinkState), alignof(RelinkState));
+            return block ? ::new (block.address) RelinkState(capacity, maximumProxies) : nullptr;
         }
 
-        [[nodiscard]] static u32 FindReaderEpoch(const PublishedSceneVersion& version,
-                                                 const u64 readerEpoch) noexcept
+        void DestroyRelinkState(RelinkState*& state) noexcept
         {
-            for (u32 index = 0; index < version.readerEpochs.Size(); ++index)
-                if (version.readerEpochs[index] == readerEpoch) return index;
-            return ~u32{0};
+            if (state == nullptr)
+                return;
+            state->~RelinkState();
+            memory::MemoryBlock block{state, sizeof(RelinkState), memory::PoolId::Rendering};
+            memory::Free(block);
+            state = nullptr;
         }
 
-        [[nodiscard]] const PublishedSceneVersion* ResolveLease(const SceneReadLease& lease) const noexcept
+        void CancelPreparedSceneUpdate(SceneSlot& scene, RelinkState& relinks) noexcept
         {
-            if (!lease.IsValid() || !ValidHandle(lease.scene)) return nullptr;
-            const PublishedSceneVersion* const version = FindPublishedVersion(slots[lease.scene.index], lease.version);
-            if (version == nullptr || FindReaderEpoch(*version, lease.readerEpoch) == ~u32{0}) return nullptr;
-            return version;
-        }
+            containers::DynamicArray<PendingRelinkRequest>& requests = relinks.Queue(relinks.processIndex);
+            for (u32 index = 0; index < relinks.processCount; ++index)
+            {
+                PendingRelinkRequest& request = requests[index];
+                if (request.active)
+                    relinks.ReleaseOutstanding(request.input.proxy);
+                request = {};
+            }
 
-        [[nodiscard]] u64 AllocateReaderEpoch() noexcept
-        {
-            u64 epoch = nextReaderEpoch++;
-            if (epoch == 0) epoch = nextReaderEpoch++;
-            return epoch;
-        }
-
-        [[nodiscard]] RenderProxySnapshot* ResolvePublishedProxy(PublishedSceneVersion& version,
-                                                                 const RenderProxyHandle proxy) noexcept
-        {
-            if (proxy.index >= version.proxyLookup.Size()) return nullptr;
-            const u32 publishedIndex = version.proxyLookup[proxy.index];
-            if (publishedIndex >= version.proxies.Size()) return nullptr;
-            RenderProxySnapshot& snapshot = version.proxies[publishedIndex];
-            return snapshot.handle == proxy ? &snapshot : nullptr;
-        }
-
-        [[nodiscard]] const RenderProxySnapshot* ResolvePublishedProxy(const PublishedSceneVersion& version,
-                                                                       const RenderProxyHandle proxy) const noexcept
-        {
-            if (proxy.index >= version.proxyLookup.Size()) return nullptr;
-            const u32 publishedIndex = version.proxyLookup[proxy.index];
-            if (publishedIndex >= version.proxies.Size()) return nullptr;
-            const RenderProxySnapshot& snapshot = version.proxies[publishedIndex];
-            return snapshot.handle == proxy ? &snapshot : nullptr;
-        }
-
-        void BuildProxySnapshot(const RenderSceneHandle scene, const u32 proxyIndex,
-                                const ProxySlot& slot, RenderProxySnapshot& snapshot) const noexcept
-        {
-            snapshot = {};
-            snapshot.handle = {scene, proxyIndex, slot.generation};
-            snapshot.state = slot.state;
-            snapshot.typeId = slot.typeId;
-            snapshot.producerId = slot.producerId;
-            snapshot.producerGeneration = slot.producerGeneration;
-            snapshot.transform = slot.transform;
-            snapshot.bounds = slot.bounds;
-            snapshot.spatialMode = slot.spatialMode;
-            snapshot.payloadKind = slot.payloadKind;
-            snapshot.visibility = slot.visibility;
-            snapshot.layerMask = slot.layerMask;
-            snapshot.visibilityMask = slot.visibilityMask;
-            snapshot.userDataEpoch = slot.userDataEpoch;
-            snapshot.createdSerial = slot.createdSerial;
-            snapshot.lifecycleRevision = slot.lifecycleRevision;
-            CopyNameUnchecked(snapshot.debugName, MaximumRenderProxyNameBytes, slot.debugName);
-        }
-
-        void BuildMeshSnapshot(const MeshPayloadSlot& slot, MeshProxySnapshot& snapshot) const noexcept
-        {
-            snapshot.proxy = slot.proxy;
-            snapshot.payloadGeneration = slot.generation;
-            snapshot.mesh = slot.mesh;
-            snapshot.material = slot.material;
-            snapshot.meshHandle = slot.meshHandle;
-            snapshot.materialHandle = slot.materialHandle;
-            snapshot.submeshMask = slot.submeshMask;
-            snapshot.renderFlags = slot.renderFlags;
-        }
-
-        void BuildLightSnapshot(const LightPayloadSlot& slot, LightProxySnapshot& snapshot) const noexcept
-        {
-            snapshot.proxy = slot.proxy;
-            snapshot.payloadGeneration = slot.generation;
-            snapshot.kind = slot.kind;
-            snapshot.color[0] = slot.color[0];
-            snapshot.color[1] = slot.color[1];
-            snapshot.color[2] = slot.color[2];
-            snapshot.intensity = slot.intensity;
-            snapshot.range = slot.range;
-            snapshot.innerConeRadians = slot.innerConeRadians;
-            snapshot.outerConeRadians = slot.outerConeRadians;
-            snapshot.castsShadow = slot.castsShadow;
-        }
-
-        void BuildDecalSnapshot(const DecalPayloadSlot& slot, DecalProxySnapshot& snapshot) const noexcept
-        {
-            snapshot.proxy = slot.proxy;
-            snapshot.payloadGeneration = slot.generation;
-            snapshot.material = slot.material;
-            snapshot.materialHandle = slot.materialHandle;
-            snapshot.extents[0] = slot.extents[0];
-            snapshot.extents[1] = slot.extents[1];
-            snapshot.extents[2] = slot.extents[2];
-            snapshot.fadeDistance = slot.fadeDistance;
-            snapshot.sortKey = slot.sortKey;
+            // Direct main-thread mutations were applied before preparation. Only the undispatched
+            // relink batch is discarded, and every admission reference is released above.
+            scene.completedMutationEpoch = scene.preparedMutationEpoch;
+            scene.framePrepared = false;
+            scene.preparedMutationCount = 0;
+            relinks.processCount = 0;
+            relinks.uniqueCount = 0;
+            relinks.structuralMoveCount = 0;
+            relinks.prepared = false;
         }
 
         void ApplySpatialDelta(const spatial::CounterDelta& delta) noexcept
         {
-            if (delta.activeEntries >= 0) stats.activeSpatialEntries += static_cast<u32>(delta.activeEntries);
+            if (delta.activeEntries >= 0)
+                stats.activeSpatialEntries += static_cast<u32>(delta.activeEntries);
             else
             {
                 const u32 removed = static_cast<u32>(-delta.activeEntries);
-                stats.activeSpatialEntries = removed <= stats.activeSpatialEntries ?
-                                                 stats.activeSpatialEntries - removed :
-                                                 0;
+                stats.activeSpatialEntries = removed <= stats.activeSpatialEntries ? stats.activeSpatialEntries - removed : 0;
             }
-            if (delta.dirtyCells >= 0) stats.dirtySpatialCells += static_cast<u32>(delta.dirtyCells);
+            if (delta.dirtyCells >= 0)
+                stats.dirtySpatialCells += static_cast<u32>(delta.dirtyCells);
             else
             {
                 const u32 repaired = static_cast<u32>(-delta.dirtyCells);
-                stats.dirtySpatialCells = repaired <= stats.dirtySpatialCells ?
-                                              stats.dirtySpatialCells - repaired :
-                                              0;
+                stats.dirtySpatialCells = repaired <= stats.dirtySpatialCells ? stats.dirtySpatialCells - repaired : 0;
             }
             stats.spatialFastMoves += delta.fastMoves;
             stats.spatialStructuralMoves += delta.structuralMoves;
@@ -538,9 +894,9 @@ namespace vanguard::rendering
 
         void ApplySpatialRemoveResult(const spatial::RemoveResult& result) noexcept
         {
-            if (!result.movedProxyRelocated || !ValidAliveProxy(result.movedProxy)) return;
-            slots[result.movedProxy.scene.index].proxies[result.movedProxy.index].spatial.objectIndex =
-                result.movedObjectIndex;
+            if (!result.movedProxyRelocated || !ValidAliveProxy(result.movedProxy))
+                return;
+            slots[result.movedProxy.scene.index].proxies[result.movedProxy.index].spatial.objectIndex = result.movedObjectIndex;
         }
 
         void ConfigureSpatialIndex(SceneSlot& scene, const SpatialWriteIndexConfig& config) noexcept
@@ -550,18 +906,15 @@ namespace vanguard::rendering
             ApplySpatialDelta(delta);
         }
 
-        [[nodiscard]] bool SpatialBoundsAccepted(const SceneSlot& scene,
-                                                 const RenderProxyBounds& bounds) const noexcept
+        [[nodiscard]] bool SpatialBoundsAccepted(const SceneSlot& scene, const RenderProxyBounds& bounds) const noexcept
         {
             return spatial::BoundsAccepted(scene.spatial, bounds);
         }
 
-        [[nodiscard]] bool InsertSpatialEntry(SceneSlot& scene, const RenderProxyHandle proxy,
-                                              ProxySlot& slot) noexcept
+        [[nodiscard]] bool InsertSpatialEntry(SceneSlot& scene, const RenderProxyHandle proxy, ProxySlot& slot) noexcept
         {
             spatial::CounterDelta delta;
-            const spatial::InsertResult result =
-                spatial::Insert(scene.spatial, proxy, slot.bounds, slot.spatialMode, slot.spatial, &delta);
+            const spatial::InsertResult result = spatial::Insert(scene.spatial, proxy, slot.bounds, slot.spatialMode, slot.spatial, &delta);
             ApplySpatialDelta(delta);
             return result != spatial::InsertResult::Rejected;
         }
@@ -575,8 +928,7 @@ namespace vanguard::rendering
             ApplySpatialDelta(delta);
         }
 
-        void MoveSpatialEntry(SceneSlot& scene, const RenderProxyHandle proxy, ProxySlot& slot,
-                              const RenderProxyBounds& oldBounds) noexcept
+        void MoveSpatialEntry(SceneSlot& scene, const RenderProxyHandle proxy, ProxySlot& slot, const RenderProxyBounds& oldBounds) noexcept
         {
             spatial::CounterDelta delta;
             spatial::RemoveResult result;
@@ -585,36 +937,49 @@ namespace vanguard::rendering
             ApplySpatialDelta(delta);
         }
 
-        [[nodiscard]] bool ResolveSpatialProxyBounds(const RenderProxyHandle proxy,
-                                                     RenderProxyBounds& bounds) const noexcept
+        [[nodiscard]] bool ResolveSpatialProxyBounds(const RenderProxyHandle proxy, RenderProxyBounds& bounds) const noexcept
         {
-            if (!ValidAliveProxy(proxy)) return false;
+            if (!ValidAliveProxy(proxy))
+                return false;
             bounds = slots[proxy.scene.index].proxies[proxy.index].bounds;
             return true;
         }
 
-        [[nodiscard]] bool ValidateSpatialProxyEntry(const RenderProxyHandle proxy,
-                                                     spatial::EntryHandle& entry,
-                                                     RenderProxyBounds& bounds) const noexcept
+        [[nodiscard]] bool ValidateSpatialProxyEntry(const RenderProxyHandle proxy, spatial::EntryHandle& entry, RenderProxyBounds& bounds) const noexcept
         {
-            if (!ValidAliveProxy(proxy)) return false;
+            if (!ValidAliveProxy(proxy))
+                return false;
             const ProxySlot& slot = slots[proxy.scene.index].proxies[proxy.index];
             entry = slot.spatial;
             bounds = slot.bounds;
             return true;
         }
 
-        static bool ResolveSpatialProxyBoundsThunk(void* const userData, const RenderProxyHandle proxy,
-                                                   RenderProxyBounds& bounds) noexcept
+        static bool ResolveSpatialProxyBoundsThunk(void* const userData, const RenderProxyHandle proxy, RenderProxyBounds& bounds) noexcept
         {
             return static_cast<const Impl*>(userData)->ResolveSpatialProxyBounds(proxy, bounds);
         }
 
-        static bool ValidateSpatialProxyEntryThunk(void* const userData, const RenderProxyHandle proxy,
-                                                   spatial::EntryHandle& entry,
+        static bool ValidateSpatialProxyEntryThunk(void* const userData, const RenderProxyHandle proxy, spatial::EntryHandle& entry,
                                                    RenderProxyBounds& bounds) noexcept
         {
             return static_cast<const Impl*>(userData)->ValidateSpatialProxyEntry(proxy, entry, bounds);
+        }
+
+        static bool ResolveLiveVisibilityProxyThunk(void* const userData, const RenderProxyHandle proxy, spatial::VisibilityProxyReadView& view) noexcept
+        {
+            const Impl* const impl = static_cast<const Impl*>(userData);
+            view = {};
+            if (!impl->ValidAliveProxy(proxy))
+                return false;
+            const ProxySlot& slot = impl->slots[proxy.scene.index].proxies[proxy.index];
+            view.bounds = &slot.bounds;
+            view.visibility = &slot.visibility;
+            view.layerMask = &slot.layerMask;
+            view.visibilityMask = &slot.visibilityMask;
+            view.payloadKind = &slot.payloadKind;
+            view.gpuInstanceIndex = &slot.gpuInstanceIndex;
+            return true;
         }
 
         void RepairSpatialIndex(SceneSlot& scene) noexcept
@@ -624,53 +989,48 @@ namespace vanguard::rendering
             ApplySpatialDelta(delta);
         }
 
-        [[nodiscard]] bool ValidateSpatialIndexInternal(const SceneSlot& scene,
-                                                        SpatialWriteIndexStats* const outStats) const noexcept
+        [[nodiscard]] bool ValidateSpatialIndexInternal(const SceneSlot& scene, SpatialWriteIndexStats* const outStats) const noexcept
         {
             return spatial::Validate(scene.spatial, const_cast<Impl*>(this), ValidateSpatialProxyEntryThunk, outStats);
         }
 
         containers::DynamicArray<SceneSlot> slots;
+        containers::DynamicArray<RelinkState*> relinkStates;
+        RenderSceneHandle framePipelineScenes[MaximumRenderScenes]{};
+        u32 framePipelineSceneCount = 0;
         mutable concurrency::RWLock publicationLock;
         RenderSceneManagerStats stats;
+        RenderCameraStorage* cameraStorage = nullptr;
+        RenderSceneGpuPublisher* gpuPublisher = nullptr;
         u64 nextCreatedSerial = 1;
         u64 nextProxyCreatedSerial = 1;
-        u64 nextMutationSerial = 1;
-        u64 nextSceneVersion = 1;
-        u64 nextCompletionToken = 1;
-        u64 nextReaderEpoch = 1;
     };
 
     RenderSceneManager::~RenderSceneManager()
     {
-        if (m_impl != nullptr) static_cast<void>(Shutdown());
+        if (m_impl != nullptr)
+            static_cast<void>(Shutdown());
     }
 
-    bool RenderSceneManager::Initialize(const RenderSceneManagerConfig& config,
-                                        RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::Initialize(const RenderSceneManagerConfig& config, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl != nullptr)
-            return Fail(failure, RenderSceneFailureCode::AlreadyInitialized,
-                        "RenderSceneManager is already initialized");
+            return Fail(failure, RenderSceneFailureCode::AlreadyInitialized, "RenderSceneManager is already initialized");
         if (!concurrency::IsMainThread())
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderSceneManager must initialize on the main thread");
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderSceneManager must initialize on the main thread");
         if (config.maximumScenes == 0 || config.maximumScenes > MaximumRenderScenes)
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid RenderSceneManager scene capacity");
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid RenderSceneManager scene capacity");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
         if (!block)
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderSceneManager implementation allocation failed");
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderSceneManager implementation allocation failed");
         Impl* const impl = ::new (block.address) Impl(config);
         if (impl->slots.Size() != config.maximumScenes)
         {
             impl->~Impl();
             memory::Free(block);
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderSceneManager slot reservation failed");
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderSceneManager slot reservation failed");
         }
         m_impl = impl;
         return true;
@@ -679,20 +1039,18 @@ namespace vanguard::rendering
     bool RenderSceneManager::Shutdown(RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (m_impl == nullptr) return true;
+        if (m_impl == nullptr)
+            return true;
         if (!concurrency::IsMainThread())
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderSceneManager must shutdown on the main thread");
-        if (m_impl->stats.activeScenes != 0 || m_impl->stats.destroyingScenes != 0)
-            return Fail(failure, RenderSceneFailureCode::ScenesRemainAlive,
-                        "RenderSceneManager shutdown blocked by live scenes");
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderSceneManager must shutdown on the main thread");
+        if (m_impl->stats.activeScenes != 0 || m_impl->stats.destroyingScenes != 0 || m_impl->framePipelineSceneCount != 0)
+            return Fail(failure, RenderSceneFailureCode::ScenesRemainAlive, "RenderSceneManager shutdown blocked by live scenes");
         if (m_impl->stats.activeProxies != 0)
-            return Fail(failure, RenderSceneFailureCode::ProxiesRemainAlive,
-                        "RenderSceneManager shutdown blocked by live proxies");
-        if (m_impl->stats.liveReadLeases != 0)
-            return Fail(failure, RenderSceneFailureCode::ReadersRemainAlive,
-                        "RenderSceneManager shutdown blocked by live scene read leases");
-
+            return Fail(failure, RenderSceneFailureCode::ProxiesRemainAlive, "RenderSceneManager shutdown blocked by live proxies");
+        if (m_impl->cameraStorage != nullptr)
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderSceneManager shutdown blocked by its camera storage");
+        if (m_impl->gpuPublisher != nullptr)
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderSceneManager shutdown blocked by its GPU publisher");
         Impl* const impl = m_impl;
         m_impl = nullptr;
         impl->~Impl();
@@ -706,29 +1064,24 @@ namespace vanguard::rendering
         return m_impl != nullptr;
     }
 
-    bool RenderSceneManager::CreateScene(const RenderSceneDesc& desc, RenderSceneHandle& scene,
-                                         RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateScene(const RenderSceneDesc& desc, RenderSceneHandle& scene, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         scene = {};
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized");
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized");
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderScene creation must run on the main thread");
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderScene creation must run on the main thread");
         }
         concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!ValidMode(desc.mode) || !ValidOwnership(desc.ownership) || !ValidSpatialConfig(desc.spatial) ||
-            desc.maximumProxies == 0 ||
-            desc.maximumProxies > MaximumRenderProxySlotsPerScene ||
-            desc.maximumPendingProxyMutations == 0 || desc.maximumViews == 0)
+        if (!ValidMode(desc.mode) || !ValidOwnership(desc.ownership) || !ValidSpatialConfig(desc.spatial) || desc.maximumProxies == 0 ||
+            desc.maximumProxies > MaximumRenderProxySlotsPerScene || desc.maximumPendingProxyMutations == 0 || desc.maximumViews == 0 ||
+            desc.maximumViews > MaximumRenderViews)
         {
             ++m_impl->stats.failedCreates;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid RenderScene creation descriptor");
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid RenderScene creation descriptor");
         }
 
         u32 slotIndex = MaximumRenderScenes;
@@ -743,8 +1096,7 @@ namespace vanguard::rendering
         if (slotIndex == MaximumRenderScenes)
         {
             ++m_impl->stats.failedCreates;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "maximum RenderScene count exceeded");
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "maximum RenderScene count exceeded");
         }
 
         Impl::SceneSlot& slot = m_impl->slots[slotIndex];
@@ -752,9 +1104,17 @@ namespace vanguard::rendering
         if (!CopyName(copiedName, MaximumRenderSceneNameBytes, desc.name))
         {
             ++m_impl->stats.failedCreates;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "RenderScene name is missing or too long");
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderScene name is missing or too long");
         }
+
+        Impl::RelinkState* relinkState = m_impl->CreateRelinkState(desc.maximumPendingProxyMutations, desc.maximumProxies);
+        if (relinkState == nullptr)
+        {
+            ++m_impl->stats.failedCreates;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderScene relink queue allocation failed");
+        }
+        m_impl->DestroyRelinkState(m_impl->relinkStates[slotIndex]);
+        m_impl->relinkStates[slotIndex] = relinkState;
 
         slot.state = RenderSceneState::Alive;
         slot.mode = desc.mode;
@@ -766,66 +1126,103 @@ namespace vanguard::rendering
         slot.activeProxies = 0;
         slot.createdSerial = m_impl->nextCreatedSerial++;
         slot.lifecycleRevision = 1;
-        slot.currentMutationEpoch = 0;
+        // Zero is reserved as an invalid/unpublished version by RenderViewFamily. Scene
+        // construction establishes the first observable scene version even before a proxy mutates.
+        slot.currentMutationEpoch = 1;
         slot.preparedMutationEpoch = 0;
+        slot.completedMutationEpoch = 0;
+        slot.pendingMutationCount = 0;
         slot.preparedMutationCount = 0;
         slot.framePrepared = false;
         slot.allowFramePipelineParticipation = desc.allowFramePipelineParticipation;
+        slot.visibilityFeedbackAttached = false;
+        slot.firstFreeProxy = InvalidSlotIndex;
+        slot.firstFreeMeshPayload = InvalidSlotIndex;
+        slot.firstFreeLightPayload = InvalidSlotIndex;
+        slot.firstFreeDecalPayload = InvalidSlotIndex;
+        slot.framePipelineSceneIndex = InvalidSlotIndex;
+        Impl::ResetProducerDirectory(slot);
         slot.proxies.Clear();
-        slot.mutations.Clear();
-        slot.publishedVersions.Clear();
         slot.meshPayloads.Clear();
         slot.lightPayloads.Clear();
         slot.decalPayloads.Clear();
         m_impl->ConfigureSpatialIndex(slot, desc.spatial);
-        m_impl->RecomputeRetainedSceneVersions();
         CopyNameUnchecked(slot.name, MaximumRenderSceneNameBytes, copiedName);
 
         scene = {slotIndex, slot.generation};
+        if (!m_impl->AddFramePipelineScene(scene, slot))
+        {
+            slot.state = RenderSceneState::Vacant;
+            m_impl->DestroyRelinkState(m_impl->relinkStates[slotIndex]);
+            scene = {};
+            ++m_impl->stats.failedCreates;
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene frame-pipeline directory insertion failed");
+        }
+        if (m_impl->cameraStorage != nullptr && !m_impl->cameraStorage->AttachScene(scene, desc.maximumViews))
+        {
+            m_impl->RemoveFramePipelineScene(slot);
+            slot.state = RenderSceneState::Vacant;
+            m_impl->DestroyRelinkState(m_impl->relinkStates[slotIndex]);
+            scene = {};
+            ++m_impl->stats.failedCreates;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderScene camera storage allocation failed");
+        }
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AttachScene(scene, desc.maximumProxies, desc.maximumPendingProxyMutations))
+        {
+            if (m_impl->cameraStorage != nullptr)
+                static_cast<void>(m_impl->cameraStorage->DetachScene(scene));
+            m_impl->RemoveFramePipelineScene(slot);
+            slot.state = RenderSceneState::Vacant;
+            m_impl->DestroyRelinkState(m_impl->relinkStates[slotIndex]);
+            scene = {};
+            ++m_impl->stats.failedCreates;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderScene GPU publication state allocation failed");
+        }
         ++m_impl->stats.activeScenes;
         ++m_impl->stats.createdScenes;
         return true;
     }
 
-    bool RenderSceneManager::DestroyScene(const RenderSceneHandle scene,
-                                          RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::DestroyScene(const RenderSceneHandle scene, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", scene);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderScene destruction must run on the main thread", scene);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderScene destruction must run on the main thread", scene);
         }
         concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
         if (!m_impl->ValidHandle(scene))
         {
             ++m_impl->stats.failedDestroys;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle", scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle", scene);
         }
 
         Impl::SceneSlot& slot = m_impl->slots[scene.index];
         if (slot.state != RenderSceneState::Alive)
         {
             ++m_impl->stats.failedDestroys;
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderScene is not alive", scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene is not alive", scene);
         }
 
         if (slot.activeProxies != 0)
-            return Fail(failure, RenderSceneFailureCode::ProxiesRemainAlive,
-                        "RenderScene destruction blocked by live proxies", scene);
-        for (u32 index = 0; index < slot.publishedVersions.Size(); ++index)
-        {
-            if (slot.publishedVersions[index].readerCount != 0)
-                return Fail(failure, RenderSceneFailureCode::ReadersRemainAlive,
-                            "RenderScene destruction blocked by live read leases", scene);
-        }
-
+            return Fail(failure, RenderSceneFailureCode::ProxiesRemainAlive, "RenderScene destruction blocked by live proxies", scene);
+        Impl::RelinkState* const relinkState = m_impl->relinkStates[scene.index];
+        if (relinkState != nullptr && (relinkState->dispatched.GetValue() || relinkState->candidateProduction.GetValue()))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene destruction blocked by scene-update jobs", scene);
+        if (slot.visibilityFeedbackAttached)
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene destruction blocked by its visibility feedback service", scene);
+        if (!m_impl->ValidFramePipelineScene(scene, slot))
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene frame-pipeline directory is inconsistent", scene);
+        if (m_impl->cameraStorage != nullptr && !m_impl->cameraStorage->CanDetachScene(scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene destruction blocked by live cameras", scene);
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->DetachScene(scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene destruction waits for pending GPU publication or retirement", scene);
+        if (m_impl->cameraStorage != nullptr && !m_impl->cameraStorage->DetachScene(scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene destruction blocked by live cameras", scene);
+        m_impl->RemoveFramePipelineScene(slot);
         slot.state = RenderSceneState::Vacant;
         slot.mode = RenderSceneMode::Runtime;
         slot.ownership = RenderSceneOwnership::Service;
@@ -835,101 +1232,103 @@ namespace vanguard::rendering
         slot.createdSerial = 0;
         ++slot.lifecycleRevision;
         slot.allowFramePipelineParticipation = false;
+        slot.visibilityFeedbackAttached = false;
+        slot.framePipelineSceneIndex = InvalidSlotIndex;
+        slot.firstFreeProxy = InvalidSlotIndex;
+        slot.firstFreeMeshPayload = InvalidSlotIndex;
+        slot.firstFreeLightPayload = InvalidSlotIndex;
+        slot.firstFreeDecalPayload = InvalidSlotIndex;
         slot.name[0] = '\0';
+        Impl::ResetProducerDirectory(slot);
         slot.proxies.Clear();
         slot.meshPayloads.Clear();
         slot.lightPayloads.Clear();
         slot.decalPayloads.Clear();
         m_impl->ConfigureSpatialIndex(slot, {});
-        if (slot.mutations.Size() != 0)
+        if (slot.pendingMutationCount != 0)
         {
-            m_impl->stats.pendingProxyMutations -= slot.mutations.Size();
-            slot.mutations.Clear();
+            m_impl->stats.pendingProxyMutations -= slot.pendingMutationCount;
+            slot.pendingMutationCount = 0;
         }
-        slot.publishedVersions.Clear();
-        m_impl->RecomputeRetainedSceneVersions();
+        m_impl->DestroyRelinkState(m_impl->relinkStates[scene.index]);
         --m_impl->stats.activeScenes;
         ++m_impl->stats.destroyedScenes;
         return true;
     }
 
-    bool RenderSceneManager::CreateProxy(const RenderProxyDesc& desc, RenderProxyHandle& proxy,
-                                         RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateProxy(const RenderProxyDesc& desc, RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         proxy = {};
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", desc.scene);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderProxy creation must run on the main thread", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderProxy creation must run on the main thread", desc.scene);
         }
         if (!m_impl->ValidAliveScene(desc.scene))
         {
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for RenderProxy creation", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for RenderProxy creation", desc.scene);
         }
-        if (desc.typeId == 0 || !ValidTransform(desc.transform) || !ValidBounds(desc.bounds) ||
-            !ValidSpatialMode(desc.spatialMode))
+        if (desc.typeId == 0 || !ValidTransform(desc.transform) || !ValidBounds(desc.bounds) || !ValidSpatialMode(desc.spatialMode) ||
+            (desc.producer.IsValid() != desc.contributor.IsValid()))
         {
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid RenderProxy creation descriptor", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid RenderProxy creation descriptor", desc.scene);
         }
 
         Impl::SceneSlot& scene = m_impl->slots[desc.scene.index];
-        if (scene.framePrepared)
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(desc.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy creation is blocked by an open GPU publication", desc.scene);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(desc.scene))
         {
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderProxy creation is blocked between scene preparation and commit", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy creation is blocked between scene preparation and commit", desc.scene);
         }
         if (desc.spatialMode == RenderProxySpatialMode::Bounds && !m_impl->SpatialBoundsAccepted(scene, desc.bounds))
         {
             ++m_impl->stats.failedProxyCreates;
             ++scene.spatial.stats.outOfRangeProxies;
             ++m_impl->stats.spatialOutOfRangeProxies;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "RenderProxy bounds are outside the configured spatial extent", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderProxy bounds are outside the configured spatial extent", desc.scene);
         }
         if (scene.activeProxies >= scene.maximumProxies)
         {
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "maximum RenderProxy count exceeded", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "maximum RenderProxy count exceeded", desc.scene);
+        }
+        if (desc.producer.IsValid())
+        {
+            if (Impl::FindProducerProxyIndex(scene, desc.producer, desc.contributor) != InvalidSlotIndex)
+                return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy producer contributor already exists", desc.scene);
         }
 
         char copiedName[MaximumRenderProxyNameBytes]{};
         if (!CopyName(copiedName, MaximumRenderProxyNameBytes, desc.debugName))
         {
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "RenderProxy debug name is missing or too long", desc.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderProxy debug name is missing or too long", desc.scene);
         }
-
-        u32 slotIndex = scene.proxies.Size();
-        for (u32 index = 0; index < scene.proxies.Size(); ++index)
+        const u32 slotIndex = Impl::AcquireSlot(scene.proxies, scene.firstFreeProxy);
+        Impl::RelinkState* const relinks = m_impl->relinkStates[desc.scene.index];
+        if (relinks == nullptr || !relinks->MaterializeProxyPage(slotIndex))
         {
-            if (scene.proxies[index].state == RenderProxyState::Vacant ||
-                scene.proxies[index].state == RenderProxyState::Retired)
-            {
-                slotIndex = index;
-                break;
-            }
+            Impl::ReleaseProxySlot(scene, slotIndex);
+            ++m_impl->stats.failedProxyCreates;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy relink metadata allocation failed", desc.scene);
         }
-        if (slotIndex == scene.proxies.Size()) scene.proxies.PushBack({});
-
         Impl::ProxySlot& slot = scene.proxies[slotIndex];
         const u32 admittedGeneration = NextGeneration(slot.generation);
+        slot = {};
         slot.state = RenderProxyState::Alive;
         slot.generation = admittedGeneration;
         slot.typeId = desc.typeId;
         slot.producerId = desc.producerId;
         slot.producerGeneration = desc.producerGeneration;
+        slot.producer = desc.producer;
+        slot.contributor = desc.contributor;
         slot.transform = desc.transform;
         slot.bounds = desc.bounds;
         slot.spatialMode = desc.spatialMode;
@@ -938,30 +1337,42 @@ namespace vanguard::rendering
         slot.layerMask = desc.layerMask;
         slot.visibilityMask = desc.visibilityMask;
         slot.userDataEpoch = desc.userDataEpoch;
+        slot.teleportRevision = 0;
         slot.createdSerial = m_impl->nextProxyCreatedSerial++;
         slot.lifecycleRevision = 1;
         CopyNameUnchecked(slot.debugName, MaximumRenderProxyNameBytes, copiedName);
 
         proxy = {desc.scene, slotIndex, slot.generation};
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::Create))
+        if (!relinks->InitializeProxyMetadata(proxy))
         {
-            slot = {};
-            slot.generation = admittedGeneration;
+            Impl::ReleaseProxySlot(scene, slotIndex);
             proxy = {};
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderProxy creation mutation budget exceeded", desc.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy relink metadata was not retired", desc.scene);
+        }
+        if (!m_impl->RegisterMutation(desc.scene, scene))
+        {
+            Impl::ReleaseProxySlot(scene, slotIndex);
+            proxy = {};
+            ++m_impl->stats.failedProxyCreates;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy creation mutation budget exceeded", desc.scene, proxy);
         }
         if (!m_impl->InsertSpatialEntry(scene, proxy, slot))
         {
-            slot = {};
-            slot.generation = admittedGeneration;
+            Impl::ReleaseProxySlot(scene, slotIndex);
             proxy = {};
-            --m_impl->stats.pendingProxyMutations;
-            scene.mutations.PopBack();
+            m_impl->RollbackMutation(scene);
             ++m_impl->stats.failedProxyCreates;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "RenderProxy spatial insertion failed", desc.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderProxy spatial insertion failed", desc.scene, proxy);
+        }
+        if (slot.producer.IsValid() && !Impl::LinkProducerProxy(scene, proxy))
+        {
+            m_impl->RemoveSpatialEntry(scene, slot);
+            Impl::ReleaseProxySlot(scene, slotIndex);
+            proxy = {};
+            m_impl->RollbackMutation(scene);
+            ++m_impl->stats.failedProxyCreates;
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy producer linkage failed", desc.scene, proxy);
         }
         ++scene.activeProxies;
         ++scene.lifecycleRevision;
@@ -970,33 +1381,32 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::CreateMeshProxy(const MeshProxyDesc& desc, RenderProxyHandle& proxy,
-                                             RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateMeshProxy(const MeshProxyDesc& desc, RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         proxy = {};
         if (!desc.mesh.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "MeshProxy requires a valid mesh resource reference", desc.proxy.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "MeshProxy requires a valid mesh resource reference", desc.proxy.scene);
+
+        RenderSceneGpuIdentity gpuIdentity;
+        if (m_impl != nullptr && m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->ReserveIdentity(RenderSceneGpuObjectKind::Instance, gpuIdentity))
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "MeshProxy GPU identity allocation failed", desc.proxy.scene);
 
         RenderProxyDesc baseDesc = desc.proxy;
-        if (baseDesc.typeId == 0) baseDesc.typeId = MeshProxyTypeId;
-        if (!CreateProxy(baseDesc, proxy, failure)) return false;
+        if (baseDesc.typeId == 0)
+            baseDesc.typeId = MeshProxyTypeId;
+        if (!CreateProxy(baseDesc, proxy, failure))
+        {
+            if (m_impl != nullptr && m_impl->gpuPublisher != nullptr)
+                m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+            return false;
+        }
 
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
         Impl::ProxySlot& base = scene.proxies[proxy.index];
-        u32 payloadIndex = scene.meshPayloads.Size();
-        for (u32 index = 0; index < scene.meshPayloads.Size(); ++index)
-        {
-            if (scene.meshPayloads[index].state != RenderProxyState::Alive)
-            {
-                payloadIndex = index;
-                break;
-            }
-        }
-        if (payloadIndex == scene.meshPayloads.Size()) scene.meshPayloads.PushBack({});
-
+        const u32 payloadIndex = Impl::AcquireSlot(scene.meshPayloads, scene.firstFreeMeshPayload);
         Impl::MeshPayloadSlot& payload = scene.meshPayloads[payloadIndex];
+        payload = {};
         payload.state = RenderProxyState::Alive;
         payload.proxy = proxy;
         payload.generation = proxy.generation;
@@ -1012,37 +1422,42 @@ namespace vanguard::rendering
         base.payloadGeneration = proxy.generation;
         ++m_impl->stats.activeMeshPayloads;
         ++m_impl->stats.createdPayloads;
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->TrackProxy(proxy, gpuIdentity))
+        {
+            m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+            static_cast<void>(DestroyProxy(proxy));
+            proxy = {};
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "MeshProxy GPU identity tracking failed", desc.proxy.scene);
+        }
         return true;
     }
 
-    bool RenderSceneManager::CreateLightProxy(const LightProxyDesc& desc, RenderProxyHandle& proxy,
-                                              RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateLightProxy(const LightProxyDesc& desc, RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         proxy = {};
-        if (!ValidLightProperties(desc.kind, desc.color, desc.intensity, desc.range,
-                                  desc.innerConeRadians, desc.outerConeRadians))
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "LightProxy requires non-negative intensity and range", desc.proxy.scene);
+        if (!ValidLightProperties(desc.kind, desc.color, desc.intensity, desc.range, desc.innerConeRadians, desc.outerConeRadians))
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "LightProxy requires non-negative intensity and range", desc.proxy.scene);
+
+        RenderSceneGpuIdentity gpuIdentity;
+        if (m_impl != nullptr && m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->ReserveIdentity(RenderSceneGpuObjectKind::Light, gpuIdentity))
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "LightProxy GPU identity allocation failed", desc.proxy.scene);
 
         RenderProxyDesc baseDesc = desc.proxy;
-        if (baseDesc.typeId == 0) baseDesc.typeId = LightProxyTypeId;
-        if (!CreateProxy(baseDesc, proxy, failure)) return false;
+        if (baseDesc.typeId == 0)
+            baseDesc.typeId = LightProxyTypeId;
+        if (!CreateProxy(baseDesc, proxy, failure))
+        {
+            if (m_impl != nullptr && m_impl->gpuPublisher != nullptr)
+                m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+            return false;
+        }
 
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
         Impl::ProxySlot& base = scene.proxies[proxy.index];
-        u32 payloadIndex = scene.lightPayloads.Size();
-        for (u32 index = 0; index < scene.lightPayloads.Size(); ++index)
-        {
-            if (scene.lightPayloads[index].state != RenderProxyState::Alive)
-            {
-                payloadIndex = index;
-                break;
-            }
-        }
-        if (payloadIndex == scene.lightPayloads.Size()) scene.lightPayloads.PushBack({});
-
+        const u32 payloadIndex = Impl::AcquireSlot(scene.lightPayloads, scene.firstFreeLightPayload);
         Impl::LightPayloadSlot& payload = scene.lightPayloads[payloadIndex];
+        payload = {};
         payload.state = RenderProxyState::Alive;
         payload.proxy = proxy;
         payload.generation = proxy.generation;
@@ -1061,39 +1476,44 @@ namespace vanguard::rendering
         base.payloadGeneration = proxy.generation;
         ++m_impl->stats.activeLightPayloads;
         ++m_impl->stats.createdPayloads;
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->TrackProxy(proxy, gpuIdentity))
+        {
+            m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+            static_cast<void>(DestroyProxy(proxy));
+            proxy = {};
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "LightProxy GPU identity tracking failed", desc.proxy.scene);
+        }
         return true;
     }
 
-    bool RenderSceneManager::CreateDecalProxy(const DecalProxyDesc& desc, RenderProxyHandle& proxy,
-                                              RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateDecalProxy(const DecalProxyDesc& desc, RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         proxy = {};
-        if (!desc.material.IsValid() || !std::isfinite(desc.extents[0]) || !std::isfinite(desc.extents[1]) ||
-            !std::isfinite(desc.extents[2]) || !std::isfinite(desc.fadeDistance) ||
-            desc.extents[0] < 0.0f || desc.extents[1] < 0.0f || desc.extents[2] < 0.0f ||
-            desc.fadeDistance < 0.0f)
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "DecalProxy requires a valid material and non-negative extents", desc.proxy.scene);
+        if (!desc.material.IsValid() || !std::isfinite(desc.extents[0]) || !std::isfinite(desc.extents[1]) || !std::isfinite(desc.extents[2]) ||
+            !std::isfinite(desc.fadeDistance) || desc.extents[0] < 0.0f || desc.extents[1] < 0.0f || desc.extents[2] < 0.0f || desc.fadeDistance < 0.0f)
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "DecalProxy requires a valid material and non-negative extents", desc.proxy.scene);
+
+        RenderSceneGpuIdentity gpuIdentity;
+        if (m_impl != nullptr && m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->ReserveIdentity(RenderSceneGpuObjectKind::Decal, gpuIdentity))
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "DecalProxy GPU identity allocation failed", desc.proxy.scene);
 
         RenderProxyDesc baseDesc = desc.proxy;
-        if (baseDesc.typeId == 0) baseDesc.typeId = DecalProxyTypeId;
-        if (!CreateProxy(baseDesc, proxy, failure)) return false;
+        if (baseDesc.typeId == 0)
+            baseDesc.typeId = DecalProxyTypeId;
+        if (!CreateProxy(baseDesc, proxy, failure))
+        {
+            if (m_impl != nullptr && m_impl->gpuPublisher != nullptr)
+                m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+            return false;
+        }
 
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
         Impl::ProxySlot& base = scene.proxies[proxy.index];
-        u32 payloadIndex = scene.decalPayloads.Size();
-        for (u32 index = 0; index < scene.decalPayloads.Size(); ++index)
-        {
-            if (scene.decalPayloads[index].state != RenderProxyState::Alive)
-            {
-                payloadIndex = index;
-                break;
-            }
-        }
-        if (payloadIndex == scene.decalPayloads.Size()) scene.decalPayloads.PushBack({});
 
+        const u32 payloadIndex = Impl::AcquireSlot(scene.decalPayloads, scene.firstFreeDecalPayload);
         Impl::DecalPayloadSlot& payload = scene.decalPayloads[payloadIndex];
+        payload = {};
         payload.state = RenderProxyState::Alive;
         payload.proxy = proxy;
         payload.generation = proxy.generation;
@@ -1110,82 +1530,125 @@ namespace vanguard::rendering
         base.payloadGeneration = proxy.generation;
         ++m_impl->stats.activeDecalPayloads;
         ++m_impl->stats.createdPayloads;
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->TrackProxy(proxy, gpuIdentity))
+        {
+            m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+            static_cast<void>(DestroyProxy(proxy));
+            proxy = {};
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "DecalProxy GPU identity tracking failed", desc.proxy.scene);
+        }
         return true;
     }
 
-    bool RenderSceneManager::DestroyProxy(const RenderProxyHandle proxy,
-                                          RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateProducerMeshProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const MeshProxyDesc& desc,
+                                                     RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
+    {
+        MeshProxyDesc producerDesc = desc;
+        producerDesc.proxy.producer = producer;
+        producerDesc.proxy.contributor = contributor;
+        return CreateMeshProxy(producerDesc, proxy, failure);
+    }
+
+    bool RenderSceneManager::CreateProducerLightProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const LightProxyDesc& desc,
+                                                      RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
+    {
+        LightProxyDesc producerDesc = desc;
+        producerDesc.proxy.producer = producer;
+        producerDesc.proxy.contributor = contributor;
+        return CreateLightProxy(producerDesc, proxy, failure);
+    }
+
+    bool RenderSceneManager::CreateProducerDecalProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const DecalProxyDesc& desc,
+                                                      RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
+    {
+        DecalProxyDesc producerDesc = desc;
+        producerDesc.proxy.producer = producer;
+        producerDesc.proxy.contributor = contributor;
+        return CreateDecalProxy(producerDesc, proxy, failure);
+    }
+
+    bool RenderSceneManager::DestroyProxy(const RenderProxyHandle proxy, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderProxy destruction must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderProxy destruction must run on the main thread", proxy.scene, proxy);
         }
         if (!m_impl->ValidProxy(proxy))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderProxy handle", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderProxy handle", proxy.scene, proxy);
         }
 
+        RenderSceneGpuIdentity gpuIdentity;
+        const bool gpuTracked = m_impl->gpuPublisher != nullptr && m_impl->gpuPublisher->GetIdentity(proxy, gpuIdentity);
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy destruction is blocked by an open GPU publication", proxy.scene, proxy);
+
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        Impl::RelinkState* const relinks = m_impl->relinkStates[proxy.scene.index];
+        if (relinks == nullptr)
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene relink state is unavailable", proxy.scene, proxy);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderProxy destruction is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy destruction is blocked between scene preparation and commit", proxy.scene, proxy);
         }
         Impl::ProxySlot& slot = scene.proxies[proxy.index];
         if (slot.state == RenderProxyState::Destroying)
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::PendingDestroy,
-                        "RenderProxy destruction is already pending", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::PendingDestroy, "RenderProxy destruction is already pending", proxy.scene, proxy);
         }
         if (slot.state != RenderProxyState::Alive)
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy is not alive", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy is not alive", proxy.scene, proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::Destroy))
+        const Impl::RelinkState::CloseProxyResult closeResult = relinks->CloseProxy(proxy);
+        if (closeResult == Impl::RelinkState::CloseProxyResult::Outstanding)
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy destruction waits for outstanding relinks", proxy.scene, proxy);
+        if (closeResult == Impl::RelinkState::CloseProxyResult::Stale)
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy relink metadata is stale or unavailable", proxy.scene, proxy);
+        if (!m_impl->RegisterMutation(proxy.scene, scene, true))
         {
+            relinks->ReopenProxy(proxy);
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderProxy destruction mutation budget exceeded", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy destruction mutation budget exceeded", proxy.scene, proxy);
+        }
+        if (gpuTracked && !m_impl->gpuPublisher->RetireProxy(proxy))
+        {
+            m_impl->RollbackMutation(scene);
+            relinks->ReopenProxy(proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy GPU retirement journaling failed", proxy.scene, proxy);
         }
 
         m_impl->RemoveSpatialEntry(scene, slot);
         switch (slot.payloadKind)
         {
         case RenderProxyPayloadKind::Mesh:
-            if (slot.payloadIndex < scene.meshPayloads.Size() &&
-                scene.meshPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
+            if (slot.payloadIndex < scene.meshPayloads.Size() && scene.meshPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
             {
-                scene.meshPayloads[slot.payloadIndex] = {};
+                Impl::ReleasePayloadSlot(scene.meshPayloads, scene.firstFreeMeshPayload, slot.payloadIndex);
                 --m_impl->stats.activeMeshPayloads;
                 ++m_impl->stats.destroyedPayloads;
             }
             break;
         case RenderProxyPayloadKind::Light:
-            if (slot.payloadIndex < scene.lightPayloads.Size() &&
-                scene.lightPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
+            if (slot.payloadIndex < scene.lightPayloads.Size() && scene.lightPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
             {
-                scene.lightPayloads[slot.payloadIndex] = {};
+                Impl::ReleasePayloadSlot(scene.lightPayloads, scene.firstFreeLightPayload, slot.payloadIndex);
                 --m_impl->stats.activeLightPayloads;
                 ++m_impl->stats.destroyedPayloads;
             }
             break;
         case RenderProxyPayloadKind::Decal:
-            if (slot.payloadIndex < scene.decalPayloads.Size() &&
-                scene.decalPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
+            if (slot.payloadIndex < scene.decalPayloads.Size() && scene.decalPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
             {
-                scene.decalPayloads[slot.payloadIndex] = {};
+                Impl::ReleasePayloadSlot(scene.decalPayloads, scene.firstFreeDecalPayload, slot.payloadIndex);
                 --m_impl->stats.activeDecalPayloads;
                 ++m_impl->stats.destroyedPayloads;
             }
@@ -1194,10 +1657,11 @@ namespace vanguard::rendering
             break;
         }
         slot.payloadKind = RenderProxyPayloadKind::None;
-        slot.payloadIndex = ~u32{0};
+        slot.payloadIndex = InvalidSlotIndex;
         slot.payloadGeneration = 0;
-        slot.state = RenderProxyState::Retired;
         ++slot.lifecycleRevision;
+        Impl::UnlinkProducerProxy(scene, slot);
+        Impl::ReleaseProxySlot(scene, proxy.index);
         ++scene.lifecycleRevision;
         --scene.activeProxies;
         --m_impl->stats.activeProxies;
@@ -1205,179 +1669,205 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::UpdateProxyTransform(const RenderProxyHandle proxy,
-                                                  const RenderProxyTransform& transform,
-                                                  const RenderProxyBounds& bounds,
-                                                  const u64 producerGeneration,
-                                                  RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::DestroyProducerContribution(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer,
+                                                         const RenderContributorId contributor, RenderProxyHandle* const destroyed,
+                                                         RenderSceneFailure* const failure) noexcept
     {
-        ClearFailure(failure);
+        if (destroyed != nullptr)
+            *destroyed = {};
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
-        if (!concurrency::IsMainThread())
-        {
-            ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderProxy transform update must run on the main thread", proxy.scene, proxy);
-        }
-        if (!m_impl->ValidAliveProxy(proxy))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
-        }
-        if (!ValidTransform(transform) || !ValidBounds(bounds))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid RenderProxy bounds", proxy.scene, proxy);
-        }
-        Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderProxy transform update is blocked between scene preparation and commit", proxy.scene, proxy);
-        }
-        if (m_impl->slots[proxy.scene.index].proxies[proxy.index].spatialMode == RenderProxySpatialMode::Bounds &&
-            !m_impl->SpatialBoundsAccepted(scene, bounds))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            ++scene.spatial.stats.outOfRangeProxies;
-            ++m_impl->stats.spatialOutOfRangeProxies;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "RenderProxy transform moves bounds outside the configured spatial extent", proxy.scene, proxy);
-        }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::TransformAndBounds))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderProxy transform mutation budget exceeded", proxy.scene, proxy);
-        }
-        Impl::ProxySlot& slot = scene.proxies[proxy.index];
-        const RenderProxyBounds oldBounds = slot.bounds;
-        slot.transform = transform;
-        slot.bounds = bounds;
-        if (producerGeneration != 0) slot.producerGeneration = producerGeneration;
-        m_impl->MoveSpatialEntry(scene, proxy, slot, oldBounds);
-        ++slot.lifecycleRevision;
-        ++scene.lifecycleRevision;
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", sceneHandle);
+        if (!m_impl->ValidAliveScene(sceneHandle) || !producer.IsValid() || !contributor.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene producer contribution", sceneHandle);
+        const Impl::SceneSlot& scene = m_impl->slots[sceneHandle.index];
+        const u32 proxyIndex = Impl::FindProducerProxyIndex(scene, producer, contributor);
+        if (proxyIndex == InvalidSlotIndex)
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "RenderScene producer contribution is not present", sceneHandle);
+        const RenderProxyHandle proxy{sceneHandle, proxyIndex, scene.proxies[proxyIndex].generation};
+        if (!DestroyProxy(proxy, failure))
+            return false;
+        if (destroyed != nullptr)
+            *destroyed = proxy;
         return true;
     }
 
-    bool RenderSceneManager::UpdateProxyVisibility(const RenderProxyHandle proxy,
-                                                   const RenderProxyVisibilityFlags visibility,
-                                                   const u32 visibilityMask,
+    bool RenderSceneManager::DestroyProducer(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer,
+                                             containers::DynamicArray<RenderProducerProxy>* const destroyed, RenderSceneFailure* const failure) noexcept
+    {
+        if (destroyed != nullptr)
+            destroyed->Clear();
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", sceneHandle);
+        if (!m_impl->ValidAliveScene(sceneHandle) || !producer.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene producer", sceneHandle);
+        Impl::SceneSlot& scene = m_impl->slots[sceneHandle.index];
+        const Impl::ProducerSlot* owner = Impl::ResolveProducer(scene, producer);
+        if (owner == nullptr)
+            return true;
+        if (destroyed != nullptr)
+            destroyed->Reserve(owner->proxyCount);
+        while ((owner = Impl::ResolveProducer(scene, producer)) != nullptr && owner->firstProxy != InvalidSlotIndex)
+        {
+            const u32 proxyIndex = owner->firstProxy;
+            const Impl::ProxySlot& slot = scene.proxies[proxyIndex];
+            const RenderProxyHandle proxy{sceneHandle, proxyIndex, slot.generation};
+            const RenderContributorId contributor = slot.contributor;
+            if (!DestroyProxy(proxy, failure))
+                return false;
+            if (destroyed != nullptr)
+                destroyed->PushBack({producer, contributor, proxy});
+        }
+        return true;
+    }
+
+    // WARNING: This cold reset scans every proxy in the scene. Destruction is not transactional;
+    // callers must process the returned partial result if a later proxy destruction fails.
+    bool RenderSceneManager::DestroySceneProducers(const RenderSceneHandle sceneHandle, const u64 producerGeneration,
+                                                   containers::DynamicArray<RenderProducerProxy>& destroyed, RenderSceneFailure* const failure) noexcept
+    {
+        destroyed.Clear();
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", sceneHandle);
+        if (!m_impl->ValidAliveScene(sceneHandle))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene for producer reset", sceneHandle);
+        Impl::SceneSlot& scene = m_impl->slots[sceneHandle.index];
+        destroyed.Reserve(scene.activeProxies);
+        for (u32 index = 0; index < scene.proxies.Size(); ++index)
+        {
+            const Impl::ProxySlot& slot = scene.proxies[index];
+            if (slot.state != RenderProxyState::Alive || !slot.producer.IsValid() || slot.producerGeneration != producerGeneration)
+                continue;
+            const RenderProducerProxy detached{slot.producer, slot.contributor, {sceneHandle, index, slot.generation}};
+            if (!DestroyProxy(detached.proxy, failure))
+                return false;
+            destroyed.PushBack(detached);
+        }
+        return true;
+    }
+
+    bool RenderSceneManager::UpdateProxyTransform(const RenderProxyHandle proxy, const RenderProxyTransform& transform, const RenderProxyBounds& bounds,
+                                                  const u64 producerGeneration, RenderSceneFailure* const failure) noexcept
+    {
+        RenderProxyRelinkRequest request;
+        request.proxy = proxy;
+        request.transform = transform;
+        request.bounds = bounds;
+        request.producerGeneration = producerGeneration;
+        return ScheduleRelink(request, failure);
+    }
+
+    bool RenderSceneManager::UpdateProxyVisibility(const RenderProxyHandle proxy, const RenderProxyVisibilityFlags visibility, const u32 visibilityMask,
                                                    RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderProxy visibility update must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderProxy visibility update must run on the main thread", proxy.scene, proxy);
         }
         if (!m_impl->ValidAliveProxy(proxy))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
         }
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        const Impl::ProxySlot& currentVisibility = scene.proxies[proxy.index];
+        if (currentVisibility.visibility == visibility && currentVisibility.visibilityMask == visibilityMask)
+            return true;
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy visibility update is blocked by an open GPU publication", proxy.scene, proxy);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderProxy visibility update is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy visibility update is blocked between scene preparation and commit", proxy.scene,
+                        proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::Visibility))
+        if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderProxy visibility mutation budget exceeded", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy visibility mutation budget exceeded", proxy.scene, proxy);
         }
         Impl::ProxySlot& slot = scene.proxies[proxy.index];
         slot.visibility = visibility;
         slot.visibilityMask = visibilityMask;
         ++slot.lifecycleRevision;
         ++scene.lifecycleRevision;
+        if (m_impl->gpuPublisher != nullptr)
+            static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Visibility));
         return true;
     }
 
-    bool RenderSceneManager::UpdateProxyLayerMask(const RenderProxyHandle proxy, const u64 layerMask,
-                                                  RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::UpdateProxyLayerMask(const RenderProxyHandle proxy, const u64 layerMask, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderProxy layer update must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderProxy layer update must run on the main thread", proxy.scene, proxy);
         }
         if (!m_impl->ValidAliveProxy(proxy))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
         }
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        const Impl::ProxySlot& currentLayer = scene.proxies[proxy.index];
+        if (currentLayer.layerMask == layerMask)
+            return true;
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy layer update is blocked by an open GPU publication", proxy.scene, proxy);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderProxy layer update is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy layer update is blocked between scene preparation and commit", proxy.scene, proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::LayerMask))
+        if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderProxy layer mutation budget exceeded", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy layer mutation budget exceeded", proxy.scene, proxy);
         }
         Impl::ProxySlot& slot = scene.proxies[proxy.index];
         slot.layerMask = layerMask;
         ++slot.lifecycleRevision;
         ++scene.lifecycleRevision;
+        if (m_impl->gpuPublisher != nullptr)
+            static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Visibility));
         return true;
     }
 
-    bool RenderSceneManager::UpdateProxyUserDataEpoch(const RenderProxyHandle proxy, const u64 userDataEpoch,
-                                                      RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::UpdateProxyUserDataEpoch(const RenderProxyHandle proxy, const u64 userDataEpoch, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderProxy user-data update must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderProxy user-data update must run on the main thread", proxy.scene, proxy);
         }
         if (!m_impl->ValidAliveProxy(proxy))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid, stale, or non-alive RenderProxy handle", proxy.scene, proxy);
         }
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        const Impl::ProxySlot& currentUserData = scene.proxies[proxy.index];
+        if (currentUserData.userDataEpoch == userDataEpoch)
+            return true;
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderProxy user-data update is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy user-data update is blocked between scene preparation and commit", proxy.scene,
+                        proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::UserDataEpoch))
+        if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "RenderProxy user-data mutation budget exceeded", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy user-data mutation budget exceeded", proxy.scene, proxy);
         }
         Impl::ProxySlot& slot = scene.proxies[proxy.index];
         slot.userDataEpoch = userDataEpoch;
@@ -1386,717 +1876,707 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::UpdateMeshProxyResources(const RenderProxyHandle proxy,
-                                                      const resources::ResourceReference mesh,
-                                                      const resources::ResourceReference material,
-                                                      const resources::ResourceHandle& meshHandle,
-                                                      const resources::ResourceHandle& materialHandle,
-                                                      RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::UpdateMeshProxy(const RenderProxyHandle proxy, const MeshProxyUpdate& update, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "MeshProxy resource update must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "MeshProxy payload update must run on the main thread", proxy.scene, proxy);
         }
-        if (!mesh.IsValid())
+        if (!ValidFields(update.fields) || (HasField(update.fields, MeshProxyUpdateFields::Resources) && !update.mesh.IsValid()))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "MeshProxy resource update requires a valid mesh reference", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid MeshProxy payload update", proxy.scene, proxy);
         }
         if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Mesh))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy does not own a live mesh payload", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy does not own a live mesh payload", proxy.scene, proxy);
         }
 
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "MeshProxy payload update is blocked by an open GPU publication", proxy.scene, proxy);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "MeshProxy resource update is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "MeshProxy payload update is blocked between scene preparation and commit", proxy.scene, proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::MeshResources))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "MeshProxy resource mutation budget exceeded", proxy.scene, proxy);
-        }
+
         Impl::ProxySlot& base = scene.proxies[proxy.index];
         Impl::MeshPayloadSlot& payload = scene.meshPayloads[base.payloadIndex];
-        payload.mesh = mesh;
-        payload.material = material;
-        payload.meshHandle = meshHandle;
-        payload.materialHandle = materialHandle;
+        const bool resourcesChanged =
+            HasField(update.fields, MeshProxyUpdateFields::Resources) &&
+            (payload.mesh != update.mesh || payload.material != update.material || !SameResourceHandle(payload.meshHandle, update.meshHandle) ||
+             !SameResourceHandle(payload.materialHandle, update.materialHandle));
+        const bool submeshesChanged = HasField(update.fields, MeshProxyUpdateFields::SubmeshSelection) && payload.submeshMask != update.submeshMask;
+        const bool flagsChanged = HasField(update.fields, MeshProxyUpdateFields::RenderFlags) && payload.renderFlags != update.renderFlags;
+        if (!resourcesChanged && !submeshesChanged && !flagsChanged)
+            return true;
+        if (!m_impl->RegisterMutation(proxy.scene, scene))
+        {
+            ++m_impl->stats.failedProxyMutations;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "MeshProxy payload mutation budget exceeded", proxy.scene, proxy);
+        }
+        if (resourcesChanged)
+        {
+            payload.mesh = update.mesh;
+            payload.material = update.material;
+            payload.meshHandle = update.meshHandle;
+            payload.materialHandle = update.materialHandle;
+        }
+        if (submeshesChanged)
+            payload.submeshMask = update.submeshMask;
+        if (flagsChanged)
+            payload.renderFlags = update.renderFlags;
         ++base.lifecycleRevision;
         ++scene.lifecycleRevision;
+        if (m_impl->gpuPublisher != nullptr)
+        {
+            if (resourcesChanged)
+                static_cast<void>(m_impl->gpuPublisher->ClearMeshBinding(proxy));
+            if (submeshesChanged || flagsChanged)
+                static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties));
+        }
         return true;
     }
 
-    bool RenderSceneManager::UpdateLightProxyProperties(const RenderProxyHandle proxy,
-                                                        const LightProxySnapshot& properties,
-                                                        RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::UpdateLightProxy(const RenderProxyHandle proxy, const LightProxyUpdate& update, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "LightProxy property update must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "LightProxy payload update must run on the main thread", proxy.scene, proxy);
         }
-        if (!ValidLightProperties(properties.kind, properties.color, properties.intensity, properties.range,
-                                  properties.innerConeRadians, properties.outerConeRadians))
+        if (!ValidFields(update.fields))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "LightProxy property update requires non-negative intensity and range", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid LightProxy payload update", proxy.scene, proxy);
         }
         if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Light))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy does not own a live light payload", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy does not own a live light payload", proxy.scene, proxy);
         }
 
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "LightProxy payload update is blocked by an open GPU publication", proxy.scene, proxy);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "LightProxy property update is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "LightProxy payload update is blocked between scene preparation and commit", proxy.scene, proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::LightProperties))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "LightProxy property mutation budget exceeded", proxy.scene, proxy);
-        }
+
         Impl::ProxySlot& base = scene.proxies[proxy.index];
         Impl::LightPayloadSlot& payload = scene.lightPayloads[base.payloadIndex];
-        payload.kind = properties.kind;
-        payload.color[0] = properties.color[0];
-        payload.color[1] = properties.color[1];
-        payload.color[2] = properties.color[2];
-        payload.intensity = properties.intensity;
-        payload.range = properties.range;
-        payload.innerConeRadians = properties.innerConeRadians;
-        payload.outerConeRadians = properties.outerConeRadians;
-        payload.castsShadow = properties.castsShadow;
+        const RenderLightKind kind = HasField(update.fields, LightProxyUpdateFields::Kind) ? update.kind : payload.kind;
+        const f32* const color = HasField(update.fields, LightProxyUpdateFields::Color) ? update.color : payload.color;
+        const f32 intensity = HasField(update.fields, LightProxyUpdateFields::Photometry) ? update.intensity : payload.intensity;
+        const f32 range = HasField(update.fields, LightProxyUpdateFields::Photometry) ? update.range : payload.range;
+        const f32 innerCone = HasField(update.fields, LightProxyUpdateFields::Cones) ? update.innerConeRadians : payload.innerConeRadians;
+        const f32 outerCone = HasField(update.fields, LightProxyUpdateFields::Cones) ? update.outerConeRadians : payload.outerConeRadians;
+        if (!ValidLightProperties(kind, color, intensity, range, innerCone, outerCone))
+        {
+            ++m_impl->stats.failedProxyMutations;
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid LightProxy payload values", proxy.scene, proxy);
+        }
+
+        const bool kindChanged = HasField(update.fields, LightProxyUpdateFields::Kind) && payload.kind != update.kind;
+        const bool colorChanged = HasField(update.fields, LightProxyUpdateFields::Color) &&
+                                  (payload.color[0] != update.color[0] || payload.color[1] != update.color[1] || payload.color[2] != update.color[2]);
+        const bool photometryChanged =
+            HasField(update.fields, LightProxyUpdateFields::Photometry) && (payload.intensity != update.intensity || payload.range != update.range);
+        const bool conesChanged = HasField(update.fields, LightProxyUpdateFields::Cones) &&
+                                  (payload.innerConeRadians != update.innerConeRadians || payload.outerConeRadians != update.outerConeRadians);
+        const bool shadowChanged = HasField(update.fields, LightProxyUpdateFields::Shadow) && payload.castsShadow != update.castsShadow;
+        if (!kindChanged && !colorChanged && !photometryChanged && !conesChanged && !shadowChanged)
+            return true;
+        if (!m_impl->RegisterMutation(proxy.scene, scene))
+        {
+            ++m_impl->stats.failedProxyMutations;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "LightProxy payload mutation budget exceeded", proxy.scene, proxy);
+        }
+        if (kindChanged)
+            payload.kind = update.kind;
+        if (colorChanged)
+        {
+            payload.color[0] = update.color[0];
+            payload.color[1] = update.color[1];
+            payload.color[2] = update.color[2];
+        }
+        if (photometryChanged)
+        {
+            payload.intensity = update.intensity;
+            payload.range = update.range;
+        }
+        if (conesChanged)
+        {
+            payload.innerConeRadians = update.innerConeRadians;
+            payload.outerConeRadians = update.outerConeRadians;
+        }
+        if (shadowChanged)
+            payload.castsShadow = update.castsShadow;
         ++base.lifecycleRevision;
         ++scene.lifecycleRevision;
+        if (m_impl->gpuPublisher != nullptr)
+            static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties));
         return true;
     }
 
-    bool RenderSceneManager::UpdateDecalProxyMaterial(const RenderProxyHandle proxy,
-                                                      const resources::ResourceReference material,
-                                                      const resources::ResourceHandle& materialHandle,
-                                                      RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::UpdateDecalProxy(const RenderProxyHandle proxy, const DecalProxyUpdate& update, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", proxy.scene, proxy);
         if (!concurrency::IsMainThread())
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "DecalProxy material update must run on the main thread", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "DecalProxy payload update must run on the main thread", proxy.scene, proxy);
         }
-        if (!material.IsValid())
+        if (!ValidFields(update.fields) || (HasField(update.fields, DecalProxyUpdateFields::Material) && !update.material.IsValid()) ||
+            (HasField(update.fields, DecalProxyUpdateFields::Extents) &&
+             (!std::isfinite(update.extents[0]) || !std::isfinite(update.extents[1]) || !std::isfinite(update.extents[2]) || update.extents[0] < 0.0f ||
+              update.extents[1] < 0.0f || update.extents[2] < 0.0f)) ||
+            (HasField(update.fields, DecalProxyUpdateFields::FadeDistance) && (!std::isfinite(update.fadeDistance) || update.fadeDistance < 0.0f)))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "DecalProxy material update requires a valid material reference", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid DecalProxy payload update", proxy.scene, proxy);
         }
         if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Decal))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy does not own a live decal payload", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy does not own a live decal payload", proxy.scene, proxy);
         }
 
         Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        if (scene.framePrepared)
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->AllowsMutation(proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::Busy, "DecalProxy payload update is blocked by an open GPU publication", proxy.scene, proxy);
+        if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "DecalProxy material update is blocked between scene preparation and commit", proxy.scene, proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "DecalProxy payload update is blocked between scene preparation and commit", proxy.scene, proxy);
         }
-        if (!m_impl->AppendMutation(scene, proxy, RenderProxyMutationKind::DecalMaterial))
-        {
-            ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded,
-                        "DecalProxy material mutation budget exceeded", proxy.scene, proxy);
-        }
+
         Impl::ProxySlot& base = scene.proxies[proxy.index];
         Impl::DecalPayloadSlot& payload = scene.decalPayloads[base.payloadIndex];
-        payload.material = material;
-        payload.materialHandle = materialHandle;
+        const bool materialChanged = HasField(update.fields, DecalProxyUpdateFields::Material) &&
+                                     (payload.material != update.material || !SameResourceHandle(payload.materialHandle, update.materialHandle));
+        const bool extentsChanged =
+            HasField(update.fields, DecalProxyUpdateFields::Extents) &&
+            (payload.extents[0] != update.extents[0] || payload.extents[1] != update.extents[1] || payload.extents[2] != update.extents[2]);
+        const bool fadeChanged = HasField(update.fields, DecalProxyUpdateFields::FadeDistance) && payload.fadeDistance != update.fadeDistance;
+        const bool sortChanged = HasField(update.fields, DecalProxyUpdateFields::SortKey) && payload.sortKey != update.sortKey;
+        if (!materialChanged && !extentsChanged && !fadeChanged && !sortChanged)
+            return true;
+        if (!m_impl->RegisterMutation(proxy.scene, scene))
+        {
+            ++m_impl->stats.failedProxyMutations;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "DecalProxy payload mutation budget exceeded", proxy.scene, proxy);
+        }
+        if (materialChanged)
+        {
+            payload.material = update.material;
+            payload.materialHandle = update.materialHandle;
+        }
+        if (extentsChanged)
+        {
+            payload.extents[0] = update.extents[0];
+            payload.extents[1] = update.extents[1];
+            payload.extents[2] = update.extents[2];
+        }
+        if (fadeChanged)
+            payload.fadeDistance = update.fadeDistance;
+        if (sortChanged)
+            payload.sortKey = update.sortKey;
         ++base.lifecycleRevision;
         ++scene.lifecycleRevision;
+        if (m_impl->gpuPublisher != nullptr)
+        {
+            if (materialChanged)
+                static_cast<void>(m_impl->gpuPublisher->ClearDecalMaterialBinding(proxy));
+            if (extentsChanged || fadeChanged || sortChanged)
+                static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties));
+        }
         return true;
     }
 
-    bool RenderSceneManager::PrepareSceneFrame(const RenderSceneHandle scene,
-                                               RenderSceneFramePrepareResult& result,
-                                               RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::ScheduleRelink(const RenderProxyRelinkRequest& request, RenderSceneFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.proxy.scene, request.proxy);
+        if (!request.proxy.IsValid() || !ValidTransform(request.transform) || !ValidBounds(request.bounds))
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid RenderProxy relink request", request.proxy.scene, request.proxy);
+
+        concurrency::ScopedSharedLock<concurrency::RWLock> sceneGuard(m_impl->publicationLock);
+        if (!m_impl->ValidAliveScene(request.proxy.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for relink admission", request.proxy.scene,
+                        request.proxy);
+        Impl::RelinkState* const relinks = m_impl->relinkStates[request.proxy.scene.index];
+        if (relinks == nullptr)
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene relink state is unavailable", request.proxy.scene, request.proxy);
+        bool alreadyOutstanding = false;
+        const Impl::RelinkState::AcquireProxyResult admission = relinks->AcquireOutstanding(request.proxy, alreadyOutstanding);
+        if (admission == Impl::RelinkState::AcquireProxyResult::Stale)
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid, stale, or non-alive RenderProxy handle", request.proxy.scene, request.proxy);
+        if (admission == Impl::RelinkState::AcquireProxyResult::Closed)
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy relink admission is closed for destruction", request.proxy.scene, request.proxy);
+        if (admission == Impl::RelinkState::AcquireProxyResult::CapacityExceeded)
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy outstanding relink capacity exceeded", request.proxy.scene,
+                        request.proxy);
+
+        if (!m_impl->ValidAliveProxy(request.proxy))
+        {
+            relinks->ReleaseOutstanding(request.proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid, stale, or non-alive RenderProxy handle", request.proxy.scene, request.proxy);
+        }
+        Impl::SceneSlot& scene = m_impl->slots[request.proxy.scene.index];
+        const Impl::ProxySlot& proxy = scene.proxies[request.proxy.index];
+        if (proxy.spatialMode == RenderProxySpatialMode::Bounds && !m_impl->SpatialBoundsAccepted(scene, request.bounds))
+        {
+            relinks->ReleaseOutstanding(request.proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderProxy relink moves bounds outside the configured spatial extent",
+                        request.proxy.scene, request.proxy);
+        }
+        if (!alreadyOutstanding && !relinks->dispatched.GetValue() && !request.teleport && SameTransform(proxy.transform, request.transform) &&
+            SameBounds(proxy.bounds, request.bounds))
+        {
+            relinks->ReleaseOutstanding(request.proxy);
+            return true;
+        }
+        concurrency::ScopedSharedLock<concurrency::RWSpinLock> indexGuard(relinks->pendingIndexLock);
+        containers::DynamicArray<Impl::PendingRelinkRequest>& queue = relinks->Queue(relinks->pendingIndex);
+        const u32 index = relinks->pendingCount.PostIncrement();
+        if (index >= queue.Size())
+        {
+            static_cast<void>(relinks->pendingCount.PostDecrement());
+            relinks->ReleaseOutstanding(request.proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderScene relink request capacity exceeded", request.proxy.scene, request.proxy);
+        }
+
+        Impl::PendingRelinkRequest& pending = queue[index];
+        pending.input = request;
+        pending.oldBounds = {};
+        pending.active = true;
+        pending.structuralMove = false;
+        return true;
+    }
+
+    bool RenderSceneManager::PrepareSceneUpdate(const RenderSceneHandle scene, const u64 tickCounter, RenderSceneFramePrepareResult& result,
+                                                RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         result = {};
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", scene);
         if (!concurrency::IsMainThread())
-        {
-            ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderScene frame preparation must run on the main thread", scene);
-        }
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderScene update preparation must run on the main thread", scene);
         if (!m_impl->ValidAliveScene(scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for update preparation", scene);
+
+        Impl::RelinkState* const relinks = m_impl->relinkStates[scene.index];
+        if (relinks == nullptr)
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene relink state is unavailable", scene);
+        if (relinks->dispatched.GetValue() || relinks->candidateProduction.GetValue())
+            return Fail(failure, RenderSceneFailureCode::Busy, "previous RenderScene update jobs have not completed", scene);
+        if (relinks->prepared)
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene update is already prepared", scene);
+
+        if (relinks->lastPreparedTick != tickCounter)
         {
-            ++m_impl->stats.failedPublishes;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for frame preparation", scene);
+            concurrency::ScopedLock<concurrency::RWSpinLock> indexGuard(relinks->pendingIndexLock);
+            relinks->processIndex = relinks->pendingIndex;
+            relinks->pendingIndex ^= 1u;
+            const u32 submitted = relinks->pendingCount.Exchange(0);
+            const u32 capacity = relinks->Queue(relinks->processIndex).Size();
+            relinks->processCount = submitted < capacity ? submitted : capacity;
+            relinks->lastPreparedTick = tickCounter;
         }
 
         Impl::SceneSlot& slot = m_impl->slots[scene.index];
-        if (slot.framePrepared)
-        {
-            ++m_impl->stats.failedPublishes;
-            return Fail(failure, RenderSceneFailureCode::Busy,
-                        "RenderScene frame is already prepared and must be committed before preparing again", scene);
-        }
-        result.scene = scene;
-        result.mutationEpoch = slot.currentMutationEpoch;
-        result.drainedMutations = slot.mutations.Size();
-        result.completedSynchronously = true;
-        slot.preparedMutationEpoch = slot.currentMutationEpoch;
-        slot.preparedMutationCount = slot.mutations.Size();
-        slot.framePrepared = true;
         m_impl->RepairSpatialIndex(slot);
-        if (slot.mutations.Size() != 0)
+        const u32 commandMutationCount = slot.pendingMutationCount;
+        if (slot.pendingMutationCount != 0)
         {
-            m_impl->stats.pendingProxyMutations -= slot.mutations.Size();
-            slot.mutations.Clear();
+            m_impl->stats.pendingProxyMutations -= slot.pendingMutationCount;
+            slot.pendingMutationCount = 0;
         }
+        slot.framePrepared = true;
+        slot.preparedMutationEpoch = slot.currentMutationEpoch;
+        slot.preparedMutationCount = commandMutationCount + relinks->processCount;
+        relinks->uniqueCount = 0;
+        relinks->structuralMoveCount = 0;
+        relinks->prepared = true;
+
+        result.scene = scene;
+        result.mutationEpoch = slot.preparedMutationEpoch;
+        result.drainedMutations = slot.preparedMutationCount;
+        result.completedSynchronously = relinks->processCount == 0;
         ++m_impl->stats.preparedFrames;
         return true;
     }
 
-    bool RenderSceneManager::CommitScene(const RenderSceneHandle scene, RenderSceneCommitResult& result,
-                                         RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::ExecuteSceneUpdate(const RenderSceneHandle scene, jobs::Builder& builder, RenderSceneUpdateResult& result,
+                                                RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         result = {};
-        if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", scene);
-        if (!concurrency::IsMainThread())
-        {
-            ++m_impl->stats.rejectedOperations;
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderScene commit must run on the main thread", scene);
-        }
-        concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidAliveScene(scene))
-        {
-            ++m_impl->stats.failedPublishes;
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for commit", scene);
-        }
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for scene update", scene);
+        Impl::RelinkState* const relinks = m_impl->relinkStates[scene.index];
+        if (relinks == nullptr || !relinks->prepared || relinks->dispatched.GetValue())
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene update must be prepared exactly once before execution", scene);
+        if (!builder.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene update requires a valid Jobs builder", scene);
 
-        Impl::SceneSlot& slot = m_impl->slots[scene.index];
-        if (!slot.framePrepared)
-        {
-            ++m_impl->stats.failedPublishes;
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderScene commit requires a prepared frame", scene);
-        }
-
-        for (u32 index = 0; index < slot.publishedVersions.Size(); ++index)
-            slot.publishedVersions[index].retired = true;
-
-        slot.publishedVersions.PushBack({});
-        Impl::PublishedSceneVersion& published = slot.publishedVersions[slot.publishedVersions.Size() - 1u];
-        published.version = {m_impl->nextSceneVersion++};
-        published.scene = scene;
-        published.mutationEpoch = slot.preparedMutationEpoch;
-        published.lifecycleRevision = slot.lifecycleRevision;
-        published.readerCount = 0;
-        published.retired = false;
-        published.proxies.Clear();
-        published.proxyLookup.Clear();
-        published.proxyLookup.Resize(slot.proxies.Size());
-        for (u32 index = 0; index < published.proxyLookup.Size(); ++index) published.proxyLookup[index] = ~u32{0};
-        published.spatialCells.Clear();
-        published.spatialCellProxies.Clear();
-        published.meshPayloads.Clear();
-        published.lightPayloads.Clear();
-        published.decalPayloads.Clear();
-        published.meshPayloadLookup.Clear();
-        published.lightPayloadLookup.Clear();
-        published.decalPayloadLookup.Clear();
-        published.meshPayloadLookup.Resize(slot.proxies.Size());
-        published.lightPayloadLookup.Resize(slot.proxies.Size());
-        published.decalPayloadLookup.Resize(slot.proxies.Size());
-        for (u32 index = 0; index < slot.proxies.Size(); ++index)
-        {
-            published.meshPayloadLookup[index] = ~u32{0};
-            published.lightPayloadLookup[index] = ~u32{0};
-            published.decalPayloadLookup[index] = ~u32{0};
-        }
-
-        for (u32 proxyIndex = 0; proxyIndex < slot.proxies.Size(); ++proxyIndex)
-        {
-            const Impl::ProxySlot& proxy = slot.proxies[proxyIndex];
-            if (proxy.state != RenderProxyState::Alive) continue;
-            RenderProxySnapshot snapshot;
-            m_impl->BuildProxySnapshot(scene, proxyIndex, proxy, snapshot);
-            published.proxyLookup[proxyIndex] = published.proxies.Size();
-            published.proxies.PushBack(snapshot);
-            switch (proxy.payloadKind)
-            {
-            case RenderProxyPayloadKind::Mesh:
-                if (m_impl->ValidAlivePayload(snapshot.handle, RenderProxyPayloadKind::Mesh))
-                {
-                    published.meshPayloadLookup[proxyIndex] = published.meshPayloads.Size();
-                    MeshProxySnapshot mesh;
-                    m_impl->BuildMeshSnapshot(slot.meshPayloads[proxy.payloadIndex], mesh);
-                    published.meshPayloads.PushBack(mesh);
-                }
-                break;
-            case RenderProxyPayloadKind::Light:
-                if (m_impl->ValidAlivePayload(snapshot.handle, RenderProxyPayloadKind::Light))
-                {
-                    published.lightPayloadLookup[proxyIndex] = published.lightPayloads.Size();
-                    LightProxySnapshot light;
-                    m_impl->BuildLightSnapshot(slot.lightPayloads[proxy.payloadIndex], light);
-                    published.lightPayloads.PushBack(light);
-                }
-                break;
-            case RenderProxyPayloadKind::Decal:
-                if (m_impl->ValidAlivePayload(snapshot.handle, RenderProxyPayloadKind::Decal))
-                {
-                    published.decalPayloadLookup[proxyIndex] = published.decalPayloads.Size();
-                    DecalProxySnapshot decal;
-                    m_impl->BuildDecalSnapshot(slot.decalPayloads[proxy.payloadIndex], decal);
-                    published.decalPayloads.PushBack(decal);
-                }
-                break;
-            case RenderProxyPayloadKind::None:
-                break;
-            }
-        }
-
-        spatial::PublishCells(slot.spatial, published.proxyLookup, published.proxies,
-                              published.spatialCells, published.spatialCellProxies);
-
+        Impl* const impl = m_impl;
+        Impl::SceneSlot& sceneSlot = impl->slots[scene.index];
+        const u32 processIndex = relinks->processIndex;
+        const u32 processCount = relinks->processCount;
         result.scene = scene;
-        result.version = published.version;
-        result.completion = {m_impl->nextCompletionToken++};
-        result.mutationEpoch = published.mutationEpoch;
-        result.proxyCount = published.proxies.Size();
-        result.completedSynchronously = true;
-        slot.framePrepared = false;
-        slot.preparedMutationCount = 0;
-        ++m_impl->stats.committedVersions;
-        m_impl->RecomputeRetainedSceneVersions();
-        return true;
-    }
-
-    bool RenderSceneManager::AcquireLatestReadLease(const RenderSceneHandle scene, SceneReadLease& lease,
-                                                    RenderSceneFailure* const failure) noexcept
-    {
-        ClearFailure(failure);
-        if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", scene);
-        if (lease.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "cannot overwrite a live RenderScene read lease", lease.scene);
-        lease = {};
-        concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidAliveScene(scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for read lease", scene);
-
-        Impl::SceneSlot& slot = m_impl->slots[scene.index];
-        if (slot.publishedVersions.Size() == 0)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "RenderScene has no committed versions", scene);
-
-        Impl::PublishedSceneVersion& version = slot.publishedVersions[slot.publishedVersions.Size() - 1u];
-        const u64 readerEpoch = m_impl->AllocateReaderEpoch();
-        version.readerEpochs.PushBack(readerEpoch);
-        ++version.readerCount;
-        ++m_impl->stats.liveReadLeases;
-        lease.scene = scene;
-        lease.version = version.version;
-        lease.readerEpoch = readerEpoch;
-        lease.proxyCount = version.proxies.Size();
-        lease.spatialCellCount = version.spatialCells.Size();
-        return true;
-    }
-
-    bool RenderSceneManager::AcquireReadLease(const RenderSceneHandle scene, const RenderSceneVersion version,
-                                              SceneReadLease& lease,
-                                              RenderSceneFailure* const failure) noexcept
-    {
-        ClearFailure(failure);
-        if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", scene);
-        if (lease.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "cannot overwrite a live RenderScene read lease", lease.scene);
-        lease = {};
-        concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!version.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid RenderScene version requested", scene);
-        if (!m_impl->ValidAliveScene(scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for exact read lease", scene);
-
-        Impl::SceneSlot& slot = m_impl->slots[scene.index];
-        Impl::PublishedSceneVersion* const published = m_impl->FindPublishedVersion(slot, version);
-        if (published == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "requested RenderScene version is not retained", scene);
-
-        const u64 readerEpoch = m_impl->AllocateReaderEpoch();
-        published->readerEpochs.PushBack(readerEpoch);
-        ++published->readerCount;
-        ++m_impl->stats.liveReadLeases;
-        lease.scene = scene;
-        lease.version = published->version;
-        lease.readerEpoch = readerEpoch;
-        lease.proxyCount = published->proxies.Size();
-        lease.spatialCellCount = published->spatialCells.Size();
-        return true;
-    }
-
-    bool RenderSceneManager::ReleaseReadLease(SceneReadLease& lease,
-                                              RenderSceneFailure* const failure) noexcept
-    {
-        ClearFailure(failure);
-        if (!lease.IsValid()) return true;
-        if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", lease.scene);
-        concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidHandle(lease.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for read lease release", lease.scene);
-
-        Impl::SceneSlot& slot = m_impl->slots[lease.scene.index];
-        Impl::PublishedSceneVersion* const version = m_impl->FindPublishedVersion(slot, lease.version);
-        const u32 readerIndex = version != nullptr ? m_impl->FindReaderEpoch(*version, lease.readerEpoch) : ~u32{0};
-        if (version == nullptr || readerIndex == ~u32{0})
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "released RenderScene version is not retained", lease.scene);
-
-        version->readerEpochs.RemoveAt(readerIndex);
-        --version->readerCount;
-        --m_impl->stats.liveReadLeases;
-        lease = {};
-        return true;
-    }
-
-    bool RenderSceneManager::RetirePublishedVersions(RenderSceneVersionRetirementResult& result,
-                                                     RenderSceneFailure* const failure) noexcept
-    {
-        ClearFailure(failure);
-        result = {};
-        if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized");
-        if (!concurrency::IsMainThread())
-            return Fail(failure, RenderSceneFailureCode::WrongThread,
-                        "RenderScene version retirement must run on the main thread");
-
-        concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        for (u32 sceneIndex = 0; sceneIndex < m_impl->slots.Size(); ++sceneIndex)
+        result.mutationEpoch = sceneSlot.preparedMutationEpoch;
+        const u64 completedMutationEpoch = sceneSlot.preparedMutationEpoch;
+        result.submittedRelinks = processCount;
+        if (processCount == 0)
         {
-            Impl::SceneSlot& scene = m_impl->slots[sceneIndex];
-            for (u32 versionIndex = 0; versionIndex < scene.publishedVersions.Size();)
-            {
-                const Impl::PublishedSceneVersion& version = scene.publishedVersions[versionIndex];
-                if (!version.retired)
-                {
-                    ++versionIndex;
-                    continue;
-                }
-                if (version.readerCount != 0)
-                {
-                    ++result.versionsBlockedByReaders;
-                    ++versionIndex;
-                    continue;
-                }
-                scene.publishedVersions.RemoveAt(versionIndex);
-                ++result.reclaimedVersions;
-            }
-            result.retainedVersions += scene.publishedVersions.Size();
-        }
-        result.liveReadLeases = m_impl->stats.liveReadLeases;
-        m_impl->RecomputeRetainedSceneVersions();
-        return true;
-    }
-
-    bool RenderSceneManager::ReadProxy(const SceneReadLease& lease, const RenderProxyHandle proxy,
-                                       RenderProxySnapshot& snapshot,
-                                       RenderSceneFailure* const failure) const noexcept
-    {
-        ClearFailure(failure);
-        snapshot = {};
-        if (!lease.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid RenderScene read lease", lease.scene, proxy);
-        if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", lease.scene, proxy);
-        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!(proxy.scene == lease.scene))
-            return Fail(failure, RenderSceneFailureCode::WrongScene,
-                        "RenderProxy does not belong to the read lease scene", lease.scene, proxy);
-        if (!m_impl->ValidHandle(lease.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for read lease", lease.scene, proxy);
-
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "RenderScene read lease version is not retained", lease.scene, proxy);
-
-        const RenderProxySnapshot* const resolved = m_impl->ResolvePublishedProxy(*version, proxy);
-        if (resolved != nullptr)
-        {
-            snapshot = *resolved;
+            relinks->prepared = false;
+            sceneSlot.completedMutationEpoch = sceneSlot.preparedMutationEpoch;
+            sceneSlot.framePrepared = false;
+            sceneSlot.preparedMutationCount = 0;
+            result.dispatched = false;
             return true;
         }
 
-        return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                    "RenderProxy is not present in the leased RenderScene version", lease.scene, proxy);
-    }
-
-    bool RenderSceneManager::ReadMeshProxy(const SceneReadLease& lease, const RenderProxyHandle proxy,
-                                           MeshProxySnapshot& snapshot,
-                                           RenderSceneFailure* const failure) const noexcept
-    {
-        ClearFailure(failure);
-        snapshot = {};
-        RenderProxySnapshot base;
-        if (!ReadProxy(lease, proxy, base, failure)) return false;
-        if (base.payloadKind != RenderProxyPayloadKind::Mesh)
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy does not own a mesh payload in this scene version", lease.scene, proxy);
-        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "RenderScene read lease version is not retained", lease.scene, proxy);
-        if (proxy.index < version->meshPayloadLookup.Size())
+        const u32 groupCount = jobs::GetWorkerCount() + 1u;
+        const u32 batchSize = (processCount + groupCount - 1u) / groupCount;
+        RenderSceneGpuDirtyBatch gpuDirtyBatch;
+        if (impl->gpuPublisher != nullptr && !impl->gpuPublisher->BeginParallelDirty(scene, groupCount, processCount, gpuDirtyBatch))
         {
-            const u32 index = version->meshPayloadLookup[proxy.index];
-            if (index < version->meshPayloads.Size() && version->meshPayloads[index].proxy == proxy)
-            {
-                snapshot = version->meshPayloads[index];
-                return true;
-            }
+            impl->CancelPreparedSceneUpdate(sceneSlot, *relinks);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene GPU dirty batch could not be opened", scene);
         }
-        return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                    "MeshProxy payload is not present in the leased RenderScene version", lease.scene, proxy);
-    }
 
-    bool RenderSceneManager::ReadLightProxy(const SceneReadLease& lease, const RenderProxyHandle proxy,
-                                            LightProxySnapshot& snapshot,
-                                            RenderSceneFailure* const failure) const noexcept
-    {
-        ClearFailure(failure);
-        snapshot = {};
-        RenderProxySnapshot base;
-        if (!ReadProxy(lease, proxy, base, failure)) return false;
-        if (base.payloadKind != RenderProxyPayloadKind::Light)
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy does not own a light payload in this scene version", lease.scene, proxy);
-        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "RenderScene read lease version is not retained", lease.scene, proxy);
-        if (proxy.index < version->lightPayloadLookup.Size())
+        u32 duplicateStamp = ++relinks->dedupStamp;
+        if (duplicateStamp == 0)
         {
-            const u32 index = version->lightPayloadLookup[proxy.index];
-            if (index < version->lightPayloads.Size() && version->lightPayloads[index].proxy == proxy)
-            {
-                snapshot = version->lightPayloads[index];
-                return true;
-            }
+            relinks->ClearDedupStamps();
+            duplicateStamp = ++relinks->dedupStamp;
         }
-        return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                    "LightProxy payload is not present in the leased RenderScene version", lease.scene, proxy);
-    }
 
-    bool RenderSceneManager::ReadDecalProxy(const SceneReadLease& lease, const RenderProxyHandle proxy,
-                                            DecalProxySnapshot& snapshot,
-                                            RenderSceneFailure* const failure) const noexcept
-    {
-        ClearFailure(failure);
-        snapshot = {};
-        RenderProxySnapshot base;
-        if (!ReadProxy(lease, proxy, base, failure)) return false;
-        if (base.payloadKind != RenderProxyPayloadKind::Decal)
-            return Fail(failure, RenderSceneFailureCode::InvalidState,
-                        "RenderProxy does not own a decal payload in this scene version", lease.scene, proxy);
-        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "RenderScene read lease version is not retained", lease.scene, proxy);
-        if (proxy.index < version->decalPayloadLookup.Size())
+        relinks->prepared = false;
+        relinks->dispatched.SetValue(true);
+        static jobs::JobName updateName{"RenderScene.UpdateState"};
+        static jobs::JobName relinkName{"RenderScene.UpdateState.Relink"};
+        jobs::Task updateTask = jobs::Task::Create(
+            [impl, relinks, scene, processIndex, processCount, duplicateStamp, groupCount, batchSize, completedMutationEpoch,
+             gpuDirtyBatch](const jobs::JobContext& context) noexcept
+            {
+                containers::DynamicArray<Impl::PendingRelinkRequest>& requests = relinks->Queue(processIndex);
+                u32 unique = 0;
+                for (u32 index = processCount; index-- > 0;)
+                {
+                    Impl::PendingRelinkRequest& request = requests[index];
+                    const RenderProxyHandle proxyHandle = request.input.proxy;
+                    if (!request.active)
+                        continue;
+                    Impl::RelinkState::ProxyRelinkMetadata* const metadata = relinks->ResolveProxyMetadata(proxyHandle);
+                    if (proxyHandle.scene != scene || metadata == nullptr)
+                    {
+                        request.active = false;
+                        continue;
+                    }
+                    if (metadata->dedupStamp == duplicateStamp)
+                    {
+                        relinks->ReleaseOutstanding(proxyHandle);
+                        request.active = false;
+                        continue;
+                    }
+                    metadata->dedupStamp = duplicateStamp;
+                    ++unique;
+                }
+                relinks->uniqueCount = unique;
+
+                const auto ApplyGroup = [impl, relinks, scene, processIndex, processCount, batchSize, gpuDirtyBatch](const u32 group) noexcept
+                {
+                    containers::DynamicArray<Impl::PendingRelinkRequest>& groupRequests = relinks->Queue(processIndex);
+                    const u32 first = group * batchSize;
+                    const u32 proposedEnd = first + batchSize;
+                    const u32 end = proposedEnd < processCount ? proposedEnd : processCount;
+                    for (u32 index = first; index < end; ++index)
+                    {
+                        Impl::PendingRelinkRequest& request = groupRequests[index];
+                        if (!request.active || !impl->ValidAliveProxy(request.input.proxy))
+                            continue;
+                        Impl::SceneSlot& slot = impl->slots[scene.index];
+                        Impl::ProxySlot& proxy = slot.proxies[request.input.proxy.index];
+                        request.oldBounds = proxy.bounds;
+                        proxy.transform = request.input.transform;
+                        proxy.bounds = request.input.bounds;
+                        if (request.input.producerGeneration != 0)
+                            proxy.producerGeneration = request.input.producerGeneration;
+                        if (request.input.teleport)
+                            ++proxy.teleportRevision;
+                        request.structuralMove =
+                            proxy.spatialMode == RenderProxySpatialMode::Bounds && spatial::QuickConditionalMove(slot.spatial, proxy.spatial, proxy.bounds);
+                        ++proxy.lifecycleRevision;
+                        if (impl->gpuPublisher != nullptr)
+                            static_cast<void>(
+                                impl->gpuPublisher->MarkProxyDirty(gpuDirtyBatch, group, request.input.proxy, RenderSceneGpuDirtyFlags::Transform));
+                    }
+                };
+                const auto Finish = [impl, relinks, scene, processIndex, processCount, completedMutationEpoch, gpuDirtyBatch]() noexcept
+                {
+                    Impl::SceneSlot& slot = impl->slots[scene.index];
+                    containers::DynamicArray<Impl::PendingRelinkRequest>& finishRequests = relinks->Queue(processIndex);
+                    u32 structuralMoves = 0;
+                    for (u32 index = 0; index < processCount; ++index)
+                    {
+                        Impl::PendingRelinkRequest& request = finishRequests[index];
+                        if (request.active && request.structuralMove && impl->ValidAliveProxy(request.input.proxy))
+                        {
+                            impl->MoveSpatialEntry(slot, request.input.proxy, slot.proxies[request.input.proxy.index], request.oldBounds);
+                            ++structuralMoves;
+                        }
+                        if (request.active)
+                            relinks->ReleaseOutstanding(request.input.proxy);
+                        request = {};
+                    }
+                    if (structuralMoves != 0)
+                        impl->RepairSpatialIndex(slot);
+                    if (impl->gpuPublisher != nullptr)
+                        static_cast<void>(impl->gpuPublisher->EndParallelDirty(gpuDirtyBatch));
+                    relinks->structuralMoveCount = structuralMoves;
+                    ++slot.currentMutationEpoch;
+                    ++slot.lifecycleRevision;
+                    slot.completedMutationEpoch = completedMutationEpoch;
+                    slot.framePrepared = false;
+                    slot.preparedMutationCount = 0;
+                    relinks->processCount = 0;
+                    relinks->dispatched.SetValue(false);
+                };
+
+                jobs::ParallelTask relinkTask =
+                    jobs::ParallelTask::Create([ApplyGroup](const u32 group, const jobs::JobContext&) noexcept { ApplyGroup(group); });
+                jobs::Task epilogue = jobs::Task::Create([Finish](const jobs::JobContext&) noexcept { Finish(); });
+                jobs::Builder childBuilder(context);
+                if (relinkTask && epilogue && childBuilder.IsValid() &&
+                    childBuilder.DispatchParallel(relinkName, groupCount, std::move(relinkTask), std::move(epilogue), 1u))
+                    return;
+
+                // Allocation/dispatch failure inside the owned root cannot reopen the scene. Complete the bounded work serially
+                // and run the same epilogue so every retained request and GPU dirty batch has exactly one release path.
+                for (u32 group = 0; group < groupCount; ++group)
+                    ApplyGroup(group);
+                Finish();
+            });
+        if (!updateTask || !builder.Dispatch(updateName, std::move(updateTask)))
         {
-            const u32 index = version->decalPayloadLookup[proxy.index];
-            if (index < version->decalPayloads.Size() && version->decalPayloads[index].proxy == proxy)
-            {
-                snapshot = version->decalPayloads[index];
-                return true;
-            }
+            if (impl->gpuPublisher != nullptr)
+                impl->gpuPublisher->CancelParallelDirty(gpuDirtyBatch);
+            relinks->dispatched.SetValue(false);
+            impl->CancelPreparedSceneUpdate(sceneSlot, *relinks);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderScene update-state job dispatch failed", scene);
         }
-        return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                    "DecalProxy payload is not present in the leased RenderScene version", lease.scene, proxy);
+
+        result.dispatched = true;
+        return true;
     }
 
-    bool RenderSceneManager::CollectVisibleProxies(const VisibilityQueryRequest& request,
-                                                   containers::DynamicArray<RenderProxyHandle>& proxies,
-                                                   VisibilityQueryResult& result,
-                                                   RenderSceneFailure* const failure) const noexcept
+    bool RenderSceneManager::CollectVisibleProxies(const VisibilityQueryRequest& request, containers::DynamicArray<RenderProxyHandle>& proxies,
+                                                   VisibilityQueryResult& result, RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         proxies.Clear();
         result = {};
-        result.scene = request.lease.scene;
-        result.version = request.lease.version;
-        if (!request.lease.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid RenderScene read lease for visibility query", request.lease.scene);
+        result.scene = request.scene;
+        result.mutationEpoch = request.mutationEpoch;
+        if (!request.scene.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene handle for visibility query", request.scene);
         if (request.useBounds && !ValidBounds(request.bounds))
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid visibility query bounds", request.lease.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid visibility query bounds", request.scene);
         if (request.useFrustum && !ValidFrustum(request.frustum))
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid visibility query frustum", request.lease.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid visibility query frustum", request.scene);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", request.lease.scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
+
         concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidHandle(request.lease.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for visibility query", request.lease.scene);
+        if (!m_impl->ValidAliveScene(request.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for visibility query", request.scene);
+        const Impl::RelinkState* const relinks = m_impl->relinkStates[request.scene.index];
+        const Impl::SceneSlot& scene = m_impl->slots[request.scene.index];
+        if ((relinks != nullptr && relinks->dispatched.GetValue()) || scene.framePrepared || scene.completedMutationEpoch != request.mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "visibility query does not reference the completed scene-update epoch", request.scene);
 
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(request.lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "visibility query version is not retained by a live read lease", request.lease.scene);
-
-        spatial::Collect(request, version->spatialCells, version->spatialCellProxies,
-                         version->proxyLookup, version->proxies, proxies, result);
+        spatial::CollectLive(scene.spatial, request, m_impl, Impl::ResolveLiveVisibilityProxyThunk, proxies, result);
         return true;
     }
 
-    bool RenderSceneManager::BuildVisibilityQueryPlan(const SceneReadLease& lease, const u32 targetCellsPerBatch,
-                                                      containers::DynamicArray<VisibilityQueryBatch>& batches,
-                                                      VisibilityQueryPlan& plan,
+    bool RenderSceneManager::BuildVisibilityQueryPlan(const RenderSceneHandle scene, const u64 mutationEpoch, const u32 targetCellsPerBatch,
+                                                      containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan,
                                                       RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         batches.Clear();
         plan = {};
-        plan.scene = lease.scene;
-        plan.version = lease.version;
-        if (!lease.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid RenderScene read lease for visibility query planning", lease.scene);
+        plan.scene = scene;
+        plan.mutationEpoch = mutationEpoch;
+        if (!scene.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene handle for visibility query planning", scene);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", lease.scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", scene);
+
         concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidHandle(lease.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for visibility query planning", lease.scene);
+        if (!m_impl->ValidAliveScene(scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for visibility query planning", scene);
+        const Impl::RelinkState* const relinks = m_impl->relinkStates[scene.index];
+        const Impl::SceneSlot& sceneSlot = m_impl->slots[scene.index];
+        if ((relinks != nullptr && relinks->dispatched.GetValue()) || sceneSlot.framePrepared || sceneSlot.completedMutationEpoch != mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "visibility query plan does not reference the completed scene-update epoch", scene);
 
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "visibility query plan version is not retained by a live read lease", lease.scene);
-
-        plan.scene = lease.scene;
-        plan.version = lease.version;
-        spatial::BuildBatches(version->spatialCells.Size(), targetCellsPerBatch, batches, plan);
+        spatial::BuildLiveBatches(sceneSlot.spatial, scene, mutationEpoch, targetCellsPerBatch, batches, plan);
         return true;
     }
 
-    bool RenderSceneManager::CollectVisibleProxyBatch(const VisibilityQueryRequest& request,
-                                                      const VisibilityQueryBatch& batch,
-                                                      containers::DynamicArray<RenderProxyHandle>& proxies,
-                                                      VisibilityQueryResult& result,
+    bool RenderSceneManager::CollectVisibleProxyBatch(const VisibilityQueryRequest& request, const VisibilityQueryBatch& batch,
+                                                      containers::DynamicArray<RenderProxyHandle>& proxies, VisibilityQueryResult& result,
                                                       RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         proxies.Clear();
         result = {};
-        result.scene = request.lease.scene;
-        result.version = request.lease.version;
-        if (!request.lease.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid RenderScene read lease for visibility query batch", request.lease.scene);
-        if (!batch.IsValid() || !(batch.scene == request.lease.scene) || !(batch.version == request.lease.version))
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "visibility query batch does not belong to the retained scene version", request.lease.scene);
+        result.scene = request.scene;
+        result.mutationEpoch = request.mutationEpoch;
+        if (!request.scene.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene handle for visibility query batch", request.scene);
+        if (!batch.IsValid() || !(batch.scene == request.scene) || batch.mutationEpoch != request.mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "visibility query batch does not belong to the requested scene-update epoch",
+                        request.scene);
         if (request.maximumResults != ~u32{0})
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "per-batch visibility collection requires an unbounded local result; apply limits during reduction",
-                        request.lease.scene);
+                        "per-batch visibility collection requires an unbounded local result; apply limits during reduction", request.scene);
         if (request.useBounds && !ValidBounds(request.bounds))
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid visibility query batch bounds", request.lease.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid visibility query batch bounds", request.scene);
         if (request.useFrustum && !ValidFrustum(request.frustum))
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "invalid visibility query batch frustum", request.lease.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid visibility query batch frustum", request.scene);
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized,
-                        "RenderSceneManager is not initialized", request.lease.scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
+
         concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidHandle(request.lease.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle,
-                        "invalid or stale RenderScene handle for visibility query batch", request.lease.scene);
+        if (!m_impl->ValidAliveScene(request.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for visibility query batch", request.scene);
+        const Impl::RelinkState* const relinks = m_impl->relinkStates[request.scene.index];
+        const Impl::SceneSlot& scene = m_impl->slots[request.scene.index];
+        if ((relinks != nullptr && relinks->dispatched.GetValue()) || scene.framePrepared || scene.completedMutationEpoch != request.mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "visibility query batch does not reference the completed scene-update epoch", request.scene);
+        const u32 traversalSlots = scene.spatial.activeCellIndices.Size() + (scene.spatial.unindexedProxies.Size() != 0 ? 1u : 0u);
+        if (batch.firstCell >= traversalSlots)
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "visibility query batch is outside the completed spatial state", request.scene);
 
-        const Impl::PublishedSceneVersion* const version = m_impl->ResolveLease(request.lease);
-        if (version == nullptr)
-            return Fail(failure, RenderSceneFailureCode::VersionNotFound,
-                        "visibility query batch version is not retained by a live read lease", request.lease.scene);
-        if (batch.firstCell >= version->spatialCells.Size())
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "visibility query batch is outside the retained spatial snapshot", request.lease.scene);
+        spatial::CollectLiveRange(scene.spatial, request, batch, m_impl, Impl::ResolveLiveVisibilityProxyThunk, proxies, result);
+        return true;
+    }
 
-        spatial::CollectRange(request, version->spatialCells, version->spatialCellProxies,
-                              version->proxyLookup, version->proxies, batch, proxies, result);
+    bool RenderSceneManager::PrepareGpuVisibilityCandidates(const VisibilityQueryRequest& request, const u32 targetCandidatesPerBatch,
+                                                            const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
+                                                            RenderSceneGpuCandidatePlan& plan, RenderSceneFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        plan = {};
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
+        if (!concurrency::IsMainThread())
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "GPU visibility candidate planning must run on the main thread", request.scene);
+        if (!request.scene.IsValid())
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene handle for GPU visibility candidate planning", request.scene);
+        if (targetCandidatesPerBatch == 0 || request.payloadFilter != VisibilityQueryPayloadFilter::Mesh || request.maximumResults != ~u32{0} ||
+            (request.useBounds && !ValidBounds(request.bounds)) || (request.useFrustum && !ValidFrustum(request.frustum)))
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid GPU visibility candidate planning request", request.scene);
+
+        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
+        if (!m_impl->ValidAliveScene(request.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate planning",
+                        request.scene);
+        Impl::RelinkState* const relinks = m_impl->relinkStates[request.scene.index];
+        Impl::SceneSlot& scene = m_impl->slots[request.scene.index];
+        if (relinks == nullptr || relinks->dispatched.GetValue() || scene.framePrepared || scene.completedMutationEpoch != request.mutationEpoch ||
+            scene.pendingMutationCount != 0)
+            return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidates require the exact sealed scene-update epoch", request.scene);
+        if (relinks->candidateProduction.CompareExchange(true, false))
+            return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidate production is already active", request.scene);
+
+        u64 serial = ++relinks->candidateSerial;
+        if (serial == 0)
+            serial = ++relinks->candidateSerial;
+        if (!spatial::BuildGpuCandidateBatches(scene.spatial, request.scene, request.mutationEpoch, serial, targetCandidatesPerBatch, batchStorage, plan))
+        {
+            relinks->candidateProduction.SetValue(false);
+            plan.serial = 0;
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "GPU visibility candidate batch storage capacity was exceeded", request.scene);
+        }
+        plan.request = request;
+        return true;
+    }
+
+    bool RenderSceneManager::WriteGpuVisibilityCandidateBatch(const RenderSceneGpuCandidatePlan& plan, const RenderSceneGpuCandidateBatch& batch,
+                                                              const GpuVisibilityCandidateReservation& reservation, GpuVisibilityCandidateRange& range,
+                                                              RenderSceneGpuCandidateBatchResult& result, RenderSceneFailure* const failure) const noexcept
+    {
+        ClearFailure(failure);
+        result = {};
+        range = {};
+        const VisibilityQueryRequest& request = plan.request;
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
+        if (!plan.IsValid() || !batch.IsValid() || !reservation.IsValid() || request.scene != plan.scene || batch.scene != plan.scene ||
+            request.mutationEpoch != plan.mutationEpoch || batch.mutationEpoch != plan.mutationEpoch || batch.planSerial != plan.serial ||
+            plan.requiredCandidateCapacity > reservation.capacity || plan.requiredWorkRangeCapacity > reservation.workRangeCapacity ||
+            batch.destinationOffset > plan.requiredCandidateCapacity ||
+            batch.traversalCandidateCount > plan.requiredCandidateCapacity - batch.destinationOffset || batch.destinationOffset > reservation.capacity ||
+            batch.traversalCandidateCount > reservation.capacity - batch.destinationOffset)
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid GPU visibility candidate batch or reservation", request.scene);
+        if (!m_impl->ValidAliveScene(plan.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate production",
+                        plan.scene);
+
+        const Impl::RelinkState* const relinks = m_impl->relinkStates[plan.scene.index];
+        const Impl::SceneSlot& scene = m_impl->slots[plan.scene.index];
+        if (relinks == nullptr || !relinks->candidateProduction.GetValue() || relinks->candidateSerial != plan.serial ||
+            scene.completedMutationEpoch != plan.mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidate plan is not the active sealed scene epoch", plan.scene);
+
+        spatial::WriteGpuCandidateRange(scene.spatial, request, batch, m_impl, Impl::ResolveLiveVisibilityProxyThunk,
+                                        reservation.destination + batch.destinationOffset, range, result);
+        if (!result.completed)
+            return Fail(failure, RenderSceneFailureCode::InvalidState,
+                        result.unresolvedGpuIdentities != 0 ? "GPU visibility candidate encountered a mesh proxy without a stable GPU identity"
+                                                            : "GPU visibility candidate batch exceeded the sealed spatial traversal",
+                        plan.scene);
+        return true;
+    }
+
+    bool RenderSceneManager::CompleteGpuVisibilityCandidates(const RenderSceneGpuCandidatePlan& plan, RenderSceneFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", plan.scene);
+        if (!plan.IsValid() || !m_impl->ValidAliveScene(plan.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid GPU visibility candidate plan", plan.scene);
+        Impl::RelinkState* const relinks = m_impl->relinkStates[plan.scene.index];
+        if (relinks == nullptr || relinks->candidateSerial != plan.serial || !relinks->candidateProduction.Exchange(false))
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "GPU visibility candidate plan is stale or already completed", plan.scene);
         return true;
     }
 
     bool RenderSceneManager::IsAlive(const RenderSceneHandle scene) const noexcept
     {
-        return m_impl != nullptr && m_impl->ValidHandle(scene) &&
-               m_impl->slots[scene.index].state == RenderSceneState::Alive;
+        return m_impl != nullptr && m_impl->ValidHandle(scene) && m_impl->slots[scene.index].state == RenderSceneState::Alive;
     }
 
     bool RenderSceneManager::IsProxyAlive(const RenderProxyHandle proxy) const noexcept
@@ -2104,22 +2584,65 @@ namespace vanguard::rendering
         return m_impl != nullptr && m_impl->ValidAliveProxy(proxy);
     }
 
-    bool RenderSceneManager::IsProxyRetained(const RenderProxyHandle proxy) const noexcept
+    bool RenderSceneManager::FindProducerProxy(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer, const RenderContributorId contributor,
+                                               RenderProxyHandle& proxy) const noexcept
     {
-        if (m_impl == nullptr || !proxy.IsValid()) return false;
-        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidHandle(proxy.scene)) return false;
-        const Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        for (const Impl::PublishedSceneVersion& version : scene.publishedVersions)
-            if (m_impl->ResolvePublishedProxy(version, proxy) != nullptr) return true;
-        return false;
+        proxy = {};
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
+            return false;
+        const Impl::SceneSlot& scene = m_impl->slots[sceneHandle.index];
+        const u32 index = Impl::FindProducerProxyIndex(scene, producer, contributor);
+        if (index == InvalidSlotIndex)
+            return false;
+        proxy = {sceneHandle, index, scene.proxies[index].generation};
+        return true;
     }
 
-    bool RenderSceneManager::Snapshot(const RenderSceneHandle scene,
-                                      RenderSceneSnapshot& snapshot) const noexcept
+    u32 RenderSceneManager::GetProducerProxyCount(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer) const noexcept
+    {
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
+            return 0;
+        const Impl::ProducerSlot* const owner = Impl::ResolveProducer(m_impl->slots[sceneHandle.index], producer);
+        return owner != nullptr ? owner->proxyCount : 0;
+    }
+
+    bool RenderSceneManager::GetProducerProxies(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer,
+                                                containers::ArraySpan<RenderProducerProxy> proxies, u32& count) const noexcept
+    {
+        count = 0;
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
+            return false;
+        const Impl::SceneSlot& scene = m_impl->slots[sceneHandle.index];
+        const Impl::ProducerSlot* const owner = Impl::ResolveProducer(scene, producer);
+        if (owner == nullptr)
+            return true;
+        count = owner->proxyCount;
+        if (proxies.Size() < owner->proxyCount)
+            return false;
+        u32 written = 0;
+        u32 proxyIndex = owner->firstProxy;
+        while (proxyIndex != InvalidSlotIndex && written < owner->proxyCount)
+        {
+            const Impl::ProxySlot& slot = scene.proxies[proxyIndex];
+            proxies[written] = RenderProducerProxy{producer, slot.contributor, {sceneHandle, proxyIndex, slot.generation}};
+            ++written;
+            proxyIndex = slot.nextProducerProxy;
+        }
+        count = written;
+        return written == owner->proxyCount;
+    }
+
+    containers::ArraySpan<const RenderSceneHandle> RenderSceneManager::GetFramePipelineScenes() const noexcept
+    {
+        return m_impl != nullptr ? containers::ArraySpan<const RenderSceneHandle>(m_impl->framePipelineScenes, m_impl->framePipelineSceneCount)
+                                 : containers::ArraySpan<const RenderSceneHandle>{};
+    }
+
+    bool RenderSceneManager::GetSnapshot(const RenderSceneHandle scene, RenderSceneSnapshot& snapshot) const noexcept
     {
         snapshot = {};
-        if (m_impl == nullptr || !m_impl->ValidHandle(scene)) return false;
+        if (m_impl == nullptr || !m_impl->ValidHandle(scene))
+            return false;
         const Impl::SceneSlot& slot = m_impl->slots[scene.index];
         snapshot.handle = scene;
         snapshot.mode = slot.mode;
@@ -2130,76 +2653,163 @@ namespace vanguard::rendering
         snapshot.maximumPendingProxyMutations = slot.maximumPendingProxyMutations;
         snapshot.maximumViews = slot.maximumViews;
         snapshot.activeProxies = slot.activeProxies;
-        snapshot.pendingProxyMutations = slot.mutations.Size();
+        snapshot.pendingProxyMutations = slot.pendingMutationCount;
         snapshot.createdSerial = slot.createdSerial;
         snapshot.lifecycleRevision = slot.lifecycleRevision;
+        snapshot.currentMutationEpoch = slot.currentMutationEpoch;
+        snapshot.preparedMutationEpoch = slot.preparedMutationEpoch;
+        snapshot.completedMutationEpoch = slot.completedMutationEpoch;
+        snapshot.framePrepared = slot.framePrepared;
         snapshot.allowFramePipelineParticipation = slot.allowFramePipelineParticipation;
         CopyNameUnchecked(snapshot.name, MaximumRenderSceneNameBytes, slot.name);
         return true;
     }
 
-    bool RenderSceneManager::SnapshotProxy(const RenderProxyHandle proxy,
-                                           RenderProxySnapshot& snapshot) const noexcept
+    const char* RenderSceneManager::GetRenderingBlockReason(const RenderSceneHandle scene) const noexcept
     {
-        snapshot = {};
-        if (m_impl == nullptr || !m_impl->ValidProxy(proxy)) return false;
-        const Impl::ProxySlot& slot = m_impl->slots[proxy.scene.index].proxies[proxy.index];
-        snapshot.handle = proxy;
-        snapshot.state = slot.state;
-        snapshot.typeId = slot.typeId;
-        snapshot.producerId = slot.producerId;
-        snapshot.producerGeneration = slot.producerGeneration;
-        snapshot.transform = slot.transform;
-        snapshot.bounds = slot.bounds;
-        snapshot.visibility = slot.visibility;
-        snapshot.layerMask = slot.layerMask;
-        snapshot.visibilityMask = slot.visibilityMask;
-        snapshot.userDataEpoch = slot.userDataEpoch;
-        snapshot.createdSerial = slot.createdSerial;
-        snapshot.lifecycleRevision = slot.lifecycleRevision;
-        CopyNameUnchecked(snapshot.debugName, MaximumRenderProxyNameBytes, slot.debugName);
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(scene))
+            return "RenderScene is unavailable";
+        return m_impl->cameraStorage != nullptr ? m_impl->cameraStorage->GetRenderingBlockReason(scene)
+                                                : "RenderScene camera storage is unavailable";
+    }
+
+    void RenderSceneManager::TickWhileLoading(const RenderSceneHandle scene, const bool isFirstFrame) noexcept
+    {
+        if (m_impl != nullptr && m_impl->ValidAliveScene(scene) && m_impl->cameraStorage != nullptr)
+            m_impl->cameraStorage->TickWhileLoading(scene, isFirstFrame);
+    }
+
+    bool RenderSceneManager::AttachCameraStorage(RenderCameraStorage& storage) noexcept
+    {
+        if (m_impl == nullptr || m_impl->cameraStorage != nullptr || m_impl->stats.activeScenes != 0)
+            return false;
+        m_impl->cameraStorage = &storage;
         return true;
     }
 
-    bool RenderSceneManager::ValidateSpatialIndex(const RenderSceneHandle scene,
-                                                  SpatialWriteIndexStats* const stats) const noexcept
+    bool RenderSceneManager::DetachCameraStorage(RenderCameraStorage& storage) noexcept
     {
-        if (stats != nullptr) *stats = {};
-        if (m_impl == nullptr || !m_impl->ValidAliveScene(scene)) return false;
+        if (m_impl == nullptr || m_impl->cameraStorage != &storage || m_impl->stats.activeScenes != 0)
+            return false;
+        m_impl->cameraStorage = nullptr;
+        return true;
+    }
+
+    bool RenderSceneManager::AttachGpuPublisher(RenderSceneGpuPublisher& publisher) noexcept
+    {
+        if (m_impl == nullptr || m_impl->gpuPublisher != nullptr || m_impl->stats.activeScenes != 0)
+            return false;
+        m_impl->gpuPublisher = &publisher;
+        return true;
+    }
+
+    bool RenderSceneManager::DetachGpuPublisher(RenderSceneGpuPublisher& publisher) noexcept
+    {
+        if (m_impl == nullptr || m_impl->gpuPublisher != &publisher || m_impl->stats.activeScenes != 0)
+            return false;
+        m_impl->gpuPublisher = nullptr;
+        return true;
+    }
+
+    bool RenderSceneManager::IsGpuPublicationReady(const RenderSceneHandle sceneHandle, const u64 mutationEpoch) const noexcept
+    {
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
+            return false;
+        const Impl::SceneSlot& scene = m_impl->slots[sceneHandle.index];
+        return !scene.framePrepared && scene.completedMutationEpoch == mutationEpoch;
+    }
+
+    bool RenderSceneManager::ReadGpuProxy(const RenderProxyHandle proxy, RenderSceneGpuReadView& view) const noexcept
+    {
+        view = {};
+        if (m_impl == nullptr || !m_impl->ValidAliveProxy(proxy))
+            return false;
+
+        const Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
+        const Impl::ProxySlot& base = scene.proxies[proxy.index];
+        view.transform = &base.transform;
+        view.bounds = &base.bounds;
+        view.visibility = &base.visibility;
+        view.layerMask = &base.layerMask;
+        view.visibilityMask = &base.visibilityMask;
+        view.payloadKind = base.payloadKind;
+
+        if (base.payloadKind == RenderProxyPayloadKind::Mesh)
+        {
+            if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Mesh))
+                return false;
+        }
+        else if (base.payloadKind == RenderProxyPayloadKind::Light)
+        {
+            if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Light))
+                return false;
+            const Impl::LightPayloadSlot& light = scene.lightPayloads[base.payloadIndex];
+            view.lightKind = &light.kind;
+            view.lightColor = light.color;
+            view.lightIntensity = &light.intensity;
+            view.lightRange = &light.range;
+            view.lightInnerConeRadians = &light.innerConeRadians;
+            view.lightOuterConeRadians = &light.outerConeRadians;
+            view.lightCastsShadow = &light.castsShadow;
+        }
+        else if (base.payloadKind == RenderProxyPayloadKind::Decal)
+        {
+            if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Decal))
+                return false;
+            const Impl::DecalPayloadSlot& decal = scene.decalPayloads[base.payloadIndex];
+            view.decalExtents = decal.extents;
+            view.decalFadeDistance = &decal.fadeDistance;
+            view.decalSortKey = &decal.sortKey;
+        }
+        return true;
+    }
+
+    bool RenderSceneManager::SetGpuInstanceIndex(const RenderProxyHandle proxy, const GpuInstanceIndex instanceIndex) noexcept
+    {
+        if (m_impl == nullptr || instanceIndex == InvalidGpuSceneIndex || !m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Mesh))
+            return false;
+        Impl::ProxySlot& slot = m_impl->slots[proxy.scene.index].proxies[proxy.index];
+        if (slot.gpuInstanceIndex != InvalidGpuSceneIndex)
+            return false;
+        slot.gpuInstanceIndex = instanceIndex;
+        return true;
+    }
+
+    void RenderSceneManager::ClearGpuInstanceIndex(const RenderProxyHandle proxy) noexcept
+    {
+        if (m_impl != nullptr && m_impl->ValidAliveProxy(proxy))
+            m_impl->slots[proxy.scene.index].proxies[proxy.index].gpuInstanceIndex = InvalidGpuSceneIndex;
+    }
+
+    bool RenderSceneManager::AttachVisibilityFeedback(const RenderSceneHandle scene) noexcept
+    {
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(scene))
+            return false;
+        Impl::SceneSlot& slot = m_impl->slots[scene.index];
+        if (slot.visibilityFeedbackAttached)
+            return false;
+        slot.visibilityFeedbackAttached = true;
+        return true;
+    }
+
+    bool RenderSceneManager::DetachVisibilityFeedback(const RenderSceneHandle scene) noexcept
+    {
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(scene))
+            return false;
+        Impl::SceneSlot& slot = m_impl->slots[scene.index];
+        if (!slot.visibilityFeedbackAttached)
+            return false;
+        slot.visibilityFeedbackAttached = false;
+        return true;
+    }
+
+    bool RenderSceneManager::ValidateSpatialIndex(const RenderSceneHandle scene, SpatialWriteIndexStats* const stats) const noexcept
+    {
+        if (stats != nullptr)
+            *stats = {};
+        if (m_impl == nullptr || !m_impl->ValidAliveScene(scene))
+            return false;
         return m_impl->ValidateSpatialIndexInternal(m_impl->slots[scene.index], stats);
-    }
-
-    bool RenderSceneManager::SnapshotMeshProxy(const RenderProxyHandle proxy,
-                                               MeshProxySnapshot& snapshot) const noexcept
-    {
-        snapshot = {};
-        if (m_impl == nullptr || !m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Mesh)) return false;
-        const Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        const Impl::ProxySlot& base = scene.proxies[proxy.index];
-        m_impl->BuildMeshSnapshot(scene.meshPayloads[base.payloadIndex], snapshot);
-        return true;
-    }
-
-    bool RenderSceneManager::SnapshotLightProxy(const RenderProxyHandle proxy,
-                                                LightProxySnapshot& snapshot) const noexcept
-    {
-        snapshot = {};
-        if (m_impl == nullptr || !m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Light)) return false;
-        const Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        const Impl::ProxySlot& base = scene.proxies[proxy.index];
-        m_impl->BuildLightSnapshot(scene.lightPayloads[base.payloadIndex], snapshot);
-        return true;
-    }
-
-    bool RenderSceneManager::SnapshotDecalProxy(const RenderProxyHandle proxy,
-                                                DecalProxySnapshot& snapshot) const noexcept
-    {
-        snapshot = {};
-        if (m_impl == nullptr || !m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Decal)) return false;
-        const Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
-        const Impl::ProxySlot& base = scene.proxies[proxy.index];
-        m_impl->BuildDecalSnapshot(scene.decalPayloads[base.payloadIndex], snapshot);
-        return true;
     }
 
     RenderSceneManagerStats RenderSceneManager::GetStats() const noexcept

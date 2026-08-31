@@ -20,9 +20,33 @@ namespace vanguard::ecs
     {
         u64 value = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return value != 0; }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
         [[nodiscard]] friend constexpr bool operator==(const Entity&, const Entity&) noexcept = default;
+    };
+
+    /// Dense, generational identity of a materialized entity inside one World. This is runtime-only:
+    /// persistent assets, saves, networking, and editor references continue to use EntityId.
+    struct RuntimeEntityHandle final
+    {
+        u32 index = 0;
+        u32 generation = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index != 0;
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
+        [[nodiscard]] friend constexpr bool operator==(const RuntimeEntityHandle&, const RuntimeEntityHandle&) noexcept = default;
     };
 
     enum class ActionType : u8
@@ -68,8 +92,7 @@ namespace vanguard::ecs
     };
 
     /// Runtime component token registered for one ECS world. It is neither stable nor serializable.
-    template<typename Component>
-    struct ComponentType final
+    template <typename Component> struct ComponentType final
     {
         ComponentId id = InvalidComponentId;
         const ecs_world_t* world = nullptr;
@@ -116,6 +139,7 @@ namespace vanguard::ecs
     {
         u64 sequence = 0;
         EntityId entity = InvalidEntityId;
+        RuntimeEntityHandle runtimeEntity;
         ComponentId component = InvalidComponentId;
         CommandBatchId commandBatch = InvalidCommandBatchId;
         CommittedChangeKind kind = CommittedChangeKind::EntityCreated;
@@ -185,8 +209,7 @@ namespace vanguard::ecs
         [[nodiscard]] CommandBatch BeginCommandBatch() noexcept;
         [[nodiscard]] bool SealCommandBatch(CommandBatch batch) noexcept;
         [[nodiscard]] bool CancelCommandBatch(CommandBatch batch) noexcept;
-        [[nodiscard]] CommandBatchStatus GetCommandBatchStatus(
-            CommandBatch batch, CommandBatchReport* report = nullptr) const noexcept;
+        [[nodiscard]] CommandBatchStatus GetCommandBatchStatus(CommandBatch batch, CommandBatchReport* report = nullptr) const noexcept;
         [[nodiscard]] bool RetireCommandBatch(CommandBatch batch) noexcept;
 
         [[nodiscard]] bool QueueCreate(EntityId identity) noexcept;
@@ -197,122 +220,93 @@ namespace vanguard::ecs
 
         /// Live component structure is changed only when FlushComponentActions is called. Tokens
         /// must have been registered for this exact world through RegisterComponent in native.hpp.
-        template<typename Component>
-        [[nodiscard]] bool QueueAddComponent(EntityId identity, const ComponentType<Component> type) noexcept
+        template <typename Component> [[nodiscard]] bool QueueAddComponent(EntityId identity, const ComponentType<Component> type) noexcept
         {
-            return QueueComponentAction({}, identity, type.id, type.world, ComponentActionType::Add, nullptr, 0, 0,
-                                        nullptr, nullptr);
+            return QueueComponentAction({}, identity, type.id, type.world, ComponentActionType::Add, nullptr, 0, 0, nullptr, nullptr);
         }
 
-        template<typename Component>
-        [[nodiscard]] bool QueueAddComponent(const CommandBatch batch, const EntityId identity,
-                                             const ComponentType<Component> type) noexcept
+        template <typename Component>
+        [[nodiscard]] bool QueueAddComponent(const CommandBatch batch, const EntityId identity, const ComponentType<Component> type) noexcept
         {
-            return QueueComponentAction(batch, identity, type.id, type.world, ComponentActionType::Add, nullptr, 0, 0,
-                                        nullptr, nullptr);
+            return QueueComponentAction(batch, identity, type.id, type.world, ComponentActionType::Add, nullptr, 0, 0, nullptr, nullptr);
         }
 
-        template<typename Component>
-        [[nodiscard]] bool QueueSetComponent(EntityId identity, const ComponentType<Component> type,
+        template <typename Component>
+        [[nodiscard]] bool QueueSetComponent(EntityId identity, const ComponentType<Component> type, const Component& value) noexcept
+        {
+            static_assert(std::is_nothrow_copy_constructible_v<Component>, "Queued component values must be nothrow copy constructible");
+            static_assert(std::is_nothrow_copy_assignable_v<Component>, "Queued component values must be nothrow copy assignable for Flecs Set");
+            static_assert(std::is_nothrow_destructible_v<Component>, "Queued component values must be nothrow destructible");
+            const auto copy = [](void* const destination, const void* const source) noexcept
+            { ::new (destination) Component(*static_cast<const Component*>(source)); };
+            const auto destroy = [](void* const valueAddress) noexcept { static_cast<Component*>(valueAddress)->~Component(); };
+            return QueueComponentAction({}, identity, type.id, type.world, ComponentActionType::Set, &value, sizeof(Component), alignof(Component), copy,
+                                        destroy);
+        }
+
+        template <typename Component>
+        [[nodiscard]] bool QueueSetComponent(const CommandBatch batch, const EntityId identity, const ComponentType<Component> type,
                                              const Component& value) noexcept
         {
-            static_assert(std::is_nothrow_copy_constructible_v<Component>,
-                          "Queued component values must be nothrow copy constructible");
-            static_assert(std::is_nothrow_copy_assignable_v<Component>,
-                          "Queued component values must be nothrow copy assignable for Flecs Set");
-            static_assert(std::is_nothrow_destructible_v<Component>,
-                          "Queued component values must be nothrow destructible");
+            static_assert(std::is_nothrow_copy_constructible_v<Component>, "Queued component values must be nothrow copy constructible");
+            static_assert(std::is_nothrow_copy_assignable_v<Component>, "Queued component values must be nothrow copy assignable for Flecs Set");
+            static_assert(std::is_nothrow_destructible_v<Component>, "Queued component values must be nothrow destructible");
             const auto copy = [](void* const destination, const void* const source) noexcept
-            {
-                ::new (destination) Component(*static_cast<const Component*>(source));
-            };
-            const auto destroy = [](void* const valueAddress) noexcept
-            {
-                static_cast<Component*>(valueAddress)->~Component();
-            };
-            return QueueComponentAction({}, identity, type.id, type.world, ComponentActionType::Set, &value,
-                                        sizeof(Component), alignof(Component), copy, destroy);
+            { ::new (destination) Component(*static_cast<const Component*>(source)); };
+            const auto destroy = [](void* const valueAddress) noexcept { static_cast<Component*>(valueAddress)->~Component(); };
+            return QueueComponentAction(batch, identity, type.id, type.world, ComponentActionType::Set, &value, sizeof(Component), alignof(Component), copy,
+                                        destroy);
         }
 
-        template<typename Component>
-        [[nodiscard]] bool QueueSetComponent(const CommandBatch batch, const EntityId identity,
-                                             const ComponentType<Component> type, const Component& value) noexcept
+        template <typename Component> [[nodiscard]] bool QueueRemoveComponent(EntityId identity, const ComponentType<Component> type) noexcept
         {
-            static_assert(std::is_nothrow_copy_constructible_v<Component>,
-                          "Queued component values must be nothrow copy constructible");
-            static_assert(std::is_nothrow_copy_assignable_v<Component>,
-                          "Queued component values must be nothrow copy assignable for Flecs Set");
-            static_assert(std::is_nothrow_destructible_v<Component>,
-                          "Queued component values must be nothrow destructible");
-            const auto copy = [](void* const destination, const void* const source) noexcept
-            {
-                ::new (destination) Component(*static_cast<const Component*>(source));
-            };
-            const auto destroy = [](void* const valueAddress) noexcept
-            {
-                static_cast<Component*>(valueAddress)->~Component();
-            };
-            return QueueComponentAction(batch, identity, type.id, type.world, ComponentActionType::Set, &value,
-                                        sizeof(Component), alignof(Component), copy, destroy);
+            return QueueComponentAction({}, identity, type.id, type.world, ComponentActionType::Remove, nullptr, 0, 0, nullptr, nullptr);
         }
 
-        template<typename Component>
-        [[nodiscard]] bool QueueRemoveComponent(EntityId identity, const ComponentType<Component> type) noexcept
+        template <typename Component>
+        [[nodiscard]] bool QueueRemoveComponent(const CommandBatch batch, const EntityId identity, const ComponentType<Component> type) noexcept
         {
-            return QueueComponentAction({}, identity, type.id, type.world, ComponentActionType::Remove, nullptr, 0, 0,
-                                        nullptr, nullptr);
+            return QueueComponentAction(batch, identity, type.id, type.world, ComponentActionType::Remove, nullptr, 0, 0, nullptr, nullptr);
         }
 
-        template<typename Component>
-        [[nodiscard]] bool QueueRemoveComponent(const CommandBatch batch, const EntityId identity,
-                                                const ComponentType<Component> type) noexcept
-        {
-            return QueueComponentAction(batch, identity, type.id, type.world, ComponentActionType::Remove,
-                                        nullptr, 0, 0, nullptr, nullptr);
-        }
-
-        template<typename Component>
-        [[nodiscard]] bool QueueSetComponentEnabled(const CommandBatch batch, const EntityId identity,
-                                                    const ComponentType<Component> type,
+        template <typename Component>
+        [[nodiscard]] bool QueueSetComponentEnabled(const CommandBatch batch, const EntityId identity, const ComponentType<Component> type,
                                                     const bool enabled) noexcept
         {
-            return QueueComponentAction(batch, identity, type.id, type.world,
-                                        enabled ? ComponentActionType::Enable : ComponentActionType::Disable,
-                                        nullptr, 0, 0, nullptr, nullptr);
+            return QueueComponentAction(batch, identity, type.id, type.world, enabled ? ComponentActionType::Enable : ComponentActionType::Disable, nullptr, 0,
+                                        0, nullptr, nullptr);
         }
 
         [[nodiscard]] bool FlushComponentActions(ComponentActionReport* report = nullptr) noexcept;
         /// Reads retained committed changes without consuming them for other subscribers. A slow reader is
         /// advanced to the oldest retained sequence and receives an exact lost-record count.
-        [[nodiscard]] bool ReadCommittedChanges(CommittedChangeCursor& cursor,
-                                                containers::DynamicArray<CommittedChange>& changes,
-                                                u32 maximumRecords,
+        [[nodiscard]] bool ReadCommittedChanges(CommittedChangeCursor& cursor, containers::DynamicArray<CommittedChange>& changes, u32 maximumRecords,
                                                 CommittedChangeReadResult* result = nullptr) const noexcept;
         /// Tiny observer boundary for intentional native Flecs writers. Observer callbacks may publish only
         /// the exact identity/component/event record; derived-system work remains outside Flecs execution.
-        [[nodiscard]] bool CaptureNativeComponentChange(EntityId entity, ComponentId component,
-                                                        CommittedChangeKind kind) noexcept;
-        [[nodiscard]] u64 NextCommittedChangeSequence() const noexcept;
-        [[nodiscard]] bool Progress(f32 deltaSeconds) noexcept;
+        [[nodiscard]] bool CaptureNativeComponentChange(EntityId entity, ComponentId component, CommittedChangeKind kind) noexcept;
+        [[nodiscard]] u64 GetNextCommittedChangeSequence() const noexcept;
+        [[nodiscard]] bool GetProgress(f32 deltaSeconds) noexcept;
 
         [[nodiscard]] Entity Resolve(EntityId identity) const noexcept;
-        [[nodiscard]] EntityId Identity(Entity entity) const noexcept;
+        [[nodiscard]] Entity Resolve(RuntimeEntityHandle identity) const noexcept;
+        [[nodiscard]] RuntimeEntityHandle RuntimeHandle(Entity entity) const noexcept;
+        [[nodiscard]] EntityId GetIdentity(Entity entity) const noexcept;
         [[nodiscard]] bool IsAlive(Entity entity) const noexcept;
         [[nodiscard]] WorldStats GetStats() const noexcept;
 
         /// Runtime-only integration boundary. Flecs entity values obtained from this world must never
         /// be serialized or retained after the corresponding stable identity is destroyed.
-        [[nodiscard]] ecs_world_t* Native() noexcept;
-        [[nodiscard]] const ecs_world_t* Native() const noexcept;
+        [[nodiscard]] ecs_world_t* GetNative() noexcept;
+        [[nodiscard]] const ecs_world_t* GetNative() const noexcept;
 
     private:
         using ComponentCopy = void (*)(void*, const void*) noexcept;
         using ComponentDestroy = void (*)(void*) noexcept;
 
-        [[nodiscard]] bool QueueComponentAction(CommandBatch batch, EntityId identity, ComponentId component,
-                                                const ecs_world_t* tokenWorld, ComponentActionType action,
-                                                const void* value, usize valueSize, usize valueAlignment,
-                                                ComponentCopy copy, ComponentDestroy destroy) noexcept;
+        [[nodiscard]] bool QueueComponentAction(CommandBatch batch, EntityId identity, ComponentId component, const ecs_world_t* tokenWorld,
+                                                ComponentActionType action, const void* value, usize valueSize, usize valueAlignment, ComponentCopy copy,
+                                                ComponentDestroy destroy) noexcept;
 
         Impl* m_impl = nullptr;
     };

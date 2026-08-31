@@ -22,10 +22,13 @@ project "meshTools"
         "../serialization/include",
         "../crypto/include",
         "../resources/include",
+        "../assets/include",
+        "../diagnostics/include",
         "../meshes/include",
+        "../../external/assimp/include",
         "../../external/meshoptimizer/src"
     }
-    links { "meshes", "meshoptimizer", "resources", "crypto", "serialization", "filesystem", "io", "containers", "memory", "system" }
+    links { "assets", "meshes", "meshoptimizer", "assimp", "resources", "crypto", "serialization", "filesystem", "io", "diagnostics", "containers", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
         ["Source/*"] = { "src/**.hpp", "src/**.cpp" },
@@ -69,6 +72,7 @@ project "meshToolsTests"
         "../serialization/include",
         "../crypto/include",
         "../resources/include",
+        "../assets/include",
         "../packages/include",
         "../meshes/include",
         path.join(redFileSystemRoot, "include"),
@@ -86,7 +90,9 @@ project "meshToolsTests"
     libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
     links {
         "meshTools",
+        "assets",
         "meshoptimizer",
+        "assimp",
         "meshes",
         "packages",
         "packagesCompat",

@@ -15,7 +15,7 @@ namespace vanguard::texture_tools
         inline constexpr TextureImporterId OpenExr = 0x6578720000000001ull;
         inline constexpr TextureImporterId Dds = 0x6464730000000001ull;
         inline constexpr TextureImporterId CubeAssembler = 0x6375626500000001ull;
-    }
+    } // namespace importers
 
     enum class TextureUsage : u8
     {
@@ -55,8 +55,7 @@ namespace vanguard::texture_tools
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return red <= ImportedChannel::One && green <= ImportedChannel::One &&
-                   blue <= ImportedChannel::One && alpha <= ImportedChannel::One;
+            return red <= ImportedChannel::One && green <= ImportedChannel::One && blue <= ImportedChannel::One && alpha <= ImportedChannel::One;
         }
     };
 
@@ -69,7 +68,8 @@ namespace vanguard::texture_tools
         DecodeFailure,
         MultipleImagesUnsupported,
         LimitExceeded,
-        OutOfMemory
+        OutOfMemory,
+        Cancelled
     };
 
     [[nodiscard]] const char* ToString(TextureImportResult result) noexcept;
@@ -92,7 +92,33 @@ namespace vanguard::texture_tools
         TextureChannelMapping channels;
         crypto::Digest256 sourceFingerprint;
         TextureImportLimits limits;
+        system::CancellationView cancellation;
     };
+
+    enum class TextureSourceKind : u8
+    {
+        Png,
+        Jpeg,
+        Tiff,
+        OpenExr,
+        Dds
+    };
+
+    struct TextureSourceInspection
+    {
+        TextureSourceKind kind = TextureSourceKind::Png;
+        u32 width = 0;
+        u32 height = 0;
+        u32 depth = 1;
+        u16 arrayLayers = 1;
+        u8 faceCount = 1;
+        u8 mipCount = 1;
+        u64 decodedBytes = 0;
+        u64 payloadBytes = 0;
+    };
+
+    /// Reads only container/header metadata. It never allocates decoded pixels or performs compression.
+    [[nodiscard]] TextureImportResult InspectTextureSource(containers::ArraySpan<const u8> encoded, TextureSourceInspection& inspection) noexcept;
 
     class ImportedTexture final
     {
@@ -107,30 +133,24 @@ namespace vanguard::texture_tools
 
         void Reset() noexcept;
         [[nodiscard]] bool IsValid() const noexcept;
-        [[nodiscard]] SourceTexture Source() const noexcept;
-        [[nodiscard]] TextureCookingProfileId RecommendedProfile() const noexcept;
+        [[nodiscard]] SourceTexture GetSource() const noexcept;
+        [[nodiscard]] TextureCookingProfileId GetRecommendedProfile() const noexcept;
         [[nodiscard]] TextureImporterId Importer() const noexcept;
         [[nodiscard]] u32 ImporterVersion() const noexcept;
 
         /// Decoder callback boundary. Allocates one tightly packed 2D image and returns its writable storage.
-        [[nodiscard]] TextureImportResult Initialize2D(SourcePixelFormat format, textures::ColorSpace colorSpace,
-                                                       u32 width, u32 height, u32 rowPitch,
-                                                       const crypto::Digest256& sourceFingerprint,
-                                                       TextureCookingProfileId recommendedProfile,
-                                                       TextureImporterId importer, u32 importerVersion,
-                                                       const TextureImportLimits& limits) noexcept;
-        [[nodiscard]] u8* MutableImageData() noexcept;
-        [[nodiscard]] u8* MutableImageData(u32 imageIndex) noexcept;
-        [[nodiscard]] const u8* ImageData(u32 imageIndex = 0) const noexcept;
-        [[nodiscard]] u32 ImageCount() const noexcept;
-        [[nodiscard]] usize ImageByteSize() const noexcept;
+        [[nodiscard]] TextureImportResult Initialize2D(SourcePixelFormat format, textures::ColorSpace colorSpace, u32 width, u32 height, u32 rowPitch,
+                                                       const crypto::Digest256& sourceFingerprint, TextureCookingProfileId recommendedProfile,
+                                                       TextureImporterId importer, u32 importerVersion, const TextureImportLimits& limits) noexcept;
+        [[nodiscard]] u8* GetMutableImageData() noexcept;
+        [[nodiscard]] u8* GetMutableImageData(u32 imageIndex) noexcept;
+        [[nodiscard]] const u8* GetImageData(u32 imageIndex = 0) const noexcept;
+        [[nodiscard]] u32 GetImageCount() const noexcept;
+        [[nodiscard]] usize GetImageByteSize() const noexcept;
         [[nodiscard]] TextureImportResult ApplyChannelMapping(const TextureChannelMapping& mapping) noexcept;
-        [[nodiscard]] TextureImportResult InitializeCube(SourcePixelFormat format, textures::ColorSpace colorSpace,
-                                                         u32 extent, u32 rowPitch,
-                                                         const crypto::Digest256& sourceFingerprint,
-                                                         TextureCookingProfileId recommendedProfile,
-                                                         TextureImporterId importer, u32 importerVersion,
-                                                         const TextureImportLimits& limits) noexcept;
+        [[nodiscard]] TextureImportResult InitializeCube(SourcePixelFormat format, textures::ColorSpace colorSpace, u32 extent, u32 rowPitch,
+                                                         const crypto::Digest256& sourceFingerprint, TextureCookingProfileId recommendedProfile,
+                                                         TextureImporterId importer, u32 importerVersion, const TextureImportLimits& limits) noexcept;
 
     private:
         SourcePixelFormat m_format = SourcePixelFormat::R8G8B8A8UNorm;
@@ -157,8 +177,7 @@ namespace vanguard::texture_tools
     };
 
     using ProbeTextureFunction = TextureProbeResult (*)(const TextureImportRequest& request, void* userData) noexcept;
-    using DecodeTextureFunction = TextureImportResult (*)(const TextureImportRequest& request,
-                                                          ImportedTexture& output, void* userData) noexcept;
+    using DecodeTextureFunction = TextureImportResult (*)(const TextureImportRequest& request, ImportedTexture& output, void* userData) noexcept;
 
     struct TextureImporterDescriptor
     {
@@ -168,11 +187,11 @@ namespace vanguard::texture_tools
         ProbeTextureFunction probe = nullptr;
         DecodeTextureFunction decode = nullptr;
         void* userData = nullptr;
+        crypto::Digest256 configurationFingerprint;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return id != InvalidTextureImporterId && name != nullptr && name[0] != '\0' && version != 0 &&
-                   probe != nullptr && decode != nullptr;
+            return id != InvalidTextureImporterId && name != nullptr && name[0] != '\0' && version != 0 && probe != nullptr && decode != nullptr;
         }
     };
 
@@ -200,9 +219,8 @@ namespace vanguard::texture_tools
     [[nodiscard]] TextureImporterRegistrationResult RegisterTextureImporter(const TextureImporterDescriptor& importer) noexcept;
     [[nodiscard]] TextureImportResult ImportTexture(const TextureImportRequest& request, ImportedTexture& output,
                                                     TextureImportReport* report = nullptr) noexcept;
-    [[nodiscard]] TextureImportResult AssembleCubeFaces(containers::ArraySpan<const ImportedTexture> faces,
-                                                        TextureUsage usage, ImportedTexture& output,
-                                                        const TextureImportLimits& limits = {}) noexcept;
+    [[nodiscard]] TextureImportResult AssembleCubeFaces(containers::ArraySpan<const ImportedTexture> faces, TextureUsage usage, ImportedTexture& output,
+                                                        const TextureImportLimits& limits = {}, system::CancellationView cancellation = {}) noexcept;
 
     enum class CubeCrossLayout : u8
     {
@@ -214,9 +232,8 @@ namespace vanguard::texture_tools
 
     /// Extracts a canonical Direct3D/NVRHI cube without rotating individual cells. Every occupied cross cell must
     /// already have the same texel orientation as its corresponding +X, -X, +Y, -Y, +Z, or -Z destination face.
-    [[nodiscard]] TextureImportResult ExtractCubeCross(const ImportedTexture& cross, CubeCrossLayout layout,
-                                                       TextureUsage usage, ImportedTexture& output,
-                                                       const TextureImportLimits& limits = {}) noexcept;
+    [[nodiscard]] TextureImportResult ExtractCubeCross(const ImportedTexture& cross, CubeCrossLayout layout, TextureUsage usage, ImportedTexture& output,
+                                                       const TextureImportLimits& limits = {}, system::CancellationView cancellation = {}) noexcept;
 
     /// A byte-exact GPU subresource imported from a container such as DDS. Unlike SourceTexture, this payload is already
     /// in its final GPU storage format and must never pass through pixel filtering or lossy recompression.
@@ -256,19 +273,17 @@ namespace vanguard::texture_tools
 
         void Reset() noexcept;
         [[nodiscard]] bool IsValid() const noexcept;
-        [[nodiscard]] GpuTextureSource Source() const noexcept;
+        [[nodiscard]] GpuTextureSource GetSource() const noexcept;
         [[nodiscard]] TextureImporterId Importer() const noexcept;
         [[nodiscard]] u32 ImporterVersion() const noexcept;
 
         /// Container-decoder boundary. Storage is allocated once; SetSubresource then copies every validated payload.
-        [[nodiscard]] TextureImportResult Initialize(textures::TextureDimension dimension, textures::PixelFormat format,
-                                                     textures::ColorSpace colorSpace, u32 width, u32 height, u32 depth,
-                                                     u16 arrayLayers, u8 mipCount, u32 subresourceCount, u64 totalBytes,
-                                                     const crypto::Digest256& sourceFingerprint, TextureImporterId importer,
-                                                     u32 importerVersion, const TextureImportLimits& limits) noexcept;
-        [[nodiscard]] TextureImportResult SetSubresource(u32 index, u8 mipLevel, u16 arrayLayer, u8 face,
-                                                        const void* data, usize byteSize, u32 rowPitch,
-                                                        u32 slicePitch) noexcept;
+        [[nodiscard]] TextureImportResult Initialize(textures::TextureDimension dimension, textures::PixelFormat format, textures::ColorSpace colorSpace,
+                                                     u32 width, u32 height, u32 depth, u16 arrayLayers, u8 mipCount, u32 subresourceCount, u64 totalBytes,
+                                                     const crypto::Digest256& sourceFingerprint, TextureImporterId importer, u32 importerVersion,
+                                                     const TextureImportLimits& limits) noexcept;
+        [[nodiscard]] TextureImportResult SetSubresource(u32 index, u8 mipLevel, u16 arrayLayer, u8 face, const void* data, usize byteSize, u32 rowPitch,
+                                                         u32 slicePitch) noexcept;
 
     private:
         struct OwnedSubresource
@@ -316,8 +331,7 @@ namespace vanguard::texture_tools
         u64 payloadBytes = 0;
     };
 
-    [[nodiscard]] TextureImportResult ImportDdsTexture(const TextureImportRequest& request,
-                                                       ImportedGpuTexture& output,
+    [[nodiscard]] TextureImportResult ImportDdsTexture(const TextureImportRequest& request, ImportedGpuTexture& output,
                                                        GpuTextureImportReport* report = nullptr) noexcept;
 
     struct GpuTextureCookSettings
@@ -325,9 +339,9 @@ namespace vanguard::texture_tools
         bool streamable = true;
         u8 mipTailCount = 4;
         u64 maximumOutputBytes = 16ull * 1024ull * 1024ull * 1024ull;
+        system::CancellationView cancellation;
     };
 
-    [[nodiscard]] Result CookGpuTexture(const GpuTextureSource& source, filesystem::IFile& output,
-                                        const GpuTextureCookSettings& settings = {},
+    [[nodiscard]] Result CookGpuTexture(const GpuTextureSource& source, filesystem::IFile& output, const GpuTextureCookSettings& settings = {},
                                         CookReport* report = nullptr) noexcept;
 } // namespace vanguard::texture_tools

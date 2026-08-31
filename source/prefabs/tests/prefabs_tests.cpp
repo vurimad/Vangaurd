@@ -27,9 +27,11 @@ namespace
 
     bool Equal(const ByteArray& left, const ByteArray& right) noexcept
     {
-        if (left.Size() != right.Size()) return false;
+        if (left.Size() != right.Size())
+            return false;
         for (vanguard::u32 index = 0; index < left.Size(); ++index)
-            if (left[index] != right[index]) return false;
+            if (left[index] != right[index])
+                return false;
         return true;
     }
 
@@ -46,27 +48,33 @@ namespace
     constexpr reflection::SchemaTypeId TransformType = reflection::HashSchemaName("vanguard.transform_component");
     constexpr reflection::SchemaTypeId RenderType = reflection::HashSchemaName("vanguard.render_component");
 
-    const std::array<reflection::SchemaField, 1> TransformFields{{
-        reflection::MakeField("translation", reflection::builtin::Blob, reflection::ValueKind::Blob,
-                              static_cast<vanguard::u32>(offsetof(TransformComponent, translation)),
-                              static_cast<vanguard::u32>(sizeof(TransformComponent::translation)),
-                              static_cast<vanguard::u32>(alignof(vanguard::f32)), 1, 0,
-                              reflection::FieldFlags::Required)}};
+    const std::array<reflection::SchemaField, 1> TransformFields{{reflection::MakeField(
+        "translation", reflection::builtin::Blob, reflection::ValueKind::Blob, static_cast<vanguard::u32>(offsetof(TransformComponent, translation)),
+        static_cast<vanguard::u32>(sizeof(TransformComponent::translation)), static_cast<vanguard::u32>(alignof(vanguard::f32)), 1, 0,
+        reflection::FieldFlags::Required)}};
 
-    const std::array<reflection::SchemaField, 1> RenderFields{{
-        reflection::MakeField("mesh", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                              static_cast<vanguard::u32>(offsetof(RenderComponent, mesh)),
-                              static_cast<vanguard::u32>(sizeof(resources::ResourceReference)),
-                              static_cast<vanguard::u32>(alignof(resources::ResourceReference)), 1, 0,
-                              reflection::FieldFlags::Required)}};
+    const std::array<reflection::SchemaField, 1> RenderFields{
+        {reflection::MakeField("mesh", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
+                               static_cast<vanguard::u32>(offsetof(RenderComponent, mesh)), static_cast<vanguard::u32>(sizeof(resources::ResourceReference)),
+                               static_cast<vanguard::u32>(alignof(resources::ResourceReference)), 1, 0, reflection::FieldFlags::Required)}};
 
-    const reflection::Schema TransformSchema{TransformType, "vanguard.transform_component", sizeof(TransformComponent),
-                                             alignof(TransformComponent), 1, 1, TransformFields.data(),
+    const reflection::Schema TransformSchema{TransformType,
+                                             "vanguard.transform_component",
+                                             sizeof(TransformComponent),
+                                             alignof(TransformComponent),
+                                             1,
+                                             1,
+                                             TransformFields.data(),
                                              static_cast<vanguard::u32>(TransformFields.size())};
-    const reflection::Schema RenderSchema{RenderType, "vanguard.render_component", sizeof(RenderComponent),
-                                          alignof(RenderComponent), 1, 1, RenderFields.data(),
+    const reflection::Schema RenderSchema{RenderType,
+                                          "vanguard.render_component",
+                                          sizeof(RenderComponent),
+                                          alignof(RenderComponent),
+                                          1,
+                                          1,
+                                          RenderFields.data(),
                                           static_cast<vanguard::u32>(RenderFields.size())};
-}
+} // namespace
 
 int main()
 {
@@ -89,22 +97,18 @@ int main()
 
     TransformComponent transform{{1.0f, 2.0f, 3.0f}};
     const resources::ResourceReference mesh(resources::ResourcePath::FromString("meshes/vehicle.vmesh"),
-                                             vanguard::serialization::MakeFourCC('V', 'M', 'S', 'H'));
+                                            vanguard::serialization::MakeFourCC('V', 'M', 'S', 'H'));
     RenderComponent render{mesh};
-    const std::array<prefab::EntityBuildRecord, 2> entities{{
-        {20, 10, 0x2000, prefab::EntityFlags::DisabledByDefault},
-        {10, prefab::InvalidStableId, 0x1000, prefab::EntityFlags::None}}};
-    const std::array<prefab::ComponentBuildRecord, 2> components{{
-        {200, 20, &RenderSchema, &render, prefab::ComponentFlags::None},
-        {100, 10, &TransformSchema, &transform, prefab::ComponentFlags::None}}};
-    const std::array<prefab::ExplicitDependency, 1> explicitDependencies{{
-        {mesh, resources::DependencyKind::Soft}}};
+    const std::array<prefab::EntityBuildRecord, 2> entities{
+        {{20, 10, 0x2000, prefab::EntityFlags::DisabledByDefault}, {10, prefab::InvalidStableId, 0x1000, prefab::EntityFlags::None}}};
+    const std::array<prefab::ComponentBuildRecord, 2> components{
+        {{200, 20, &RenderSchema, &render, prefab::ComponentFlags::None}, {100, 10, &TransformSchema, &transform, prefab::ComponentFlags::None}}};
+    const std::array<prefab::ExplicitDependency, 1> explicitDependencies{{{mesh, resources::DependencyKind::Soft}}};
     prefab::CookDescription description;
     description.name = 0x12345678;
     description.entities = {entities.data(), static_cast<vanguard::u32>(entities.size())};
     description.components = {components.data(), static_cast<vanguard::u32>(components.size())};
-    description.explicitDependencies = {explicitDependencies.data(),
-                                        static_cast<vanguard::u32>(explicitDependencies.size())};
+    description.explicitDependencies = {explicitDependencies.data(), static_cast<vanguard::u32>(explicitDependencies.size())};
     description.sourceFingerprint = vanguard::crypto::Sha256("prefab source", 13);
 
     ByteArray first(memory::pools::World::GetInstance());
@@ -124,13 +128,11 @@ int main()
     filesystem::MemoryFileReader reader(first, 0);
     prefab::PrefabFile file;
     Check(file.Open(reader) == prefab::Result::Success, "open cooked prefab");
-    Check(file.IsOpen() && file.Name() == description.name, "prefab identity");
-    Check(file.Entities().Size() == 2 && file.Components().Size() == 2, "entity and component counts");
-    Check(file.Entities()[0].stableId == 10 && file.Entities()[0].componentCount == 1,
-          "root entity and grouped component");
-    Check(file.Entities()[1].parentStableId == 10, "child hierarchy");
-    Check(file.Dependencies().Size() == 1 && file.Dependencies()[0].resource == mesh &&
-              file.Dependencies()[0].kind == resources::DependencyKind::Required,
+    Check(file.IsOpen() && file.GetName() == description.name, "prefab identity");
+    Check(file.GetEntities().Size() == 2 && file.GetComponents().Size() == 2, "entity and component counts");
+    Check(file.GetEntities()[0].stableId == 10 && file.GetEntities()[0].componentCount == 1, "root entity and grouped component");
+    Check(file.GetEntities()[1].parentStableId == 10, "child hierarchy");
+    Check(file.GetDependencies().Size() == 1 && file.GetDependencies()[0].resource == mesh && file.GetDependencies()[0].kind == resources::DependencyKind::Required,
           "schema dependency extraction and strongest-kind coalescing");
     Check(file.FindEntity(20) != nullptr && file.FindComponent(200) != nullptr, "stable identity lookup");
 
@@ -138,24 +140,21 @@ int main()
     Check(transformRecord != nullptr && transformRecord->schema == TransformType, "component schema identity");
     if (transformRecord != nullptr)
     {
-        const auto bytes = file.ComponentData(*transformRecord);
+        const auto bytes = file.GetComponentData(*transformRecord);
         ByteArray componentBytes(memory::pools::Serialization::GetInstance());
         componentBytes.Resize(bytes.Size());
-        for (vanguard::u32 index = 0; index < bytes.Size(); ++index) componentBytes[index] = bytes[index];
+        for (vanguard::u32 index = 0; index < bytes.Size(); ++index)
+            componentBytes[index] = bytes[index];
         filesystem::MemoryFileReader componentFile(componentBytes, 0);
         vanguard::serialization::BinaryReader componentReader(componentFile);
         TransformComponent decoded;
-        Check(schemas::ReadObject(componentReader, TransformSchema, &decoded) == schemas::Result::Success,
-              "deserialize component through schema");
-        Check(decoded.translation[0] == 1.0f && decoded.translation[1] == 2.0f && decoded.translation[2] == 3.0f,
-              "component data round trip");
+        Check(schemas::ReadObject(componentReader, TransformSchema, &decoded) == schemas::Result::Success, "deserialize component through schema");
+        Check(decoded.translation[0] == 1.0f && decoded.translation[1] == 2.0f && decoded.translation[2] == 3.0f, "component data round trip");
     }
 
-    std::array<vanguard::packages::Dependency, 1> packageDependencies{{
-        {mesh.Path().Id(), mesh.ExpectedType(), resources::DependencyKind::Required}}};
-    const vanguard::packages::BuildSegment prefabSegment{
-        first.TypedData(), first.Size(), vanguard::packages::Codec::Lz4, 4,
-        vanguard::packages::SegmentFlags::Inline | vanguard::packages::SegmentFlags::MemoryResident};
+    std::array<vanguard::packages::Dependency, 1> packageDependencies{{{mesh.GetPath().Id(), mesh.ExpectedType(), resources::DependencyKind::Required}}};
+    const vanguard::packages::BuildSegment prefabSegment{first.TypedData(), first.Size(), vanguard::packages::Codec::Lz4, 4,
+                                                         vanguard::packages::SegmentFlags::Inline | vanguard::packages::SegmentFlags::MemoryResident};
     vanguard::packages::BuildResource packagedPrefab;
     packagedPrefab.path = "entities/vehicle.vprefab";
     packagedPrefab.type = prefab::PrefabResourceType;
@@ -165,17 +164,14 @@ int main()
     ByteArray packageBytes(memory::pools::Assets::GetInstance());
     filesystem::MemoryFileWriter packageFile(packageBytes);
     vanguard::packages::PackageWriter packageWriter;
-    Check(packageWriter.Begin(packageFile) == vanguard::packages::Result::Success &&
-              packageWriter.Add(packagedPrefab) == vanguard::packages::Result::Success &&
+    Check(packageWriter.Begin(packageFile) == vanguard::packages::Result::Success && packageWriter.Add(packagedPrefab) == vanguard::packages::Result::Success &&
               packageWriter.Finalize() == vanguard::packages::Result::Success,
           "package vprefab as an opaque VPAK resource");
     filesystem::MemoryFileReader packageReaderFile(packageBytes, 0);
     vanguard::packages::PackageReader packageReader;
-    Check(packageReader.Open(packageReaderFile) == vanguard::packages::Result::Success,
-          "open VPAK containing vprefab");
+    Check(packageReader.Open(packageReaderFile) == vanguard::packages::Result::Success, "open VPAK containing vprefab");
     const vanguard::packages::Resource* const packagedRecord = packageReader.Find("entities/vehicle.vprefab");
-    Check(packagedRecord != nullptr && packagedRecord->type == prefab::PrefabResourceType &&
-              packageReader.Dependencies(*packagedRecord).Size() == 1,
+    Check(packagedRecord != nullptr && packagedRecord->type == prefab::PrefabResourceType && packageReader.GetDependencies(*packagedRecord).Size() == 1,
           "VPAK preserves prefab dependencies without interpreting component data");
     if (packagedRecord != nullptr)
     {
@@ -183,8 +179,7 @@ int main()
         Check(packagedView.Open(packageReader, *packagedRecord, packageReaderFile) == vanguard::packages::Result::Success,
               "open logical vprefab directly over VPAK");
         prefab::PrefabFile packaged;
-        Check(packaged.Open(packagedView) == prefab::Result::Success &&
-                  packaged.ContentFingerprint() == file.ContentFingerprint(),
+        Check(packaged.Open(packagedView) == prefab::Result::Success && packaged.GetContentFingerprint() == file.GetContentFingerprint(),
               "package-backed vprefab opens without format translation");
     }
 
@@ -194,8 +189,7 @@ int main()
     invalid.entities = {duplicateEntities.data(), static_cast<vanguard::u32>(duplicateEntities.size())};
     ByteArray scratch(memory::pools::World::GetInstance());
     filesystem::MemoryFileWriter scratchWriter(scratch);
-    Check(prefab::CookPrefab(invalid, scratchWriter) == prefab::Result::DuplicateIdentifier,
-          "reject duplicate stable entity ID");
+    Check(prefab::CookPrefab(invalid, scratchWriter) == prefab::Result::DuplicateIdentifier, "reject duplicate stable entity ID");
 
     auto missingParent = entities;
     missingParent[0].parentStableId = 999;
@@ -213,7 +207,8 @@ int main()
 
     ByteArray corrupted(memory::pools::World::GetInstance());
     corrupted = first;
-    if (corrupted.Size() > 64) corrupted[64] ^= 0x80u;
+    if (corrupted.Size() > 64)
+        corrupted[64] ^= 0x80u;
     filesystem::MemoryFileReader corruptedReader(corrupted, 0);
     prefab::PrefabFile corruptedFile;
     Check(corruptedFile.Open(corruptedReader) == prefab::Result::IntegrityFailure, "reject corrupted prefab");

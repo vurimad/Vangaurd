@@ -47,17 +47,28 @@ project "meshes"
         "../system/include",
         "../memory/include",
         "../containers/include",
+        "../concurrency/include",
         "../io/include",
         "../filesystem/include",
         "../serialization/include",
         "../crypto/include",
-        "../resources/include"
+        "../resources/include",
+        "../packages/include",
+        "../streaming/include",
+        "../jobs/include",
+        "../reflection/include",
+        "../schemas/include"
     }
     links {
         "serialization",
         "crypto",
         "resources",
+        "streaming",
+        "schemas",
+        "reflection",
+        "packages",
         "filesystem",
+        "concurrency",
         "containers",
         "memory",
         "system"
@@ -90,12 +101,21 @@ project "meshesTests"
         "../filesystem/include",
         "../serialization/include",
         "../crypto/include",
-        "../resources/include"
+        "../resources/include",
+        "../packages/include",
+        "../streaming/include",
+        "../jobs/include",
+        "../reflection/include",
+        "../schemas/include"
     }
     importedIncludes()
     libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
     links {
         "meshes",
+        "streaming",
+        "schemas",
+        "reflection",
+        "packages",
         "resources",
         "crypto",
         "serialization",

@@ -44,7 +44,7 @@ int main()
     namespace concurrency = vanguard::concurrency;
 
     concurrency::InitializeMainThread();
-    if (!concurrency::IsMainThread() || !concurrency::ThreadId::CurrentThread().IsValid() || concurrency::GetMaxHardwareConcurrency() == 0)
+    if (!concurrency::IsMainThread() || !concurrency::ThreadId::GetCurrentThread().IsValid() || concurrency::GetMaxHardwareConcurrency() == 0)
     {
         return 1;
     }

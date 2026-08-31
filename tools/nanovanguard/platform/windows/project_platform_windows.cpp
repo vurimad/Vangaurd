@@ -19,8 +19,7 @@ namespace
         {
             if (text.Empty() || text.Length() > static_cast<vanguard::u32>(INT_MAX))
                 return false;
-            const int required =
-                ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.Data(), static_cast<int>(text.Length()), nullptr, 0);
+            const int required = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.Data(), static_cast<int>(text.Length()), nullptr, 0);
             if (required <= 0)
                 return false;
             m_characters.Resize(static_cast<vanguard::u32>(required) + 1);
@@ -60,8 +59,7 @@ namespace
         const int required = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, wideLength, nullptr, 0, nullptr, nullptr);
         if (required <= 0 || !output.Resize(static_cast<vanguard::u32>(required)))
             return false;
-        return ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, wideLength, output.AsChar(), required, nullptr, nullptr) ==
-               required;
+        return ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, wideLength, output.AsChar(), required, nullptr, nullptr) == required;
     }
 
     [[nodiscard]] bool Join(const containers::StringView directory, const containers::StringView leaf, containers::String& output) noexcept
@@ -102,8 +100,7 @@ namespace vanguard::nanovanguard::platform
             return PathKind::Failure;
         const DWORD attributes = ::GetFileAttributesW(path.Data());
         if (attributes == INVALID_FILE_ATTRIBUTES)
-            return ::GetLastError() == ERROR_FILE_NOT_FOUND || ::GetLastError() == ERROR_PATH_NOT_FOUND ? PathKind::Missing
-                                                                                                        : PathKind::Failure;
+            return ::GetLastError() == ERROR_FILE_NOT_FOUND || ::GetLastError() == ERROR_PATH_NOT_FOUND ? PathKind::Missing : PathKind::Failure;
         if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
             return PathKind::Directory;
         if ((attributes & FILE_ATTRIBUTE_DEVICE) != 0)
@@ -142,8 +139,8 @@ namespace vanguard::nanovanguard::platform
         WideBuffer path;
         if (!path.FromUtf8(absolutePath))
             return false;
-        const HANDLE file = ::CreateFileW(path.Data(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        const HANDLE file = ::CreateFileW(path.Data(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (file == INVALID_HANDLE_VALUE)
             return false;
         LARGE_INTEGER size{};
@@ -167,8 +164,7 @@ namespace vanguard::nanovanguard::platform
         WideBuffer path;
         if (!path.FromUtf8(absolutePath))
             return false;
-        const HANDLE file =
-            ::CreateFileW(path.Data(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        const HANDLE file = ::CreateFileW(path.Data(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (file == INVALID_HANDLE_VALUE)
             return false;
         u32 offset = 0;

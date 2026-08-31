@@ -22,23 +22,18 @@ namespace vanguard::math
     RED_INLINE Color::Color(Uint8 r, Uint8 g, Uint8 b, Uint8 a /*=255*/) : R(r), G(g), B(b), A(a) {}
 
     RED_INLINE Color::Color(const Vector4& x)
-        : vanguard::math::Color{
-              (Uint8)vanguard::math::Clamp(x.X * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(x.Y * 255.0f, 0.0f, 255.0f),
-              (Uint8)vanguard::math::Clamp(x.Z * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(x.W * 255.0f, 0.0f, 255.0f)}
+        : vanguard::math::Color{(Uint8)vanguard::math::Clamp(x.X * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(x.Y * 255.0f, 0.0f, 255.0f),
+                                (Uint8)vanguard::math::Clamp(x.Z * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(x.W * 255.0f, 0.0f, 255.0f)}
     {
     }
 
     RED_INLINE Color::Color(const Float f[4])
-        : vanguard::math::Color{
-              (Uint8)vanguard::math::Clamp(f[0] * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(f[1] * 255.0f, 0.0f, 255.0f),
-              (Uint8)vanguard::math::Clamp(f[2] * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(f[3] * 255.0f, 0.0f, 255.0f)}
+        : vanguard::math::Color{(Uint8)vanguard::math::Clamp(f[0] * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(f[1] * 255.0f, 0.0f, 255.0f),
+                                (Uint8)vanguard::math::Clamp(f[2] * 255.0f, 0.0f, 255.0f), (Uint8)vanguard::math::Clamp(f[3] * 255.0f, 0.0f, 255.0f)}
     {
     }
 
-    RED_FORCE_INLINE Color::Color(Uint32 x)
-        : Color{(Uint8)(x & 0xff), (Uint8)((x >> 8) & 0xff), (Uint8)((x >> 16) & 0xff), (Uint8)((x >> 24) & 0xff)}
-    {
-    }
+    RED_FORCE_INLINE Color::Color(Uint32 x) : Color{(Uint8)(x & 0xff), (Uint8)((x >> 8) & 0xff), (Uint8)((x >> 16) & 0xff), (Uint8)((x >> 24) & 0xff)} {}
 
     RED_INLINE Bool Color::operator==(const Color& other) const
     {

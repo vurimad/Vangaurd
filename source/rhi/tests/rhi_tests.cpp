@@ -27,6 +27,7 @@ namespace
             capabilities.uploadBufferAlignment = 256;
             capabilities.constantBufferAlignment = 256;
             capabilities.maximumTextureDimension2D = 16384;
+            capabilities.maximumTextureDimension3D = 2048;
             capabilities.maximumTextureArrayLayers = 2048;
             capabilities.asyncCompute = true;
             capabilities.copyQueue = true;
@@ -79,23 +80,23 @@ namespace
             lifetimeStats.pendingRetirements = 0;
             return {};
         }
-        gpu::BackendStatus QueryMemoryBudget(const gpu::MemorySegment segment,
-                                             gpu::MemoryBudgetSnapshot& budget) noexcept override
+        gpu::BackendStatus QueryMemoryBudget(const gpu::MemorySegment segment, gpu::MemoryBudgetSnapshot& budget) noexcept override
         {
             budget = {8ull * 1024 * 1024 * 1024, 2ull * 1024 * 1024 * 1024, 1024, 512, segment};
             ++residencyStats.budgetQueries;
             return {};
         }
-        gpu::BackendStatus SetResidencyPriority(const gpu::ResourceRef resource,
-                                                gpu::ResidencyPriority) noexcept override
+        gpu::BackendStatus SetResidencyPriority(const gpu::ResourceRef resource, gpu::ResidencyPriority) noexcept override
         {
-            if (!resource.IsValid()) return gpu::BackendStatus::Failure(gpu::FailureCode::InvalidReference, 0, "invalid resource");
+            if (!resource.IsValid())
+                return gpu::BackendStatus::Failure(gpu::FailureCode::InvalidReference, 0, "invalid resource");
             ++residencyStats.priorityChanges;
             return {};
         }
         gpu::BackendStatus SetResidencyPinned(const gpu::ResourceRef resource, const bool pinned) noexcept override
         {
-            if (!resource.IsValid()) return gpu::BackendStatus::Failure(gpu::FailureCode::InvalidReference, 0, "invalid resource");
+            if (!resource.IsValid())
+                return gpu::BackendStatus::Failure(gpu::FailureCode::InvalidReference, 0, "invalid resource");
             ++residencyPinChanges;
             residencyPinned = pinned;
             return gpu::BackendStatus::Success();
@@ -118,7 +119,10 @@ namespace
             residencyStats.objectsEvicted += resources.Size();
             return {};
         }
-        gpu::ResidencyStats GetResidencyStats() const noexcept override { return residencyStats; }
+        gpu::ResidencyStats GetResidencyStats() const noexcept override
+        {
+            return residencyStats;
+        }
 
         gpu::TextureRef CreateTexture(const gpu::TextureDesc&, const gpu::TextureInitData&) noexcept override
         {
@@ -171,13 +175,11 @@ namespace
             ++descriptorStats.populated;
             return {};
         }
-        gpu::BackendStatus WriteDescriptor(gpu::DescriptorDomainRef, gpu::DescriptorHandle,
-                                           gpu::AccelerationStructureRef) noexcept override
+        gpu::BackendStatus WriteDescriptor(gpu::DescriptorDomainRef, gpu::DescriptorHandle, gpu::AccelerationStructureRef) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
-        gpu::BackendStatus RetireDescriptor(gpu::DescriptorDomainRef, gpu::DescriptorHandle,
-                                            const gpu::DescriptorRetirement&) noexcept override
+        gpu::BackendStatus RetireDescriptor(gpu::DescriptorDomainRef, gpu::DescriptorHandle, const gpu::DescriptorRetirement&) noexcept override
         {
             --descriptorStats.allocated;
             --descriptorStats.populated;
@@ -222,9 +224,11 @@ namespace
         {
             return {};
         }
-        gpu::ShaderTableRef CreateShaderTable(const gpu::ShaderTableDesc&) noexcept override { return {}; }
-        gpu::BackendStatus GetAccelerationStructureDeviceAddress(gpu::AccelerationStructureRef,
-                                                                 vanguard::u64&) noexcept override
+        gpu::ShaderTableRef CreateShaderTable(const gpu::ShaderTableDesc&) noexcept override
+        {
+            return {};
+        }
+        gpu::BackendStatus GetAccelerationStructureDeviceAddress(gpu::AccelerationStructureRef, vanguard::u64&) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
@@ -243,22 +247,33 @@ namespace
                 ++queryPoolDestroyCount;
             }
         }
-        gpu::BackendStatus BeginQuery(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32) noexcept override { return {}; }
-        gpu::BackendStatus EndQuery(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32) noexcept override { return {}; }
-        gpu::BackendStatus IssueQuery(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32) noexcept override { return {}; }
+        gpu::BackendStatus BeginQuery(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32) noexcept override
+        {
+            return {};
+        }
+        gpu::BackendStatus EndQuery(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32) noexcept override
+        {
+            return {};
+        }
+        gpu::BackendStatus IssueQuery(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32) noexcept override
+        {
+            return {};
+        }
         gpu::BackendStatus ResolveQueries(gpu::CommandListRef, gpu::QueryPoolRef, vanguard::u32, vanguard::u32) noexcept override
         {
             return {};
         }
-        gpu::BackendStatus AcquireQueries(gpu::QueryPoolRef, vanguard::u32, vanguard::u32) noexcept override { return {}; }
+        gpu::BackendStatus AcquireQueries(gpu::QueryPoolRef, vanguard::u32, vanguard::u32) noexcept override
+        {
+            return {};
+        }
         void ReleaseQueries(gpu::QueryPoolRef) noexcept override {}
         gpu::BackendStatus GetQueryResult(gpu::QueryPoolRef, vanguard::u32 index, vanguard::u64& result) noexcept override
         {
             result = 100 + index;
             return {};
         }
-        gpu::BackendStatus GetQueryResult(gpu::QueryPoolRef, vanguard::u32,
-                                          gpu::PipelineStatistics& result) noexcept override
+        gpu::BackendStatus GetQueryResult(gpu::QueryPoolRef, vanguard::u32, gpu::PipelineStatistics& result) noexcept override
         {
             result.inputAssemblerVertices = 3;
             return {};
@@ -293,22 +308,22 @@ namespace
         }
         bool IsResourceReferenceValid(const gpu::ResourceRef resource) const noexcept override
         {
-            const vanguard::u32 kind = static_cast<vanguard::u32>(resource.Kind());
-            return resource.IsValid() && kind < ResourceKindCount && resource.Index() == kind && resource.Generation() == 1 &&
-                   (resource.Kind() == gpu::ResourceKind::VertexLayout || refCounts[kind] != 0);
+            const vanguard::u32 kind = static_cast<vanguard::u32>(resource.GetKind());
+            return resource.IsValid() && kind < ResourceKindCount && resource.Index() == kind && resource.GetGeneration() == 1 &&
+                   (resource.GetKind() == gpu::ResourceKind::VertexLayout || refCounts[kind] != 0);
         }
         void AddRef(const gpu::ResourceRef resource) noexcept override
         {
             if (!IsResourceReferenceValid(resource))
                 return;
-            ++refCounts[static_cast<vanguard::u32>(resource.Kind())];
+            ++refCounts[static_cast<vanguard::u32>(resource.GetKind())];
             ++lifetimeStats.totalReferences;
         }
         vanguard::i32 Release(const gpu::ResourceRef resource) noexcept override
         {
             if (!IsResourceReferenceValid(resource))
                 return 0;
-            const vanguard::u32 kind = static_cast<vanguard::u32>(resource.Kind());
+            const vanguard::u32 kind = static_cast<vanguard::u32>(resource.GetKind());
             --refCounts[kind];
             --lifetimeStats.totalReferences;
             ++releaseCount;
@@ -337,8 +352,8 @@ namespace
         {
             return commandList == gpu::CommandListRef{20, 1} ? commandListType : gpu::CommandListType::None;
         }
-        gpu::BackendStatus CloseAndSubmitCommandLists(const char*, vanguard::containers::ArraySpan<const gpu::CommandListRef>,
-                                                      gpu::CommandListSyncType, gpu::GpuFence& completion) noexcept override
+        gpu::BackendStatus CloseAndSubmitCommandLists(const char*, vanguard::containers::ArraySpan<const gpu::CommandListRef>, gpu::CommandListSyncType,
+                                                      gpu::GpuFence& completion) noexcept override
         {
             ++submitCount;
             completion = {gpu::QueueType::Graphics, 9};
@@ -371,11 +386,9 @@ namespace
         {
             return {};
         }
-        gpu::BackendStatus SetVariableRateShading(
-            gpu::CommandListRef, const gpu::VariableRateShadingState&) noexcept override
+        gpu::BackendStatus SetVariableRateShading(gpu::CommandListRef, const gpu::VariableRateShadingState&) noexcept override
         {
-            return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0,
-                                               "variable-rate shading is unavailable");
+            return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "variable-rate shading is unavailable");
         }
         gpu::BackendStatus SetViewport(gpu::CommandListRef, const gpu::ViewportDesc&) noexcept override
         {
@@ -402,27 +415,24 @@ namespace
         {
             return {};
         }
-        gpu::BackendStatus ClearColorTarget(gpu::CommandListRef, gpu::TextureRef, const gpu::ColorValue&,
-                                            const gpu::SubresourceRange&, const gpu::Rect*) noexcept override
+        gpu::BackendStatus ClearColorTarget(gpu::CommandListRef, gpu::TextureRef, const gpu::ColorValue&, const gpu::SubresourceRange&,
+                                            const gpu::Rect*) noexcept override
         {
             ++clearCount;
             return {};
         }
-        gpu::BackendStatus ClearDepthStencilTarget(gpu::CommandListRef, gpu::TextureRef, bool, vanguard::f32, bool,
-                                                   vanguard::u8, const gpu::SubresourceRange&,
+        gpu::BackendStatus ClearDepthStencilTarget(gpu::CommandListRef, gpu::TextureRef, bool, vanguard::f32, bool, vanguard::u8, const gpu::SubresourceRange&,
                                                    const gpu::Rect*) noexcept override
         {
             ++clearCount;
             return {};
         }
-        gpu::BackendStatus ClearTextureUav(gpu::CommandListRef, gpu::TextureRef, const gpu::ColorValue&,
-                                           const gpu::SubresourceRange&) noexcept override
+        gpu::BackendStatus ClearTextureUav(gpu::CommandListRef, gpu::TextureRef, const gpu::ColorValue&, const gpu::SubresourceRange&) noexcept override
         {
             ++clearCount;
             return {};
         }
-        gpu::BackendStatus ClearTextureUav(gpu::CommandListRef, gpu::TextureRef, vanguard::u32,
-                                           const gpu::SubresourceRange&) noexcept override
+        gpu::BackendStatus ClearTextureUav(gpu::CommandListRef, gpu::TextureRef, vanguard::u32, const gpu::SubresourceRange&) noexcept override
         {
             ++clearCount;
             return {};
@@ -432,8 +442,7 @@ namespace
             ++clearCount;
             return {};
         }
-        gpu::BackendStatus DiscardTexture(gpu::CommandListRef, gpu::TextureRef,
-                                          const gpu::SubresourceRange&) noexcept override
+        gpu::BackendStatus DiscardTexture(gpu::CommandListRef, gpu::TextureRef, const gpu::SubresourceRange&) noexcept override
         {
             ++discardCount;
             return {};
@@ -460,7 +469,8 @@ namespace
         }
         gpu::BackendStatus EndGpuEvent(gpu::CommandListRef) noexcept override
         {
-            if (gpuEventDepth != 0) --gpuEventDepth;
+            if (gpuEventDepth != 0)
+                --gpuEventDepth;
             return {};
         }
         gpu::BackendStatus SetGpuMarker(gpu::CommandListRef, const char*) noexcept override
@@ -488,8 +498,7 @@ namespace
             ++drawCount;
             return {};
         }
-        gpu::BackendStatus DrawIndexedPrimitiveIndirectCount(gpu::CommandListRef, vanguard::u64, vanguard::u64,
-                                                             vanguard::u32) noexcept override
+        gpu::BackendStatus DrawIndexedPrimitiveIndirectCount(gpu::CommandListRef, vanguard::u64, vanguard::u64, vanguard::u32) noexcept override
         {
             ++drawCount;
             return {};
@@ -504,39 +513,34 @@ namespace
             ++dispatchCount;
             return {};
         }
-        gpu::BackendStatus BuildBottomLevelAccelerationStructure(
-            gpu::CommandListRef, gpu::AccelerationStructureRef,
-            vanguard::containers::ArraySpan<const gpu::RayTracingGeometryDesc>,
-            gpu::AccelerationStructureBuildMode) noexcept override
+        gpu::BackendStatus BuildBottomLevelAccelerationStructure(gpu::CommandListRef, gpu::AccelerationStructureRef,
+                                                                 vanguard::containers::ArraySpan<const gpu::RayTracingGeometryDesc>,
+                                                                 gpu::AccelerationStructureBuildMode) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
-        gpu::BackendStatus BuildTopLevelAccelerationStructure(
-            gpu::CommandListRef, gpu::AccelerationStructureRef,
-            vanguard::containers::ArraySpan<const gpu::RayTracingInstanceDesc>,
-            gpu::AccelerationStructureBuildMode) noexcept override
+        gpu::BackendStatus BuildTopLevelAccelerationStructure(gpu::CommandListRef, gpu::AccelerationStructureRef,
+                                                              vanguard::containers::ArraySpan<const gpu::RayTracingInstanceDesc>,
+                                                              gpu::AccelerationStructureBuildMode) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
-        gpu::BackendStatus BuildTopLevelAccelerationStructureIndirect(
-            gpu::CommandListRef, gpu::AccelerationStructureRef, gpu::BufferRef, vanguard::u64, vanguard::u32,
-            gpu::AccelerationStructureBuildMode) noexcept override
+        gpu::BackendStatus BuildTopLevelAccelerationStructureIndirect(gpu::CommandListRef, gpu::AccelerationStructureRef, gpu::BufferRef, vanguard::u64,
+                                                                      vanguard::u32, gpu::AccelerationStructureBuildMode) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
-        gpu::BackendStatus CopyAccelerationStructure(
-            gpu::CommandListRef, gpu::AccelerationStructureRef, gpu::AccelerationStructureRef,
-            gpu::AccelerationStructureCopyMode) noexcept override
+        gpu::BackendStatus CopyAccelerationStructure(gpu::CommandListRef, gpu::AccelerationStructureRef, gpu::AccelerationStructureRef,
+                                                     gpu::AccelerationStructureCopyMode) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
-        gpu::BackendStatus WriteAccelerationStructureCompactedSize(
-            gpu::CommandListRef, gpu::AccelerationStructureRef, gpu::QueryPoolRef, vanguard::u32) noexcept override
+        gpu::BackendStatus WriteAccelerationStructureCompactedSize(gpu::CommandListRef, gpu::AccelerationStructureRef, gpu::QueryPoolRef,
+                                                                   vanguard::u32) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
-        gpu::BackendStatus DispatchRays(gpu::CommandListRef, gpu::ShaderTableRef,
-                                        const gpu::DispatchRaysArguments&) noexcept override
+        gpu::BackendStatus DispatchRays(gpu::CommandListRef, gpu::ShaderTableRef, const gpu::DispatchRaysArguments&) noexcept override
         {
             return gpu::BackendStatus::Failure(gpu::FailureCode::Unsupported, 0, "ray tracing is unavailable");
         }
@@ -548,25 +552,21 @@ namespace
         {
             return {};
         }
-        gpu::BackendStatus CopyBuffer(gpu::CommandListRef, gpu::BufferRef, vanguard::u64, gpu::BufferRef, vanguard::u64,
-                                      vanguard::u64) noexcept override
+        gpu::BackendStatus CopyBuffer(gpu::CommandListRef, gpu::BufferRef, vanguard::u64, gpu::BufferRef, vanguard::u64, vanguard::u64) noexcept override
         {
             return {};
         }
-        gpu::BackendStatus CopyTexture(gpu::CommandListRef, gpu::TextureRef, gpu::TextureRef,
-                                       const gpu::TextureCopyRegion&) noexcept override
+        gpu::BackendStatus CopyTexture(gpu::CommandListRef, gpu::TextureRef, gpu::TextureRef, const gpu::TextureCopyRegion&) noexcept override
         {
             ++textureCopyCount;
             return {};
         }
-        gpu::BackendStatus ResolveTexture(gpu::CommandListRef, gpu::TextureRef, gpu::TextureRef,
-                                           const gpu::TextureResolveRegion&) noexcept override
+        gpu::BackendStatus ResolveTexture(gpu::CommandListRef, gpu::TextureRef, gpu::TextureRef, const gpu::TextureResolveRegion&) noexcept override
         {
             ++textureResolveCount;
             return {};
         }
-        gpu::BackendStatus RequestTextureReadback(gpu::CommandListRef, gpu::TextureRef,
-                                                  const gpu::TextureReadbackRegion&,
+        gpu::BackendStatus RequestTextureReadback(gpu::CommandListRef, gpu::TextureRef, const gpu::TextureReadbackRegion&,
                                                   gpu::TextureReadbackRef& readback) noexcept override
         {
             Create(gpu::ResourceKind::TextureReadback);
@@ -576,8 +576,7 @@ namespace
         }
         gpu::BackendStatus GetTextureReadbackInfo(gpu::TextureReadbackRef, gpu::TextureReadbackInfo& info) noexcept override
         {
-            info = {gpu::Format::R8G8B8A8UNorm, {2, 2, 1}, gpu::TextureReadbackState::Ready,
-                    {gpu::QueueType::Graphics, 4}};
+            info = {gpu::Format::R8G8B8A8UNorm, {2, 2, 1}, gpu::TextureReadbackState::Ready, {gpu::QueueType::Graphics, 4}};
             return {};
         }
         gpu::BackendStatus MapTextureReadback(gpu::TextureReadbackRef, gpu::TextureReadbackMapping& mapping) noexcept override
@@ -652,14 +651,12 @@ namespace
         {
             return {};
         }
-        gpu::BackendStatus SetSwapChainPresentParameters(gpu::SwapChainRef,
-                                                         const gpu::PresentParameters& parameters) noexcept override
+        gpu::BackendStatus SetSwapChainPresentParameters(gpu::SwapChainRef, const gpu::PresentParameters& parameters) noexcept override
         {
             swapChainStats.presentParameters = parameters;
             return {};
         }
-        gpu::BackendStatus AcquireBackBuffer(const gpu::SwapChainRef swapChain,
-                                             gpu::AcquiredBackBuffer& acquisition) noexcept override
+        gpu::BackendStatus AcquireBackBuffer(const gpu::SwapChainRef swapChain, gpu::AcquiredBackBuffer& acquisition) noexcept override
         {
             acquisition = {swapChain, {1, 1}, ++acquisitionSerial, 0, 1280, 720};
             swapChainStats.state = gpu::SwapChainState::Acquired;
@@ -673,8 +670,7 @@ namespace
             ++swapChainStats.abandonedAcquisitions;
             return {};
         }
-        gpu::BackendStatus TransitionSwapChainPresent(gpu::CommandListRef,
-                                                      const gpu::AcquiredBackBuffer&) noexcept override
+        gpu::BackendStatus TransitionSwapChainPresent(gpu::CommandListRef, const gpu::AcquiredBackBuffer&) noexcept override
         {
             ++barrierCount;
             return {};
@@ -686,7 +682,10 @@ namespace
             ++swapChainStats.presentedFrames;
             return {};
         }
-        gpu::SwapChainStats GetSwapChainStats(gpu::SwapChainRef) noexcept override { return swapChainStats; }
+        gpu::SwapChainStats GetSwapChainStats(gpu::SwapChainRef) noexcept override
+        {
+            return swapChainStats;
+        }
         void SetResourceDebugName(gpu::TextureRef, const char*) noexcept override
         {
             ++debugNameCount;
@@ -799,10 +798,8 @@ int main()
 
     FakeBackend backend;
     gpu::DeviceParams invalidResidencyParams{};
-    invalidResidencyParams.residencyPolicy.recoveryThresholdPercent =
-        invalidResidencyParams.residencyPolicy.pressureThresholdPercent;
-    Check(!gpu::Initialize(backend, invalidResidencyParams, &failure) &&
-              failure.code == gpu::FailureCode::InvalidArgument && !backend.initialized,
+    invalidResidencyParams.residencyPolicy.recoveryThresholdPercent = invalidResidencyParams.residencyPolicy.pressureThresholdPercent;
+    Check(!gpu::Initialize(backend, invalidResidencyParams, &failure) && failure.code == gpu::FailureCode::InvalidArgument && !backend.initialized,
           "RHI rejects a residency policy without a recovery hysteresis band");
     Check(gpu::Initialize(backend, {}, &failure) && gpu::IsInitialized(), "RHI initializes through its backend boundary");
     Check(gpu::GetCapabilities().resourceAliasing && gpu::TestDeviceState() == gpu::DeviceState::Operational,
@@ -812,6 +809,12 @@ int main()
     malformedTexture.format = gpu::Format::R8UNorm;
     Check(!gpu::CreateTexture(malformedTexture, {}, &failure) && failure.code == gpu::FailureCode::InvalidArgument,
           "texture creation enforces device dimension limits before reaching the backend");
+    malformedTexture.dimension = gpu::TextureDimension::Texture3D;
+    malformedTexture.extent = {2049, 1, 1};
+    malformedTexture.arraySize = 1;
+    Check(!gpu::CreateTexture(malformedTexture, {}, &failure) && failure.code == gpu::FailureCode::InvalidArgument,
+          "texture creation enforces device 3D dimension limits before reaching the backend");
+    malformedTexture.dimension = gpu::TextureDimension::Texture2D;
     malformedTexture.extent = {1, 1, 1};
     malformedTexture.format = static_cast<gpu::Format>(0xffffu);
     Check(!gpu::CreateTexture(malformedTexture, {}, &failure) && failure.code == gpu::FailureCode::InvalidArgument,
@@ -822,8 +825,7 @@ int main()
     Check(!gpu::CreateBuffer(malformedStructuredBuffer, {}, &failure) && failure.code == gpu::FailureCode::InvalidArgument,
           "structured buffers require an explicit element stride");
     gpu::AccelerationStructureDesc dormantAccelerationStructure{};
-    Check(!gpu::CreateAccelerationStructure(dormantAccelerationStructure, &failure) &&
-              failure.code == gpu::FailureCode::Unsupported &&
+    Check(!gpu::CreateAccelerationStructure(dormantAccelerationStructure, &failure) && failure.code == gpu::FailureCode::Unsupported &&
               !gpu::CreateShaderTable({}, &failure) && failure.code == gpu::FailureCode::Unsupported,
           "dormant ray-tracing resource APIs report unsupported without reaching the backend");
     gpu::TextureDesc dormantShadingRateImage{};
@@ -853,27 +855,24 @@ int main()
     gpu::ResidencyFenceSet unfinishedUse;
     unfinishedUse.Include({gpu::QueueType::Graphics, 9});
     Check(gpu::GetCapabilities().memoryBudgetQueries && gpu::GetCapabilities().explicitResidency &&
-               gpu::QueryMemoryBudget(gpu::MemorySegment::Local, localBudget, &failure) &&
-               localBudget.budget == 8ull * 1024 * 1024 * 1024 && localBudget.Available() == 6ull * 1024 * 1024 * 1024 &&
-               gpu::SetResidencyPriority(gpu::ResourceRef(heap), gpu::ResidencyPriority::High, &failure) &&
-               gpu::SetResidencyPinned(gpu::ResourceRef(heap), true, &failure) && backend.residencyPinned &&
-               gpu::SetResidencyPinned(gpu::ResourceRef(heap), false, &failure) && !backend.residencyPinned &&
-               !gpu::Evict({residencyResources, 3}, unfinishedUse, &failure) && failure.code == gpu::FailureCode::Busy &&
+              gpu::QueryMemoryBudget(gpu::MemorySegment::Local, localBudget, &failure) && localBudget.budget == 8ull * 1024 * 1024 * 1024 &&
+              localBudget.Available() == 6ull * 1024 * 1024 * 1024 &&
+              gpu::SetResidencyPriority(gpu::ResourceRef(heap), gpu::ResidencyPriority::High, &failure) &&
+              gpu::SetResidencyPinned(gpu::ResourceRef(heap), true, &failure) && backend.residencyPinned &&
+              gpu::SetResidencyPinned(gpu::ResourceRef(heap), false, &failure) && !backend.residencyPinned &&
+              !gpu::Evict({residencyResources, 3}, unfinishedUse, &failure) && failure.code == gpu::FailureCode::Busy &&
               gpu::Evict({residencyResources, 3}, {}, &failure) && gpu::MakeResident({residencyResources, 3}, &failure),
           "memory budgets and fence-safe batched residency operations route through the backend contract");
     const gpu::ResidencyStats residencyStats = gpu::GetResidencyStats();
-    Check(residencyStats.budgetQueries == 1 && residencyStats.priorityChanges == 1 && backend.residencyPinChanges == 2 &&
-              residencyStats.evictCalls == 2 &&
-              residencyStats.rejectedEvictions == 1 && residencyStats.objectsEvicted == 3 &&
-              residencyStats.objectsMadeResident == 3,
+    Check(residencyStats.budgetQueries == 1 && residencyStats.priorityChanges == 1 && backend.residencyPinChanges == 2 && residencyStats.evictCalls == 2 &&
+              residencyStats.rejectedEvictions == 1 && residencyStats.objectsEvicted == 3 && residencyStats.objectsMadeResident == 3,
           "residency telemetry distinguishes completed operations from rejected in-flight eviction");
     Check(gpu::BindMemory(texture, heap, 0, &failure) && gpu::BindMemory(buffer, heap, 65536, &failure) && backend.bindCount == 2,
           "virtual resources bind to explicit heap placements");
 
     const gpu::ResourceRef genericTexture = texture;
-    Check(sizeof(gpu::ResourceRef) == sizeof(gpu::TextureRef) && genericTexture.Kind() == gpu::ResourceKind::Texture &&
-              gpu::CastResourceRef<gpu::TextureRef>(genericTexture) == texture &&
-              !gpu::CastResourceRef<gpu::BufferRef>(genericTexture).IsValid(),
+    Check(sizeof(gpu::ResourceRef) == sizeof(gpu::TextureRef) && genericTexture.GetKind() == gpu::ResourceKind::Texture &&
+              gpu::CastResourceRef<gpu::TextureRef>(genericTexture) == texture && !gpu::CastResourceRef<gpu::BufferRef>(genericTexture).IsValid(),
           "type-erased resources require checked conversion back to a typed reference");
 
     Check(gpu::GetRefCount(texture) == 1, "the owning factory adopts creation without an accidental reference");
@@ -908,18 +907,15 @@ int main()
     graphicsPipelineDesc.attachments.colorFormats[0] = gpu::Format::R8G8B8A8UNorm;
     graphicsPipelineDesc.attachments.colorCount = 1;
     gpu::PipelineRef pipeline = gpu::CreateGraphicsPipeline(graphicsPipelineDesc, &failure);
-    Check(
-        !gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Samplers, 257, 0, gpu::ShaderStageBit(gpu::ShaderStage::Pixel)}, &failure)
-                .IsValid() &&
-            failure.code == gpu::FailureCode::InvalidArgument,
-        "descriptor domains enforce class-specific hardware capacity limits");
-    gpu::DescriptorDomainRef descriptorDomain =
-        gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 1024, 0,
-                                     gpu::ShaderStageBit(gpu::ShaderStage::Vertex) | gpu::ShaderStageBit(gpu::ShaderStage::Pixel)},
-                                    &failure);
+    Check(!gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Samplers, 257, 0, gpu::ShaderStageBit(gpu::ShaderStage::Pixel)}, &failure).IsValid() &&
+              failure.code == gpu::FailureCode::InvalidArgument,
+          "descriptor domains enforce class-specific hardware capacity limits");
+    gpu::DescriptorDomainRef descriptorDomain = gpu::CreateDescriptorDomain(
+        {gpu::DescriptorDomainKind::Resources, 1024, 0, gpu::ShaderStageBit(gpu::ShaderStage::Vertex) | gpu::ShaderStageBit(gpu::ShaderStage::Pixel)},
+        &failure);
     const gpu::DescriptorHandle textureDescriptor = gpu::AllocateDescriptor(descriptorDomain, &failure);
-    Check(sampler.IsValid() && shader.IsValid() && vertexLayout.IsValid() && queryPool.IsValid() && bindingLayout.IsValid() &&
-              pipeline.IsValid() && descriptorDomain.IsValid() && textureDescriptor.IsValid() &&
+    Check(sampler.IsValid() && shader.IsValid() && vertexLayout.IsValid() && queryPool.IsValid() && bindingLayout.IsValid() && pipeline.IsValid() &&
+              descriptorDomain.IsValid() && textureDescriptor.IsValid() &&
               gpu::WriteDescriptor(descriptorDomain, textureDescriptor, texture, gpu::BindingType::TextureShaderResource, {}, &failure),
           "samplers, shaders, vertex layouts, query pools and descriptor layouts have typed references");
     gpu::DescriptorRetirement descriptorRetirement;
@@ -941,19 +937,16 @@ int main()
               !gpu::BuildBottomLevelAccelerationStructure({}, {}, gpu::AccelerationStructureBuildMode::Build, &failure) &&
               failure.code == gpu::FailureCode::Unsupported,
           "dormant ray-tracing recording APIs remain explicit unsupported operations");
-    Check(!gpu::SetVariableRateShading({gpu::ShadingRate::Rate2x2,
-                                        gpu::ShadingRateCombiner::Passthrough,
-                                        gpu::ShadingRateCombiner::Passthrough,
-                                        {}, {}, true}, &failure) &&
+    Check(!gpu::SetVariableRateShading({gpu::ShadingRate::Rate2x2, gpu::ShadingRateCombiner::Passthrough, gpu::ShadingRateCombiner::Passthrough, {}, {}, true},
+                                       &failure) &&
               failure.code == gpu::FailureCode::Unsupported,
           "dormant variable-rate shading commands remain explicit unsupported operations");
     gpu::TimestampCalibration timestampCalibration{};
-    Check(gpu::BeginGpuEvent("RHI façade", &failure) && gpu::SetGpuMarker("query begin", &failure) &&
-              gpu::IssueQuery(queryPool, 0, &failure) && gpu::IssueQuery(queryPool, 1, &failure) &&
-              gpu::ResolveQueries(queryPool, 0, 2, &failure) && gpu::EndGpuEvent(&failure) &&
+    Check(gpu::BeginGpuEvent("RHI façade", &failure) && gpu::SetGpuMarker("query begin", &failure) && gpu::IssueQuery(queryPool, 0, &failure) &&
+              gpu::IssueQuery(queryPool, 1, &failure) && gpu::ResolveQueries(queryPool, 0, 2, &failure) && gpu::EndGpuEvent(&failure) &&
               gpu::GetTimestampFrequency(gpu::QueueType::Graphics, &failure) == 1'000'000 &&
-              gpu::CalibrateTimestamps(gpu::QueueType::Graphics, timestampCalibration, &failure) &&
-              timestampCalibration.IsValid() && backend.gpuEventDepth == 0 && backend.gpuMarkerCount == 1,
+              gpu::CalibrateTimestamps(gpu::QueueType::Graphics, timestampCalibration, &failure) && timestampCalibration.IsValid() &&
+              backend.gpuEventDepth == 0 && backend.gpuMarkerCount == 1,
           "GPU events, markers, query recording and timestamp calibration route through the backend contract");
     gpu::RenderTargetSetup renderTargets{};
     renderTargets.colorTargets[0].texture = texture;
@@ -963,44 +956,45 @@ int main()
     const vanguard::u32 pushConstants[] = {1, 2, 3, 4};
     const gpu::Rect clearRectangle{8, 8, 64, 64};
     Check(gpu::ClearColorTarget(texture, {0.1f, 0.2f, 0.3f, 1.0f}, {}, &clearRectangle, &failure) &&
-              gpu::ClearDepthTarget(texture, 0.0f, {}, nullptr, &failure) &&
-              gpu::ClearStencilTarget(texture, 7, {}, nullptr, &failure) &&
+              gpu::ClearDepthTarget(texture, 0.0f, {}, nullptr, &failure) && gpu::ClearStencilTarget(texture, 7, {}, nullptr, &failure) &&
               gpu::ClearDepthStencilTarget(texture, 1.0f, 0, {}, nullptr, &failure) &&
-              gpu::ClearTextureUav(texture, gpu::ColorValue{0.0f, 0.0f, 0.0f, 0.0f}, {}, &failure) &&
-              gpu::ClearTextureUav(texture, 0u, {}, &failure) && gpu::ClearBufferUav(buffer, 0u, &failure) &&
-              gpu::DiscardTexture(texture, {}, &failure) && gpu::DiscardBuffer(buffer, &failure) &&
-              gpu::SetStencilRefValue(19, &failure) && gpu::SetBlendFactor({0.25f, 0.5f, 0.75f, 1.0f}, &failure) &&
-              backend.clearCount == 7 && backend.discardCount == 2 && backend.dynamicOutputStateCount == 2,
+              gpu::ClearTextureUav(texture, gpu::ColorValue{0.0f, 0.0f, 0.0f, 0.0f}, {}, &failure) && gpu::ClearTextureUav(texture, 0u, {}, &failure) &&
+              gpu::ClearBufferUav(buffer, 0u, &failure) && gpu::DiscardTexture(texture, {}, &failure) && gpu::DiscardBuffer(buffer, &failure) &&
+              gpu::SetStencilRefValue(19, &failure) && gpu::SetBlendFactor({0.25f, 0.5f, 0.75f, 1.0f}, &failure) && backend.clearCount == 7 &&
+              backend.discardCount == 2 && backend.dynamicOutputStateCount == 2,
           "clear, discard and dynamic output state commands route through the bound command list");
     const gpu::Rect invalidClearRectangle{-1, 0, 1, 1};
-    Check(!gpu::ClearColorTarget(texture, {}, {}, &invalidClearRectangle, &failure) &&
-              failure.code == gpu::FailureCode::InvalidArgument && backend.clearCount == 7,
+    Check(!gpu::ClearColorTarget(texture, {}, {}, &invalidClearRectangle, &failure) && failure.code == gpu::FailureCode::InvalidArgument &&
+              backend.clearCount == 7,
           "clear rectangles are rejected before reaching the backend when their extent is invalid");
     const gpu::TextureCopyRegion invalidTextureCopy{{}, {}, 0, 0, 0, 0, 0, 0, {16, 0, 1}};
-    Check(gpu::CopyTexture(texture, texture, {}, &failure) && gpu::ResolveTexture(texture, texture, {}, &failure) &&
-              backend.textureCopyCount == 1 && backend.textureResolveCount == 1 &&
-              !gpu::CopyTexture(texture, texture, invalidTextureCopy, &failure) &&
+    Check(gpu::CopyTexture(texture, texture, {}, &failure) && gpu::ResolveTexture(texture, texture, {}, &failure) && backend.textureCopyCount == 1 &&
+              backend.textureResolveCount == 1 && !gpu::CopyTexture(texture, texture, invalidTextureCopy, &failure) &&
               failure.code == gpu::FailureCode::InvalidArgument && backend.textureCopyCount == 1,
           "texture copy and resolve commands route through the façade with complete extent validation");
     gpu::TextureReadback textureReadback(gpu::AdoptReference, gpu::RequestTextureReadback(texture, {}, &failure));
     gpu::TextureReadbackInfo textureReadbackInfo{};
     gpu::TextureReadbackMapping textureReadbackMapping{};
-    Check(textureReadback.IsValid() && backend.textureReadbackCount == 1 &&
-              gpu::GetTextureReadbackInfo(textureReadback, textureReadbackInfo, &failure) &&
-              textureReadbackInfo.state == gpu::TextureReadbackState::Ready &&
-              gpu::MapTextureReadback(textureReadback, textureReadbackMapping, &failure) && textureReadbackMapping.data != nullptr &&
-              textureReadbackMapping.rowPitch == 8 && gpu::UnmapTextureReadback(textureReadback, &failure),
+    Check(textureReadback.IsValid() && backend.textureReadbackCount == 1 && gpu::GetTextureReadbackInfo(textureReadback, textureReadbackInfo, &failure) &&
+              textureReadbackInfo.state == gpu::TextureReadbackState::Ready && gpu::MapTextureReadback(textureReadback, textureReadbackMapping, &failure) &&
+              textureReadbackMapping.data != nullptr && textureReadbackMapping.rowPitch == 8 && gpu::UnmapTextureReadback(textureReadback, &failure),
           "asynchronous texture readback exposes owned native-format staging and explicit mapping");
     Check(gpu::SetPipeline(pipeline, &failure) && gpu::SetupRenderTargets(renderTargets, &failure) &&
               gpu::SetViewport({0.0f, 0.0f, 1280.0f, 720.0f, 0.0f, 1.0f}, &failure) && gpu::SetScissors({0, 0, 1280, 720}, &failure) &&
               gpu::BindVertexBuffers(0, {&vertexBufferBinding, 1}, &failure) && gpu::BindIndexBuffer(indexBufferBinding, &failure) &&
-              gpu::BindIndirectArguments(buffer, buffer, &failure) &&
-              gpu::SetPushConstants(pushConstants, sizeof(pushConstants), &failure) && gpu::DrawPrimitive({3, 1, 0, 0}, &failure) &&
-              gpu::DrawIndexedPrimitive({3, 1, 0, 0, 0}, &failure) && gpu::DrawPrimitiveIndirect(0, 1, &failure) &&
-              gpu::DrawIndexedPrimitiveIndirect(0, 1, &failure) && gpu::DrawIndexedPrimitiveIndirectCount(0, 0, 1, &failure) &&
-              gpu::DispatchCompute(1, 1, 1, &failure) && gpu::DispatchIndirectCompute(0, &failure) && backend.setPipelineCount == 1 &&
-              backend.drawCount == 5 && backend.dispatchCount == 2,
+              gpu::BindIndirectArguments(buffer, buffer, &failure) && gpu::SetPushConstants(pushConstants, sizeof(pushConstants), &failure) &&
+              gpu::DrawPrimitive({3, 1, 0, 0}, &failure) && gpu::DrawIndexedPrimitive({3, 1, 0, 0, 0}, &failure) &&
+              gpu::DrawPrimitiveIndirect(0, 1, &failure) && gpu::DrawIndexedPrimitiveIndirect(0, 1, &failure) &&
+              gpu::DrawIndexedPrimitiveIndirectCount(0, 0, 1, &failure) && gpu::DispatchCompute(1, 1, 1, &failure) &&
+              gpu::DispatchIndirectCompute(0, &failure) && backend.setPipelineCount == 1 && backend.drawCount == 5 && backend.dispatchCount == 2,
           "draw, indirect, push-constant and compute commands route through command-list-local state");
+    constexpr vanguard::u64 unrepresentableIndirectOffset = static_cast<vanguard::u64>(0xffffffffu) + 1u;
+    Check(!gpu::DrawPrimitiveIndirect(2, 1, &failure) && failure.code == gpu::FailureCode::InvalidArgument &&
+              !gpu::DrawIndexedPrimitiveIndirect(unrepresentableIndirectOffset, 1, &failure) && failure.code == gpu::FailureCode::InvalidArgument &&
+              !gpu::DrawIndexedPrimitiveIndirectCount(0, 2, 1, &failure) && failure.code == gpu::FailureCode::InvalidArgument &&
+              !gpu::DispatchIndirectCompute(2, &failure) && failure.code == gpu::FailureCode::InvalidArgument && backend.drawCount == 5 &&
+              backend.dispatchCount == 2,
+          "indirect offsets reject misalignment and native narrowing before reaching the backend");
     Check(gpu::TransitionTexture(texture, gpu::ResourceState::Common, gpu::ResourceState::UnorderedAccess, {}, &failure) &&
               gpu::BarrierTextureUav(texture, &failure) &&
               gpu::TransitionBuffer(buffer, gpu::ResourceState::Common, gpu::ResourceState::UnorderedAccess, &failure) &&
@@ -1019,39 +1013,33 @@ int main()
     const gpu::GpuCounterScopeId geometryScope = gpu::MakeGpuCounterScopeId("Geometry.Main");
     gpu::GpuCounterFrameHandle counterFrame{};
     gpu::GpuCounterScopeToken counterScope{};
-    const bool counterRecordingSucceeded = gpuCounters.Initialize({2, 4, 2, gpu::QueueType::Graphics, false}, &failure) &&
-              gpuCounters.RegisterScope(geometryScope, "Geometry.Main", &failure) &&
-              !gpuCounters.RegisterScope(geometryScope, "Geometry.Collision", &failure) &&
-              failure.code == gpu::FailureCode::IncompatibleBinding &&
-              gpuCounters.BeginFrame(77, counterFrame, &failure) &&
-              gpuCounters.BeginScope(counterFrame, geometryScope, counterScope, &failure) &&
-              !gpuCounters.EndFrame(counterFrame, &failure) && failure.code == gpu::FailureCode::Busy &&
-              gpuCounters.EndScope(counterScope, &failure) && gpuCounters.EndFrame(counterFrame, &failure) &&
-              gpuCounters.GetFrameState(counterFrame) == gpu::GpuCounterFrameState::AwaitingSubmission &&
-              gpuCounters.Collect(&failure) == 0;
-    Check(counterRecordingSucceeded,
-          "GPU counter recording uses registered stable scopes and refuses incomplete frames");
+    const bool counterRecordingSucceeded =
+        gpuCounters.Initialize({2, 4, 2, gpu::QueueType::Graphics, false}, &failure) && gpuCounters.RegisterScope(geometryScope, "Geometry.Main", &failure) &&
+        !gpuCounters.RegisterScope(geometryScope, "Geometry.Collision", &failure) && failure.code == gpu::FailureCode::IncompatibleBinding &&
+        gpuCounters.BeginFrame(77, counterFrame, &failure) && gpuCounters.BeginScope(counterFrame, geometryScope, counterScope, &failure) &&
+        !gpuCounters.EndFrame(counterFrame, &failure) && failure.code == gpu::FailureCode::Busy && gpuCounters.EndScope(counterScope, &failure) &&
+        gpuCounters.EndFrame(counterFrame, &failure) && gpuCounters.GetFrameState(counterFrame) == gpu::GpuCounterFrameState::AwaitingSubmission &&
+        gpuCounters.Collect(&failure) == 0;
+    Check(counterRecordingSucceeded, "GPU counter recording uses registered stable scopes and refuses incomplete frames");
     gpu::CommandListRef commandLists[] = {commandList};
     gpu::GpuFence completion{};
     Check(!gpu::CloseAndSubmitCommandLists("bound rejection", commandLists, gpu::CommandListSyncType::None, completion, &failure) &&
               failure.code == gpu::FailureCode::InvalidCommandList,
           "a bound command list cannot be submitted implicitly");
     gpu::UnbindCommandList();
-    Check(gpu::CloseAndSubmitCommandLists("frame", commandLists, gpu::CommandListSyncType::None, completion, &failure) &&
-              completion.IsValid() && gpu::IsGpuFenceComplete(completion) && gpu::WaitForGpuFence(completion, 1000, &failure),
+    Check(gpu::CloseAndSubmitCommandLists("frame", commandLists, gpu::CommandListSyncType::None, completion, &failure) && completion.IsValid() &&
+              gpu::IsGpuFenceComplete(completion) && gpu::WaitForGpuFence(completion, 1000, &failure),
           "submission produces an explicit queue timeline fence");
     gpu::GpuCounterFrameView counterView{};
     const bool counterCollectionSucceeded = gpuCounters.CommitFrame(counterFrame, completion, &failure) && gpuCounters.Collect(&failure) == 1 &&
-              gpuCounters.GetOldestReadyFrame(counterView, &failure) && counterView.frameNumber == 77 &&
-              counterView.sampleCount == 1 && counterView.gpuBegin == 100 && counterView.gpuEnd == 101 &&
-              counterView.samples[0].valid && counterView.samples[0].scope == geometryScope &&
-              counterView.samples[0].gpuBegin == 102 && counterView.samples[0].gpuEnd == 103 &&
-              gpuCounters.ConsumeFrame(counterView.handle, &failure) && gpuCounters.Shutdown(&failure);
-    Check(counterCollectionSucceeded,
-          "GPU counter frames are committed with the actual submission fence, collected without waiting and explicitly consumed");
+                                            gpuCounters.GetOldestReadyFrame(counterView, &failure) && counterView.frameNumber == 77 &&
+                                            counterView.sampleCount == 1 && counterView.gpuBegin == 100 && counterView.gpuEnd == 101 &&
+                                            counterView.samples[0].valid && counterView.samples[0].scope == geometryScope &&
+                                            counterView.samples[0].gpuBegin == 102 && counterView.samples[0].gpuEnd == 103 &&
+                                            gpuCounters.ConsumeFrame(counterView.handle, &failure) && gpuCounters.Shutdown(&failure);
+    Check(counterCollectionSucceeded, "GPU counter frames are committed with the actual submission fence, collected without waiting and explicitly consumed");
     vanguard::u64 timestampResult = 0;
-    Check(gpu::AcquireQueries(queryPool, 0, 2, &failure) &&
-              gpu::GetQueryResult(queryPool, 1, timestampResult, &failure) && timestampResult == 101,
+    Check(gpu::AcquireQueries(queryPool, 0, 2, &failure) && gpu::GetQueryResult(queryPool, 1, timestampResult, &failure) && timestampResult == 101,
           "resolved query ranges expose results only through explicit acquisition");
     gpu::ReleaseQueries(queryPool);
 
@@ -1062,8 +1050,8 @@ int main()
     swapChainDesc.height = 720;
     gpu::SwapChainRef swapChain = gpu::CreateSwapChainWithBackBuffer(swapChainDesc, &failure);
     gpu::AcquiredBackBuffer abandonedBackBuffer;
-    Check(swapChain.IsValid() && gpu::AcquireBackBuffer(swapChain, abandonedBackBuffer, &failure) &&
-              abandonedBackBuffer.IsValid() && gpu::AbandonBackBuffer(abandonedBackBuffer, &failure),
+    Check(swapChain.IsValid() && gpu::AcquireBackBuffer(swapChain, abandonedBackBuffer, &failure) && abandonedBackBuffer.IsValid() &&
+              gpu::AbandonBackBuffer(abandonedBackBuffer, &failure),
           "presentation acquisition can be explicitly abandoned");
     gpu::AcquiredBackBuffer backBuffer;
     Check(gpu::AcquireBackBuffer(swapChain, backBuffer, &failure) && gpu::BindCommandList(commandList, &failure) &&
@@ -1091,13 +1079,12 @@ int main()
     static_cast<void>(gpu::SafeRelease(heap));
     textureReadback.Reset();
     const gpu::ResourceLifetimeStats beforeIdle = gpu::GetResourceLifetimeStats();
-    Check(beforeIdle.liveResources == 0 && beforeIdle.pendingRetirements == 10 && backend.debugNameCount == 4 &&
-              backend.retirementTransitionCount == 2 && backend.queryPoolDestroyCount == 2,
+    Check(beforeIdle.liveResources == 0 && beforeIdle.pendingRetirements == 10 && backend.debugNameCount == 4 && backend.retirementTransitionCount == 2 &&
+              backend.queryPoolDestroyCount == 2,
           "final release enters fence-safe retirement instead of immediately destroying native resources");
     Check(gpu::RetireResources(&failure) && backend.retireResourcesCount == 1 && gpu::GetResourceLifetimeStats().pendingRetirements == 0,
           "explicit retirement advances backend reclamation independently of a device-idle wait");
-    Check(gpu::WaitIdle(&failure) && gpu::GetResourceLifetimeStats().completedRetirements == 10 && gpu::Shutdown(&failure) &&
-              !gpu::IsInitialized(),
+    Check(gpu::WaitIdle(&failure) && gpu::GetResourceLifetimeStats().completedRetirements == 10 && gpu::Shutdown(&failure) && !gpu::IsInitialized(),
           "device idle and explicit shutdown complete after retirement without leaking backend state");
 
     if (g_failures != 0)

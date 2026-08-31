@@ -28,13 +28,13 @@ project "textureTools"
     includedirs {
         "include", "src", "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../io/include",
         "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include", "../jobs/include", "../concurrency/include",
-        "../textures/include", "../../external/bcCodecs/src", "../../external/compressonatorCore/cmp_core/source",
+        "../textures/include", "../assets/include", "../../external/bcCodecs/src", "../../external/compressonatorCore/cmp_core/source",
         "../../external/imageCodecs/libpng", "../../external/imageCodecs/zlib", "../../external/imageCodecs/libjpeg-turbo",
         "../../external/imageCodecs/libtiff", "../../external/imageCodecs/openexr", "../../external/imageCodecs/openexr/Imath",
         "../../external/imageCodecs/openexr/OpenEXRCore"
     }
     defines { "PNG_STATIC", "Z_PREFIX" }
-    links { "textures", "bcCodecs", "compressonatorCore", "libpng", "zlib", "libjpegTurbo", "libtiff", "openexrCore", "openjph", "resources", "crypto", "serialization", "filesystem", "io", "jobs", "concurrency", "diagnostics", "containers", "memory", "system" }
+    links { "assets", "textures", "bcCodecs", "compressonatorCore", "libpng", "zlib", "libjpegTurbo", "libtiff", "openexrCore", "openjph", "resources", "crypto", "serialization", "filesystem", "io", "jobs", "concurrency", "diagnostics", "containers", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
         ["Source/*"] = { "src/**.hpp", "src/**.cpp" },
@@ -56,7 +56,7 @@ project "textureToolsTests"
     includedirs {
         "include", "../system/include", "../memory/include", "../diagnostics/include", "../containers/include",
         "../io/include", "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include", "../jobs/include", "../concurrency/include",
-        "../textures/include", "../../external/bcCodecs/src", "../../external/compressonatorCore/cmp_core/source",
+        "../textures/include", "../assets/include", "../../external/bcCodecs/src", "../../external/compressonatorCore/cmp_core/source",
         "../../external/imageCodecs/libtiff", "../../external/imageCodecs/openexr", "../../external/imageCodecs/openexr/OpenEXRCore",
         path.join(redFileSystemRoot, "include"), path.join(redFileSystemRoot, "src"),
         path.join(redCompressionRoot, "include"), path.join(redCompressionRoot, "src"), path.join(redSystemRoot, "include"),
@@ -65,7 +65,7 @@ project "textureToolsTests"
     }
     libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
     links {
-        "textureTools", "textures", "bcCodecs", "compressonatorCore", "libtiff", "openexrCore", "openjph", "libjpegTurbo", "libpng", "zlib", "resources", "crypto", "serialization", "serializationCompat", "jobs", "jobsCompat", "redJobsCompat", "concurrency", "concurrencyCompat",
+        "textureTools", "assets", "textures", "bcCodecs", "compressonatorCore", "libtiff", "openexrCore", "openjph", "libjpegTurbo", "libpng", "zlib", "resources", "crypto", "serialization", "serializationCompat", "jobs", "jobsCompat", "redJobsCompat", "concurrency", "concurrencyCompat",
         "filesystem", "filesystemCompat", "redFileSystemCompat", "redCompressionCompat", "redCoreCompat", "redIOCompat",
         "redContainersCompat", "redMathCompat", "io", "diagnostics", "diagnosticsCompat", "containers", "containersCompat",
         "memory", "redSystemCompat", "system", "nvToolsExt64_1", "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Shell32",
@@ -98,7 +98,7 @@ project "textureToolsBenchmarks"
     includedirs {
         "include", "../system/include", "../memory/include", "../diagnostics/include", "../containers/include",
         "../io/include", "../filesystem/include", "../serialization/include", "../crypto/include", "../resources/include",
-        "../jobs/include", "../concurrency/include", "../textures/include", path.join(redFileSystemRoot, "include"),
+        "../jobs/include", "../concurrency/include", "../textures/include", "../assets/include", path.join(redFileSystemRoot, "include"),
         path.join(redFileSystemRoot, "src"), path.join(redCompressionRoot, "include"), path.join(redCompressionRoot, "src"),
         path.join(redSystemRoot, "include"), path.join(redMemoryRoot, "include"), path.join(redMemoryRoot, "src"),
         path.join(redMathRoot, "include"), path.join(redContainersRoot, "include"), path.join(redIORoot, "include"),
@@ -106,7 +106,7 @@ project "textureToolsBenchmarks"
     }
     libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
     links {
-        "textureTools", "textures", "bcCodecs", "compressonatorCore", "libtiff", "openexrCore", "openjph", "libjpegTurbo", "libpng", "zlib", "resources", "crypto", "serialization",
+        "textureTools", "assets", "textures", "bcCodecs", "compressonatorCore", "libtiff", "openexrCore", "openjph", "libjpegTurbo", "libpng", "zlib", "resources", "crypto", "serialization",
         "serializationCompat", "jobs", "jobsCompat", "redJobsCompat", "concurrency", "concurrencyCompat", "filesystem",
         "filesystemCompat", "redFileSystemCompat", "redCompressionCompat", "redCoreCompat", "redIOCompat",
         "redContainersCompat", "redMathCompat", "io", "diagnostics", "diagnosticsCompat", "containers", "containersCompat",

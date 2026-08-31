@@ -19,38 +19,33 @@ namespace
         return static_cast<TestClock*>(userData)->ticks;
     }
 
-    [[nodiscard]] vanguard::engine::FrameParticipantStatus ExecuteParticipant(
-        const vanguard::engine::FrameContext&, void*) noexcept
+    [[nodiscard]] vanguard::engine::FrameParticipantStatus ExecuteParticipant(const vanguard::engine::FrameContext&, void*) noexcept
     {
         return vanguard::engine::FrameParticipantStatus::Success();
     }
 
     [[nodiscard]] bool Check(const bool condition, const char* const message) noexcept
     {
-        if (condition) return true;
+        if (condition)
+            return true;
         std::fprintf(stderr, "[framePipelineCycleTests] FAILED: %s\n", message);
         return false;
     }
-}
+} // namespace
 
 int main()
 {
     if (!Check(vanguard::memory::Initialize(), "memory initialization") ||
-        !Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous,
-                                                 "framePipelineCycleTests"),
-               "diagnostics initialization") ||
+        !Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "framePipelineCycleTests"), "diagnostics initialization") ||
         !Check(vanguard::containers::Initialize(), "containers initialization"))
         return 1;
 
     vanguard::application::EngineHost host;
     vanguard::application::HostFailure hostFailure;
-    if (!Check(vanguard::engine::RegisterEngineModule(host, &hostFailure) &&
-                   vanguard::engine::RegisterIoService(host, &hostFailure) &&
-                   vanguard::engine::RegisterFilesystemService(host, &hostFailure) &&
-                   vanguard::engine::RegisterJobsService(host, &hostFailure) &&
+    if (!Check(vanguard::engine::RegisterEngineModule(host, &hostFailure) && vanguard::engine::RegisterIoService(host, &hostFailure) &&
+                   vanguard::engine::RegisterFilesystemService(host, &hostFailure) && vanguard::engine::RegisterJobsService(host, &hostFailure) &&
                    vanguard::engine::RegisterFramePipelineService(host, &hostFailure) &&
-                   host.Compile(vanguard::application::ApplicationProfile::Runtime, &hostFailure) &&
-                   host.Start(&hostFailure),
+                   host.Compile(vanguard::application::ApplicationProfile::Runtime, &hostFailure) && host.Start(&hostFailure),
                "Frame Pipeline host startup"))
     {
         vanguard::diagnostics::Shutdown();
@@ -63,8 +58,7 @@ int main()
     config.clock = {&ReadTestClock, 1'000, &clock};
     config.pacing = vanguard::engine::FramePacingMode::Disabled;
     vanguard::engine::FrameFailure failure;
-    bool passed = Check(pipeline != nullptr && pipeline->Configure(config, &failure),
-                        "deterministic Frame Pipeline configuration");
+    bool passed = Check(pipeline != nullptr && pipeline->Configure(config, &failure), "deterministic Frame Pipeline configuration");
 
     constexpr vanguard::engine::FrameParticipantId FirstParticipant = 1;
     constexpr vanguard::engine::FrameParticipantId SecondParticipant = 2;
@@ -80,10 +74,10 @@ int main()
     second.name = "cycleSecond";
     second.after = {secondAfter, 1};
     second.execute = &ExecuteParticipant;
-    passed = Check(pipeline != nullptr && pipeline->RegisterParticipant(first, &failure) &&
-                       pipeline->RegisterParticipant(second, &failure) && !pipeline->Compile(&failure) &&
-                       failure.code == vanguard::engine::FrameFailureCode::DependencyCycle,
-                   "same-phase dependency cycle rejection") && passed;
+    passed = Check(pipeline != nullptr && pipeline->RegisterParticipant(first, &failure) && pipeline->RegisterParticipant(second, &failure) &&
+                       !pipeline->Compile(&failure) && failure.code == vanguard::engine::FrameFailureCode::DependencyCycle,
+                   "same-phase dependency cycle rejection") &&
+             passed;
     passed = Check(host.Shutdown(&hostFailure), "Frame Pipeline host shutdown") && passed;
     vanguard::diagnostics::Shutdown();
     return passed ? 0 : 1;

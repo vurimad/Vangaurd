@@ -53,6 +53,8 @@ int main()
     const filesystem::AbsolutePath movedPath = nestedDirectory.AddFilePath("moved.bin");
     const filesystem::AbsolutePath managedPath = testDirectory.AddFilePath("managed.bin");
     const filesystem::AbsolutePath safePath = testDirectory.AddFilePath("safe.bin");
+    const filesystem::AbsolutePath replacementTarget = testDirectory.AddFilePath("replacement.bin");
+    const filesystem::AbsolutePath replacementStaged = testDirectory.AddFilePath("replacement.bin.tmp");
 
     Check(!filesystem::Initialize({workingDirectory, workingDirectory, testDirectory}), "initialization rejects missing dependencies");
     Check(memory::Initialize(), "memory initialization");
@@ -72,13 +74,14 @@ int main()
     static_cast<void>(manager.DeleteFile(movedPath));
     static_cast<void>(manager.DeleteFile(managedPath));
     static_cast<void>(manager.DeleteFile(safePath));
+    static_cast<void>(manager.DeleteFile(replacementTarget));
+    static_cast<void>(manager.DeleteFile(replacementStaged));
     static_cast<void>(manager.DeletePath(nestedDirectory));
     static_cast<void>(manager.DeletePath(testDirectory));
 
     Check(manager.CreatePath(testDirectory), "create test directory");
     Check(manager.CreatePath(nestedDirectory), "create nested directory");
-    Check(manager.GetEngineRoot() == workingDirectory && manager.GetGameRoot() == workingDirectory &&
-              manager.GetCacheDirectory() == testDirectory,
+    Check(manager.GetEngineRoot() == workingDirectory && manager.GetGameRoot() == workingDirectory && manager.GetCacheDirectory() == testDirectory,
           "configured roots");
 
     containers::DynamicArray<vanguard::u8> memoryData(memory::pools::Filesystem::GetInstance());
@@ -152,6 +155,38 @@ int main()
     Check(manager.FileExist(copiedPath), "copied file exists");
     Check(manager.MoveFile(copiedPath, movedPath), "move file");
     Check(!manager.FileExist(copiedPath) && manager.FileExist(movedPath), "move file state");
+
+    const std::array<vanguard::u8, 3> oldReplacement = {1, 2, 3};
+    const std::array<vanguard::u8, 4> newReplacement = {9, 8, 7, 6};
+    {
+        auto oldWriter = manager.CreateFileWriter(replacementTarget, filesystem::FOF_Buffered);
+        auto stagedWriter = manager.CreateFileWriter(replacementStaged, filesystem::FOF_Buffered);
+        Check(oldWriter && stagedWriter, "replacement fixture writers");
+        if (oldWriter && stagedWriter)
+        {
+            oldWriter->Serialize(const_cast<vanguard::u8*>(oldReplacement.data()), oldReplacement.size());
+            stagedWriter->Serialize(const_cast<vanguard::u8*>(newReplacement.data()), newReplacement.size());
+            oldWriter->Flush();
+            stagedWriter->Flush();
+        }
+    }
+    Check(filesystem::ReplaceFile(replacementStaged, replacementTarget) && !manager.FileExist(replacementStaged) &&
+              manager.GetFileSize(replacementTarget) == newReplacement.size(),
+          "same-directory replacement publishes staged file");
+    {
+        auto stagedWriter = manager.CreateFileWriter(replacementStaged, filesystem::FOF_Buffered);
+        Check(static_cast<bool>(stagedWriter), "cross-directory rejection fixture");
+        if (stagedWriter)
+        {
+            stagedWriter->Serialize(const_cast<vanguard::u8*>(oldReplacement.data()), oldReplacement.size());
+            stagedWriter->Flush();
+        }
+    }
+    Check(!filesystem::ReplaceFile(replacementStaged, movedPath) && manager.FileExist(replacementStaged) &&
+              manager.GetFileSize(movedPath) == g_payload.size(),
+          "replacement rejects non-siblings without touching either file");
+    static_cast<void>(manager.DeleteFile(replacementStaged));
+    static_cast<void>(manager.DeleteFile(replacementTarget));
     Check(manager.SetFileReadOnly(movedPath, true), "set read-only");
     Check(manager.IsFileReadOnly(movedPath), "query read-only");
     Check(manager.SetFileReadOnly(movedPath, false), "clear read-only");

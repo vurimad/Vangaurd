@@ -34,10 +34,8 @@ int main()
     std::puts("[jobsTests] initializing");
     std::fflush(stdout);
     if (!Check(Initialize(config), "Initialize failed") || !Check(IsInitialized(), "Jobs did not enter running state") ||
-        !Check(WorkerCount() == 4, "Unexpected worker count") ||
-        !Check(GetSchedulerStats().initialized, "Telemetry did not enter running state") ||
-        !Check(DispatcherThreadIndex() == 0, "Main thread index is not zero") ||
-        !Check(!IsWorkerThread(), "Main thread reported as a worker"))
+        !Check(GetWorkerCount() == 4, "Unexpected worker count") || !Check(GetSchedulerStats().initialized, "Telemetry did not enter running state") ||
+        !Check(GetDispatcherThreadIndex() == 0, "Main thread index is not zero") || !Check(!IsWorkerThread(), "Main thread reported as a worker"))
     {
         return 1;
     }
@@ -83,7 +81,7 @@ int main()
 
         builder.DispatchFence();
         Counter counter = builder.ExtractCounter();
-        if (!Check(counter.IsValid(), "Bulk counter is invalid") || !Check(counter.Wait(), "Bulk wait failed"))
+        if (!Check(counter.IsValid(), "Bulk counter is invalid") || !Check(counter.WaitOnProcessFrame(), "Bulk process-frame wait failed"))
         {
             return 4;
         }
@@ -162,8 +160,7 @@ int main()
             }
 
             Counter dependent = second.ExtractCounter();
-            if (!Check(dependent.Wait(), "Dependent job wait failed") ||
-                !Check(dependencyStage.GetValue() == 2, "Dependency ordering was violated"))
+            if (!Check(dependent.Wait(), "Dependent job wait failed") || !Check(dependencyStage.GetValue() == 2, "Dependency ordering was violated"))
             {
                 return 8;
             }
@@ -187,8 +184,7 @@ int main()
             });
         Task epilogue = Task::Create([&epilogueCount](const JobContext&) noexcept { (void)epilogueCount.Increment(); });
 
-        if (!Check(builder.DispatchParallel(parallelName, elementCount, std::move(task), std::move(epilogue), 128),
-                   "Parallel dispatch failed"))
+        if (!Check(builder.DispatchParallel(parallelName, elementCount, std::move(task), std::move(epilogue), 128), "Parallel dispatch failed"))
         {
             return 9;
         }
@@ -201,8 +197,7 @@ int main()
     }
 
     const u64 expectedSum = static_cast<u64>(elementCount) * static_cast<u64>(elementCount + 1) / 2;
-    if (!Check(sum.GetValue() == expectedSum, "Parallel result is incorrect") ||
-        !Check(epilogueCount.GetValue() == 1, "Parallel epilogue count is wrong"))
+    if (!Check(sum.GetValue() == expectedSum, "Parallel result is incorrect") || !Check(epilogueCount.GetValue() == 1, "Parallel epilogue count is wrong"))
     {
         return 11;
     }
@@ -228,8 +223,7 @@ int main()
         }
 
         Counter counter = parent.ExtractCounter();
-        if (!Check(counter.Wait(), "Continuation wait failed") ||
-            !Check(continuationCount.GetValue() == 2, "Continuation did not extend parent completion"))
+        if (!Check(counter.Wait(), "Continuation wait failed") || !Check(continuationCount.GetValue() == 2, "Continuation did not extend parent completion"))
         {
             return 13;
         }
@@ -348,11 +342,10 @@ int main()
     std::puts("[jobsTests] shutdown");
     std::fflush(stdout);
     const SchedulerStats finalStats = GetSchedulerStats();
-    if (!Check(OutstandingJobCount() == 0, "Logical jobs remained outstanding before shutdown") ||
+    if (!Check(GetOutstandingJobCount() == 0, "Logical jobs remained outstanding before shutdown") ||
         !Check(finalStats.submittedJobs == finalStats.completedJobs, "Telemetry submission/completion totals diverged") ||
         !Check(finalStats.activeDeferrals == 0, "An active completion deferral remained before shutdown") ||
-        !Check(finalStats.timedOutWaits == 1, "Telemetry did not record the timed-out wait") ||
-        !Check(Shutdown(), "Shutdown rejected a clean jobs state"))
+        !Check(finalStats.timedOutWaits == 1, "Telemetry did not record the timed-out wait") || !Check(Shutdown(), "Shutdown rejected a clean jobs state"))
     {
         return 19;
     }

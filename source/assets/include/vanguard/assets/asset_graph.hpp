@@ -46,6 +46,8 @@ namespace vanguard::assets
     {
         u32 maximumKnownOperations = 65536;
         u32 maximumGeneratedDependenciesPerOperation = 4096;
+        u64 maximumActiveExecutionBytes = 8ull * 1024ull * 1024ull * 1024ull;
+        u64 maximumQueuedRequestBytes = 8ull * 1024ull * 1024ull * 1024ull;
     };
 
     // Called only for generated dependencies discovered by BuildSystem::Prepare.
@@ -64,6 +66,12 @@ namespace vanguard::assets
         u64 completedOperations = 0;
         u64 failedOperations = 0;
         u64 cancelledOperations = 0;
+        u32 waitingForAdmission = 0;
+        u64 queuedRequestBytes = 0;
+        u64 peakQueuedRequestBytes = 0;
+        u64 activeExecutionBytes = 0;
+        u64 peakActiveExecutionBytes = 0;
+        u64 retainedOutputBytes = 0;
     };
 
     class GraphRequest final
@@ -80,8 +88,8 @@ namespace vanguard::assets
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] explicit operator bool() const noexcept;
         [[nodiscard]] bool IsSameOperation(const GraphRequest& other) const noexcept;
-        [[nodiscard]] BuildState Status() const noexcept;
-        [[nodiscard]] BuildFailure Error() const noexcept;
+        [[nodiscard]] BuildState GetStatus() const noexcept;
+        [[nodiscard]] BuildFailure GetError() const noexcept;
         [[nodiscard]] Result BuildError() const noexcept;
         [[nodiscard]] bool HasFinished() const noexcept;
         [[nodiscard]] bool HasSucceeded() const noexcept;
@@ -112,9 +120,8 @@ namespace vanguard::assets
         BuildGraph(const BuildGraph&) = delete;
         BuildGraph& operator=(const BuildGraph&) = delete;
 
-        [[nodiscard]] bool Initialize(BuildSystem& buildSystem, ResolveGeneratedDependencyFunction resolver,
-                                      void* resolverUserData = nullptr, const BuildGraphConfig& config = {},
-                                      DependencyIndex* dependencyIndex = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(BuildSystem& buildSystem, ResolveGeneratedDependencyFunction resolver, void* resolverUserData = nullptr,
+                                      const BuildGraphConfig& config = {}, DependencyIndex* dependencyIndex = nullptr) noexcept;
         // BuildSystem, Jobs, resolver state, and an optional DependencyIndex
         // must outlive the graph.
         // Shutdown refuses live requests or unfinished operations.

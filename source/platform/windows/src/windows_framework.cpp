@@ -35,28 +35,27 @@ namespace
         }
     };
 
-    [[nodiscard]] bool ConvertCommandLine(wchar_t* const* wideArguments, const int argumentCount,
-                                          Utf8CommandLine& output) noexcept
+    [[nodiscard]] bool ConvertCommandLine(wchar_t* const* wideArguments, const int argumentCount, Utf8CommandLine& output) noexcept
     {
-        if (wideArguments == nullptr || argumentCount <= 0) return false;
+        if (wideArguments == nullptr || argumentCount <= 0)
+            return false;
 
         vanguard::usize byteCount = 0;
         for (int argumentIndex = 0; argumentIndex < argumentCount; ++argumentIndex)
         {
-            const int requiredBytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wideArguments[argumentIndex],
-                                                            -1, nullptr, 0, nullptr, nullptr);
-            if (requiredBytes <= 0 || byteCount > static_cast<vanguard::usize>(-1) -
-                                                     static_cast<vanguard::usize>(requiredBytes))
+            const int requiredBytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wideArguments[argumentIndex], -1, nullptr, 0, nullptr, nullptr);
+            if (requiredBytes <= 0 || byteCount > static_cast<vanguard::usize>(-1) - static_cast<vanguard::usize>(requiredBytes))
                 return false;
             byteCount += static_cast<vanguard::usize>(requiredBytes);
         }
 
         const vanguard::usize pointerCount = static_cast<vanguard::usize>(argumentCount);
-        if (pointerCount > static_cast<vanguard::usize>(-1) / sizeof(const char*)) return false;
-        output.argumentPointers = vanguard::memory::Allocate(vanguard::memory::PoolId::Runtime,
-                                                             pointerCount * sizeof(const char*), alignof(const char*));
+        if (pointerCount > static_cast<vanguard::usize>(-1) / sizeof(const char*))
+            return false;
+        output.argumentPointers = vanguard::memory::Allocate(vanguard::memory::PoolId::Runtime, pointerCount * sizeof(const char*), alignof(const char*));
         output.argumentBytes = vanguard::memory::Allocate(vanguard::memory::PoolId::Runtime, byteCount, alignof(char));
-        if (!output.argumentPointers || !output.argumentBytes) return false;
+        if (!output.argumentPointers || !output.argumentBytes)
+            return false;
 
         auto** arguments = static_cast<const char**>(output.argumentPointers.address);
         auto* destination = static_cast<char*>(output.argumentBytes.address);
@@ -65,17 +64,18 @@ namespace
         {
             arguments[argumentIndex] = destination + destinationOffset;
             const vanguard::usize remainingBytes = byteCount - destinationOffset;
-            if (remainingBytes > static_cast<vanguard::usize>(0x7fffffff)) return false;
-            const int writtenBytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wideArguments[argumentIndex],
-                                                           -1, destination + destinationOffset,
+            if (remainingBytes > static_cast<vanguard::usize>(0x7fffffff))
+                return false;
+            const int writtenBytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wideArguments[argumentIndex], -1, destination + destinationOffset,
                                                            static_cast<int>(remainingBytes), nullptr, nullptr);
-            if (writtenBytes <= 0) return false;
+            if (writtenBytes <= 0)
+                return false;
             destinationOffset += static_cast<vanguard::usize>(writtenBytes);
         }
         output.argumentCount = argumentCount;
         return destinationOffset == byteCount;
     }
-}
+} // namespace
 
 namespace vanguard::platform::windows
 {
@@ -85,7 +85,8 @@ namespace vanguard::platform::windows
         wchar_t** const wideArguments = ::CommandLineToArgvW(::GetCommandLineW(), &argumentCount);
         if (wideArguments == nullptr || argumentCount <= 0)
         {
-            if (wideArguments != nullptr) static_cast<void>(::LocalFree(wideArguments));
+            if (wideArguments != nullptr)
+                static_cast<void>(::LocalFree(wideArguments));
             return CommandLineFailure;
         }
         if (!memory::IsInitialized() && !memory::Initialize())
@@ -98,8 +99,7 @@ namespace vanguard::platform::windows
         const bool converted = ConvertCommandLine(wideArguments, argumentCount, commandLine);
         static_cast<void>(::LocalFree(wideArguments));
         if (!converted)
-            return commandLine.argumentPointers && commandLine.argumentBytes ? CommandLineEncodingFailure
-                                                                             : CommandLineStorageFailure;
+            return commandLine.argumentPointers && commandLine.argumentBytes ? CommandLineEncodingFailure : CommandLineStorageFailure;
 
         FrameworkLaunchParameters parameters;
         parameters.commandLine = {commandLine.argumentCount, commandLine.Arguments()};

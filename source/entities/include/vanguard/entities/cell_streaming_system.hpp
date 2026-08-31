@@ -22,6 +22,9 @@ namespace vanguard::entities
     struct CellStreamingSystemConfig
     {
         world::WorldStreamingExecutor* executor = nullptr;
+        ComponentDirectory* componentDirectory = nullptr;
+        resources::ResourceRegistry* resources = nullptr;
+        resources::ResourcePipeline* resourcePipeline = nullptr;
         RegisterWorldComponents registerComponents = nullptr;
         PrefabResolver resolvePrefab = nullptr;
         ForwardStreamingEvent forwardNonCellEvent = nullptr;
@@ -59,9 +62,9 @@ namespace vanguard::entities
         [[nodiscard]] bool SetProcessInput(const world::StreamingProcessInput& input) noexcept;
         [[nodiscard]] Result AcquireActivationGroup(u64 cellId, u64 groupId, ActivationOwnerId ownerId) noexcept;
         [[nodiscard]] Result ReleaseActivationGroup(u64 cellId, u64 groupId, ActivationOwnerId ownerId) noexcept;
-        [[nodiscard]] ComponentRegistry* Components() noexcept;
-        [[nodiscard]] EntityReferenceRegistry* References() noexcept;
-        [[nodiscard]] CellMaterializer* Materializer() noexcept;
+        [[nodiscard]] ComponentRegistry* GetComponents() noexcept;
+        [[nodiscard]] EntityReferenceRegistry* GetReferences() noexcept;
+        [[nodiscard]] CellMaterializer* GetMaterializer() noexcept;
         [[nodiscard]] CellStreamingSystemStats GetStats() const noexcept;
 
     protected:

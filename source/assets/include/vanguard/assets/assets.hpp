@@ -2,6 +2,7 @@
 
 #include <vanguard/crypto/crypto.hpp>
 #include <vanguard/resources/resources.hpp>
+#include <vanguard/system/cancellation.hpp>
 
 namespace vanguard::assets
 {
@@ -59,6 +60,7 @@ namespace vanguard::assets
         CompilerAlreadyRegistered,
         CompilerBusy,
         DependencyDiscoveryFailed,
+        ResourceEstimationFailed,
         DuplicateDependency,
         CompileFailed,
         InvalidArtifact,
@@ -105,8 +107,7 @@ namespace vanguard::assets
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return identity.IsValid() && identity.IsTyped() && role <= DependencyRole::Tool &&
-                   requirement <= DependencyRequirement::Optional &&
+            return identity.IsValid() && identity.IsTyped() && role <= DependencyRole::Tool && requirement <= DependencyRequirement::Optional &&
                    (requirement == DependencyRequirement::Optional || role == DependencyRole::Generated || !content.IsEmpty());
         }
     };
@@ -118,8 +119,8 @@ namespace vanguard::assets
 
         [[nodiscard]] Result Add(const BuildDependency& dependency) noexcept;
         [[nodiscard]] u32 Count() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const BuildDependency> Dependencies() const noexcept;
-        [[nodiscard]] Result Status() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const BuildDependency> GetDependencies() const noexcept;
+        [[nodiscard]] Result GetStatus() const noexcept;
 
     private:
         containers::DynamicArray<BuildDependency> m_dependencies;
@@ -142,12 +143,16 @@ namespace vanguard::assets
     public:
         ArtifactWriter(resources::ResourceReference primaryOutput, u32 maximumArtifacts, u64 maximumBytes) noexcept;
 
-        [[nodiscard]] Result Add(resources::ResourceReference resource, u32 segment, ArtifactFlags flags, u8 alignmentLog2,
-                                 const void* data, usize size) noexcept;
+        [[nodiscard]] Result Add(resources::ResourceReference resource, u32 segment, ArtifactFlags flags, u8 alignmentLog2, const void* data,
+                                 usize size) noexcept;
         [[nodiscard]] u32 Count() const noexcept;
-        [[nodiscard]] u64 ByteCount() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const Artifact> Artifacts() const noexcept;
-        [[nodiscard]] Result Status() const noexcept;
+        [[nodiscard]] u64 GetByteCount() const noexcept;
+        [[nodiscard]] u32 GetMaximumArtifactCount() const noexcept;
+        [[nodiscard]] u32 GetRemainingArtifactCount() const noexcept;
+        [[nodiscard]] u64 GetMaximumByteCount() const noexcept;
+        [[nodiscard]] u64 GetRemainingByteCount() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const Artifact> GetArtifacts() const noexcept;
+        [[nodiscard]] Result GetStatus() const noexcept;
         [[nodiscard]] bool HasPrimaryOutput() const noexcept;
 
     private:
@@ -162,7 +167,7 @@ namespace vanguard::assets
         friend class BuildSystem;
     };
 
-    using IsCancellationRequestedFunction = bool (*)(void* userData) noexcept;
+    using IsCancellationRequestedFunction = system::IsCancellationRequestedFunction;
 
     struct CompileContext
     {
@@ -178,6 +183,20 @@ namespace vanguard::assets
         }
     };
 
+    struct BuildResourceEstimate
+    {
+        /// Peak compiler-owned working memory. This excludes the graph-owned request and
+        /// generic ArtifactWriter, BuildOutput, and cache copies.
+        u64 compilerTransientBytes = 0;
+        /// Total bytes expected to be emitted through ArtifactWriter.
+        u64 artifactBytes = 0;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return artifactBytes != 0;
+        }
+    };
+
     class BuildPlan final
     {
     public:
@@ -187,23 +206,28 @@ namespace vanguard::assets
         [[nodiscard]] bool IsPrepared() const noexcept;
         [[nodiscard]] CompilerId Compiler() const noexcept;
         [[nodiscard]] u32 CompilerVersion() const noexcept;
-        [[nodiscard]] resources::ResourceTypeId SourceType() const noexcept;
-        [[nodiscard]] resources::ResourceTypeId OutputType() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const BuildDependency> Dependencies() const noexcept;
-        [[nodiscard]] Result SetGeneratedDependencyContent(resources::ResourceReference dependency,
-                                                           const BuildFingerprint& content) noexcept;
+        [[nodiscard]] resources::ResourceTypeId GetSourceType() const noexcept;
+        [[nodiscard]] resources::ResourceTypeId GetOutputType() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const BuildDependency> GetDependencies() const noexcept;
+        [[nodiscard]] bool HasResourceEstimate() const noexcept;
+        [[nodiscard]] const BuildResourceEstimate& GetResourceEstimate() const noexcept;
+        [[nodiscard]] Result SetGeneratedDependencyContent(resources::ResourceReference dependency, const BuildFingerprint& content) noexcept;
 
     private:
         CompilerId m_compiler = InvalidCompilerId;
         u32 m_compilerVersion = 0;
         resources::ResourceTypeId m_sourceType = resources::InvalidResourceTypeId;
         resources::ResourceTypeId m_outputType = resources::InvalidResourceTypeId;
+        BuildResourceEstimate m_resourceEstimate;
+        bool m_hasResourceEstimate = false;
         containers::DynamicArray<BuildDependency> m_dependencies;
 
         friend class BuildSystem;
     };
 
     using DiscoverDependenciesFunction = bool (*)(const BuildRequest& request, DependencyCollector& dependencies, void* userData) noexcept;
+    using EstimateBuildResourcesFunction = bool (*)(const BuildRequest& request, containers::ArraySpan<const BuildDependency> dependencies,
+                                                    BuildResourceEstimate& estimate, void* userData) noexcept;
     using CompileFunction = bool (*)(const CompileContext& context, ArtifactWriter& artifacts, void* userData) noexcept;
 
     struct CompilerDescriptor
@@ -216,12 +240,14 @@ namespace vanguard::assets
         DiscoverDependenciesFunction discoverDependencies = nullptr;
         CompileFunction compile = nullptr;
         void* userData = nullptr;
+        /// Optional for direct synchronous BuildSystem use. BuildGraph rejects plans without
+        /// an estimate so asynchronous work can never bypass its byte admission limit.
+        EstimateBuildResourcesFunction estimateResources = nullptr;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return id != InvalidCompilerId && name != nullptr && name[0] != '\0' && version != 0 &&
-                   sourceType != resources::InvalidResourceTypeId && outputType != resources::InvalidResourceTypeId &&
-                   discoverDependencies != nullptr && compile != nullptr;
+            return id != InvalidCompilerId && name != nullptr && name[0] != '\0' && version != 0 && sourceType != resources::InvalidResourceTypeId &&
+                   outputType != resources::InvalidResourceTypeId && discoverDependencies != nullptr && compile != nullptr;
         }
     };
 

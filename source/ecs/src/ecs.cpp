@@ -14,18 +14,28 @@ namespace
 {
     using namespace vanguard;
 
-    template<typename Type, typename... Args>
-    [[nodiscard]] Type* AllocateEcsObject(Args&&... args) noexcept
+    [[nodiscard]] ecs::RuntimeEntityHandle MakeRuntimeEntityHandle(const ecs_entity_t entity) noexcept
+    {
+        return {static_cast<u32>(entity & ECS_ENTITY_MASK), static_cast<u32>(ECS_GENERATION(entity))};
+    }
+
+    [[nodiscard]] ecs_entity_t MakeNativeEntity(const ecs::RuntimeEntityHandle entity) noexcept
+    {
+        return static_cast<ecs_entity_t>(entity.index) | (static_cast<ecs_entity_t>(entity.generation) << 32u);
+    }
+
+    template <typename Type, typename... Args> [[nodiscard]] Type* AllocateEcsObject(Args&&... args) noexcept
     {
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Gameplay, sizeof(Type), alignof(Type));
-        if (!block) return nullptr;
+        if (!block)
+            return nullptr;
         return ::new (block.address) Type(static_cast<Args&&>(args)...);
     }
 
-    template<typename Type>
-    void DeleteEcsObject(Type* const object) noexcept
+    template <typename Type> void DeleteEcsObject(Type* const object) noexcept
     {
-        if (object == nullptr) return;
+        if (object == nullptr)
+            return;
         object->~Type();
         memory::MemoryBlock block{object, sizeof(Type), memory::PoolId::Gameplay};
         memory::Free(block);
@@ -38,12 +48,14 @@ namespace
 
     void FlecsFree(void* const address)
     {
-        if (address != nullptr) VANGUARD_FREE(memory::pools::Gameplay, address);
+        if (address != nullptr)
+            VANGUARD_FREE(memory::pools::Gameplay, address);
     }
 
     void* FlecsReallocate(void* const address, const ecs_size_t size)
     {
-        if (address == nullptr) return FlecsAllocate(size);
+        if (address == nullptr)
+            return FlecsAllocate(size);
         if (size <= 0)
         {
             FlecsFree(address);
@@ -55,36 +67,46 @@ namespace
     void* FlecsCallocate(const ecs_size_t size)
     {
         void* const address = FlecsAllocate(size);
-        if (address != nullptr) std::memset(address, 0, static_cast<usize>(size));
+        if (address != nullptr)
+            std::memset(address, 0, static_cast<usize>(size));
         return address;
     }
 
     char* FlecsDuplicate(const char* const source)
     {
-        if (source == nullptr) return nullptr;
+        if (source == nullptr)
+            return nullptr;
         const usize size = std::strlen(source) + 1u;
         char* const destination = static_cast<char*>(FlecsAllocate(static_cast<ecs_size_t>(size)));
-        if (destination != nullptr) std::memcpy(destination, source, size);
+        if (destination != nullptr)
+            std::memcpy(destination, source, size);
         return destination;
     }
 
     void FlecsLog(const i32 level, const char* const file, const i32 line, const char* const message)
     {
         diagnostics::Level output = diagnostics::Level::Trace;
-        if (level <= -4) output = diagnostics::Level::Fatal;
-        else if (level == -3) output = diagnostics::Level::Error;
-        else if (level == -2) output = diagnostics::Level::Warning;
-        else if (level == -1) output = diagnostics::Level::Info;
-        else if (level == 0) output = diagnostics::Level::Debug;
-        diagnostics::Logf(output, diagnostics::Category::Entity, "Flecs: %s (%s:%d)", message != nullptr ? message : "",
-                          file != nullptr ? file : "unknown", line);
+        if (level <= -4)
+            output = diagnostics::Level::Fatal;
+        else if (level == -3)
+            output = diagnostics::Level::Error;
+        else if (level == -2)
+            output = diagnostics::Level::Warning;
+        else if (level == -1)
+            output = diagnostics::Level::Info;
+        else if (level == 0)
+            output = diagnostics::Level::Debug;
+        diagnostics::Logf(output, diagnostics::Category::Entity, "Flecs: %s (%s:%d)", message != nullptr ? message : "", file != nullptr ? file : "unknown",
+                          line);
     }
 
     [[nodiscard]] bool ConfigureFlecs() noexcept
     {
         static bool configured = false;
-        if (configured) return true;
-        if (!memory::IsInitialized()) return false;
+        if (configured)
+            return true;
+        if (!memory::IsInitialized())
+            return false;
         ecs_os_set_api_defaults();
         ecs_os_api_t api = ecs_os_get_api();
         api.malloc_ = &FlecsAllocate;
@@ -136,33 +158,32 @@ namespace vanguard::ecs
         };
 
         explicit Impl(const WorldConfig& value) noexcept
-            : config(value), identities(memory::pools::Gameplay::GetInstance()),
-              pendingActions(memory::pools::Gameplay::GetInstance()),
-              pendingComponentActions(memory::pools::Gameplay::GetInstance()),
-              batches(memory::pools::Gameplay::GetInstance()),
-              pendingIdentities(memory::pools::Gameplay::GetInstance()),
-              committedChanges(value.committedChangeCapacity, memory::pools::Gameplay::GetInstance())
+            : config(value), identities(memory::pools::Gameplay::GetInstance()), pendingActions(memory::pools::Gameplay::GetInstance()),
+              pendingComponentActions(memory::pools::Gameplay::GetInstance()), batches(memory::pools::Gameplay::GetInstance()),
+              pendingIdentities(memory::pools::Gameplay::GetInstance()), committedChanges(value.committedChangeCapacity, memory::pools::Gameplay::GetInstance())
         {
             identities.Reserve(value.initialEntityCapacity);
             pendingActions.Reserve(value.initialActionCapacity);
             pendingComponentActions.Reserve(value.initialActionCapacity);
         }
 
-        void PublishCommittedChange(const EntityId entity, const ComponentId component,
-                                    const CommandBatchId batch, const CommittedChangeKind kind) noexcept
+        void PublishCommittedChange(const EntityId entity, const RuntimeEntityHandle runtimeEntity, const ComponentId component, const CommandBatchId batch,
+                                    const CommittedChangeKind kind) noexcept
         {
             if (committedChanges.Size() == config.committedChangeCapacity)
             {
                 committedChanges.PopFront();
                 ++overwrittenCommittedChanges;
             }
-            committedChanges.PushBack({nextCommittedChangeSequence++, entity, component, batch, kind});
+            committedChanges.PushBack({nextCommittedChangeSequence++, entity, runtimeEntity, component, batch, kind});
         }
 
         [[nodiscard]] bool IsOpenBatch(const CommandBatch batch) const noexcept
         {
-            if (!batch) return true;
-            if (batch.world != world) return false;
+            if (!batch)
+                return true;
+            if (batch.world != world)
+                return false;
             const BatchRecord* const record = batches.FindPtr(batch.id);
             return record != nullptr && !record->sealed;
         }
@@ -170,19 +191,24 @@ namespace vanguard::ecs
         [[nodiscard]] bool QueueComponent(const CommandBatch batch, const ComponentAction action) noexcept
         {
             VG_SCOPE_LOCK(queueLock);
-            if (!IsOpenBatch(batch)) return false;
+            if (!IsOpenBatch(batch))
+                return false;
             const CommandBatchId* const identityOwner = pendingIdentities.FindPtr(action.identity);
-            if (identityOwner != nullptr && *identityOwner != batch.id) return false;
+            if (identityOwner != nullptr && *identityOwner != batch.id)
+                return false;
             const u32 expected = pendingComponentActions.Size() + 1u;
             pendingComponentActions.PushBack(action);
-            if (BatchRecord* const record = batches.FindPtr(action.batch)) ++record->queued;
+            if (BatchRecord* const record = batches.FindPtr(action.batch))
+                ++record->queued;
             return pendingComponentActions.Size() == expected;
         }
 
         static void ReleaseComponentValue(ComponentAction& action) noexcept
         {
-            if (!action.value) return;
-            if (action.destroy != nullptr) action.destroy(action.value.address);
+            if (!action.value)
+                return;
+            if (action.destroy != nullptr)
+                action.destroy(action.value.address);
             memory::Free(action.value);
             action.destroy = nullptr;
         }
@@ -190,24 +216,31 @@ namespace vanguard::ecs
         [[nodiscard]] bool QueueCreate(const CommandBatch batch, const EntityId identity) noexcept
         {
             VG_SCOPE_LOCK(queueLock);
-            if (!IsOpenBatch(batch) || pendingIdentities.FindPtr(identity) != nullptr) return false;
-            if (!pendingIdentities.Insert(identity, batch.id).IsSuccessful()) return false;
+            if (!IsOpenBatch(batch) || pendingIdentities.FindPtr(identity) != nullptr)
+                return false;
+            if (!pendingIdentities.Insert(identity, batch.id).IsSuccessful())
+                return false;
             const u32 expected = pendingActions.Size() + 1u;
             pendingActions.PushBack({ActionType::Create, identity, batch.id});
-            if (BatchRecord* const record = batches.FindPtr(batch.id)) ++record->queued;
+            if (BatchRecord* const record = batches.FindPtr(batch.id))
+                ++record->queued;
             return pendingActions.Size() == expected;
         }
 
         [[nodiscard]] bool QueueDestroy(const CommandBatch batch, const EntityId identity) noexcept
         {
             VG_SCOPE_LOCK(queueLock);
-            if (!IsOpenBatch(batch)) return false;
+            if (!IsOpenBatch(batch))
+                return false;
             const CommandBatchId* const identityOwner = pendingIdentities.FindPtr(identity);
-            if (identityOwner != nullptr && *identityOwner != batch.id) return false;
-            if (identityOwner == nullptr && !pendingIdentities.Insert(identity, batch.id).IsSuccessful()) return false;
+            if (identityOwner != nullptr && *identityOwner != batch.id)
+                return false;
+            if (identityOwner == nullptr && !pendingIdentities.Insert(identity, batch.id).IsSuccessful())
+                return false;
             const u32 expected = pendingActions.Size() + 1u;
             pendingActions.PushBack({ActionType::Destroy, identity, batch.id});
-            if (BatchRecord* const record = batches.FindPtr(batch.id)) ++record->queued;
+            if (BatchRecord* const record = batches.FindPtr(batch.id))
+                ++record->queued;
             return pendingActions.Size() == expected;
         }
 
@@ -216,14 +249,16 @@ namespace vanguard::ecs
             containers::DynamicArray<EntityId> identitiesToRelease(memory::pools::Gameplay::GetInstance());
             identitiesToRelease.Reserve(pendingIdentities.Size());
             for (auto iterator = pendingIdentities.Begin(), end = pendingIdentities.End(); iterator != end; ++iterator)
-                if (iterator.Value() == batch) identitiesToRelease.PushBack(iterator.Key());
+                if (iterator.Value() == batch)
+                    identitiesToRelease.PushBack(iterator.Key());
             for (const EntityId identity : identitiesToRelease)
                 static_cast<void>(pendingIdentities.Remove(identity));
         }
 
         void CompleteCommand(const CommandBatchId batch, const bool rejected) noexcept
         {
-            if (batch == InvalidCommandBatchId) return;
+            if (batch == InvalidCommandBatchId)
+                return;
             VG_SCOPE_LOCK(queueLock);
             if (BatchRecord* const record = batches.FindPtr(batch))
             {
@@ -263,7 +298,8 @@ namespace vanguard::ecs
         {
             for (Impl::ComponentAction& action : m_impl->pendingComponentActions)
                 Impl::ReleaseComponentValue(action);
-            if (m_impl->world != nullptr) static_cast<void>(ecs_fini(m_impl->world));
+            if (m_impl->world != nullptr)
+                static_cast<void>(ecs_fini(m_impl->world));
             DeleteEcsObject(m_impl);
             m_impl = nullptr;
         }
@@ -271,11 +307,13 @@ namespace vanguard::ecs
 
     bool World::Initialize(const WorldConfig& config) noexcept
     {
-        if (m_impl != nullptr) return false;
-        if (config.initialEntityCapacity == 0 || config.initialActionCapacity == 0 ||
-            config.committedChangeCapacity == 0 || !ConfigureFlecs()) return false;
+        if (m_impl != nullptr)
+            return false;
+        if (config.initialEntityCapacity == 0 || config.initialActionCapacity == 0 || config.committedChangeCapacity == 0 || !ConfigureFlecs())
+            return false;
         Impl* const impl = AllocateEcsObject<Impl>(config);
-        if (impl == nullptr) return false;
+        if (impl == nullptr)
+            return false;
         impl->world = ecs_init();
         if (impl->world == nullptr)
         {
@@ -301,55 +339,67 @@ namespace vanguard::ecs
 
     bool World::Shutdown() noexcept
     {
-        if (m_impl == nullptr) return true;
+        if (m_impl == nullptr)
+            return true;
         {
             VG_SCOPE_LOCK(m_impl->queueLock);
-            if (!m_impl->pendingActions.Empty() || !m_impl->pendingComponentActions.Empty() ||
-                !m_impl->batches.Empty() || !m_impl->pendingIdentities.Empty()) return false;
+            if (!m_impl->pendingActions.Empty() || !m_impl->pendingComponentActions.Empty() || !m_impl->batches.Empty() || !m_impl->pendingIdentities.Empty())
+                return false;
         }
-        if (!m_impl->identities.Empty() || m_impl->progressing) return false;
-        if (ecs_fini(m_impl->world) != 0) return false;
+        if (!m_impl->identities.Empty() || m_impl->progressing)
+            return false;
+        if (ecs_fini(m_impl->world) != 0)
+            return false;
         m_impl->world = nullptr;
         DeleteEcsObject(m_impl);
         m_impl = nullptr;
         return true;
     }
 
-    bool World::IsInitialized() const noexcept { return m_impl != nullptr; }
+    bool World::IsInitialized() const noexcept
+    {
+        return m_impl != nullptr;
+    }
 
     CommandBatch World::BeginCommandBatch() noexcept
     {
-        if (m_impl == nullptr) return {};
+        if (m_impl == nullptr)
+            return {};
         VG_SCOPE_LOCK(m_impl->queueLock);
         CommandBatchId id = InvalidCommandBatchId;
         do
         {
             id = m_impl->nextBatch++;
-        }
-        while (id == InvalidCommandBatchId || m_impl->batches.FindPtr(id) != nullptr);
-        if (!m_impl->batches.Insert(id, {}).IsSuccessful()) return {};
+        } while (id == InvalidCommandBatchId || m_impl->batches.FindPtr(id) != nullptr);
+        if (!m_impl->batches.Insert(id, {}).IsSuccessful())
+            return {};
         return {id, m_impl->world};
     }
 
     bool World::SealCommandBatch(const CommandBatch batch) noexcept
     {
-        if (m_impl == nullptr || !batch || batch.world != m_impl->world) return false;
+        if (m_impl == nullptr || !batch || batch.world != m_impl->world)
+            return false;
         VG_SCOPE_LOCK(m_impl->queueLock);
         Impl::BatchRecord* const record = m_impl->batches.FindPtr(batch.id);
-        if (record == nullptr || record->sealed) return false;
+        if (record == nullptr || record->sealed)
+            return false;
         record->sealed = true;
         return true;
     }
 
     bool World::CancelCommandBatch(const CommandBatch batch) noexcept
     {
-        if (m_impl == nullptr || !batch || batch.world != m_impl->world) return false;
+        if (m_impl == nullptr || !batch || batch.world != m_impl->world)
+            return false;
         VG_SCOPE_LOCK(m_impl->queueLock);
-        if (m_impl->batches.FindPtr(batch.id) == nullptr) return false;
+        if (m_impl->batches.FindPtr(batch.id) == nullptr)
+            return false;
         for (u32 index = m_impl->pendingActions.Size(); index > 0; --index)
         {
             const Impl::Action& action = m_impl->pendingActions[index - 1u];
-            if (action.batch != batch.id) continue;
+            if (action.batch != batch.id)
+                continue;
             if (action.type == ActionType::Create)
             {
                 const CommandBatchId* const owner = m_impl->pendingIdentities.FindPtr(action.identity);
@@ -362,7 +412,8 @@ namespace vanguard::ecs
         for (u32 index = m_impl->pendingComponentActions.Size(); index > 0; --index)
         {
             Impl::ComponentAction& action = m_impl->pendingComponentActions[index - 1u];
-            if (action.batch != batch.id) continue;
+            if (action.batch != batch.id)
+                continue;
             Impl::ReleaseComponentValue(action);
             static_cast<void>(m_impl->pendingComponentActions.RemoveAt(index - 1u));
         }
@@ -370,26 +421,33 @@ namespace vanguard::ecs
         return true;
     }
 
-    CommandBatchStatus World::GetCommandBatchStatus(const CommandBatch batch,
-                                                     CommandBatchReport* const output) const noexcept
+    CommandBatchStatus World::GetCommandBatchStatus(const CommandBatch batch, CommandBatchReport* const output) const noexcept
     {
-        if (output != nullptr) *output = {};
-        if (m_impl == nullptr || !batch || batch.world != m_impl->world) return CommandBatchStatus::Unknown;
+        if (output != nullptr)
+            *output = {};
+        if (m_impl == nullptr || !batch || batch.world != m_impl->world)
+            return CommandBatchStatus::Unknown;
         VG_SCOPE_LOCK(m_impl->queueLock);
         const Impl::BatchRecord* const record = m_impl->batches.FindPtr(batch.id);
-        if (record == nullptr) return CommandBatchStatus::Unknown;
-        if (output != nullptr) *output = {record->queued, record->completed, record->rejected};
-        if (!record->sealed) return CommandBatchStatus::Open;
-        if (record->completed < record->queued) return CommandBatchStatus::Pending;
+        if (record == nullptr)
+            return CommandBatchStatus::Unknown;
+        if (output != nullptr)
+            *output = {record->queued, record->completed, record->rejected};
+        if (!record->sealed)
+            return CommandBatchStatus::Open;
+        if (record->completed < record->queued)
+            return CommandBatchStatus::Pending;
         return record->rejected == 0 ? CommandBatchStatus::Succeeded : CommandBatchStatus::Failed;
     }
 
     bool World::RetireCommandBatch(const CommandBatch batch) noexcept
     {
-        if (m_impl == nullptr || !batch || batch.world != m_impl->world) return false;
+        if (m_impl == nullptr || !batch || batch.world != m_impl->world)
+            return false;
         VG_SCOPE_LOCK(m_impl->queueLock);
         const Impl::BatchRecord* const record = m_impl->batches.FindPtr(batch.id);
-        if (record == nullptr || !record->sealed || record->completed != record->queued) return false;
+        if (record == nullptr || !record->sealed || record->completed != record->queued)
+            return false;
         m_impl->ReleaseBatchReservations(batch.id);
         return m_impl->batches.Remove(batch.id).IsSuccessful();
     }
@@ -414,34 +472,37 @@ namespace vanguard::ecs
         return m_impl != nullptr && identity != InvalidEntityId && m_impl->QueueDestroy(batch, identity);
     }
 
-    bool World::QueueComponentAction(const CommandBatch batch, const EntityId identity, const ComponentId component,
-                                     const ecs_world_t* const tokenWorld, const ComponentActionType action,
-                                     const void* const value, const usize valueSize, const usize valueAlignment,
+    bool World::QueueComponentAction(const CommandBatch batch, const EntityId identity, const ComponentId component, const ecs_world_t* const tokenWorld,
+                                     const ComponentActionType action, const void* const value, const usize valueSize, const usize valueAlignment,
                                      const ComponentCopy copy, const ComponentDestroy destroy) noexcept
     {
-        if (m_impl == nullptr || identity == InvalidEntityId || component == InvalidComponentId ||
-            tokenWorld != m_impl->world) return false;
+        if (m_impl == nullptr || identity == InvalidEntityId || component == InvalidComponentId || tokenWorld != m_impl->world)
+            return false;
         Impl::ComponentAction queued{action, identity, component, batch.id};
         if (action == ComponentActionType::Set)
         {
             if (value == nullptr || valueSize == 0 || valueAlignment == 0 || copy == nullptr || destroy == nullptr)
                 return false;
             queued.value = memory::Allocate(memory::PoolId::Gameplay, valueSize, valueAlignment);
-            if (!queued.value) return false;
+            if (!queued.value)
+                return false;
             queued.valueSize = valueSize;
             queued.valueAlignment = valueAlignment;
             queued.destroy = destroy;
             copy(queued.value.address, value);
         }
-        if (m_impl->QueueComponent(batch, queued)) return true;
+        if (m_impl->QueueComponent(batch, queued))
+            return true;
         Impl::ReleaseComponentValue(queued);
         return false;
     }
 
     bool World::FlushActions(ActionReport* const output) noexcept
     {
-        if (output != nullptr) *output = {};
-        if (m_impl == nullptr || m_impl->progressing) return false;
+        if (output != nullptr)
+            *output = {};
+        if (m_impl == nullptr || m_impl->progressing)
+            return false;
         containers::DynamicArray<Impl::Action> actions(memory::pools::Gameplay::GetInstance());
         {
             VG_SCOPE_LOCK(m_impl->queueLock);
@@ -469,7 +530,8 @@ namespace vanguard::ecs
                         ecs_set_id(m_impl->world, entity, m_impl->stableIdentityType, sizeof(identity), &identity);
                     if (entity == 0 || !m_impl->identities.Insert(action.identity, entity).IsSuccessful())
                     {
-                        if (entity != 0) ecs_delete(m_impl->world, entity);
+                        if (entity != 0)
+                            ecs_delete(m_impl->world, entity);
                         ++report.rejected;
                         rejected = true;
                     }
@@ -477,7 +539,7 @@ namespace vanguard::ecs
                     {
                         ++report.created;
                         ++m_impl->createdEntities;
-                        m_impl->PublishCommittedChange(action.identity, InvalidComponentId, action.batch,
+                        m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(entity), InvalidComponentId, action.batch,
                                                        CommittedChangeKind::EntityCreated);
                     }
                 }
@@ -501,7 +563,7 @@ namespace vanguard::ecs
                     ecs_delete(m_impl->world, existing);
                     ++report.destroyed;
                     ++m_impl->destroyedEntities;
-                    m_impl->PublishCommittedChange(action.identity, InvalidComponentId, action.batch,
+                    m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(existing), InvalidComponentId, action.batch,
                                                    CommittedChangeKind::EntityDestroyed);
                 }
                 {
@@ -514,14 +576,17 @@ namespace vanguard::ecs
             m_impl->CompleteCommand(action.batch, rejected);
         }
         m_impl->rejectedActions += report.rejected;
-        if (output != nullptr) *output = report;
+        if (output != nullptr)
+            *output = report;
         return true;
     }
 
     bool World::FlushComponentActions(ComponentActionReport* const output) noexcept
     {
-        if (output != nullptr) *output = {};
-        if (m_impl == nullptr || m_impl->progressing) return false;
+        if (output != nullptr)
+            *output = {};
+        if (m_impl == nullptr || m_impl->progressing)
+            return false;
         containers::DynamicArray<Impl::ComponentAction> actions(memory::pools::Gameplay::GetInstance());
         {
             VG_SCOPE_LOCK(m_impl->queueLock);
@@ -533,8 +598,7 @@ namespace vanguard::ecs
         {
             bool rejected = false;
             ecs_entity_t entity = 0;
-            const bool entityFound = m_impl->identities.Find(action.identity, entity) &&
-                                     ecs_is_alive(m_impl->world, entity);
+            const bool entityFound = m_impl->identities.Find(action.identity, entity) && ecs_is_alive(m_impl->world, entity);
             const bool componentAlive = ecs_is_alive(m_impl->world, action.component);
             if (!entityFound || !componentAlive)
             {
@@ -559,17 +623,20 @@ namespace vanguard::ecs
                     if (ecs_has_id(m_impl->world, entity, action.component))
                     {
                         ++report.added;
-                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                        m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(entity), action.component, action.batch,
                                                        CommittedChangeKind::ComponentAdded);
                     }
-                    else { ++report.rejected; rejected = true; }
+                    else
+                    {
+                        ++report.rejected;
+                        rejected = true;
+                    }
                 }
             }
             else if (action.type == ComponentActionType::Set)
             {
                 const ecs_type_info_t* const typeInfo = ecs_get_type_info(m_impl->world, action.component);
-                if (!componentPresent || typeInfo == nullptr || typeInfo->size != action.valueSize ||
-                    typeInfo->alignment != action.valueAlignment)
+                if (!componentPresent || typeInfo == nullptr || typeInfo->size != action.valueSize || typeInfo->alignment != action.valueAlignment)
                 {
                     ++report.rejected;
                     rejected = true;
@@ -578,7 +645,7 @@ namespace vanguard::ecs
                 {
                     ecs_set_id(m_impl->world, entity, action.component, action.valueSize, action.value.address);
                     ++report.set;
-                    m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                    m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(entity), action.component, action.batch,
                                                    CommittedChangeKind::ComponentSet);
                 }
             }
@@ -595,10 +662,14 @@ namespace vanguard::ecs
                     if (!ecs_has_id(m_impl->world, entity, action.component))
                     {
                         ++report.removed;
-                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                        m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(entity), action.component, action.batch,
                                                        CommittedChangeKind::ComponentRemoved);
                     }
-                    else { ++report.rejected; rejected = true; }
+                    else
+                    {
+                        ++report.rejected;
+                        rejected = true;
+                    }
                 }
             }
             else
@@ -610,13 +681,13 @@ namespace vanguard::ecs
                     if (enable)
                     {
                         ++report.enabled;
-                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                        m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(entity), action.component, action.batch,
                                                        CommittedChangeKind::ComponentEnabled);
                     }
                     else
                     {
                         ++report.disabled;
-                        m_impl->PublishCommittedChange(action.identity, action.component, action.batch,
+                        m_impl->PublishCommittedChange(action.identity, MakeRuntimeEntityHandle(entity), action.component, action.batch,
                                                        CommittedChangeKind::ComponentDisabled);
                     }
                 }
@@ -635,21 +706,20 @@ namespace vanguard::ecs
         m_impl->enabledComponents += report.enabled;
         m_impl->disabledComponents += report.disabled;
         m_impl->rejectedComponentActions += report.rejected;
-        if (output != nullptr) *output = report;
+        if (output != nullptr)
+            *output = report;
         return true;
     }
 
-    bool World::ReadCommittedChanges(CommittedChangeCursor& cursor,
-                                     containers::DynamicArray<CommittedChange>& changes,
-                                     const u32 maximumRecords,
+    bool World::ReadCommittedChanges(CommittedChangeCursor& cursor, containers::DynamicArray<CommittedChange>& changes, const u32 maximumRecords,
                                      CommittedChangeReadResult* const output) const noexcept
     {
-        if (output != nullptr) *output = {};
-        if (m_impl == nullptr || m_impl->progressing || maximumRecords == 0) return false;
+        if (output != nullptr)
+            *output = {};
+        if (m_impl == nullptr || m_impl->progressing || maximumRecords == 0)
+            return false;
         CommittedChangeReadResult result;
-        const u64 oldest = m_impl->committedChanges.Empty()
-                               ? m_impl->nextCommittedChangeSequence
-                               : m_impl->committedChanges.Front().sequence;
+        const u64 oldest = m_impl->committedChanges.Empty() ? m_impl->nextCommittedChangeSequence : m_impl->committedChanges.Front().sequence;
         u64 requested = cursor.nextSequence == 0 ? oldest : cursor.nextSequence;
         if (requested < oldest)
         {
@@ -657,42 +727,45 @@ namespace vanguard::ecs
             result.lostRecords = lost > ~u32{0} ? ~u32{0} : static_cast<u32>(lost);
             requested = oldest;
         }
-        if (requested > m_impl->nextCommittedChangeSequence) return false;
+        if (requested > m_impl->nextCommittedChangeSequence)
+            return false;
         result.firstSequence = requested;
         for (u32 index = 0; index < m_impl->committedChanges.Size() && result.records < maximumRecords; ++index)
         {
             const CommittedChange& change = m_impl->committedChanges[index];
-            if (change.sequence < requested) continue;
+            if (change.sequence < requested)
+                continue;
             changes.PushBack(change);
             ++result.records;
         }
         cursor.nextSequence = requested + result.records;
         result.nextSequence = cursor.nextSequence;
-        if (output != nullptr) *output = result;
+        if (output != nullptr)
+            *output = result;
         return true;
     }
 
-    bool World::CaptureNativeComponentChange(const EntityId entity, const ComponentId component,
-                                             const CommittedChangeKind kind) noexcept
+    bool World::CaptureNativeComponentChange(const EntityId entity, const ComponentId component, const CommittedChangeKind kind) noexcept
     {
-        if (m_impl == nullptr || entity == InvalidEntityId || component == InvalidComponentId ||
-            kind == CommittedChangeKind::EntityCreated || kind == CommittedChangeKind::EntityDestroyed)
+        if (m_impl == nullptr || entity == InvalidEntityId || component == InvalidComponentId || kind == CommittedChangeKind::EntityCreated ||
+            kind == CommittedChangeKind::EntityDestroyed)
             return false;
         ecs_entity_t runtimeEntity = 0;
-        if (!m_impl->identities.Find(entity, runtimeEntity) || !ecs_is_alive(m_impl->world, runtimeEntity) ||
-            !ecs_is_alive(m_impl->world, component)) return false;
-        m_impl->PublishCommittedChange(entity, component, InvalidCommandBatchId, kind);
+        if (!m_impl->identities.Find(entity, runtimeEntity) || !ecs_is_alive(m_impl->world, runtimeEntity) || !ecs_is_alive(m_impl->world, component))
+            return false;
+        m_impl->PublishCommittedChange(entity, MakeRuntimeEntityHandle(runtimeEntity), component, InvalidCommandBatchId, kind);
         return true;
     }
 
-    u64 World::NextCommittedChangeSequence() const noexcept
+    u64 World::GetNextCommittedChangeSequence() const noexcept
     {
         return m_impl != nullptr ? m_impl->nextCommittedChangeSequence : 0;
     }
 
-    bool World::Progress(const f32 deltaSeconds) noexcept
+    bool World::GetProgress(const f32 deltaSeconds) noexcept
     {
-        if (m_impl == nullptr || m_impl->progressing || deltaSeconds < 0.0f) return false;
+        if (m_impl == nullptr || m_impl->progressing || deltaSeconds < 0.0f)
+            return false;
         m_impl->progressing = true;
         const bool running = ecs_progress(m_impl->world, deltaSeconds);
         m_impl->progressing = false;
@@ -701,16 +774,30 @@ namespace vanguard::ecs
 
     Entity World::Resolve(const EntityId identity) const noexcept
     {
-        if (m_impl == nullptr || identity == InvalidEntityId) return {};
+        if (m_impl == nullptr || identity == InvalidEntityId)
+            return {};
         ecs_entity_t entity = 0;
         return m_impl->identities.Find(identity, entity) && ecs_is_alive(m_impl->world, entity) ? Entity{entity} : Entity{};
     }
 
-    EntityId World::Identity(const Entity entity) const noexcept
+    Entity World::Resolve(const RuntimeEntityHandle identity) const noexcept
     {
-        if (m_impl == nullptr || !entity || !ecs_is_alive(m_impl->world, entity.value)) return InvalidEntityId;
-        const auto* const identity = static_cast<const StableIdentity*>(ecs_get_id(m_impl->world, entity.value,
-                                                                                   m_impl->stableIdentityType));
+        if (m_impl == nullptr || !identity)
+            return {};
+        const ecs_entity_t entity = MakeNativeEntity(identity);
+        return ecs_is_alive(m_impl->world, entity) ? Entity{entity} : Entity{};
+    }
+
+    RuntimeEntityHandle World::RuntimeHandle(const Entity entity) const noexcept
+    {
+        return m_impl != nullptr && entity && ecs_is_alive(m_impl->world, entity.value) ? MakeRuntimeEntityHandle(entity.value) : RuntimeEntityHandle{};
+    }
+
+    EntityId World::GetIdentity(const Entity entity) const noexcept
+    {
+        if (m_impl == nullptr || !entity || !ecs_is_alive(m_impl->world, entity.value))
+            return InvalidEntityId;
+        const auto* const identity = static_cast<const StableIdentity*>(ecs_get_id(m_impl->world, entity.value, m_impl->stableIdentityType));
         return identity != nullptr ? identity->value : InvalidEntityId;
     }
 
@@ -722,7 +809,8 @@ namespace vanguard::ecs
     WorldStats World::GetStats() const noexcept
     {
         WorldStats stats;
-        if (m_impl == nullptr) return stats;
+        if (m_impl == nullptr)
+            return stats;
         stats.entities = m_impl->identities.Size();
         {
             VG_SCOPE_LOCK(m_impl->queueLock);
@@ -745,6 +833,12 @@ namespace vanguard::ecs
         return stats;
     }
 
-    ecs_world_t* World::Native() noexcept { return m_impl != nullptr ? m_impl->world : nullptr; }
-    const ecs_world_t* World::Native() const noexcept { return m_impl != nullptr ? m_impl->world : nullptr; }
+    ecs_world_t* World::GetNative() noexcept
+    {
+        return m_impl != nullptr ? m_impl->world : nullptr;
+    }
+    const ecs_world_t* World::GetNative() const noexcept
+    {
+        return m_impl != nullptr ? m_impl->world : nullptr;
+    }
 } // namespace vanguard::ecs

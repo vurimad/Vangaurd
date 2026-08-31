@@ -93,10 +93,9 @@ namespace vanguard::math
 
     EulerAngles Cylinder::GetOrientation() const
     {
-        return EulerAngles(RAD2DEG(::atan2f(m_normalAndHeight.X, -m_normalAndHeight.Y)),
-                           RAD2DEG(::atan2f(m_normalAndHeight.Z, ::sqrtf(m_normalAndHeight.X * m_normalAndHeight.X +
-                                                                         m_normalAndHeight.Y * m_normalAndHeight.Y))),
-                           0.0f);
+        return EulerAngles(
+            RAD2DEG(::atan2f(m_normalAndHeight.X, -m_normalAndHeight.Y)),
+            RAD2DEG(::atan2f(m_normalAndHeight.Z, ::sqrtf(m_normalAndHeight.X * m_normalAndHeight.X + m_normalAndHeight.Y * m_normalAndHeight.Y))), 0.0f);
     }
 
 } // namespace vanguard::math

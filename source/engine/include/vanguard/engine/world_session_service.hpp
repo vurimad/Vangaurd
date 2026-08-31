@@ -61,14 +61,12 @@ namespace vanguard::engine
     public:
         ~WorldSessionService() override = default;
 
-        [[nodiscard]] virtual bool Begin(const WorldSessionStartRequest& request,
-                                         WorldSessionFailure* failure = nullptr) noexcept = 0;
+        [[nodiscard]] virtual bool Begin(const WorldSessionStartRequest& request, WorldSessionFailure* failure = nullptr) noexcept = 0;
         [[nodiscard]] virtual WorldSessionStatus Poll(WorldSessionFailure* failure = nullptr) noexcept = 0;
-        [[nodiscard]] virtual bool RequestStop(WorldSessionStopMode mode,
-                                               WorldSessionFailure* failure = nullptr) noexcept = 0;
+        [[nodiscard]] virtual bool RequestStop(WorldSessionStopMode mode, WorldSessionFailure* failure = nullptr) noexcept = 0;
 
-        [[nodiscard]] virtual WorldSessionStatus Status() const noexcept = 0;
-        [[nodiscard]] virtual const WorldSessionFailure& LastFailure() const noexcept = 0;
+        [[nodiscard]] virtual WorldSessionStatus GetStatus() const noexcept = 0;
+        [[nodiscard]] virtual const WorldSessionFailure& GetLastFailure() const noexcept = 0;
 
     protected:
         WorldSessionService() noexcept = default;

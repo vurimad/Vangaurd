@@ -23,10 +23,17 @@ neither native cache blobs nor NVRHI objects enter this module's public API.
 `BeginFrame`, frame-packet population, `SubmitFrame`, and `FlushFrame` contract. A `RenderViewportHandle` describes
 where that frame is rendered: a presentation attachment, an externally owned texture, or a headless output.
 
-Frame submission is serialized through `RenderFrameDispatcher` on the Jobs `RenderPath` priority. Every submitted
-packet is copied before dispatch, and an optional retain/release payload contract keeps renderer-owned scene and
-camera snapshots alive until execution finishes. The dispatcher completion counter is the explicit barrier used by
-viewport destruction, swapchain replacement, and resize operations.
+`RenderCommandSystem` owns one Jobs `RenderPath` CPU tail shared by scene `FrameTick` work and viewport `RenderFrame`
+submission. Every submitted frame packet is retained before dispatch, and its optional retain/release payload keeps
+renderer-owned scene and camera state alive until execution finishes. `FlushPreviousFrameProcessing` is the explicit
+RED-style CPU barrier used by viewport destruction and exceptional ownership transitions; it never waits for GPU queue
+completion. GPU safety remains an RHI-fence contract.
+
+`RenderingService` owns the command system and viewport manager. `WorldRenderBridge` and future editor/tool bridges are
+producers of scene mutations, not hard-coded stages of this generic rendering service. A retained `RenderFrame` now enters
+the service with a Jobs continuation builder, allowing future Render Graph work to extend the same CPU command tail. Until
+that graph is installed the destination fails explicitly instead of reporting an unrendered frame as successful. Automatic
+engine-frame ordering, camera/frame publication, and Render Graph execution remain the next integration layer.
 
 Native windows remain owned by the window module. Presentation viewports retain a generation-safe
 `PresentationAttachmentHandle`; the presentation service creates the platform swapchain and binds its RHI reference
@@ -62,21 +69,13 @@ output state, recreates the chain when display color state changes, and records 
 HDR modes fail explicitly. SDL-provided SDR white level and HDR headroom, resolved RHI output metadata, active swap-chain
 format/color space, and pacing policy remain visible through the output snapshot without exposing native platform objects.
 
-## RenderScene collection
+## RenderScene updates and queries
 
-`RenderSceneManager` separates mutable proxy state from immutable committed scene versions. Uniquely registered read leases pin
-base records, typed payloads, and flat spatial snapshots while visibility queries traverse them. Bounds, frustum, layer,
-visibility-role, payload-family, and overflow-lane filtering remain CPU-side and independent of RHI or material binding policy.
+`RenderSceneManager` owns stable live proxies, typed payload pools, and the CPU spatial broad phase. Producers submit bounded
+relink requests; `PrepareSceneUpdate` swaps the ingress queue and `ExecuteSceneUpdate` performs newest-request reduction,
+parallel proxy-local updates, batched structural movement, and one spatial repair boundary through Jobs `RenderPath`.
 
-`RenderSceneCollector` converts those candidates into typed mesh, light, and decal packets. It retains the exact scene lease,
-fans deterministic spatial batches across Jobs `RenderPath`, writes only job-local fixed-capacity pages, and reduces them in a
-dependent epilogue. Each generational view owns isolated proxy history such as visible-frame tracking, distance, LOD placeholder,
-dissolve, and feature slots. Dispatch is non-blocking; completion and output lifetime are explicit through a collection handle
-and Jobs counter. Packet overflow remains observable and does not erase a proxy's view-local visibility history.
-
-`VisibilityFeedbackService` stores query-only probes independently from drawable proxy storage. A probe selects a specific
-view, a view family, or the registered streaming-authority views. Dispatch captures an immutable probe evaluation set and the
-collection completion job produces versioned observations without writing shared service state. End-frame rejects incomplete
-collection dependencies, deterministically aggregates coherent observations, publishes `Unknown`, `Visible`, or `NotVisible`
-with an explicit age and view-set revision, then retires collection storage. Retired scene, spatial, and typed-payload versions
-are reclaimed only at this boundary and only when their registered reader count reaches zero.
+Visibility queries consume the live spatial state only after that update dependency completes. A request names the exact
+completed mutation epoch it expects, so stale or overlapping work fails explicitly without immutable CPU scene copies, read
+leases, typed collector packets, or hidden synchronization. Cold proxy and payload snapshots remain available for editor
+inspection, validation, recovery, and tests; they are not the runtime draw-data path.

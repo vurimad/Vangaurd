@@ -43,7 +43,8 @@ namespace vanguard::rhi::backend
 
         [[nodiscard]] constexpr u32 NextPowerOfTwo(u32 value) noexcept
         {
-            if (value < 2u) return 2u;
+            if (value < 2u)
+                return 2u;
             --value;
             value |= value >> 1u;
             value |= value >> 2u;
@@ -59,7 +60,8 @@ namespace vanguard::rhi::backend
             while (current < value)
             {
                 const u32 observed = target.CompareExchange(value, current);
-                if (observed == current) return;
+                if (observed == current)
+                    return;
                 current = observed;
             }
         }
@@ -70,7 +72,8 @@ namespace vanguard::rhi::backend
             while (current < value)
             {
                 const u64 observed = target.CompareExchange(value, current);
-                if (observed == current) return;
+                if (observed == current)
+                    return;
                 current = observed;
             }
         }
@@ -82,7 +85,8 @@ namespace vanguard::rhi::backend
             {
                 VG_ASSERT_MSG(current >= value, "RHI atomic accounting underflow");
                 const u64 observed = target.CompareExchange(current - value, current);
-                if (observed == current) return;
+                if (observed == current)
+                    return;
                 current = observed;
             }
         }
@@ -102,7 +106,8 @@ namespace vanguard::rhi::backend
         public:
             [[nodiscard]] bool Initialize(const ResourceKind resourceKind, const u32 requestedCapacity) noexcept
             {
-                if (slots != nullptr || requestedCapacity == 0 || requestedCapacity > MaximumResourceReferenceIndex) return false;
+                if (slots != nullptr || requestedCapacity == 0 || requestedCapacity > MaximumResourceReferenceIndex)
+                    return false;
                 kind = resourceKind;
                 capacity = requestedCapacity;
                 slotBlock = memory::Allocate(memory::PoolId::Rendering, sizeof(ResourceSlot) * capacity, alignof(ResourceSlot));
@@ -128,8 +133,10 @@ namespace vanguard::rhi::backend
 
             void Shutdown() noexcept
             {
-                if (slots == nullptr) return;
-                for (u32 index = 0; index < capacity; ++index) slots[index].~ResourceSlot();
+                if (slots == nullptr)
+                    return;
+                for (u32 index = 0; index < capacity; ++index)
+                    slots[index].~ResourceSlot();
                 slots = nullptr;
                 freeIndices = nullptr;
                 capacity = 0;
@@ -138,12 +145,14 @@ namespace vanguard::rhi::backend
                 memory::Free(freeBlock);
             }
 
-            [[nodiscard]] ResourceRef Create(void* const payload, const DestroyResourceCallback destroy,
-                                             void* const destroyContext, const u32 initialReferences) noexcept
+            [[nodiscard]] ResourceRef Create(void* const payload, const DestroyResourceCallback destroy, void* const destroyContext,
+                                             const u32 initialReferences) noexcept
             {
-                if (initialReferences == 0 || initialReferences >= DestroyingReferenceCount) return {};
+                if (initialReferences == 0 || initialReferences >= DestroyingReferenceCount)
+                    return {};
                 concurrency::ScopedLock guard(freeLock);
-                if (freeCount == 0) return {};
+                if (freeCount == 0)
+                    return {};
                 const u32 index = freeIndices[--freeCount];
                 ResourceSlot& slot = slots[index];
                 const u64 oldIdentity = slot.identity.GetValue();
@@ -162,23 +171,22 @@ namespace vanguard::rhi::backend
 
             [[nodiscard]] ResourceSlot* Find(const ResourceRef resource) noexcept
             {
-                return resource.Kind() == kind && resource.Index() < capacity ? &slots[resource.Index()] : nullptr;
+                return resource.GetKind() == kind && resource.Index() < capacity ? &slots[resource.Index()] : nullptr;
             }
 
             [[nodiscard]] const ResourceSlot* Find(const ResourceRef resource) const noexcept
             {
-                return resource.Kind() == kind && resource.Index() < capacity ? &slots[resource.Index()] : nullptr;
+                return resource.GetKind() == kind && resource.Index() < capacity ? &slots[resource.Index()] : nullptr;
             }
 
             [[nodiscard]] void* GetPayload(const ResourceRef resource) noexcept
             {
                 ResourceSlot* const slot = Find(resource);
-                if (slot == nullptr) return nullptr;
+                if (slot == nullptr)
+                    return nullptr;
                 const u64 identity = slot->identity.GetValue();
                 const u32 references = IdentityReferences(identity);
-                return IdentityGeneration(identity) == resource.Generation() && references < DestroyingReferenceCount
-                           ? slot->payload
-                           : nullptr;
+                return IdentityGeneration(identity) == resource.GetGeneration() && references < DestroyingReferenceCount ? slot->payload : nullptr;
             }
 
             [[nodiscard]] const void* GetPayload(const ResourceRef resource) const noexcept
@@ -186,13 +194,13 @@ namespace vanguard::rhi::backend
                 return const_cast<ResourceTable*>(this)->GetPayload(resource);
             }
 
-            [[nodiscard]] bool TryClaimDestroy(const ResourceRef resource, void*& payload,
-                                               DestroyResourceCallback& destroy, void*& destroyContext) noexcept
+            [[nodiscard]] bool TryClaimDestroy(const ResourceRef resource, void*& payload, DestroyResourceCallback& destroy, void*& destroyContext) noexcept
             {
                 ResourceSlot* const slot = Find(resource);
-                if (slot == nullptr) return false;
-                const u64 expected = PackIdentity(resource.Generation(), 0);
-                if (slot->identity.CompareExchange(PackIdentity(resource.Generation(), DestroyingReferenceCount), expected) != expected)
+                if (slot == nullptr)
+                    return false;
+                const u64 expected = PackIdentity(resource.GetGeneration(), 0);
+                if (slot->identity.CompareExchange(PackIdentity(resource.GetGeneration(), DestroyingReferenceCount), expected) != expected)
                     return false;
                 payload = slot->payload;
                 destroy = slot->destroy;
@@ -200,16 +208,18 @@ namespace vanguard::rhi::backend
                 return true;
             }
 
-            [[nodiscard]] bool TryClaimAny(const u32 index, ResourceRef& resource, u32& references, void*& payload,
-                                           DestroyResourceCallback& destroy, void*& destroyContext) noexcept
+            [[nodiscard]] bool TryClaimAny(const u32 index, ResourceRef& resource, u32& references, void*& payload, DestroyResourceCallback& destroy,
+                                           void*& destroyContext) noexcept
             {
-                if (index >= capacity) return false;
+                if (index >= capacity)
+                    return false;
                 ResourceSlot& slot = slots[index];
                 u64 identity = slot.identity.GetValue();
                 for (;;)
                 {
                     references = IdentityReferences(identity);
-                    if (references == FreeReferenceCount || references == DestroyingReferenceCount) return false;
+                    if (references == FreeReferenceCount || references == DestroyingReferenceCount)
+                        return false;
                     const u32 generation = IdentityGeneration(identity);
                     const u64 destroying = PackIdentity(generation, DestroyingReferenceCount);
                     const u64 observed = slot.identity.CompareExchange(destroying, identity);
@@ -236,7 +246,7 @@ namespace vanguard::rhi::backend
                 slot.lastUse[1].SetValue(0);
                 slot.lastUse[2].SetValue(0);
                 slot.retirementQueued.SetValue(0);
-                const u32 generation = NextGeneration(resource.Generation());
+                const u32 generation = NextGeneration(resource.GetGeneration());
                 slot.identity.SetValue(PackIdentity(generation, FreeReferenceCount));
                 concurrency::ScopedLock guard(freeLock);
                 VG_ASSERT_MSG(freeCount < capacity, "RHI resource free list overflow");
@@ -245,7 +255,8 @@ namespace vanguard::rhi::backend
 
             template <typename Visitor> void VisitSlots(Visitor&& visitor) noexcept
             {
-                for (u32 index = 0; index < capacity; ++index) visitor(index, slots[index]);
+                for (u32 index = 0; index < capacity; ++index)
+                    visitor(index, slots[index]);
             }
 
             ResourceKind kind = ResourceKind::None;
@@ -274,9 +285,11 @@ namespace vanguard::rhi::backend
                 capacity = NextPowerOfTwo(minimumCapacity);
                 mask = capacity - 1u;
                 block = memory::Allocate(memory::PoolId::Rendering, sizeof(Cell) * capacity, alignof(Cell));
-                if (!block) return false;
+                if (!block)
+                    return false;
                 cells = static_cast<Cell*>(block.address);
-                for (u32 index = 0; index < capacity; ++index) new (&cells[index]) Cell{concurrency::Atomic<u64>(index), {}};
+                for (u32 index = 0; index < capacity; ++index)
+                    new (&cells[index]) Cell{concurrency::Atomic<u64>(index), {}};
                 enqueue.SetValue(0);
                 dequeue.SetValue(0);
                 return true;
@@ -284,8 +297,10 @@ namespace vanguard::rhi::backend
 
             void Shutdown() noexcept
             {
-                if (cells == nullptr) return;
-                for (u32 index = 0; index < capacity; ++index) cells[index].~Cell();
+                if (cells == nullptr)
+                    return;
+                for (u32 index = 0; index < capacity; ++index)
+                    cells[index].~Cell();
                 cells = nullptr;
                 capacity = 0;
                 mask = 0;
@@ -368,17 +383,22 @@ namespace vanguard::rhi::backend
 
     u64 FenceSet::Get(const QueueType queue) const noexcept
     {
-        if (queue == QueueType::Compute) return compute;
-        if (queue == QueueType::Copy) return copy;
+        if (queue == QueueType::Compute)
+            return compute;
+        if (queue == QueueType::Copy)
+            return copy;
         return graphics;
     }
 
     void FenceSet::Include(const QueueType queue, const u64 value) noexcept
     {
         u64* target = &graphics;
-        if (queue == QueueType::Compute) target = &compute;
-        else if (queue == QueueType::Copy) target = &copy;
-        if (*target < value) *target = value;
+        if (queue == QueueType::Compute)
+            target = &compute;
+        else if (queue == QueueType::Copy)
+            target = &copy;
+        if (*target < value)
+            *target = value;
     }
 
     void FenceSet::Include(const FenceSet& other) noexcept
@@ -432,7 +452,8 @@ namespace vanguard::rhi::backend
 
         [[nodiscard]] bool AreFencesComplete(const FenceSet& fences) const noexcept
         {
-            if (fenceComplete == nullptr) return fences.graphics == 0 && fences.compute == 0 && fences.copy == 0;
+            if (fenceComplete == nullptr)
+                return fences.graphics == 0 && fences.compute == 0 && fences.copy == 0;
             return (fences.graphics == 0 || fenceComplete(fenceContext, QueueType::Graphics, fences.graphics)) &&
                    (fences.compute == 0 || fenceComplete(fenceContext, QueueType::Compute, fences.compute)) &&
                    (fences.copy == 0 || fenceComplete(fenceContext, QueueType::Copy, fences.copy));
@@ -443,10 +464,10 @@ namespace vanguard::rhi::backend
             return {slot.lastUse[0].GetValue(), slot.lastUse[1].GetValue(), slot.lastUse[2].GetValue()};
         }
 
-        [[nodiscard]] bool QueueRetirementLocked(const ResourceRef resource, ResourceSlot& slot,
-                                                 const bool recovery) noexcept
+        [[nodiscard]] bool QueueRetirementLocked(const ResourceRef resource, ResourceSlot& slot, const bool recovery) noexcept
         {
-            if (slot.retirementQueued.Exchange(1u) != 0u) return true;
+            if (slot.retirementQueued.Exchange(1u) != 0u)
+                return true;
             if (!retirementQueue.Push(resource))
             {
                 slot.retirementQueued.SetValue(0);
@@ -455,12 +476,12 @@ namespace vanguard::rhi::backend
             }
             const u32 bucketIndex = enqueueBucket.GetValue();
             static_cast<void>(buckets[bucketIndex].count.Increment());
-            if (recovery) static_cast<void>(retirementQueueRecoveries.Increment());
+            if (recovery)
+                static_cast<void>(retirementQueueRecoveries.Increment());
             return true;
         }
 
-        [[nodiscard]] bool QueueRetirement(const ResourceRef resource, ResourceSlot& slot,
-                                           const bool recovery) noexcept
+        [[nodiscard]] bool QueueRetirement(const ResourceRef resource, ResourceSlot& slot, const bool recovery) noexcept
         {
             // Queue order and bucket counts form one publication transaction. Serializing only final-release
             // publication prevents an epoch advance from observing one half of that transaction. Ordinary
@@ -474,14 +495,15 @@ namespace vanguard::rhi::backend
             for (u32 kindIndex = 1; kindIndex < static_cast<u32>(ResourceKind::Count); ++kindIndex)
             {
                 ResourceTable& table = tables[kindIndex];
-                table.VisitSlots([&](const u32 index, ResourceSlot& slot) noexcept
-                {
-                    const u64 identity = slot.identity.GetValue();
-                    if (IdentityReferences(identity) != 0 || slot.retirementQueued.GetValue() != 0) return;
-                    const ResourceRef resource = ResourceRef::FromParts(static_cast<ResourceKind>(kindIndex), index,
-                                                                        IdentityGeneration(identity));
-                    static_cast<void>(QueueRetirement(resource, slot, true));
-                });
+                table.VisitSlots(
+                    [&](const u32 index, ResourceSlot& slot) noexcept
+                    {
+                        const u64 identity = slot.identity.GetValue();
+                        if (IdentityReferences(identity) != 0 || slot.retirementQueued.GetValue() != 0)
+                            return;
+                        const ResourceRef resource = ResourceRef::FromParts(static_cast<ResourceKind>(kindIndex), index, IdentityGeneration(identity));
+                        static_cast<void>(QueueRetirement(resource, slot, true));
+                    });
             }
         }
 
@@ -492,15 +514,18 @@ namespace vanguard::rhi::backend
             for (u32 visited = 0; visited < bucketCount; ++visited)
             {
                 const u32 current = enqueueBucket.GetValue();
-                if (nextFlushBucket == current) break;
+                if (nextFlushBucket == current)
+                    break;
                 RetirementBucket& bucket = buckets[nextFlushBucket];
-                if (!bucket.finalized || !AreFencesComplete(bucket.fences)) break;
+                if (!bucket.finalized || !AreFencesComplete(bucket.fences))
+                    break;
                 evictionCount += bucket.count.Exchange(0);
                 bucket.fences = {};
                 bucket.finalized = false;
                 nextFlushBucket = (nextFlushBucket + 1u) % bucketCount;
             }
-            if (evictionCount != 0) static_cast<void>(pendingEvictions.ExchangeAdd(evictionCount));
+            if (evictionCount != 0)
+                static_cast<void>(pendingEvictions.ExchangeAdd(evictionCount));
         }
 
         void Requeue(const ResourceRef resource, ResourceSlot& slot) noexcept
@@ -509,12 +534,14 @@ namespace vanguard::rhi::backend
             static_cast<void>(QueueRetirement(resource, slot, false));
         }
 
-        void DestroyClaimed(const ResourceRef resource, ResourceTable& table, void* const payload,
-                            const DestroyResourceCallback destroy, void* const destroyContext) noexcept
+        void DestroyClaimed(const ResourceRef resource, ResourceTable& table, void* const payload, const DestroyResourceCallback destroy,
+                            void* const destroyContext) noexcept
         {
             static_cast<void>(destroyingResources.Increment());
-            if (destroy != nullptr) destroy(destroyContext, resource, payload);
-            if (resourceDestroyed != nullptr) resourceDestroyed(resourceDestroyedContext, resource);
+            if (destroy != nullptr)
+                destroy(destroyContext, resource, payload);
+            if (resourceDestroyed != nullptr)
+                resourceDestroyed(resourceDestroyedContext, resource);
             table.FinishDestroy(resource);
             static_cast<void>(destroyingResources.Decrement());
             static_cast<void>(pendingRetirements.Decrement());
@@ -537,9 +564,10 @@ namespace vanguard::rhi::backend
                     static_cast<void>(retirementQueueRecoveries.Increment());
                     break;
                 }
-                ResourceTable* const table = GetTable(resource.Kind());
+                ResourceTable* const table = GetTable(resource.GetKind());
                 ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
-                if (slot == nullptr) continue;
+                if (slot == nullptr)
+                    continue;
                 if (!AreFencesComplete(GetLastUse(*slot)))
                 {
                     Requeue(resource, *slot);
@@ -548,7 +576,8 @@ namespace vanguard::rhi::backend
                 void* payload = nullptr;
                 void* destroyContext = nullptr;
                 DestroyResourceCallback destroy = nullptr;
-                if (!table->TryClaimDestroy(resource, payload, destroy, destroyContext)) continue;
+                if (!table->TryClaimDestroy(resource, payload, destroy, destroyContext))
+                    continue;
                 DestroyClaimed(resource, *table, payload, destroy, destroyContext);
             }
         }
@@ -559,8 +588,9 @@ namespace vanguard::rhi::backend
             ResourceRef resource{};
             while (retirementQueue.Pop(resource))
             {
-                ResourceTable* const table = GetTable(resource.Kind());
-                if (table == nullptr) continue;
+                ResourceTable* const table = GetTable(resource.GetKind());
+                if (table == nullptr)
+                    continue;
                 void* payload = nullptr;
                 void* destroyContext = nullptr;
                 DestroyResourceCallback destroy = nullptr;
@@ -570,18 +600,19 @@ namespace vanguard::rhi::backend
             for (u32 kindIndex = 1; kindIndex < static_cast<u32>(ResourceKind::Count); ++kindIndex)
             {
                 ResourceTable& table = tables[kindIndex];
-                table.VisitSlots([&](const u32 index, ResourceSlot& slot) noexcept
-                {
-                    const u64 identity = slot.identity.GetValue();
-                    if (IdentityReferences(identity) != 0) return;
-                    const ResourceRef pending = ResourceRef::FromParts(static_cast<ResourceKind>(kindIndex), index,
-                                                                       IdentityGeneration(identity));
-                    void* payload = nullptr;
-                    void* destroyContext = nullptr;
-                    DestroyResourceCallback destroy = nullptr;
-                    if (table.TryClaimDestroy(pending, payload, destroy, destroyContext))
-                        DestroyClaimed(pending, table, payload, destroy, destroyContext);
-                });
+                table.VisitSlots(
+                    [&](const u32 index, ResourceSlot& slot) noexcept
+                    {
+                        const u64 identity = slot.identity.GetValue();
+                        if (IdentityReferences(identity) != 0)
+                            return;
+                        const ResourceRef pending = ResourceRef::FromParts(static_cast<ResourceKind>(kindIndex), index, IdentityGeneration(identity));
+                        void* payload = nullptr;
+                        void* destroyContext = nullptr;
+                        DestroyResourceCallback destroy = nullptr;
+                        if (table.TryClaimDestroy(pending, payload, destroy, destroyContext))
+                            DestroyClaimed(pending, table, payload, destroy, destroyContext);
+                    });
             }
             pendingEvictions.SetValue(0);
             for (u32 index = 0; index < bucketCount; ++index)
@@ -599,29 +630,33 @@ namespace vanguard::rhi::backend
             for (u32 kindIndex = 1; kindIndex < static_cast<u32>(ResourceKind::Count); ++kindIndex)
             {
                 ResourceTable& table = tables[kindIndex];
-                table.VisitSlots([&](const u32 index, ResourceSlot&) noexcept
-                {
-                    ResourceRef resource{};
-                    u32 references = 0;
-                    void* payload = nullptr;
-                    void* destroyContext = nullptr;
-                    DestroyResourceCallback destroy = nullptr;
-                    if (!table.TryClaimAny(index, resource, references, payload, destroy, destroyContext)) return;
-
-                    static_cast<void>(destroyingResources.Increment());
-                    if (destroy != nullptr) destroy(destroyContext, resource, payload);
-                    if (resourceDestroyed != nullptr) resourceDestroyed(resourceDestroyedContext, resource);
-                    table.FinishDestroy(resource);
-                    static_cast<void>(destroyingResources.Decrement());
-                    if (references == 0)
-                        static_cast<void>(pendingRetirements.Decrement());
-                    else
+                table.VisitSlots(
+                    [&](const u32 index, ResourceSlot&) noexcept
                     {
-                        static_cast<void>(liveResources.Decrement());
-                        Subtract(totalReferences, references);
-                    }
-                    static_cast<void>(completedRetirements.Increment());
-                });
+                        ResourceRef resource{};
+                        u32 references = 0;
+                        void* payload = nullptr;
+                        void* destroyContext = nullptr;
+                        DestroyResourceCallback destroy = nullptr;
+                        if (!table.TryClaimAny(index, resource, references, payload, destroy, destroyContext))
+                            return;
+
+                        static_cast<void>(destroyingResources.Increment());
+                        if (destroy != nullptr)
+                            destroy(destroyContext, resource, payload);
+                        if (resourceDestroyed != nullptr)
+                            resourceDestroyed(resourceDestroyedContext, resource);
+                        table.FinishDestroy(resource);
+                        static_cast<void>(destroyingResources.Decrement());
+                        if (references == 0)
+                            static_cast<void>(pendingRetirements.Decrement());
+                        else
+                        {
+                            static_cast<void>(liveResources.Decrement());
+                            Subtract(totalReferences, references);
+                        }
+                        static_cast<void>(completedRetirements.Increment());
+                    });
             }
 
             pendingEvictions.SetValue(0);
@@ -636,17 +671,18 @@ namespace vanguard::rhi::backend
         void ShutdownStorage() noexcept
         {
             retirementQueue.Shutdown();
-            for (u32 index = 1; index < static_cast<u32>(ResourceKind::Count); ++index) tables[index].Shutdown();
+            for (u32 index = 1; index < static_cast<u32>(ResourceKind::Count); ++index)
+                tables[index].Shutdown();
             initialized = false;
         }
     };
 
     ResourceLifetimeManager::~ResourceLifetimeManager()
     {
-        if (m_impl == nullptr) return;
+        if (m_impl == nullptr)
+            return;
         WaitForReclamation();
-        VG_ASSERT_MSG(m_impl->liveResources.GetValue() == 0,
-                      "RHI resource lifetime manager was destroyed while external resource owners remained");
+        VG_ASSERT_MSG(m_impl->liveResources.GetValue() == 0, "RHI resource lifetime manager was destroyed while external resource owners remained");
         m_impl->ForceDestroyAllAfterGpuIdle();
         m_impl->ShutdownStorage();
         m_impl->~Impl();
@@ -655,16 +691,14 @@ namespace vanguard::rhi::backend
         m_impl = nullptr;
     }
 
-    bool ResourceLifetimeManager::Initialize(const ResourceLifetimeConfig& config,
-                                             const FenceCompleteCallback fenceComplete, void* const fenceContext,
-                                             const ResourceDestroyedCallback resourceDestroyed,
-                                             void* const resourceDestroyedContext) noexcept
+    bool ResourceLifetimeManager::Initialize(const ResourceLifetimeConfig& config, const FenceCompleteCallback fenceComplete, void* const fenceContext,
+                                             const ResourceDestroyedCallback resourceDestroyed, void* const resourceDestroyedContext) noexcept
     {
-        if (m_impl != nullptr || !memory::IsInitialized() || config.retirementBucketCount < 2 ||
-            config.retirementBucketCount > MaximumRetirementBuckets)
+        if (m_impl != nullptr || !memory::IsInitialized() || config.retirementBucketCount < 2 || config.retirementBucketCount > MaximumRetirementBuckets)
             return false;
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
-        if (!block) return false;
+        if (!block)
+            return false;
         m_impl = new (block.address) Impl();
         m_impl->fenceComplete = fenceComplete;
         m_impl->fenceContext = fenceContext;
@@ -672,12 +706,21 @@ namespace vanguard::rhi::backend
         m_impl->resourceDestroyedContext = resourceDestroyedContext;
         m_impl->bucketCount = config.retirementBucketCount;
 
-        const u32 capacities[static_cast<u32>(ResourceKind::Count)] = {
-            0, config.textureCapacity, config.bufferCapacity, config.heapCapacity, config.samplerStateCapacity,
-            config.shaderCapacity, 1, config.pipelineCapacity, config.bindingLayoutCapacity,
-            config.descriptorDomainCapacity, config.accelerationStructureCapacity, config.shaderTableCapacity,
-            config.swapChainCapacity,
-            config.commandListCapacity, config.textureReadbackCapacity};
+        const u32 capacities[static_cast<u32>(ResourceKind::Count)] = {0,
+                                                                       config.textureCapacity,
+                                                                       config.bufferCapacity,
+                                                                       config.heapCapacity,
+                                                                       config.samplerStateCapacity,
+                                                                       config.shaderCapacity,
+                                                                       1,
+                                                                       config.pipelineCapacity,
+                                                                       config.bindingLayoutCapacity,
+                                                                       config.descriptorDomainCapacity,
+                                                                       config.accelerationStructureCapacity,
+                                                                       config.shaderTableCapacity,
+                                                                       config.swapChainCapacity,
+                                                                       config.commandListCapacity,
+                                                                       config.textureReadbackCapacity};
         u32 totalCapacity = 0;
         for (u32 index = 1; index < static_cast<u32>(ResourceKind::Count); ++index)
         {
@@ -705,11 +748,14 @@ namespace vanguard::rhi::backend
 
     bool ResourceLifetimeManager::ShutdownAfterGpuIdle() noexcept
     {
-        if (m_impl == nullptr || !m_impl->initialized) return false;
+        if (m_impl == nullptr || !m_impl->initialized)
+            return false;
         WaitForReclamation();
-        if (m_impl->liveResources.GetValue() != 0) return false;
+        if (m_impl->liveResources.GetValue() != 0)
+            return false;
         m_impl->ForceReclaimAfterGpuIdle();
-        if (m_impl->pendingRetirements.GetValue() != 0 || m_impl->destroyingResources.GetValue() != 0) return false;
+        if (m_impl->pendingRetirements.GetValue() != 0 || m_impl->destroyingResources.GetValue() != 0)
+            return false;
         m_impl->ShutdownStorage();
         m_impl->~Impl();
         memory::MemoryBlock block{m_impl, sizeof(Impl), memory::PoolId::Rendering};
@@ -720,7 +766,8 @@ namespace vanguard::rhi::backend
 
     void ResourceLifetimeManager::ForceShutdownAfterGpuIdle() noexcept
     {
-        if (m_impl == nullptr || !m_impl->initialized) return;
+        if (m_impl == nullptr || !m_impl->initialized)
+            return;
         WaitForReclamation();
         m_impl->ForceDestroyAllAfterGpuIdle();
         m_impl->ShutdownStorage();
@@ -735,13 +782,14 @@ namespace vanguard::rhi::backend
         return m_impl != nullptr && m_impl->initialized;
     }
 
-    ResourceRef ResourceLifetimeManager::Create(const ResourceKind kind, void* const payload,
-                                                const DestroyResourceCallback destroy, void* const destroyContext,
+    ResourceRef ResourceLifetimeManager::Create(const ResourceKind kind, void* const payload, const DestroyResourceCallback destroy, void* const destroyContext,
                                                 const u32 initialReferences) noexcept
     {
-        if (!IsInitialized()) return {};
+        if (!IsInitialized())
+            return {};
         ResourceTable* const table = m_impl->GetTable(kind);
-        if (table == nullptr) return {};
+        if (table == nullptr)
+            return {};
         const ResourceRef resource = table->Create(payload, destroy, destroyContext, initialReferences);
         if (resource)
         {
@@ -753,19 +801,22 @@ namespace vanguard::rhi::backend
 
     bool ResourceLifetimeManager::IsValid(const ResourceRef resource) const noexcept
     {
-        if (!IsInitialized() || !resource.IsValid()) return false;
-        const ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        if (!IsInitialized() || !resource.IsValid())
+            return false;
+        const ResourceTable* const table = m_impl->GetTable(resource.GetKind());
         const ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
-        if (slot == nullptr) return false;
+        if (slot == nullptr)
+            return false;
         const u64 identity = slot->identity.GetValue();
         const u32 references = IdentityReferences(identity);
-        return IdentityGeneration(identity) == resource.Generation() && references > 0 && references < DestroyingReferenceCount;
+        return IdentityGeneration(identity) == resource.GetGeneration() && references > 0 && references < DestroyingReferenceCount;
     }
 
     bool ResourceLifetimeManager::AddRef(const ResourceRef resource) noexcept
     {
-        if (!IsInitialized() || !resource.IsValid()) return false;
-        ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        if (!IsInitialized() || !resource.IsValid())
+            return false;
+        ResourceTable* const table = m_impl->GetTable(resource.GetKind());
         ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
         if (slot == nullptr)
         {
@@ -776,12 +827,12 @@ namespace vanguard::rhi::backend
         for (;;)
         {
             const u32 references = IdentityReferences(identity);
-            if (IdentityGeneration(identity) != resource.Generation() || references == 0 || references >= DestroyingReferenceCount - 1u)
+            if (IdentityGeneration(identity) != resource.GetGeneration() || references == 0 || references >= DestroyingReferenceCount - 1u)
             {
                 static_cast<void>(m_impl->staleReferenceOperations.Increment());
                 return false;
             }
-            const u64 desired = PackIdentity(resource.Generation(), references + 1u);
+            const u64 desired = PackIdentity(resource.GetGeneration(), references + 1u);
             const u64 observed = slot->identity.CompareExchange(desired, identity);
             if (observed == identity)
             {
@@ -794,8 +845,9 @@ namespace vanguard::rhi::backend
 
     i32 ResourceLifetimeManager::Release(const ResourceRef resource) noexcept
     {
-        if (!IsInitialized() || !resource.IsValid()) return -1;
-        ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        if (!IsInitialized() || !resource.IsValid())
+            return -1;
+        ResourceTable* const table = m_impl->GetTable(resource.GetKind());
         ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
         if (slot == nullptr)
         {
@@ -806,13 +858,13 @@ namespace vanguard::rhi::backend
         for (;;)
         {
             const u32 references = IdentityReferences(identity);
-            if (IdentityGeneration(identity) != resource.Generation() || references == 0 || references >= DestroyingReferenceCount)
+            if (IdentityGeneration(identity) != resource.GetGeneration() || references == 0 || references >= DestroyingReferenceCount)
             {
                 static_cast<void>(m_impl->staleReferenceOperations.Increment());
                 return -1;
             }
             const u32 remaining = references - 1u;
-            const u64 desired = PackIdentity(resource.Generation(), remaining);
+            const u64 desired = PackIdentity(resource.GetGeneration(), remaining);
             const u64 observed = slot->identity.CompareExchange(desired, identity);
             if (observed != identity)
             {
@@ -833,20 +885,22 @@ namespace vanguard::rhi::backend
 
     i32 ResourceLifetimeManager::GetRefCount(const ResourceRef resource) const noexcept
     {
-        if (!IsInitialized() || !resource.IsValid()) return -1;
-        const ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        if (!IsInitialized() || !resource.IsValid())
+            return -1;
+        const ResourceTable* const table = m_impl->GetTable(resource.GetKind());
         const ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
-        if (slot == nullptr) return -1;
+        if (slot == nullptr)
+            return -1;
         const u64 identity = slot->identity.GetValue();
         const u32 references = IdentityReferences(identity);
-        return IdentityGeneration(identity) == resource.Generation() && references < DestroyingReferenceCount
-                   ? static_cast<i32>(references) : -1;
+        return IdentityGeneration(identity) == resource.GetGeneration() && references < DestroyingReferenceCount ? static_cast<i32>(references) : -1;
     }
 
     void* ResourceLifetimeManager::GetPayload(const ResourceRef resource) noexcept
     {
-        if (!IsInitialized() || !resource.IsValid()) return nullptr;
-        ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        if (!IsInitialized() || !resource.IsValid())
+            return nullptr;
+        ResourceTable* const table = m_impl->GetTable(resource.GetKind());
         return table != nullptr ? table->GetPayload(resource) : nullptr;
     }
 
@@ -855,20 +909,21 @@ namespace vanguard::rhi::backend
         return const_cast<ResourceLifetimeManager*>(this)->GetPayload(resource);
     }
 
-    bool ResourceLifetimeManager::RecordUse(const ResourceRef resource, const QueueType queue,
-                                            const u64 submissionFence) noexcept
+    bool ResourceLifetimeManager::RecordUse(const ResourceRef resource, const QueueType queue, const u64 submissionFence) noexcept
     {
         if (submissionFence == 0)
         {
-            if (m_impl != nullptr) static_cast<void>(m_impl->staleReferenceOperations.Increment());
+            if (m_impl != nullptr)
+                static_cast<void>(m_impl->staleReferenceOperations.Increment());
             return false;
         }
 
         // Pin the slot while last-use metadata is updated. IsValid followed by a separate update is not
         // sufficient: the final external Release could otherwise retire, destroy and reuse the same slot
         // between those operations, allowing an old command list to modify the new generation.
-        if (!AddRef(resource)) return false;
-        ResourceSlot* const slot = m_impl->GetTable(resource.Kind())->Find(resource);
+        if (!AddRef(resource))
+            return false;
+        ResourceSlot* const slot = m_impl->GetTable(resource.GetKind())->Find(resource);
         UpdateMaximum(slot->lastUse[QueueIndex(queue)], submissionFence);
         const i32 remainingReferences = Release(resource);
         VG_ASSERT_MSG(remainingReferences >= 0, "RHI resource became invalid while recording its submission fence");
@@ -877,19 +932,22 @@ namespace vanguard::rhi::backend
 
     FenceSet ResourceLifetimeManager::GetLastUse(const ResourceRef resource) const noexcept
     {
-        if (!IsInitialized() || !resource.IsValid()) return {};
-        const ResourceTable* const table = m_impl->GetTable(resource.Kind());
+        if (!IsInitialized() || !resource.IsValid())
+            return {};
+        const ResourceTable* const table = m_impl->GetTable(resource.GetKind());
         const ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
         return slot != nullptr ? m_impl->GetLastUse(*slot) : FenceSet{};
     }
 
     void ResourceLifetimeManager::SealRetirementEpoch(const FenceSet& submittedFences) noexcept
     {
-        if (!IsInitialized()) return;
+        if (!IsInitialized())
+            return;
         concurrency::ScopedLock guard(m_impl->epochLock);
         const u32 current = m_impl->enqueueBucket.GetValue();
         RetirementBucket& bucket = m_impl->buckets[current];
-        if (bucket.count.GetValue() == 0) return;
+        if (bucket.count.GetValue() == 0)
+            return;
 
         bucket.fences.Include(submittedFences);
         const u32 next = (current + 1u) % m_impl->bucketCount;
@@ -911,10 +969,12 @@ namespace vanguard::rhi::backend
 
     void ResourceLifetimeManager::CollectGarbage() noexcept
     {
-        if (!IsInitialized()) return;
+        if (!IsInitialized())
+            return;
         m_impl->RecoverUnqueuedRetirements();
         m_impl->PrepareEvictions();
-        if (m_impl->pendingEvictions.GetValue() == 0) return;
+        if (m_impl->pendingEvictions.GetValue() == 0)
+            return;
 
         if (!jobs::IsInitialized())
         {
@@ -929,13 +989,15 @@ namespace vanguard::rhi::backend
             m_impl->ReclaimReady();
             return;
         }
-        if (m_impl->reclamationCounter.IsValid()) builder.AddDependency(m_impl->reclamationCounter);
+        if (m_impl->reclamationCounter.IsValid())
+            builder.AddDependency(m_impl->reclamationCounter);
         Impl* const impl = m_impl;
-        jobs::Task task = jobs::Task::Create([impl](const jobs::JobContext&) noexcept
-        {
-            impl->ReclaimReady();
-            static_cast<void>(impl->reclamationJobs.Decrement());
-        });
+        jobs::Task task = jobs::Task::Create(
+            [impl](const jobs::JobContext&) noexcept
+            {
+                impl->ReclaimReady();
+                static_cast<void>(impl->reclamationJobs.Decrement());
+            });
         if (!task)
         {
             m_impl->ReclaimReady();
@@ -953,7 +1015,8 @@ namespace vanguard::rhi::backend
 
     void ResourceLifetimeManager::WaitForReclamation() noexcept
     {
-        if (m_impl == nullptr) return;
+        if (m_impl == nullptr)
+            return;
         concurrency::ScopedLock guard(m_impl->scheduleLock);
         if (m_impl->reclamationCounter.IsValid())
         {
@@ -964,11 +1027,17 @@ namespace vanguard::rhi::backend
 
     ResourceLifetimeStats ResourceLifetimeManager::GetStats() const noexcept
     {
-        if (m_impl == nullptr) return {};
-        return {m_impl->liveResources.GetValue(), m_impl->pendingRetirements.GetValue(),
-                m_impl->peakPendingRetirements.GetValue(), m_impl->destroyingResources.GetValue(),
-                m_impl->totalReferences.GetValue(), m_impl->completedRetirements.GetValue(),
-                m_impl->staleReferenceOperations.GetValue(), m_impl->retirementQueueRecoveries.GetValue(),
-                m_impl->retirementBucketOverflows.GetValue(), m_impl->reclamationJobs.GetValue() != 0};
+        if (m_impl == nullptr)
+            return {};
+        return {m_impl->liveResources.GetValue(),
+                m_impl->pendingRetirements.GetValue(),
+                m_impl->peakPendingRetirements.GetValue(),
+                m_impl->destroyingResources.GetValue(),
+                m_impl->totalReferences.GetValue(),
+                m_impl->completedRetirements.GetValue(),
+                m_impl->staleReferenceOperations.GetValue(),
+                m_impl->retirementQueueRecoveries.GetValue(),
+                m_impl->retirementBucketOverflows.GetValue(),
+                m_impl->reclamationJobs.GetValue() != 0};
     }
 } // namespace vanguard::rhi::backend

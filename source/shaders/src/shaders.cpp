@@ -30,8 +30,7 @@ namespace
     [[nodiscard]] bool WriteName(serialization::BinaryWriter& writer, const char* const value) noexcept
     {
         const u32 length = StringLength(value, shader::MaximumEntryPointLength);
-        return length != 0 && length < shader::MaximumEntryPointLength && writer.WriteU16(static_cast<u16>(length)) &&
-               writer.WriteBytes(value, length);
+        return length != 0 && length < shader::MaximumEntryPointLength && writer.WriteU16(static_cast<u16>(length)) && writer.WriteBytes(value, length);
     }
 
     [[nodiscard]] bool ReadName(serialization::BinaryReader& reader, char (&value)[shader::MaximumEntryPointLength]) noexcept
@@ -90,12 +89,12 @@ namespace
 
     [[nodiscard]] shader::Result WriterResult(const serialization::BinaryWriter& writer) noexcept
     {
-        return writer.Good() ? shader::Result::Success : ConvertSerializationResult(writer.Status());
+        return writer.IsGood() ? shader::Result::Success : ConvertSerializationResult(writer.GetStatus());
     }
 
     [[nodiscard]] shader::Result ReaderResult(const serialization::BinaryReader& reader) noexcept
     {
-        return reader.Good() ? shader::Result::Success : ConvertSerializationResult(reader.Status());
+        return reader.IsGood() ? shader::Result::Success : ConvertSerializationResult(reader.GetStatus());
     }
 
     template <typename Type> void CopySpan(const containers::ArraySpan<const Type> source, containers::DynamicArray<Type>& destination)
@@ -119,7 +118,7 @@ namespace
 
     [[nodiscard]] bool IsValidBindingKind(const shader::BindingKind kind) noexcept
     {
-        return kind <= shader::BindingKind::AccelerationStructure;
+        return kind <= shader::BindingKind::ReadWriteTypedBuffer;
     }
 
     [[nodiscard]] bool IsValidAccess(const shader::BindingAccess access) noexcept
@@ -218,13 +217,21 @@ namespace
 
     [[nodiscard]] shader::Result Canonicalize(const shader::BuildDescription& description, CanonicalData& output) noexcept
     {
-        enum class DescriptorNamespace : u8 { ConstantBuffer, ShaderResource, UnorderedAccess, Sampler };
+        enum class DescriptorNamespace : u8
+        {
+            ConstantBuffer,
+            ShaderResource,
+            UnorderedAccess,
+            Sampler
+        };
         const auto bindingNamespace = [](const shader::BindingKind kind) noexcept
         {
-            if (kind == shader::BindingKind::ConstantBuffer) return DescriptorNamespace::ConstantBuffer;
-            if (kind == shader::BindingKind::Sampler) return DescriptorNamespace::Sampler;
+            if (kind == shader::BindingKind::ConstantBuffer)
+                return DescriptorNamespace::ConstantBuffer;
+            if (kind == shader::BindingKind::Sampler)
+                return DescriptorNamespace::Sampler;
             if (kind == shader::BindingKind::StorageTexture || kind == shader::BindingKind::ReadWriteStructuredBuffer ||
-                kind == shader::BindingKind::ReadWriteByteAddressBuffer)
+                kind == shader::BindingKind::ReadWriteByteAddressBuffer || kind == shader::BindingKind::ReadWriteTypedBuffer)
                 return DescriptorNamespace::UnorderedAccess;
             return DescriptorNamespace::ShaderResource;
         };
@@ -240,22 +247,22 @@ namespace
         std::sort(output.bindings.Begin(), output.bindings.End(),
                   [&bindingNamespace](const shader::DescriptorBinding& left, const shader::DescriptorBinding& right)
                   {
-                      if (left.space != right.space) return left.space < right.space;
+                      if (left.space != right.space)
+                          return left.space < right.space;
                       const DescriptorNamespace leftNamespace = bindingNamespace(left.kind);
                       const DescriptorNamespace rightNamespace = bindingNamespace(right.kind);
-                      if (leftNamespace != rightNamespace) return leftNamespace < rightNamespace;
-                      if (left.binding != right.binding) return left.binding < right.binding;
+                      if (leftNamespace != rightNamespace)
+                          return leftNamespace < rightNamespace;
+                      if (left.binding != right.binding)
+                          return left.binding < right.binding;
                       return left.kind < right.kind;
                   });
-        std::sort(output.vertexInputs.Begin(), output.vertexInputs.End(),
-                  [](const shader::VertexInput& left, const shader::VertexInput& right)
+        std::sort(output.vertexInputs.Begin(), output.vertexInputs.End(), [](const shader::VertexInput& left, const shader::VertexInput& right)
                   { return left.location != right.location ? left.location < right.location : left.semanticIndex < right.semanticIndex; });
-        std::sort(output.fragmentOutputs.Begin(), output.fragmentOutputs.End(),
-                  [](const shader::FragmentOutput& left, const shader::FragmentOutput& right)
+        std::sort(output.fragmentOutputs.Begin(), output.fragmentOutputs.End(), [](const shader::FragmentOutput& left, const shader::FragmentOutput& right)
                   { return left.location != right.location ? left.location < right.location : left.blendSource < right.blendSource; });
         std::sort(output.specializationConstants.Begin(), output.specializationConstants.End(),
-                  [](const shader::SpecializationConstant& left, const shader::SpecializationConstant& right)
-                  { return left.id < right.id; });
+                  [](const shader::SpecializationConstant& left, const shader::SpecializationConstant& right) { return left.id < right.id; });
 
         containers::DynamicArray<u32> bufferOrder{memory::pools::Rendering::GetInstance()};
         bufferOrder.Reserve(description.constantBuffers.Size());
@@ -274,8 +281,7 @@ namespace
         for (const u32 sourceIndex : bufferOrder)
         {
             shader::ConstantBuffer buffer = description.constantBuffers[sourceIndex];
-            if (buffer.firstMember > description.constantMembers.Size() ||
-                buffer.memberCount > description.constantMembers.Size() - buffer.firstMember)
+            if (buffer.firstMember > description.constantMembers.Size() || buffer.memberCount > description.constantMembers.Size() - buffer.firstMember)
             {
                 return shader::Result::InvalidLayout;
             }
@@ -311,12 +317,10 @@ namespace
             const shader::DescriptorBinding& binding = output.bindings[index];
             const u16 flags = static_cast<u16>(binding.flags);
             const bool bindless = shader::HasFlag(binding.flags, shader::BindingFlags::Bindless);
-            if (binding.name == 0 || binding.arrayCount == 0 || !IsValidBindingKind(binding.kind) || !IsValidAccess(binding.access) ||
-                binding.stages == 0 || (binding.stages & ~description.pipelineInterface.stages) != 0 ||
-                (flags & ~static_cast<u16>(shader::BindingFlags::Bindless)) != 0 ||
+            if (binding.name == 0 || binding.arrayCount == 0 || !IsValidBindingKind(binding.kind) || !IsValidAccess(binding.access) || binding.stages == 0 ||
+                (binding.stages & ~description.pipelineInterface.stages) != 0 || (flags & ~static_cast<u16>(shader::BindingFlags::Bindless)) != 0 ||
                 bindless != (binding.arrayCount == shader::UnboundedDescriptorCount) ||
-                (!bindless && (binding.arrayCount > 0xffffu ||
-                               static_cast<u64>(binding.binding) + binding.arrayCount > 0x100000000ull)))
+                (!bindless && (binding.arrayCount > 0xffffu || static_cast<u64>(binding.binding) + binding.arrayCount > 0x100000000ull)))
             {
                 return shader::Result::InvalidLayout;
             }
@@ -325,16 +329,13 @@ namespace
                 const shader::DescriptorBinding& previous = output.bindings[previousIndex];
                 if (previous.space == binding.space && bindingNamespace(previous.kind) == bindingNamespace(binding.kind))
                 {
-                    const u64 previousEnd = previous.arrayCount == shader::UnboundedDescriptorCount
-                                                ? 0x100000000ull
-                                                : static_cast<u64>(previous.binding) + previous.arrayCount;
-                    const u64 bindingEnd = binding.arrayCount == shader::UnboundedDescriptorCount
-                                               ? 0x100000000ull
-                                               : static_cast<u64>(binding.binding) + binding.arrayCount;
+                    const u64 previousEnd =
+                        previous.arrayCount == shader::UnboundedDescriptorCount ? 0x100000000ull : static_cast<u64>(previous.binding) + previous.arrayCount;
+                    const u64 bindingEnd =
+                        binding.arrayCount == shader::UnboundedDescriptorCount ? 0x100000000ull : static_cast<u64>(binding.binding) + binding.arrayCount;
                     if (static_cast<u64>(binding.binding) < previousEnd && static_cast<u64>(previous.binding) < bindingEnd)
-                        return previous.binding == binding.binding && previous.kind == binding.kind
-                                   ? shader::Result::DuplicateBinding
-                                   : shader::Result::OverlappingBinding;
+                        return previous.binding == binding.binding && previous.kind == binding.kind ? shader::Result::DuplicateBinding
+                                                                                                    : shader::Result::OverlappingBinding;
                 }
             }
         }
@@ -358,9 +359,9 @@ namespace
             for (u32 memberIndex = 0; memberIndex < buffer.memberCount; ++memberIndex)
             {
                 const shader::ConstantMember& member = output.constantMembers[buffer.firstMember + memberIndex];
-                if (member.name == 0 || member.byteSize == 0 || !IsValidScalarType(member.scalarType) || member.rows == 0 ||
-                    member.rows > 4 || member.columns == 0 || member.columns > 4 || member.byteOffset < previousEnd ||
-                    member.byteOffset > buffer.byteSize || member.byteSize > buffer.byteSize - member.byteOffset)
+                if (member.name == 0 || member.byteSize == 0 || !IsValidScalarType(member.scalarType) || member.rows == 0 || member.rows > 4 ||
+                    member.columns == 0 || member.columns > 4 || member.byteOffset < previousEnd || member.byteOffset > buffer.byteSize ||
+                    member.byteSize > buffer.byteSize - member.byteOffset)
                 {
                     return shader::Result::InvalidLayout;
                 }
@@ -385,8 +386,8 @@ namespace
         for (u32 index = 0; index < output.fragmentOutputs.Size(); ++index)
         {
             const shader::FragmentOutput& fragment = output.fragmentOutputs[index];
-            if (fragment.semantic == 0 || fragment.location >= 8 || fragment.blendSource > 1 ||
-                !IsValidNumericClass(fragment.numericClass) || fragment.componentMask == 0 || (fragment.componentMask & ~0x0fu) != 0)
+            if (fragment.semantic == 0 || fragment.location >= 8 || fragment.blendSource > 1 || !IsValidNumericClass(fragment.numericClass) ||
+                fragment.componentMask == 0 || (fragment.componentMask & ~0x0fu) != 0)
             {
                 return shader::Result::InvalidLayout;
             }
@@ -401,8 +402,7 @@ namespace
         {
             const shader::SpecializationConstant& constant = output.specializationConstants[index];
             if (constant.name == 0 || !IsValidScalarType(constant.scalarType) || constant.stages == 0 ||
-                (constant.stages & ~description.pipelineInterface.stages) != 0 ||
-                (index != 0 && output.specializationConstants[index - 1].id == constant.id))
+                (constant.stages & ~description.pipelineInterface.stages) != 0 || (index != 0 && output.specializationConstants[index - 1].id == constant.id))
             {
                 return shader::Result::InvalidLayout;
             }
@@ -422,10 +422,9 @@ namespace
 
     [[nodiscard]] bool WriteInterface(serialization::BinaryWriter& writer, const shader::PipelineInterface& value) noexcept
     {
-        return writer.WriteU32(value.stages) && writer.WriteU8(static_cast<u8>(value.primitiveClass)) && writer.WriteU8(0) &&
-               writer.WriteU16(0) && writer.WriteU32(static_cast<u32>(value.flags)) && writer.WriteU32(value.renderTargetCount) &&
-               writer.WriteU32(value.threadGroupSizeX) && writer.WriteU32(value.threadGroupSizeY) &&
-               writer.WriteU32(value.threadGroupSizeZ);
+        return writer.WriteU32(value.stages) && writer.WriteU8(static_cast<u8>(value.primitiveClass)) && writer.WriteU8(0) && writer.WriteU16(0) &&
+               writer.WriteU32(static_cast<u32>(value.flags)) && writer.WriteU32(value.renderTargetCount) && writer.WriteU32(value.threadGroupSizeX) &&
+               writer.WriteU32(value.threadGroupSizeY) && writer.WriteU32(value.threadGroupSizeZ);
     }
 
     [[nodiscard]] bool ReadInterface(serialization::BinaryReader& reader, shader::PipelineInterface& value) noexcept
@@ -447,9 +446,9 @@ namespace
 
     [[nodiscard]] bool WriteBinding(serialization::BinaryWriter& writer, const shader::DescriptorBinding& value) noexcept
     {
-        return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) &&
-               writer.WriteU32(value.arrayCount) && writer.WriteU8(static_cast<u8>(value.kind)) &&
-               writer.WriteU8(static_cast<u8>(value.access)) && writer.WriteU16(static_cast<u16>(value.flags)) && writer.WriteU32(value.stages);
+        return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) && writer.WriteU32(value.arrayCount) &&
+               writer.WriteU8(static_cast<u8>(value.kind)) && writer.WriteU8(static_cast<u8>(value.access)) && writer.WriteU16(static_cast<u16>(value.flags)) &&
+               writer.WriteU32(value.stages);
     }
 
     [[nodiscard]] bool ReadBinding(serialization::BinaryReader& reader, shader::DescriptorBinding& value) noexcept
@@ -457,9 +456,8 @@ namespace
         u8 kind = 0;
         u8 access = 0;
         u16 flags = 0;
-        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.space) || !reader.ReadU32(value.binding) ||
-            !reader.ReadU32(value.arrayCount) || !reader.ReadU8(kind) || !reader.ReadU8(access) || !reader.ReadU16(flags) ||
-            !reader.ReadU32(value.stages))
+        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.space) || !reader.ReadU32(value.binding) || !reader.ReadU32(value.arrayCount) ||
+            !reader.ReadU8(kind) || !reader.ReadU8(access) || !reader.ReadU16(flags) || !reader.ReadU32(value.stages))
         {
             return false;
         }
@@ -471,30 +469,29 @@ namespace
 
     [[nodiscard]] bool WriteConstantBuffer(serialization::BinaryWriter& writer, const shader::ConstantBuffer& value) noexcept
     {
-        return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) &&
-               writer.WriteU32(value.byteSize) && writer.WriteU32(value.firstMember) && writer.WriteU32(value.memberCount);
+        return writer.WriteU64(value.name) && writer.WriteU32(value.space) && writer.WriteU32(value.binding) && writer.WriteU32(value.byteSize) &&
+               writer.WriteU32(value.firstMember) && writer.WriteU32(value.memberCount);
     }
 
     [[nodiscard]] bool ReadConstantBuffer(serialization::BinaryReader& reader, shader::ConstantBuffer& value) noexcept
     {
-        return reader.ReadU64(value.name) && reader.ReadU32(value.space) && reader.ReadU32(value.binding) &&
-               reader.ReadU32(value.byteSize) && reader.ReadU32(value.firstMember) && reader.ReadU32(value.memberCount);
+        return reader.ReadU64(value.name) && reader.ReadU32(value.space) && reader.ReadU32(value.binding) && reader.ReadU32(value.byteSize) &&
+               reader.ReadU32(value.firstMember) && reader.ReadU32(value.memberCount);
     }
 
     [[nodiscard]] bool WriteConstantMember(serialization::BinaryWriter& writer, const shader::ConstantMember& value) noexcept
     {
-        return writer.WriteU64(value.name) && writer.WriteU32(value.byteOffset) && writer.WriteU32(value.byteSize) &&
-               writer.WriteU32(value.arrayStride) && writer.WriteU32(value.matrixStride) &&
-               writer.WriteU8(static_cast<u8>(value.scalarType)) && writer.WriteU8(value.rows) && writer.WriteU8(value.columns) &&
-               writer.WriteBool(value.rowMajor);
+        return writer.WriteU64(value.name) && writer.WriteU32(value.byteOffset) && writer.WriteU32(value.byteSize) && writer.WriteU32(value.arrayStride) &&
+               writer.WriteU32(value.matrixStride) && writer.WriteU8(static_cast<u8>(value.scalarType)) && writer.WriteU8(value.rows) &&
+               writer.WriteU8(value.columns) && writer.WriteBool(value.rowMajor);
     }
 
     [[nodiscard]] bool ReadConstantMember(serialization::BinaryReader& reader, shader::ConstantMember& value) noexcept
     {
         u8 scalarType = 0;
-        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.byteOffset) || !reader.ReadU32(value.byteSize) ||
-            !reader.ReadU32(value.arrayStride) || !reader.ReadU32(value.matrixStride) || !reader.ReadU8(scalarType) ||
-            !reader.ReadU8(value.rows) || !reader.ReadU8(value.columns) || !reader.ReadBool(value.rowMajor))
+        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.byteOffset) || !reader.ReadU32(value.byteSize) || !reader.ReadU32(value.arrayStride) ||
+            !reader.ReadU32(value.matrixStride) || !reader.ReadU8(scalarType) || !reader.ReadU8(value.rows) || !reader.ReadU8(value.columns) ||
+            !reader.ReadBool(value.rowMajor))
         {
             return false;
         }
@@ -505,17 +502,16 @@ namespace
     [[nodiscard]] bool WriteVertexInput(serialization::BinaryWriter& writer, const shader::VertexInput& value) noexcept
     {
         return writer.WriteU64(value.semantic) && writer.WriteU32(value.semanticIndex) && writer.WriteU32(value.location) &&
-               writer.WriteU8(static_cast<u8>(value.numericClass)) && writer.WriteU8(value.componentCount) &&
-               writer.WriteU8(value.componentBits) && writer.WriteU8(0);
+               writer.WriteU8(static_cast<u8>(value.numericClass)) && writer.WriteU8(value.componentCount) && writer.WriteU8(value.componentBits) &&
+               writer.WriteU8(0);
     }
 
     [[nodiscard]] bool ReadVertexInput(serialization::BinaryReader& reader, shader::VertexInput& value) noexcept
     {
         u8 numericClass = 0;
         u8 reserved = 0;
-        if (!reader.ReadU64(value.semantic) || !reader.ReadU32(value.semanticIndex) || !reader.ReadU32(value.location) ||
-            !reader.ReadU8(numericClass) || !reader.ReadU8(value.componentCount) || !reader.ReadU8(value.componentBits) ||
-            !reader.ReadU8(reserved) || reserved != 0)
+        if (!reader.ReadU64(value.semantic) || !reader.ReadU32(value.semanticIndex) || !reader.ReadU32(value.location) || !reader.ReadU8(numericClass) ||
+            !reader.ReadU8(value.componentCount) || !reader.ReadU8(value.componentBits) || !reader.ReadU8(reserved) || reserved != 0)
         {
             return false;
         }
@@ -533,8 +529,8 @@ namespace
     {
         u8 numericClass = 0;
         u16 reserved = 0;
-        if (!reader.ReadU64(value.semantic) || !reader.ReadU32(value.location) || !reader.ReadU32(value.blendSource) ||
-            !reader.ReadU8(numericClass) || !reader.ReadU8(value.componentMask) || !reader.ReadU16(reserved) || reserved != 0)
+        if (!reader.ReadU64(value.semantic) || !reader.ReadU32(value.location) || !reader.ReadU32(value.blendSource) || !reader.ReadU8(numericClass) ||
+            !reader.ReadU8(value.componentMask) || !reader.ReadU16(reserved) || reserved != 0)
         {
             return false;
         }
@@ -542,11 +538,10 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool WriteSpecializationConstant(serialization::BinaryWriter& writer,
-                                                   const shader::SpecializationConstant& value) noexcept
+    [[nodiscard]] bool WriteSpecializationConstant(serialization::BinaryWriter& writer, const shader::SpecializationConstant& value) noexcept
     {
-        return writer.WriteU64(value.name) && writer.WriteU32(value.id) && writer.WriteU8(static_cast<u8>(value.scalarType)) &&
-               writer.WriteU8(0) && writer.WriteU16(0) && writer.WriteU64(value.defaultValueBits) && writer.WriteU32(value.stages);
+        return writer.WriteU64(value.name) && writer.WriteU32(value.id) && writer.WriteU8(static_cast<u8>(value.scalarType)) && writer.WriteU8(0) &&
+               writer.WriteU16(0) && writer.WriteU64(value.defaultValueBits) && writer.WriteU32(value.stages);
     }
 
     [[nodiscard]] bool ReadSpecializationConstant(serialization::BinaryReader& reader, shader::SpecializationConstant& value) noexcept
@@ -555,8 +550,7 @@ namespace
         u8 reserved8 = 0;
         u16 reserved16 = 0;
         if (!reader.ReadU64(value.name) || !reader.ReadU32(value.id) || !reader.ReadU8(scalarType) || !reader.ReadU8(reserved8) ||
-            !reader.ReadU16(reserved16) || !reader.ReadU64(value.defaultValueBits) || !reader.ReadU32(value.stages) || reserved8 != 0 ||
-            reserved16 != 0)
+            !reader.ReadU16(reserved16) || !reader.ReadU64(value.defaultValueBits) || !reader.ReadU32(value.stages) || reserved8 != 0 || reserved16 != 0)
         {
             return false;
         }
@@ -567,9 +561,8 @@ namespace
     [[nodiscard]] shader::Result WriteLayoutBytes(serialization::BinaryWriter& writer, const shader::BuildDescription& description,
                                                   const CanonicalData& data) noexcept
     {
-        if (!WriteInterface(writer, description.pipelineInterface) || !writer.WriteU32(data.bindings.Size()) ||
-            !writer.WriteU32(data.constantBuffers.Size()) || !writer.WriteU32(data.constantMembers.Size()) ||
-            !writer.WriteU32(data.vertexInputs.Size()) || !writer.WriteU32(data.fragmentOutputs.Size()) ||
+        if (!WriteInterface(writer, description.pipelineInterface) || !writer.WriteU32(data.bindings.Size()) || !writer.WriteU32(data.constantBuffers.Size()) ||
+            !writer.WriteU32(data.constantMembers.Size()) || !writer.WriteU32(data.vertexInputs.Size()) || !writer.WriteU32(data.fragmentOutputs.Size()) ||
             !writer.WriteU32(data.specializationConstants.Size()))
         {
             return WriterResult(writer);
@@ -643,8 +636,8 @@ namespace
         ByteArray bytes{memory::pools::Serialization::GetInstance()};
         filesystem::MemoryFileWriter file(bytes);
         serialization::BinaryWriter writer(file);
-        if (!writer.WriteU32(data.bindings.Size()) || !writer.WriteU32(data.constantBuffers.Size()) ||
-            !writer.WriteU32(data.constantMembers.Size()) || !writer.WriteU32(data.specializationConstants.Size()))
+        if (!writer.WriteU32(data.bindings.Size()) || !writer.WriteU32(data.constantBuffers.Size()) || !writer.WriteU32(data.constantMembers.Size()) ||
+            !writer.WriteU32(data.specializationConstants.Size()))
         {
             return WriterResult(writer);
         }
@@ -709,19 +702,17 @@ namespace
         return shader::Result::Success;
     }
 
-    [[nodiscard]] shader::Result WriteMetadata(ByteArray& metadata, ByteArray& bytecode, const shader::BuildDescription& description,
-                                               const CanonicalData& data, const crypto::Digest256& layoutFingerprint,
-                                               const crypto::Digest256& bindingLayoutFingerprint,
+    [[nodiscard]] shader::Result WriteMetadata(ByteArray& metadata, ByteArray& bytecode, const shader::BuildDescription& description, const CanonicalData& data,
+                                               const crypto::Digest256& layoutFingerprint, const crypto::Digest256& bindingLayoutFingerprint,
                                                const crypto::Digest256& pipelineInterfaceFingerprint) noexcept
     {
         metadata.Clear();
         bytecode.Clear();
         filesystem::MemoryFileWriter metadataFile(metadata);
         serialization::BinaryWriter writer(metadataFile);
-        if (!writer.WriteU32(MetadataWireVersion) || !writer.WriteU8(static_cast<u8>(description.kind)) || !writer.WriteU8(0) ||
-            !writer.WriteU16(0) || !writer.WriteU64(description.program) || !WriteDigest(writer, description.permutation) ||
-            !WriteDigest(writer, description.compilerFingerprint) || !WriteDigest(writer, layoutFingerprint) ||
-            !WriteDigest(writer, bindingLayoutFingerprint) || !WriteDigest(writer, pipelineInterfaceFingerprint) ||
+        if (!writer.WriteU32(MetadataWireVersion) || !writer.WriteU8(static_cast<u8>(description.kind)) || !writer.WriteU8(0) || !writer.WriteU16(0) ||
+            !writer.WriteU64(description.program) || !WriteDigest(writer, description.permutation) || !WriteDigest(writer, description.compilerFingerprint) ||
+            !WriteDigest(writer, layoutFingerprint) || !WriteDigest(writer, bindingLayoutFingerprint) || !WriteDigest(writer, pipelineInterfaceFingerprint) ||
             !writer.WriteU32(data.stages.Size()))
         {
             return WriterResult(writer);
@@ -733,8 +724,7 @@ namespace
             const crypto::Digest256 digest = crypto::Sha256(stage.bytecode, stage.bytecodeSize);
             if (!writer.WriteU8(static_cast<u8>(stage.stage)) || !writer.WriteU8(static_cast<u8>(stage.format)) || !writer.WriteU16(0) ||
                 !writer.WriteU64(stage.entryPoint) || !WriteName(writer, stage.entryPointName) || !writer.WriteU64(bytecodeOffset) ||
-                !writer.WriteU64(stage.bytecodeSize) ||
-                !WriteDigest(writer, digest))
+                !writer.WriteU64(stage.bytecodeSize) || !WriteDigest(writer, digest))
             {
                 return WriterResult(writer);
             }
@@ -802,16 +792,16 @@ namespace
             }
         }
         header.fileSize = writer.Position();
-        if (!writer.Seek(0) || serialization::WriteDocumentHeader(writer, header) != serialization::Result::Success ||
-            !writer.Seek(header.fileSize) || !writer.Flush())
+        if (!writer.Seek(0) || serialization::WriteDocumentHeader(writer, header) != serialization::Result::Success || !writer.Seek(header.fileSize) ||
+            !writer.Flush())
         {
             return WriterResult(writer);
         }
         return shader::Result::Success;
     }
 
-    [[nodiscard]] const serialization::SectionDescriptor* FindSection(
-        const containers::ArraySpan<const serialization::SectionDescriptor> sections, const u32 id) noexcept
+    [[nodiscard]] const serialization::SectionDescriptor* FindSection(const containers::ArraySpan<const serialization::SectionDescriptor> sections,
+                                                                      const u32 id) noexcept
     {
         for (const serialization::SectionDescriptor& section : sections)
         {
@@ -823,8 +813,7 @@ namespace
         return nullptr;
     }
 
-    template <typename Type>
-    [[nodiscard]] bool ResizeChecked(containers::DynamicArray<Type>& array, const u32 count, const u32 limit) noexcept
+    template <typename Type> [[nodiscard]] bool ResizeChecked(containers::DynamicArray<Type>& array, const u32 count, const u32 limit) noexcept
     {
         if (count > limit)
         {
@@ -855,8 +844,7 @@ namespace
                 const shader::VertexInput& right = provided[providedIndex];
                 if (left.location == right.location)
                 {
-                    found = left.numericClass == right.numericClass && left.componentCount == right.componentCount &&
-                            left.componentBits == right.componentBits;
+                    found = left.numericClass == right.numericClass && left.componentCount == right.componentCount && left.componentBits == right.componentBits;
                     break;
                 }
             }
@@ -927,8 +915,7 @@ namespace vanguard::shaders
         serialization::ReadLimits documentLimits;
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 2;
-        const serialization::Result headerResult =
-            serialization::ReadDocumentHeader(reader, ShaderMagic, {1, 1, 1}, documentLimits, header);
+        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, ShaderMagic, {1, 1, 1}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
         {
             return ConvertSerializationResult(headerResult);
@@ -959,12 +946,12 @@ namespace vanguard::shaders
         metadata.Resize(static_cast<u32>(metadataSection->storedSize));
         m_bytecode.Resize(static_cast<u32>(bytecodeSection->storedSize));
         if (!reader.Seek(metadataSection->offset) || !reader.ReadBytes(metadata.Data(), metadata.Size()) ||
-            serialization::Crc64(metadata.Data(), metadata.Size()) != metadataSection->storedCrc64 ||
-            !reader.Seek(bytecodeSection->offset) || !reader.ReadBytes(m_bytecode.Data(), m_bytecode.Size()) ||
+            serialization::Crc64(metadata.Data(), metadata.Size()) != metadataSection->storedCrc64 || !reader.Seek(bytecodeSection->offset) ||
+            !reader.ReadBytes(m_bytecode.Data(), m_bytecode.Size()) ||
             serialization::Crc64(m_bytecode.Data(), m_bytecode.Size()) != bytecodeSection->storedCrc64)
         {
             Close();
-            return reader.Good() ? Result::IntegrityFailure : ReaderResult(reader);
+            return reader.IsGood() ? Result::IntegrityFailure : ReaderResult(reader);
         }
 
         filesystem::MemoryFileReader metadataFile(metadata, 0);
@@ -983,8 +970,8 @@ namespace vanguard::shaders
             Close();
             return ReaderResult(metadataReader);
         }
-        if (metadataVersion != MetadataWireVersion || kind > static_cast<u8>(ProgramKind::Library) || reserved8 != 0 || reserved16 != 0 ||
-            m_program == 0 || !ResizeChecked(m_stages, stageCount, limits.maximumStages))
+        if (metadataVersion != MetadataWireVersion || kind > static_cast<u8>(ProgramKind::Library) || reserved8 != 0 || reserved16 != 0 || m_program == 0 ||
+            !ResizeChecked(m_stages, stageCount, limits.maximumStages))
         {
             Close();
             return metadataVersion != MetadataWireVersion ? Result::UnsupportedVersion : Result::InvalidLayout;
@@ -999,8 +986,7 @@ namespace vanguard::shaders
             u8 format = 0;
             u16 reserved = 0;
             if (!metadataReader.ReadU8(stageValue) || !metadataReader.ReadU8(format) || !metadataReader.ReadU16(reserved) ||
-                !metadataReader.ReadU64(stage.entryPoint) || !ReadName(metadataReader, stage.entryPointName) ||
-                !metadataReader.ReadU64(stage.bytecodeOffset) ||
+                !metadataReader.ReadU64(stage.entryPoint) || !ReadName(metadataReader, stage.entryPointName) || !metadataReader.ReadU64(stage.bytecodeOffset) ||
                 !metadataReader.ReadU64(stage.bytecodeSize) || !ReadDigest(metadataReader, stage.bytecodeDigest))
             {
                 Close();
@@ -1009,15 +995,14 @@ namespace vanguard::shaders
             stage.stage = static_cast<ShaderStage>(stageValue);
             stage.format = static_cast<NativeFormat>(format);
             const StageMask bit = StageBit(stage.stage);
-            if (reserved != 0 || !IsValidStage(stage.stage) || !IsValidFormat(stage.format) || stage.entryPoint == 0 ||
-                stage.bytecodeSize == 0 || stage.bytecodeOffset != expectedOffset || stage.bytecodeOffset > m_bytecode.Size() ||
+            if (reserved != 0 || !IsValidStage(stage.stage) || !IsValidFormat(stage.format) || stage.entryPoint == 0 || stage.bytecodeSize == 0 ||
+                stage.bytecodeOffset != expectedOffset || stage.bytecodeOffset > m_bytecode.Size() ||
                 stage.bytecodeSize > m_bytecode.Size() - stage.bytecodeOffset || (actualStages & bit) != 0)
             {
                 Close();
                 return Result::InvalidLayout;
             }
-            const crypto::Digest256 actualDigest =
-                crypto::Sha256(m_bytecode.TypedData() + stage.bytecodeOffset, static_cast<usize>(stage.bytecodeSize));
+            const crypto::Digest256 actualDigest = crypto::Sha256(m_bytecode.TypedData() + stage.bytecodeOffset, static_cast<usize>(stage.bytecodeSize));
             if (!DigestsEqual(actualDigest, stage.bytecodeDigest))
             {
                 Close();
@@ -1029,7 +1014,7 @@ namespace vanguard::shaders
         if (expectedOffset != m_bytecode.Size() || !ReadInterface(metadataReader, m_interface))
         {
             Close();
-            return metadataReader.Good() ? Result::InvalidLayout : ReaderResult(metadataReader);
+            return metadataReader.IsGood() ? Result::InvalidLayout : ReaderResult(metadataReader);
         }
 
         u32 counts[6]{};
@@ -1041,8 +1026,7 @@ namespace vanguard::shaders
                 return ReaderResult(metadataReader);
             }
         }
-        if (!ResizeChecked(m_bindings, counts[0], limits.maximumBindings) ||
-            !ResizeChecked(m_constantBuffers, counts[1], limits.maximumConstantBuffers) ||
+        if (!ResizeChecked(m_bindings, counts[0], limits.maximumBindings) || !ResizeChecked(m_constantBuffers, counts[1], limits.maximumConstantBuffers) ||
             !ResizeChecked(m_constantMembers, counts[2], limits.maximumConstantMembers) ||
             !ResizeChecked(m_vertexInputs, counts[3], limits.maximumVertexInputs) ||
             !ResizeChecked(m_fragmentOutputs, counts[4], limits.maximumFragmentOutputs) ||
@@ -1140,8 +1124,7 @@ namespace vanguard::shaders
         {
             result = BuildPipelineInterfaceFingerprint(validation, canonical, actualPipelineInterface);
         }
-        if (result != Result::Success || !DigestsEqual(actualLayout, m_layoutFingerprint) ||
-            !DigestsEqual(actualBindingLayout, m_bindingLayoutFingerprint) ||
+        if (result != Result::Success || !DigestsEqual(actualLayout, m_layoutFingerprint) || !DigestsEqual(actualBindingLayout, m_bindingLayoutFingerprint) ||
             !DigestsEqual(actualPipelineInterface, m_pipelineInterfaceFingerprint))
         {
             Close();
@@ -1176,15 +1159,15 @@ namespace vanguard::shaders
     {
         return m_open;
     }
-    ProgramKind ShaderFile::Kind() const noexcept
+    ProgramKind ShaderFile::GetKind() const noexcept
     {
         return m_kind;
     }
-    u64 ShaderFile::Program() const noexcept
+    u64 ShaderFile::GetProgram() const noexcept
     {
         return m_program;
     }
-    const crypto::Digest256& ShaderFile::Permutation() const noexcept
+    const crypto::Digest256& ShaderFile::GetPermutation() const noexcept
     {
         return m_permutation;
     }
@@ -1192,7 +1175,7 @@ namespace vanguard::shaders
     {
         return m_compilerFingerprint;
     }
-    const crypto::Digest256& ShaderFile::LayoutFingerprint() const noexcept
+    const crypto::Digest256& ShaderFile::GetLayoutFingerprint() const noexcept
     {
         return m_layoutFingerprint;
     }
@@ -1200,15 +1183,15 @@ namespace vanguard::shaders
     {
         return m_bindingLayoutFingerprint;
     }
-    const crypto::Digest256& ShaderFile::PipelineInterfaceFingerprint() const noexcept
+    const crypto::Digest256& ShaderFile::GetPipelineInterfaceFingerprint() const noexcept
     {
         return m_pipelineInterfaceFingerprint;
     }
-    const PipelineInterface& ShaderFile::Interface() const noexcept
+    const PipelineInterface& ShaderFile::GetInterface() const noexcept
     {
         return m_interface;
     }
-    containers::ArraySpan<const StageRecord> ShaderFile::Stages() const noexcept
+    containers::ArraySpan<const StageRecord> ShaderFile::GetStages() const noexcept
     {
         return m_stages;
     }
@@ -1216,28 +1199,28 @@ namespace vanguard::shaders
     {
         return m_bindings;
     }
-    containers::ArraySpan<const ConstantBuffer> ShaderFile::ConstantBuffers() const noexcept
+    containers::ArraySpan<const ConstantBuffer> ShaderFile::GetConstantBuffers() const noexcept
     {
         return m_constantBuffers;
     }
-    containers::ArraySpan<const ConstantMember> ShaderFile::ConstantMembers() const noexcept
+    containers::ArraySpan<const ConstantMember> ShaderFile::GetConstantMembers() const noexcept
     {
         return m_constantMembers;
     }
-    containers::ArraySpan<const VertexInput> ShaderFile::VertexInputs() const noexcept
+    containers::ArraySpan<const VertexInput> ShaderFile::GetVertexInputs() const noexcept
     {
         return m_vertexInputs;
     }
-    containers::ArraySpan<const FragmentOutput> ShaderFile::FragmentOutputs() const noexcept
+    containers::ArraySpan<const FragmentOutput> ShaderFile::GetFragmentOutputs() const noexcept
     {
         return m_fragmentOutputs;
     }
-    containers::ArraySpan<const SpecializationConstant> ShaderFile::SpecializationConstants() const noexcept
+    containers::ArraySpan<const SpecializationConstant> ShaderFile::GetSpecializationConstants() const noexcept
     {
         return m_specializationConstants;
     }
 
-    containers::ArraySpan<const u8> ShaderFile::Bytecode(const StageRecord& stage) const noexcept
+    containers::ArraySpan<const u8> ShaderFile::GetBytecode(const StageRecord& stage) const noexcept
     {
         if (!m_open || stage.bytecodeOffset > m_bytecode.Size() || stage.bytecodeSize > m_bytecode.Size() - stage.bytecodeOffset ||
             stage.bytecodeSize > ~u32{0})
@@ -1275,8 +1258,7 @@ namespace vanguard::shaders
         }
         ByteArray metadata{memory::pools::Serialization::GetInstance()};
         ByteArray bytecode{memory::pools::Rendering::GetInstance()};
-        result = WriteMetadata(metadata, bytecode, description, canonical, layoutFingerprint, bindingLayoutFingerprint,
-                               pipelineInterfaceFingerprint);
+        result = WriteMetadata(metadata, bytecode, description, canonical, layoutFingerprint, bindingLayoutFingerprint, pipelineInterfaceFingerprint);
         return result == Result::Success ? WriteDocument(writer, metadata, bytecode) : result;
     }
 
@@ -1307,19 +1289,19 @@ namespace vanguard::shaders
         {
             return Result::InvalidArgument;
         }
-        const PipelineInterface& interfaceData = shader.Interface();
-        switch (shader.Kind())
+        const PipelineInterface& interfaceData = shader.GetInterface();
+        switch (shader.GetKind())
         {
         case ProgramKind::Graphics:
             if (pipeline.kind != PipelineKind::Graphics || pipeline.renderTargetCount != interfaceData.renderTargetCount ||
                 (interfaceData.primitiveClass != PrimitiveClass::Any && interfaceData.primitiveClass != pipeline.primitiveClass) ||
                 HasFlag(interfaceData.flags, InterfaceFlags::WritesDepth) && !pipeline.depthStencilFormatPresent ||
                 HasFlag(interfaceData.flags, InterfaceFlags::DualSourceBlending) != pipeline.dualSourceBlendEnabled ||
-                !VertexInputsCompatible(shader.VertexInputs(), pipeline.vertexLayout))
+                !VertexInputsCompatible(shader.GetVertexInputs(), pipeline.vertexLayout))
             {
                 return Result::IncompatiblePipeline;
             }
-            for (const FragmentOutput& output : shader.FragmentOutputs())
+            for (const FragmentOutput& output : shader.GetFragmentOutputs())
             {
                 if (output.location >= pipeline.renderTargetCount || pipeline.renderTargetClasses[output.location] != output.numericClass)
                 {
@@ -1340,13 +1322,11 @@ namespace vanguard::shaders
             }
             break;
         }
-        if (!pipeline.bindingLayoutFingerprint.IsEmpty() &&
-            !DigestsEqual(pipeline.bindingLayoutFingerprint, shader.BindingLayoutFingerprint()))
+        if (!pipeline.bindingLayoutFingerprint.IsEmpty() && !DigestsEqual(pipeline.bindingLayoutFingerprint, shader.BindingLayoutFingerprint()))
         {
             return Result::IncompatiblePipeline;
         }
-        if (!pipeline.pipelineInterfaceFingerprint.IsEmpty() &&
-            !DigestsEqual(pipeline.pipelineInterfaceFingerprint, shader.PipelineInterfaceFingerprint()))
+        if (!pipeline.pipelineInterfaceFingerprint.IsEmpty() && !DigestsEqual(pipeline.pipelineInterfaceFingerprint, shader.GetPipelineInterfaceFingerprint()))
         {
             return Result::IncompatiblePipeline;
         }

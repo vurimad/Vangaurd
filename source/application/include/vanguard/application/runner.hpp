@@ -17,12 +17,18 @@ namespace vanguard::application
         bool succeeded = true;
         const char* message = nullptr;
 
-        [[nodiscard]] static constexpr CompositionStatus Success() noexcept { return {}; }
+        [[nodiscard]] static constexpr CompositionStatus Success() noexcept
+        {
+            return {};
+        }
         [[nodiscard]] static constexpr CompositionStatus Failure(const char* const message) noexcept
         {
             return {false, message};
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return succeeded; }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return succeeded;
+        }
     };
 
     class IApplicationComposition
@@ -33,8 +39,7 @@ namespace vanguard::application
         IApplicationComposition(const IApplicationComposition&) = delete;
         IApplicationComposition& operator=(const IApplicationComposition&) = delete;
 
-        [[nodiscard]] virtual CompositionStatus Compose(const ApplicationStartupContext& startup,
-                                                        EngineHost& services,
+        [[nodiscard]] virtual CompositionStatus Compose(const ApplicationStartupContext& startup, EngineHost& services,
                                                         ApplicationStateMachine& states) noexcept = 0;
 
     protected:
@@ -75,13 +80,15 @@ namespace vanguard::application
         HostFailure hostFailure;
         StateMachineFailure stateFailure;
 
-        [[nodiscard]] explicit operator bool() const noexcept { return failure == RunnerFailureCode::None; }
+        [[nodiscard]] explicit operator bool() const noexcept
+        {
+            return failure == RunnerFailureCode::None;
+        }
     };
 
     class ApplicationRunner final
     {
     public:
-        [[nodiscard]] RunnerResult Run(IPlatformHost& platform, IApplicationComposition& composition,
-                                       const RunnerSettings& settings) noexcept;
+        [[nodiscard]] RunnerResult Run(IPlatformHost& platform, IApplicationComposition& composition, const RunnerSettings& settings) noexcept;
     };
 } // namespace vanguard::application

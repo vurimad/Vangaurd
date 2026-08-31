@@ -56,8 +56,15 @@ namespace
     [[nodiscard]] bool Compile(const assets::CompileContext& context, assets::ArtifactWriter& writer, void*) noexcept
     {
         const u8 bytes[] = {context.request.source.content[0], static_cast<u8>(context.dependencies.Count())};
-        return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, bytes,
-                          sizeof(bytes)) == assets::Result::Success;
+        return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, bytes, sizeof(bytes)) ==
+               assets::Result::Success;
+    }
+
+    [[nodiscard]] bool Estimate(const assets::BuildRequest&, const containers::ArraySpan<const assets::BuildDependency>,
+                                assets::BuildResourceEstimate& estimate, void*) noexcept
+    {
+        estimate = {1, 2};
+        return true;
     }
 
     [[nodiscard]] assets::BuildRequest Request(const resources::ResourceReference source, const resources::ResourceReference output,
@@ -67,8 +74,7 @@ namespace
     }
 
     [[nodiscard]] bool BuildAndPublish(assets::BuildSystem& system, assets::DependencyIndex& index, const assets::BuildRequest& request,
-                                       const resources::ResourceReference dependency = {},
-                                       const assets::BuildFingerprint& dependencyContent = {}) noexcept
+                                       const resources::ResourceReference dependency = {}, const assets::BuildFingerprint& dependencyContent = {}) noexcept
     {
         assets::BuildPlan plan;
         if (system.Prepare(request, plan) != assets::Result::Success)
@@ -80,8 +86,7 @@ namespace
             return false;
         }
         assets::BuildOutput output;
-        return system.Execute(request, plan, output) == assets::Result::Success &&
-               index.Publish(request, plan, output) == assets::IndexResult::Success;
+        return system.Execute(request, plan, output) == assets::Result::Success && index.Publish(request, plan, output) == assets::IndexResult::Success;
     }
 
     void DeleteIndexFiles(filesystem::Manager& manager, const filesystem::AbsolutePath& root) noexcept
@@ -135,7 +140,7 @@ int main()
     assets::BuildSystem buildSystem;
     Check(buildSystem.Initialize(), "build-system initialization");
     assets::CompilerDescriptor compiler{
-        assets::HashCompilerName("assets.index_test"), "assets.index_test", 1, SourceType, OutputType, &Discover, &Compile, &fixture};
+        assets::HashCompilerName("assets.index_test"), "assets.index_test", 1, SourceType, OutputType, &Discover, &Compile, &fixture, &Estimate};
     Check(buildSystem.RegisterCompiler(compiler) == assets::Result::Success, "compiler registration");
 
     assets::DependencyIndexConfig indexConfig;
@@ -181,8 +186,7 @@ int main()
     Check(buildSystem.RegisterCompiler(compiler) == assets::Result::Success, "register new compiler version");
     assets::BuildPlan changedCompilerPlan;
     Check(buildSystem.Prepare(leftRequest, changedCompilerPlan) == assets::Result::Success &&
-              changedCompilerPlan.SetGeneratedDependencyContent(fixture.sharedOutput, sharedRecord.contentFingerprint) ==
-                  assets::Result::Success &&
+              changedCompilerPlan.SetGeneratedDependencyContent(fixture.sharedOutput, sharedRecord.contentFingerprint) == assets::Result::Success &&
               index.Evaluate(leftRequest, changedCompilerPlan) == assets::DirtyReason::CompilerChanged,
           "compiler version change is classified");
 

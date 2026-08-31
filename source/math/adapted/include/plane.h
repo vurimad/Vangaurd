@@ -48,10 +48,8 @@ namespace vanguard::math
         }
 
         RED_INLINE Vector4 Project(const Vector4& point) const;
-        RED_INLINE Bool FrontIntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint,
-                                           Float& intersectionDistance) const;
-        RED_INLINE ESide IntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint,
-                                       Float& intersectionDistance) const;
+        RED_INLINE Bool FrontIntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint, Float& intersectionDistance) const;
+        RED_INLINE ESide IntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint, Float& intersectionDistance) const;
         RED_INLINE static Bool IntersectPlanes(const Plane& p0, const Plane& p1, Vector4& outOrigin, Vector4& outDirection);
 
         RED_INLINE Bool IsOk() const;

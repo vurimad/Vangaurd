@@ -267,16 +267,15 @@ namespace vanguard::packages
 
     class PackageReader;
 
-    [[nodiscard]] Result ReadPackageSet(filesystem::IFile& reader, PackageSet& packageSet,
-                                        const ReadLimits& packageLimits = {},
+    [[nodiscard]] Result ReadPackageSet(filesystem::IFile& reader, PackageSet& packageSet, const ReadLimits& packageLimits = {},
                                         const PackageSetReadLimits& packageSetLimits = {}) noexcept;
 
     // Opens one external DATA package named by a validated DATA000 catalog entry. Normal startup validates exact size, package/build
     // identity, index CRC, and package layout. WholeFileDigest additionally reads and authenticates every byte and is intended for
     // installation verification or paranoid modes rather than ordinary launch-time mounting.
     [[nodiscard]] Result OpenCatalogPackage(filesystem::IFile& file, const PackageSetEntry& entry, PackageReader& package,
-                                            CatalogVerification verification = CatalogVerification::IndexAndIdentity,
-                                            const ReadLimits& limits = {}, u32 hashBufferBytes = 1024u * 1024u) noexcept;
+                                            CatalogVerification verification = CatalogVerification::IndexAndIdentity, const ReadLimits& limits = {},
+                                            u32 hashBufferBytes = 1024u * 1024u) noexcept;
 
     class PackageWriter final
     {
@@ -288,17 +287,16 @@ namespace vanguard::packages
         PackageWriter& operator=(const PackageWriter&) = delete;
 
         [[nodiscard]] Result Begin(filesystem::IFile& writer, const BuildOptions& options = {}) noexcept;
-        [[nodiscard]] Result Begin(filesystem::IFile& writer, const BuildOptions& options,
-                                   const PackageSetBuild& packageSet) noexcept;
+        [[nodiscard]] Result Begin(filesystem::IFile& writer, const BuildOptions& options, const PackageSetBuild& packageSet) noexcept;
 
         [[nodiscard]] Result Add(const BuildResource& resource) noexcept;
         [[nodiscard]] Result Finalize() noexcept;
         void Reset() noexcept;
 
         [[nodiscard]] bool IsBuilding() const noexcept;
-        [[nodiscard]] u32 ResourceCount() const noexcept;
-        [[nodiscard]] u32 DeduplicatedSegmentCount() const noexcept;
-        [[nodiscard]] u64 StoredPayloadBytes() const noexcept;
+        [[nodiscard]] u32 GetResourceCount() const noexcept;
+        [[nodiscard]] u32 GetDeduplicatedSegmentCount() const noexcept;
+        [[nodiscard]] u64 GetStoredPayloadBytes() const noexcept;
 
     private:
         struct StoredPayload
@@ -333,18 +331,17 @@ namespace vanguard::packages
         PackageReader(const PackageReader&) = delete;
         PackageReader& operator=(const PackageReader&) = delete;
 
-        [[nodiscard]] Result Open(filesystem::IFile& reader, const ReadLimits& limits = {},
-                                  const PackageSetReadLimits& packageSetLimits = {}) noexcept;
+        [[nodiscard]] Result Open(filesystem::IFile& reader, const ReadLimits& limits = {}, const PackageSetReadLimits& packageSetLimits = {}) noexcept;
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] const PackageHeader& Header() const noexcept;
+        [[nodiscard]] const PackageHeader& GetHeader() const noexcept;
         [[nodiscard]] bool HasPackageSet() const noexcept;
         [[nodiscard]] const PackageSet* GetPackageSet() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const Resource> Resources() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const Segment> Segments(const Resource& resource) const noexcept;
-        [[nodiscard]] containers::ArraySpan<const Dependency> Dependencies(const Resource& resource) const noexcept;
-        [[nodiscard]] containers::StringView DebugPath(const Resource& resource) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const Resource> GetResources() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const Segment> GetSegments(const Resource& resource) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const Dependency> GetDependencies(const Resource& resource) const noexcept;
+        [[nodiscard]] containers::StringView GetDebugPath(const Resource& resource) const noexcept;
 
         [[nodiscard]] const Resource* Find(ResourceId id) const noexcept;
         [[nodiscard]] const Resource* Find(containers::StringView canonicalOrSourcePath) const noexcept;
@@ -386,14 +383,13 @@ namespace vanguard::packages
         ResourceFileReader(const ResourceFileReader&) = delete;
         ResourceFileReader& operator=(const ResourceFileReader&) = delete;
 
-        [[nodiscard]] Result Open(const PackageReader& package, const Resource& resource,
-                                  filesystem::IFile& physicalPackageFile) noexcept;
+        [[nodiscard]] Result Open(const PackageReader& package, const Resource& resource, filesystem::IFile& physicalPackageFile) noexcept;
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] Result LastResult() const noexcept;
-        [[nodiscard]] u64 StoredBytesRead() const noexcept;
-        [[nodiscard]] u32 DecodedSegmentCount() const noexcept;
+        [[nodiscard]] Result GetLastResult() const noexcept;
+        [[nodiscard]] u64 GetStoredBytesRead() const noexcept;
+        [[nodiscard]] u32 GetDecodedSegmentCount() const noexcept;
 
         void Serialize(void* buffer, size_t size) override;
         [[nodiscard]] Uint64 GetOffset() const override;

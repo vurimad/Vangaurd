@@ -66,28 +66,25 @@ namespace vanguard::math::simd
     RED_FORCE_INLINE __m128 Lerp(const __m128& a, const __m128& b, const __m128& t);
     RED_FORCE_INLINE __m128 MulAdd(const __m128& a, const __m128& b, const __m128& c);
 
-    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& xxxx1, const __m128& yyyy1,
-                                const __m128& zzzz1);
+    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& xxxx1, const __m128& yyyy1, const __m128& zzzz1);
 
-    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& wwww, const __m128& xxxx1,
-                                const __m128& yyyy1, const __m128& zzzz1, const __m128& wwww1);
+    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& wwww, const __m128& xxxx1, const __m128& yyyy1,
+                                const __m128& zzzz1, const __m128& wwww1);
 
-    RED_FORCE_INLINE void Normalize(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx,
-                                    const __m128& yyyy, const __m128& zzzz, const __m128& wwww);
+    RED_FORCE_INLINE void Normalize(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx, const __m128& yyyy,
+                                    const __m128& zzzz, const __m128& wwww);
 
     // this could be used as an interpolation function for quaternions.
     // ex. in animation sampling
-    RED_FORCE_INLINE void QuatNLerp(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx,
-                                    const __m128& yyyy, const __m128& zzzz, const __m128& wwww, const __m128& xxxx1, const __m128& yyyy1,
-                                    const __m128& zzzz1, const __m128& wwww1, const __m128& t);
+    RED_FORCE_INLINE void QuatNLerp(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx, const __m128& yyyy,
+                                    const __m128& zzzz, const __m128& wwww, const __m128& xxxx1, const __m128& yyyy1, const __m128& zzzz1, const __m128& wwww1,
+                                    const __m128& t);
 
     // functions to write computation result to data in AoS (Array of Structs) format
-    RED_FORCE_INLINE void Scatter3(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1,
-                                   ::vanguard::math::simd::Vector4* output2, ::vanguard::math::simd::Vector4* output3,
-                                   const __m128 input[3], const __m128& w);
-    RED_FORCE_INLINE void Scatter4(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1,
-                                   ::vanguard::math::simd::Vector4* output2, ::vanguard::math::simd::Vector4* output3,
-                                   const __m128 input[4]);
+    RED_FORCE_INLINE void Scatter3(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1, ::vanguard::math::simd::Vector4* output2,
+                                   ::vanguard::math::simd::Vector4* output3, const __m128 input[3], const __m128& w);
+    RED_FORCE_INLINE void Scatter4(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1, ::vanguard::math::simd::Vector4* output2,
+                                   ::vanguard::math::simd::Vector4* output3, const __m128 input[4]);
 } // namespace vanguard::math::simd
 
 #include "simdVectorFunctions.hpp"

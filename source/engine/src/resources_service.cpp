@@ -12,10 +12,22 @@ namespace
     class ManagedResourcesService final : public vanguard::engine::ResourcesService
     {
     public:
-        [[nodiscard]] vanguard::resources::ResourceRegistry& Registry() noexcept override { return m_registry; }
-        [[nodiscard]] const vanguard::resources::ResourceRegistry& Registry() const noexcept override { return m_registry; }
-        [[nodiscard]] vanguard::resources::ResourcePipeline& Pipeline() noexcept override { return m_pipeline; }
-        [[nodiscard]] const vanguard::resources::ResourcePipeline& Pipeline() const noexcept override { return m_pipeline; }
+        [[nodiscard]] vanguard::resources::ResourceRegistry& GetRegistry() noexcept override
+        {
+            return m_registry;
+        }
+        [[nodiscard]] const vanguard::resources::ResourceRegistry& GetRegistry() const noexcept override
+        {
+            return m_registry;
+        }
+        [[nodiscard]] vanguard::resources::ResourcePipeline& GetPipeline() noexcept override
+        {
+            return m_pipeline;
+        }
+        [[nodiscard]] const vanguard::resources::ResourcePipeline& GetPipeline() const noexcept override
+        {
+            return m_pipeline;
+        }
 
     protected:
         app::LifecycleStatus OnInitialize(app::ServiceContext&) noexcept override
@@ -36,9 +48,8 @@ namespace
 
         app::LifecycleStatus OnStart(app::ServiceContext&) noexcept override
         {
-            return m_registry.IsInitialized() && m_pipeline.IsInitialized()
-                ? app::LifecycleStatus::Success()
-                : app::LifecycleStatus::Failure("Resources did not enter a running state");
+            return m_registry.IsInitialized() && m_pipeline.IsInitialized() ? app::LifecycleStatus::Success()
+                                                                            : app::LifecycleStatus::Failure("Resources did not enter a running state");
         }
 
         app::LifecycleStatus OnQuiesce(app::ServiceContext&) noexcept override
@@ -79,31 +90,28 @@ namespace
 
     app::Service* CreateResourcesService(void*) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Resources, sizeof(ManagedResourcesService), alignof(ManagedResourcesService));
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Resources, sizeof(ManagedResourcesService), alignof(ManagedResourcesService));
         return block ? ::new (block.address) ManagedResourcesService() : nullptr;
     }
 
     void DestroyResourcesService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<ManagedResourcesService*>(service)->~ManagedResourcesService();
-        vanguard::memory::MemoryBlock block{
-            service, sizeof(ManagedResourcesService), vanguard::memory::PoolId::Resources};
+        vanguard::memory::MemoryBlock block{service, sizeof(ManagedResourcesService), vanguard::memory::PoolId::Resources};
         vanguard::memory::Free(block);
     }
-}
+} // namespace
 
 namespace vanguard::engine
 {
-    bool RegisterResourcesService(application::EngineHost& host,
-                                  application::HostFailure* const failure) noexcept
+    bool RegisterResourcesService(application::EngineHost& host, application::HostFailure* const failure) noexcept
     {
-        constexpr application::ServiceDependency dependencies[]{
-            {FilesystemServiceId, application::DependencyKind::Required},
-            {JobsServiceId, application::DependencyKind::Required}};
-        constexpr application::CapabilityId providedCapabilities[]{
-            ResourceRegistryCapabilityId, ResourcePipelineCapabilityId};
+        constexpr application::ServiceDependency dependencies[]{{FilesystemServiceId, application::DependencyKind::Required},
+                                                                {JobsServiceId, application::DependencyKind::Required}};
+        constexpr application::CapabilityId providedCapabilities[]{ResourceRegistryCapabilityId, ResourcePipelineCapabilityId};
         application::ServiceDescriptor descriptor;
         descriptor.id = ResourcesServiceId;
         descriptor.name = "resources";

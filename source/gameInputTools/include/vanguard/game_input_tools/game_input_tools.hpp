@@ -11,9 +11,20 @@ namespace vanguard::game_input_tools
 
     enum class SourceResult : u8
     {
-        Success, InvalidArgument, InvalidEncoding, UnsupportedVersion, UnknownDirective, InvalidFieldCount,
-        InvalidIdentifier, InvalidEnum, InvalidNumber, DuplicateCurvePoint, UnknownAction, LimitExceeded,
-        MappingValidationFailure, WriteFailure
+        Success,
+        InvalidArgument,
+        InvalidEncoding,
+        UnsupportedVersion,
+        UnknownDirective,
+        InvalidFieldCount,
+        InvalidIdentifier,
+        InvalidEnum,
+        InvalidNumber,
+        DuplicateCurvePoint,
+        UnknownAction,
+        LimitExceeded,
+        MappingValidationFailure,
+        WriteFailure
     };
 
     struct SourceDiagnostic
@@ -28,11 +39,10 @@ namespace vanguard::game_input_tools
 
     /// Compiles UTF-8 editor source directly to a cooked vinput document. The source is line-oriented,
     /// comments begin with '#', identifiers contain no whitespace, and declaration order is irrelevant.
-    [[nodiscard]] SourceResult CompileSourceMapping(containers::ArraySpan<const u8> source,
-                                                    filesystem::IFile& output,
+    [[nodiscard]] SourceResult CompileSourceMapping(containers::ArraySpan<const u8> source, filesystem::IFile& output,
                                                     SourceDiagnostic* diagnostic = nullptr) noexcept;
 
     /// Descriptor for assets::BuildSystem and its DDC/build graph. The compiler has no generated dependencies.
     [[nodiscard]] assets::CompilerDescriptor MakeMappingCompilerDescriptor() noexcept;
     [[nodiscard]] assets::Result RegisterMappingCompiler(assets::BuildSystem& buildSystem) noexcept;
-}
+} // namespace vanguard::game_input_tools

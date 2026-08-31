@@ -61,10 +61,10 @@ namespace vanguard::math
             t[i * 2 + 1] = (e[i] - localSpaceExtends[i]) / f[i]; // tmax[x, y, z]
         }
 
-        const Float tmin = vanguard::math::Max(vanguard::math::Max(vanguard::math::Min(t[0], t[1]), vanguard::math::Min(t[2], t[3])),
-                                               vanguard::math::Min(t[4], t[5]));
-        const Float tmax = vanguard::math::Min(vanguard::math::Min(vanguard::math::Max(t[0], t[1]), vanguard::math::Max(t[2], t[3])),
-                                               vanguard::math::Max(t[4], t[5]));
+        const Float tmin =
+            vanguard::math::Max(vanguard::math::Max(vanguard::math::Min(t[0], t[1]), vanguard::math::Min(t[2], t[3])), vanguard::math::Min(t[4], t[5]));
+        const Float tmax =
+            vanguard::math::Min(vanguard::math::Min(vanguard::math::Max(t[0], t[1]), vanguard::math::Max(t[2], t[3])), vanguard::math::Max(t[4], t[5]));
 
         // if tmax < 0, ray is intersecting AABB
         // but entire AABB is behind it's origin

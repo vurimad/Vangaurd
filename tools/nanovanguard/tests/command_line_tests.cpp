@@ -63,8 +63,7 @@ namespace
         return output.Write("executed\n") ? nano::ExitCode::Success : nano::ExitCode::InternalFailure;
     }
 
-    void Join(const vanguard::containers::StringView root, const vanguard::containers::StringView leaf,
-              vanguard::containers::String& output) noexcept
+    void Join(const vanguard::containers::StringView root, const vanguard::containers::StringView leaf, vanguard::containers::String& output) noexcept
     {
         output.Clear();
         output.Append(root);
@@ -116,13 +115,10 @@ int main()
     namespace platform = vanguard::nanovanguard::platform;
     if (!vanguard::memory::Initialize() || !vanguard::containers::Initialize())
         return 1;
-    constexpr nano::OptionDescriptor options[]{
-        {"target", 't', nano::OptionValue::Required, "platform", "Select the target platform.", false}};
+    constexpr nano::OptionDescriptor options[]{{"target", 't', nano::OptionValue::Required, "platform", "Select the target platform.", false}};
     nano::CommandRegistry registry;
-    if (registry.Register({"project", nullptr, "Manage projects.", "<subcommand>", nullptr, 0, 0, 0, nullptr}) !=
-            nano::RegistrationResult::Success ||
-        registry.Register({"validate", "project", "Validate a project.", "<project>", options, 1, 1, 1, &Execute}) !=
-            nano::RegistrationResult::Success)
+    if (registry.Register({"project", nullptr, "Manage projects.", "<subcommand>", nullptr, 0, 0, 0, nullptr}) != nano::RegistrationResult::Success ||
+        registry.Register({"validate", "project", "Validate a project.", "<project>", options, 1, 1, 1, &Execute}) != nano::RegistrationResult::Success)
         return 2;
 
     Buffer buffer;

@@ -10,9 +10,9 @@ namespace vanguard::engine
     public:
         ~WindowService() override = default;
 
-        [[nodiscard]] virtual window::WindowManager& Manager() noexcept = 0;
-        [[nodiscard]] virtual const window::WindowManager& Manager() const noexcept = 0;
-        [[nodiscard]] virtual window::WindowHandle PrimaryWindow() const noexcept = 0;
+        [[nodiscard]] virtual window::WindowManager& GetManager() noexcept = 0;
+        [[nodiscard]] virtual const window::WindowManager& GetManager() const noexcept = 0;
+        [[nodiscard]] virtual window::WindowHandle GetPrimaryWindow() const noexcept = 0;
 
     protected:
         WindowService() noexcept = default;

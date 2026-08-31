@@ -11,10 +11,10 @@ namespace vanguard::math
 
     EulerAngles CutCone::GetOrientation() const
     {
-        return EulerAngles(RAD2DEG(::atan2f(m_normalAndRadius2.X, -m_normalAndRadius2.Y)),
-                           RAD2DEG(::atan2f(m_normalAndRadius2.Z, (Float)::sqrt(m_normalAndRadius2.X * m_normalAndRadius2.X +
-                                                                                m_normalAndRadius2.Y * m_normalAndRadius2.Y))),
-                           0.0f);
+        return EulerAngles(
+            RAD2DEG(::atan2f(m_normalAndRadius2.X, -m_normalAndRadius2.Y)),
+            RAD2DEG(::atan2f(m_normalAndRadius2.Z, (Float)::sqrt(m_normalAndRadius2.X * m_normalAndRadius2.X + m_normalAndRadius2.Y * m_normalAndRadius2.Y))),
+            0.0f);
     }
 
     Bool CutCone::Contains(const Vector4& point) const
@@ -42,8 +42,7 @@ namespace vanguard::math
 
         Float x1;
         Float x2;
-        if (!utils::SolveQuadraticEquation(Vector4::Dot3(t2, t2) - t4 * t4, 2 * (Vector4::Dot3(t1, t2) - t3 * t4),
-                                           Vector4::Dot3(t1, t1) - t3 * t3, x1, x2) ||
+        if (!utils::SolveQuadraticEquation(Vector4::Dot3(t2, t2) - t4 * t4, 2 * (Vector4::Dot3(t1, t2) - t3 * t4), Vector4::Dot3(t1, t1) - t3 * t3, x1, x2) ||
             t1 == t2)
             return false;
 

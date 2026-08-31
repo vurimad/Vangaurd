@@ -96,13 +96,11 @@ namespace vanguard::concurrency
         {
             if constexpr (sizeof(T) == 4)
             {
-                return static_cast<T>(
-                    _InterlockedCompareExchange(&m_target, static_cast<Storage>(exchange), static_cast<Storage>(comparand)));
+                return static_cast<T>(_InterlockedCompareExchange(&m_target, static_cast<Storage>(exchange), static_cast<Storage>(comparand)));
             }
             else
             {
-                return static_cast<T>(
-                    _InterlockedCompareExchange64(&m_target, static_cast<Storage>(exchange), static_cast<Storage>(comparand)));
+                return static_cast<T>(_InterlockedCompareExchange64(&m_target, static_cast<Storage>(exchange), static_cast<Storage>(comparand)));
             }
         }
 

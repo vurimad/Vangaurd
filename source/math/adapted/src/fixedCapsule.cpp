@@ -57,8 +57,7 @@ namespace vanguard::math
 
             Vector4 disp = s * dot;
 
-            if ((dot > 1.f || dot < 0.f) && sphere.GetCenter().DistanceSquaredTo(pointA) > r2 &&
-                sphere.GetCenter().DistanceSquaredTo(pointB) > r2)
+            if ((dot > 1.f || dot < 0.f) && sphere.GetCenter().DistanceSquaredTo(pointA) > r2 && sphere.GetCenter().DistanceSquaredTo(pointB) > r2)
             {
                 return false;
             }

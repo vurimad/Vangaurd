@@ -16,19 +16,50 @@ namespace
     public:
         explicit ManagedProjectWorkspaceService(const editor::ProjectWorkspaceConfig* const config) noexcept
         {
-            if (config != nullptr) m_projectFile = config->projectFile;
+            if (config != nullptr)
+                m_projectFile = config->projectFile;
         }
 
-        [[nodiscard]] const vanguard::projects::ProjectDescriptor& Project() const noexcept override { return m_project; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& ProjectFile() const noexcept override { return m_projectFile; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& ProjectRoot() const noexcept override { return m_projectRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& AssetsRoot() const noexcept override { return m_assetsRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& DerivedDataRoot() const noexcept override { return m_derivedDataRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& IntermediateRoot() const noexcept override { return m_intermediateRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& SavedRoot() const noexcept override { return m_savedRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& BuildsRoot() const noexcept override { return m_buildsRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& ConfigRoot() const noexcept override { return m_configRoot; }
-        [[nodiscard]] const vanguard::filesystem::AbsolutePath& PluginsRoot() const noexcept override { return m_pluginsRoot; }
+        [[nodiscard]] const vanguard::projects::ProjectDescriptor& GetProject() const noexcept override
+        {
+            return m_project;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetProjectFile() const noexcept override
+        {
+            return m_projectFile;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetProjectRoot() const noexcept override
+        {
+            return m_projectRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetAssetsRoot() const noexcept override
+        {
+            return m_assetsRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetDerivedDataRoot() const noexcept override
+        {
+            return m_derivedDataRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetIntermediateRoot() const noexcept override
+        {
+            return m_intermediateRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetSavedRoot() const noexcept override
+        {
+            return m_savedRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetBuildsRoot() const noexcept override
+        {
+            return m_buildsRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetConfigRoot() const noexcept override
+        {
+            return m_configRoot;
+        }
+        [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetPluginsRoot() const noexcept override
+        {
+            return m_pluginsRoot;
+        }
 
     protected:
         app::LifecycleStatus OnInitialize(app::ServiceContext&) noexcept override
@@ -37,22 +68,21 @@ namespace
                 return app::LifecycleStatus::Failure("Project Workspace received an invalid project file or unavailable filesystem");
 
             auto reader = vanguard::filesystem::GetManager().CreateFileReader(m_projectFile, vanguard::filesystem::FOF_Buffered);
-            if (!reader) return app::LifecycleStatus::Failure("Project Workspace could not open the project document");
+            if (!reader)
+                return app::LifecycleStatus::Failure("Project Workspace could not open the project document");
 
             vanguard::projects::Diagnostic diagnostic;
             if (vanguard::projects::Read(*reader, m_project, &diagnostic) != vanguard::projects::Result::Success)
             {
-                VG_LOG_ERROR(vanguard::diagnostics::Category::Engine,
-                             "project workspace validation failed: result=%u line=%u column=%u field=%s message=%s",
+                VG_LOG_ERROR(vanguard::diagnostics::Category::Engine, "project workspace validation failed: result=%u line=%u column=%u field=%s message=%s",
                              static_cast<vanguard::u32>(diagnostic.result), diagnostic.line, diagnostic.column,
-                             diagnostic.field != nullptr ? diagnostic.field : "<none>",
-                             diagnostic.message != nullptr ? diagnostic.message : "<none>");
-                return app::LifecycleStatus::Failure(diagnostic.message != nullptr ? diagnostic.message
-                                                                                  : "Project Workspace validation failed");
+                             diagnostic.field != nullptr ? diagnostic.field : "<none>", diagnostic.message != nullptr ? diagnostic.message : "<none>");
+                return app::LifecycleStatus::Failure(diagnostic.message != nullptr ? diagnostic.message : "Project Workspace validation failed");
             }
 
             m_projectRoot = vanguard::filesystem::paths::ParentAbsolutePath(m_projectFile);
-            if (m_projectRoot.Empty()) return app::LifecycleStatus::Failure("Project Workspace has no project root");
+            if (m_projectRoot.Empty())
+                return app::LifecycleStatus::Failure("Project Workspace has no project root");
             m_assetsRoot = m_projectRoot.AddDirPath(m_project.assets);
             m_derivedDataRoot = m_projectRoot.AddDirPath(m_project.derivedData);
             m_intermediateRoot = m_projectRoot.AddDirPath(m_project.intermediate);
@@ -82,30 +112,26 @@ namespace
 
     app::Service* CreateProjectWorkspaceService(void* const userData) noexcept
     {
-        vanguard::memory::MemoryBlock block = vanguard::memory::Allocate(
-            vanguard::memory::PoolId::Tools, sizeof(ManagedProjectWorkspaceService), alignof(ManagedProjectWorkspaceService));
-        return block ? ::new (block.address) ManagedProjectWorkspaceService(
-                           static_cast<const editor::ProjectWorkspaceConfig*>(userData))
-                     : nullptr;
+        vanguard::memory::MemoryBlock block =
+            vanguard::memory::Allocate(vanguard::memory::PoolId::Tools, sizeof(ManagedProjectWorkspaceService), alignof(ManagedProjectWorkspaceService));
+        return block ? ::new (block.address) ManagedProjectWorkspaceService(static_cast<const editor::ProjectWorkspaceConfig*>(userData)) : nullptr;
     }
 
     void DestroyProjectWorkspaceService(app::Service* const service, void*) noexcept
     {
-        if (service == nullptr) return;
+        if (service == nullptr)
+            return;
         static_cast<ManagedProjectWorkspaceService*>(service)->~ManagedProjectWorkspaceService();
-        vanguard::memory::MemoryBlock block{
-            service, sizeof(ManagedProjectWorkspaceService), vanguard::memory::PoolId::Tools};
+        vanguard::memory::MemoryBlock block{service, sizeof(ManagedProjectWorkspaceService), vanguard::memory::PoolId::Tools};
         vanguard::memory::Free(block);
     }
 } // namespace
 
 namespace vanguard::editor
 {
-    bool RegisterProjectWorkspaceService(application::EngineHost& host, const ProjectWorkspaceConfig& config,
-                                         application::HostFailure* const failure) noexcept
+    bool RegisterProjectWorkspaceService(application::EngineHost& host, const ProjectWorkspaceConfig& config, application::HostFailure* const failure) noexcept
     {
-        constexpr application::ServiceDependency dependencies[]{
-            {engine::FilesystemServiceId, application::DependencyKind::Required}};
+        constexpr application::ServiceDependency dependencies[]{{engine::FilesystemServiceId, application::DependencyKind::Required}};
         constexpr application::CapabilityId capabilities[]{ProjectWorkspaceCapabilityId};
         application::ServiceDescriptor descriptor;
         descriptor.id = ProjectWorkspaceServiceId;

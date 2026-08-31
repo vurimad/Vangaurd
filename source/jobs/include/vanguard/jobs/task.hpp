@@ -66,8 +66,7 @@ namespace vanguard::jobs
         template <typename Function> [[nodiscard]] static Task Create(Function&& function) noexcept
         {
             using StoredFunction = std::remove_cv_t<std::remove_reference_t<Function>>;
-            static_assert(std::is_nothrow_invocable_v<StoredFunction&, const JobContext&>,
-                          "Vanguard jobs must be noexcept-callable with const JobContext&.");
+            static_assert(std::is_nothrow_invocable_v<StoredFunction&, const JobContext&>, "Vanguard jobs must be noexcept-callable with const JobContext&.");
 
             struct Payload
             {
@@ -84,8 +83,7 @@ namespace vanguard::jobs
             auto* payload = new (allocation.address) Payload{std::forward<Function>(function), allocation};
 
             Task task;
-            task.m_packet = {payload,
-                             [](void* state, const JobContext& context) noexcept { static_cast<Payload*>(state)->function(context); },
+            task.m_packet = {payload, [](void* state, const JobContext& context) noexcept { static_cast<Payload*>(state)->function(context); },
                              [](void* state) noexcept
                              {
                                  auto* payloadToDestroy = static_cast<Payload*>(state);
@@ -168,8 +166,8 @@ namespace vanguard::jobs
             auto* payload = new (allocation.address) Payload{std::forward<Function>(function), allocation};
 
             ParallelTask task;
-            task.m_packet = {payload, [](void* state, u32 index, const JobContext& context) noexcept
-                             { static_cast<Payload*>(state)->function(index, context); },
+            task.m_packet = {payload,
+                             [](void* state, u32 index, const JobContext& context) noexcept { static_cast<Payload*>(state)->function(index, context); },
                              [](void* state) noexcept
                              {
                                  auto* payloadToDestroy = static_cast<Payload*>(state);

@@ -12,10 +12,10 @@ namespace vanguard::engine
     public:
         ~ResourceStreamingService() override = default;
 
-        [[nodiscard]] virtual streaming::ResourceStreamer& Streamer() noexcept = 0;
-        [[nodiscard]] virtual const streaming::ResourceStreamer& Streamer() const noexcept = 0;
-        [[nodiscard]] virtual streaming::PackageSetMount& PackageSet() noexcept = 0;
-        [[nodiscard]] virtual const streaming::PackageSetMount& PackageSet() const noexcept = 0;
+        [[nodiscard]] virtual streaming::ResourceStreamer& GetStreamer() noexcept = 0;
+        [[nodiscard]] virtual const streaming::ResourceStreamer& GetStreamer() const noexcept = 0;
+        [[nodiscard]] virtual streaming::PackageSetMount& GetPackageSet() noexcept = 0;
+        [[nodiscard]] virtual const streaming::PackageSetMount& GetPackageSet() const noexcept = 0;
 
     protected:
         ResourceStreamingService() noexcept = default;

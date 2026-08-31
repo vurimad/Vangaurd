@@ -47,8 +47,8 @@ namespace vanguard::math
 
     RED_INLINE void Quad::SanityCheck() const
     {
-        RED_MATH_ASSERT((Vector4::Cross(m_points[2] - m_points[1], m_points[0] - m_points[1]) -
-                         Vector4::Cross(m_points[3] - m_points[2], m_points[1] - m_points[2]))
-                            .SquareMag3() < 1e-06);
+        RED_MATH_ASSERT(
+            (Vector4::Cross(m_points[2] - m_points[1], m_points[0] - m_points[1]) - Vector4::Cross(m_points[3] - m_points[2], m_points[1] - m_points[2]))
+                .SquareMag3() < 1e-06);
     }
 } // namespace vanguard::math

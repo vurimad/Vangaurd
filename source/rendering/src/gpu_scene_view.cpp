@@ -6,19 +6,21 @@ namespace vanguard::rendering
     {
         void CopyViewFloats(f32* const destination, const f32* const source, const u32 count) noexcept
         {
-            for (u32 index = 0; index < count; ++index) destination[index] = source[index];
+            for (u32 index = 0; index < count; ++index)
+                destination[index] = source[index];
         }
 
         void CopyCells(i32* const destination, const i32* const source) noexcept
         {
-            for (u32 index = 0; index < 3; ++index) destination[index] = source[index];
+            for (u32 index = 0; index < 3; ++index)
+                destination[index] = source[index];
         }
     } // namespace
 
     bool BuildGpuView(const RenderView& source, GpuView& output) noexcept
     {
-        if (!source.id.IsValid() || !source.family.IsValid() || !source.rect.IsValid() ||
-            source.frustum.planeCount > MaximumVisibilityFrustumPlanes || source.phases.Empty())
+        if (!source.id.IsValid() || !source.family.IsValid() || !source.rect.IsValid() || source.frustum.planeCount > MaximumVisibilityFrustumPlanes ||
+            source.phases.Empty())
             return false;
 
         output = {};

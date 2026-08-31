@@ -144,13 +144,13 @@ namespace vanguard::prefabs
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] u64 Name() const noexcept;
-        [[nodiscard]] const crypto::Digest256& SourceFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const EntityRecord> Entities() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ComponentRecord> Components() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const DependencyRecord> Dependencies() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const u8> ComponentData(const ComponentRecord& component) const noexcept;
+        [[nodiscard]] u64 GetName() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetSourceFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const EntityRecord> GetEntities() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ComponentRecord> GetComponents() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const DependencyRecord> GetDependencies() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const u8> GetComponentData(const ComponentRecord& component) const noexcept;
         [[nodiscard]] const EntityRecord* FindEntity(u64 stableId) const noexcept;
         [[nodiscard]] const ComponentRecord* FindComponent(u64 stableId) const noexcept;
 
@@ -168,15 +168,14 @@ namespace vanguard::prefabs
     class PrefabResource final : public resources::ResourceObject
     {
     public:
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override;
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
         [[nodiscard]] Result Open(const void* data, usize size, const ReadLimits& limits = {}) noexcept;
-        [[nodiscard]] const PrefabFile& File() const noexcept;
+        [[nodiscard]] const PrefabFile& GetFile() const noexcept;
 
     private:
         PrefabFile m_file;
     };
 
     [[nodiscard]] Result CookPrefab(const CookDescription& description, filesystem::IFile& output) noexcept;
-    [[nodiscard]] Result CalculateContentFingerprint(const CookDescription& description,
-                                                     crypto::Digest256& fingerprint) noexcept;
+    [[nodiscard]] Result CalculateContentFingerprint(const CookDescription& description, crypto::Digest256& fingerprint) noexcept;
 } // namespace vanguard::prefabs

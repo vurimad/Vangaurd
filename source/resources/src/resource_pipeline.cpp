@@ -74,12 +74,13 @@ namespace vanguard::resources
 
         struct DependencyBuildState
         {
-            DependencyBuildState(const u32 maximumDependencyCount) noexcept
-                : dependencies(memory::pools::Resources::GetInstance()), maximumDependencies(maximumDependencyCount)
+            DependencyBuildState(const u32 maximumDependencyCount, PipelineOperation* const pipelineOperation) noexcept
+                : dependencies(memory::pools::Resources::GetInstance()), operation(pipelineOperation), maximumDependencies(maximumDependencyCount)
             {
             }
 
             containers::DynamicArray<DependencySpec> dependencies;
+            PipelineOperation* operation = nullptr;
             u32 maximumDependencies = 0;
             Failure failure = Failure::None;
         };
@@ -107,10 +108,8 @@ namespace vanguard::resources
 
     struct PipelineOperation
     {
-        PipelineOperation(const ResourceReference resourceReference, const AsyncLoaderDescriptor& loaderDescriptor,
-                          const LoadPriority loadPriority) noexcept
-            : reference(resourceReference), loader(loaderDescriptor), edges(memory::pools::Resources::GetInstance()),
-              priority(static_cast<u32>(loadPriority))
+        PipelineOperation(const ResourceReference resourceReference, const AsyncLoaderDescriptor& loaderDescriptor, const LoadPriority loadPriority) noexcept
+            : reference(resourceReference), loader(loaderDescriptor), edges(memory::pools::Resources::GetInstance()), priority(static_cast<u32>(loadPriority))
         {
         }
 
@@ -144,6 +143,7 @@ namespace vanguard::resources
         bool evictionIssued = false;
         Failure failure = Failure::None;
         PipelineOperation* failureCause = nullptr;
+        void* loaderState = nullptr;
         u64 traversalMark = 0;
     };
 
@@ -184,9 +184,8 @@ namespace vanguard::resources
 
         [[nodiscard]] bool CreateCompletionGate(PipelineOperation& operation) noexcept
         {
-            jobs::Builder builder{
-                jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
-                &operation};
+            jobs::Builder builder{jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
+                                  &operation};
             jobs::Task task = jobs::Task::Create([&operation](const jobs::JobContext&) noexcept { operation.gateCanComplete.Wait(); });
             if (!task || !builder.Dispatch(gateJobName, static_cast<jobs::Task&&>(task), jobs::Fence::Full))
             {
@@ -202,11 +201,9 @@ namespace vanguard::resources
 
         [[nodiscard]] bool CreatePreparationGate(PipelineOperation& operation) noexcept
         {
-            jobs::Builder builder{
-                jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
-                &operation};
-            jobs::Task task =
-                jobs::Task::Create([&operation](const jobs::JobContext&) noexcept { operation.preparationGateCanComplete.Wait(); });
+            jobs::Builder builder{jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
+                                  &operation};
+            jobs::Task task = jobs::Task::Create([&operation](const jobs::JobContext&) noexcept { operation.preparationGateCanComplete.Wait(); });
             if (!task || !builder.Dispatch(gateJobName, static_cast<jobs::Task&&>(task), jobs::Fence::Full))
             {
                 operation.preparationGateCanComplete.Signal();
@@ -244,7 +241,7 @@ namespace vanguard::resources
             }
 
             allOperations.PushBack(operation);
-            if (!currentOperations.Insert(reference.Path().Id(), operation).IsSuccessful())
+            if (!currentOperations.Insert(reference.GetPath().Id(), operation).IsSuccessful())
             {
                 operation->completionDeferral.Finish();
                 static_cast<void>(operation->completionCounter.Wait());
@@ -258,14 +255,14 @@ namespace vanguard::resources
         [[nodiscard]] bool IsCurrentLocked(const PipelineOperation& operation) const noexcept
         {
             PipelineOperation* current = nullptr;
-            return currentOperations.Find(operation.reference.Path().Id(), current) && current == &operation;
+            return currentOperations.Find(operation.reference.GetPath().Id(), current) && current == &operation;
         }
 
         void RemoveCurrentLocked(PipelineOperation& operation) noexcept
         {
             if (IsCurrentLocked(operation))
             {
-                static_cast<void>(currentOperations.Remove(operation.reference.Path().Id()));
+                static_cast<void>(currentOperations.Remove(operation.reference.GetPath().Id()));
             }
         }
 
@@ -362,7 +359,7 @@ namespace vanguard::resources
             }
             for (PipelineOperation* const operation : actions.evict)
             {
-                static_cast<void>(registry->Evict(operation->reference.Path()));
+                static_cast<void>(registry->Evict(operation->reference.GetPath()));
             }
         }
 
@@ -465,7 +462,7 @@ namespace vanguard::resources
                 if (!operation.terminal)
                 {
                     operation.terminal = true;
-                    operation.failure = operation.registryRequest.Error();
+                    operation.failure = operation.registryRequest.GetError();
                     operation.publishedFailure.SetValue(static_cast<u32>(operation.failure));
                     ++failedOperations;
                     MarkForFinishLocked(operation, actions);
@@ -558,9 +555,8 @@ namespace vanguard::resources
                     RunPlan(operation);
                     static_cast<void>(activeJobs.Decrement());
                 });
-            jobs::Builder builder{
-                jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
-                &operation};
+            jobs::Builder builder{jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
+                                  &operation};
             if (!task || !builder.Dispatch(planJobName, static_cast<jobs::Task&&>(task), jobs::Fence::Full))
             {
                 static_cast<void>(activeJobs.Decrement());
@@ -580,7 +576,7 @@ namespace vanguard::resources
                 return false;
             }
 
-            static_cast<void>(currentOperations.Find(dependency.reference.Path().Id(), child));
+            static_cast<void>(currentOperations.Find(dependency.reference.GetPath().Id(), child));
             if (child != nullptr && child->reference.ExpectedType() != dependency.reference.ExpectedType())
             {
                 lock.Release();
@@ -647,7 +643,7 @@ namespace vanguard::resources
                 return;
             }
 
-            DependencyBuildState buildState{config.maximumDependenciesPerResource};
+            DependencyBuildState buildState{config.maximumDependenciesPerResource, &operation};
             DependencyBuilder builder{&buildState};
             Failure failure = loader.discoverDependencies(operation.reference, builder, loader.userData);
             if (failure == Failure::None)
@@ -727,9 +723,8 @@ namespace vanguard::resources
                 return;
             }
 
-            jobs::Builder builder{
-                jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
-                &operation};
+            jobs::Builder builder{jobs::Schedule{ToJobsPriority(static_cast<LoadPriority>(operation.priority.GetValue())), jobs::Affinity::AnyWorker},
+                                  &operation};
             for (const DependencyEdge& edge : operation.edges)
             {
                 builder.AddDependency(edge.operation->completionCounter);
@@ -826,7 +821,7 @@ namespace vanguard::resources
                 CompleteFailure(operation, failure == Failure::None ? Failure::InternalError : failure);
                 return;
             }
-            if (resource->Type() != operation.reference.ExpectedType())
+            if (resource->GetType() != operation.reference.ExpectedType())
             {
                 loader.destroyResource(resource, loader.userData);
                 CompleteFailure(operation, Failure::InternalError);
@@ -861,7 +856,7 @@ namespace vanguard::resources
 
         for (DependencySpec& dependency : state->dependencies)
         {
-            if (dependency.reference.Path() == reference.Path())
+            if (dependency.reference.GetPath() == reference.GetPath())
             {
                 if (dependency.reference.ExpectedType() != reference.ExpectedType())
                 {
@@ -884,6 +879,35 @@ namespace vanguard::resources
         return true;
     }
 
+    bool DependencyBuilder::SetLoaderState(void* const loaderState) noexcept
+    {
+        auto* const state = static_cast<DependencyBuildState*>(m_state);
+        if (state == nullptr || state->operation == nullptr || loaderState == nullptr || state->operation->loaderState != nullptr)
+        {
+            return false;
+        }
+        state->operation->loaderState = loaderState;
+        return true;
+    }
+
+    void* DependencyBuilder::GetLoaderState() const noexcept
+    {
+        const auto* const state = static_cast<const DependencyBuildState*>(m_state);
+        return state != nullptr && state->operation != nullptr ? state->operation->loaderState : nullptr;
+    }
+
+    void* DependencyBuilder::TakeLoaderState() noexcept
+    {
+        auto* const state = static_cast<DependencyBuildState*>(m_state);
+        if (state == nullptr || state->operation == nullptr)
+        {
+            return nullptr;
+        }
+        void* const loaderState = state->operation->loaderState;
+        state->operation->loaderState = nullptr;
+        return loaderState;
+    }
+
     u32 DependencyBuilder::Count() const noexcept
     {
         const auto* const state = static_cast<const DependencyBuildState*>(m_state);
@@ -901,8 +925,7 @@ namespace vanguard::resources
     LoadPriority LoadContext::Priority() const noexcept
     {
         const auto* const state = static_cast<const LoadContextState*>(m_state);
-        return state != nullptr && state->operation != nullptr ? static_cast<LoadPriority>(state->operation->priority.GetValue())
-                                                               : LoadPriority::Normal;
+        return state != nullptr && state->operation != nullptr ? static_cast<LoadPriority>(state->operation->priority.GetValue()) : LoadPriority::Normal;
     }
 
     bool LoadContext::IsCancellationRequested() const noexcept
@@ -911,42 +934,57 @@ namespace vanguard::resources
         return state == nullptr || state->operation == nullptr || state->operation->cancellationRequested.GetValue();
     }
 
-    u32 LoadContext::DependencyCount() const noexcept
+    u32 LoadContext::GetDependencyCount() const noexcept
     {
         const auto* const state = static_cast<const LoadContextState*>(m_state);
         return state != nullptr && state->operation != nullptr ? state->operation->edges.Size() : 0;
     }
 
-    ResourceReference LoadContext::DependencyReference(const u32 index) const noexcept
+    ResourceReference LoadContext::GetDependencyReference(const u32 index) const noexcept
     {
         const auto* const state = static_cast<const LoadContextState*>(m_state);
-        return state != nullptr && state->operation != nullptr && index < state->operation->edges.Size()
-                   ? state->operation->edges[index].reference
-                   : ResourceReference{};
+        return state != nullptr && state->operation != nullptr && index < state->operation->edges.Size() ? state->operation->edges[index].reference
+                                                                                                         : ResourceReference{};
     }
 
-    DependencyRequirement LoadContext::DependencyRequirementAt(const u32 index) const noexcept
+    DependencyRequirement LoadContext::GetDependencyRequirementAt(const u32 index) const noexcept
     {
         const auto* const state = static_cast<const LoadContextState*>(m_state);
-        return state != nullptr && state->operation != nullptr && index < state->operation->edges.Size()
-                   ? state->operation->edges[index].requirement
-                   : DependencyRequirement::Required;
+        return state != nullptr && state->operation != nullptr && index < state->operation->edges.Size() ? state->operation->edges[index].requirement
+                                                                                                         : DependencyRequirement::Required;
     }
 
-    Failure LoadContext::DependencyError(const u32 index) const noexcept
+    Failure LoadContext::GetDependencyError(const u32 index) const noexcept
     {
         const auto* const state = static_cast<const LoadContextState*>(m_state);
-        return state != nullptr && state->operation != nullptr && index < state->operation->edges.Size() &&
-                       state->operation->edges[index].operation != nullptr
+        return state != nullptr && state->operation != nullptr && index < state->operation->edges.Size() && state->operation->edges[index].operation != nullptr
                    ? static_cast<Failure>(state->operation->edges[index].operation->publishedFailure.GetValue())
                    : Failure::InternalError;
     }
 
-    const ResourceHandle& LoadContext::Dependency(const u32 index) const noexcept
+    const ResourceHandle& LoadContext::GetDependency(const u32 index) const noexcept
     {
         static const ResourceHandle empty;
         const auto* const state = static_cast<const LoadContextState*>(m_state);
         return state != nullptr && state->handles != nullptr && index < state->handles->Size() ? (*state->handles)[index] : empty;
+    }
+
+    void* LoadContext::GetLoaderState() const noexcept
+    {
+        const auto* const state = static_cast<const LoadContextState*>(m_state);
+        return state != nullptr && state->operation != nullptr ? state->operation->loaderState : nullptr;
+    }
+
+    void* LoadContext::TakeLoaderState() const noexcept
+    {
+        const auto* const state = static_cast<const LoadContextState*>(m_state);
+        if (state == nullptr || state->operation == nullptr)
+        {
+            return nullptr;
+        }
+        void* const loaderState = state->operation->loaderState;
+        state->operation->loaderState = nullptr;
+        return loaderState;
     }
 
     PreparationRequest::PreparationRequest(ResourcePipeline* const pipeline, PipelineOperation* const operation) noexcept
@@ -967,6 +1005,16 @@ namespace vanguard::resources
     bool PreparationRequest::IsCancellationRequested() const noexcept
     {
         return m_operation == nullptr || m_operation->cancellationRequested.GetValue();
+    }
+
+    void* PreparationRequest::GetLoaderState() const noexcept
+    {
+        return m_operation != nullptr ? m_operation->loaderState : nullptr;
+    }
+
+    void* PreparationRequest::TakeLoaderState() const noexcept
+    {
+        return m_pipeline != nullptr ? m_pipeline->TakeLoaderState(m_operation) : nullptr;
     }
 
     bool PreparationRequest::Complete(const Failure failure) const noexcept
@@ -1020,7 +1068,7 @@ namespace vanguard::resources
         return m_operation != nullptr ? static_cast<LoadPriority>(m_operation->priority.GetValue()) : LoadPriority::Normal;
     }
 
-    State PipelineRequest::Status() const noexcept
+    State PipelineRequest::GetStatus() const noexcept
     {
         if (m_cancelled)
         {
@@ -1030,10 +1078,10 @@ namespace vanguard::resources
         {
             return State::Queued;
         }
-        return m_operation->registryRequest.Status();
+        return m_operation->registryRequest.GetStatus();
     }
 
-    Failure PipelineRequest::Error() const noexcept
+    Failure PipelineRequest::GetError() const noexcept
     {
         if (m_cancelled)
         {
@@ -1053,7 +1101,7 @@ namespace vanguard::resources
 
     bool PipelineRequest::HasLoaded() const noexcept
     {
-        return !m_cancelled && HasFinished() && Error() == Failure::None && Status() == State::Loaded;
+        return !m_cancelled && HasFinished() && GetError() == Failure::None && GetStatus() == State::Loaded;
     }
 
     bool PipelineRequest::HasFailed() const noexcept
@@ -1181,14 +1229,13 @@ namespace vanguard::resources
         for (const PipelineOperation* const operation : m_impl->allOperations)
         {
             if (!operation->terminal || operation->rootInterests != 0 || operation->dependencyInterests != 0 ||
-                !operation->completionCounter.IsReady())
+                !operation->completionCounter.IsReady() || operation->loaderState != nullptr)
             {
                 m_impl->lock.ReleaseShared();
                 return false;
             }
-            const State state = m_impl->registry->GetState(operation->reference.Path());
-            if (state == State::Queued || state == State::Loading || state == State::Loaded || state == State::Reloading ||
-                state == State::Evicting)
+            const State state = m_impl->registry->GetState(operation->reference.GetPath());
+            if (state == State::Queued || state == State::Loading || state == State::Loaded || state == State::Reloading || state == State::Evicting)
             {
                 m_impl->lock.ReleaseShared();
                 return false;
@@ -1236,8 +1283,7 @@ namespace vanguard::resources
         m_impl->loaderTypes.PushBack(loader.type);
         m_impl->lock.Release();
 
-        const LoaderDescriptor registryLoader{loader.type, loader.name, &ResourcePipeline::BeginRegistryLoad,
-                                              &ResourcePipeline::DestroyRegistryResource, this};
+        const LoaderDescriptor registryLoader{loader.type, loader.name, &ResourcePipeline::BeginRegistryLoad, &ResourcePipeline::DestroyRegistryResource, this};
         if (!m_impl->registry->RegisterLoader(registryLoader))
         {
             m_impl->lock.Acquire();
@@ -1291,7 +1337,7 @@ namespace vanguard::resources
         bool created = false;
         m_impl->lock.Acquire();
         ++m_impl->issuedRequests;
-        static_cast<void>(m_impl->currentOperations.Find(reference.Path().Id(), operation));
+        static_cast<void>(m_impl->currentOperations.Find(reference.GetPath().Id(), operation));
         if (operation != nullptr && operation->reference.ExpectedType() != reference.ExpectedType())
         {
             m_impl->lock.Release();
@@ -1371,7 +1417,7 @@ namespace vanguard::resources
 
         AsyncLoaderDescriptor loader;
         pipeline->m_impl->lock.AcquireShared();
-        static_cast<void>(pipeline->m_impl->loaders.Find(resource->Type(), loader));
+        static_cast<void>(pipeline->m_impl->loaders.Find(resource->GetType(), loader));
         pipeline->m_impl->lock.ReleaseShared();
         if (loader.destroyResource != nullptr)
         {
@@ -1389,7 +1435,7 @@ namespace vanguard::resources
 
         PipelineOperation* operation = nullptr;
         m_impl->lock.Acquire();
-        static_cast<void>(m_impl->currentOperations.Find(request.Reference().Path().Id(), operation));
+        static_cast<void>(m_impl->currentOperations.Find(request.Reference().GetPath().Id(), operation));
         if (operation == nullptr || operation->reference.ExpectedType() != request.Reference().ExpectedType())
         {
             m_impl->lock.Release();
@@ -1484,6 +1530,19 @@ namespace vanguard::resources
         return true;
     }
 
+    void* ResourcePipeline::TakeLoaderState(PipelineOperation* const operation) noexcept
+    {
+        if (m_impl == nullptr || operation == nullptr)
+        {
+            return nullptr;
+        }
+        m_impl->lock.Acquire();
+        void* const state = operation->loaderState;
+        operation->loaderState = nullptr;
+        m_impl->lock.Release();
+        return state;
+    }
+
     bool ResourcePipeline::BuildFailureTrace(const PipelineOperation* operation, FailureTrace& trace) const noexcept
     {
         if (m_impl == nullptr || operation == nullptr)
@@ -1492,9 +1551,8 @@ namespace vanguard::resources
         }
 
         VG_SCOPE_SHARED_LOCK(m_impl->lock);
-        const u32 maximumDepth = m_impl->config.maximumFailureTraceDepth < MaximumFailureTraceEntries
-                                     ? m_impl->config.maximumFailureTraceDepth
-                                     : MaximumFailureTraceEntries;
+        const u32 maximumDepth =
+            m_impl->config.maximumFailureTraceDepth < MaximumFailureTraceEntries ? m_impl->config.maximumFailureTraceDepth : MaximumFailureTraceEntries;
         const PipelineOperation* current = operation;
         while (current != nullptr && trace.count < maximumDepth)
         {

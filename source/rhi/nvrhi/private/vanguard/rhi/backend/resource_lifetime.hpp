@@ -47,9 +47,8 @@ namespace vanguard::rhi::backend
         ResourceLifetimeManager(const ResourceLifetimeManager&) = delete;
         ResourceLifetimeManager& operator=(const ResourceLifetimeManager&) = delete;
 
-        [[nodiscard]] bool Initialize(const ResourceLifetimeConfig& config, FenceCompleteCallback fenceComplete,
-                                      void* fenceContext, ResourceDestroyedCallback resourceDestroyed = nullptr,
-                                      void* resourceDestroyedContext = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(const ResourceLifetimeConfig& config, FenceCompleteCallback fenceComplete, void* fenceContext,
+                                      ResourceDestroyedCallback resourceDestroyed = nullptr, void* resourceDestroyedContext = nullptr) noexcept;
         // Requires the GPU to be idle and all externally owned references to be released.
         [[nodiscard]] bool ShutdownAfterGpuIdle() noexcept;
         // Emergency backend teardown after device idle/removal. Outstanding owners are invalidated and
@@ -57,8 +56,8 @@ namespace vanguard::rhi::backend
         void ForceShutdownAfterGpuIdle() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] ResourceRef Create(ResourceKind kind, void* payload, DestroyResourceCallback destroy,
-                                         void* destroyContext = nullptr, u32 initialReferences = 1) noexcept;
+        [[nodiscard]] ResourceRef Create(ResourceKind kind, void* payload, DestroyResourceCallback destroy, void* destroyContext = nullptr,
+                                         u32 initialReferences = 1) noexcept;
         [[nodiscard]] bool IsValid(ResourceRef resource) const noexcept;
         [[nodiscard]] bool AddRef(ResourceRef resource) noexcept;
         [[nodiscard]] i32 Release(ResourceRef resource) noexcept;

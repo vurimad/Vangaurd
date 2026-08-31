@@ -26,11 +26,11 @@ namespace vanguard::engine
         [[nodiscard]] virtual bool CancelWorld() noexcept = 0;
         [[nodiscard]] virtual bool ReleaseWorld() noexcept = 0;
 
-        [[nodiscard]] virtual WorldResourceStatus Status() const noexcept = 0;
-        [[nodiscard]] virtual resources::Failure LastFailure() const noexcept = 0;
-        [[nodiscard]] virtual const world::WorldResource* Resource() const noexcept = 0;
-        [[nodiscard]] virtual world::WorldStreamingGrid* Grid() noexcept = 0;
-        [[nodiscard]] virtual world::WorldStreamingExecutor* Executor() noexcept = 0;
+        [[nodiscard]] virtual WorldResourceStatus GetStatus() const noexcept = 0;
+        [[nodiscard]] virtual resources::Failure GetLastFailure() const noexcept = 0;
+        [[nodiscard]] virtual const world::WorldResource* GetResource() const noexcept = 0;
+        [[nodiscard]] virtual world::WorldStreamingGrid* GetGrid() noexcept = 0;
+        [[nodiscard]] virtual world::WorldStreamingExecutor* GetExecutor() noexcept = 0;
 
     protected:
         WorldService() noexcept = default;

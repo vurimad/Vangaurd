@@ -14,8 +14,7 @@ namespace vanguard::math
         extern REDMATH_API Float BezierSmoothStep(const Float t);
         extern REDMATH_API Float SmoothstepInterpolation(const Float t);
         extern REDMATH_API Vector3 ComputeBaryCentric(const Vector3& p, const Vector3& p0, const Vector3& p1, const Vector3& p2);
-        extern REDMATH_API Vector4 ComputeBaryCentric(const Vector3& p, const Vector3& p0, const Vector3& p1, const Vector3& p2,
-                                                      const Vector3& p3);
+        extern REDMATH_API Vector4 ComputeBaryCentric(const Vector3& p, const Vector3& p0, const Vector3& p1, const Vector3& p2, const Vector3& p3);
         extern REDMATH_API Bool IsPointOnSegment(const Vector3& p, const Vector3& a, const Vector3& b);
         extern REDMATH_API Vector4 ClosestPointOnTriangle(const Vector4& p0, const Vector4& p1, const Vector4& p2, const Vector4& p);
 
@@ -92,12 +91,12 @@ namespace vanguard::math
 #define MATH_SCOPE_DENORM_GUARD() vanguard::math::ScopedDenormGuard RED_CONCATENATE2(s_varDenormGuard, __LINE__)
 #define MATH_SCOPE_FP_EXCEPTION_GUARD() vanguard::math::ScopedFPExceptionGuard RED_CONCATENATE2(s_varFpGuard, __LINE__)
 #else
-#define MATH_SCOPE_DENORM_GUARD()                                                                                                          \
-    do                                                                                                                                     \
-    {                                                                                                                                      \
+#define MATH_SCOPE_DENORM_GUARD()                                                                                                                              \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
     } while ((void)0, 0)
-#define MATH_SCOPE_FP_EXCEPTION_GUARD()                                                                                                    \
-    do                                                                                                                                     \
-    {                                                                                                                                      \
+#define MATH_SCOPE_FP_EXCEPTION_GUARD()                                                                                                                        \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
     } while ((void)0, 0)
 #endif

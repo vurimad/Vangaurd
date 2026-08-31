@@ -25,8 +25,7 @@ namespace vanguard::engine
         {
             return index < world::MaximumStreamingObservers && generation != 0;
         }
-        [[nodiscard]] friend constexpr bool operator==(const StreamingObserverHandle&,
-                                                       const StreamingObserverHandle&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const StreamingObserverHandle&, const StreamingObserverHandle&) noexcept = default;
     };
 
     struct StreamingObserverDescriptor
@@ -80,17 +79,15 @@ namespace vanguard::engine
         ~StreamingObserverService() override = default;
 
         [[nodiscard]] virtual bool ConfigurePrediction(const StreamingObserverPredictionConfig& config) noexcept = 0;
-        [[nodiscard]] virtual bool RegisterObserver(const StreamingObserverDescriptor& descriptor,
-                                                    StreamingObserverHandle& observer) noexcept = 0;
+        [[nodiscard]] virtual bool RegisterObserver(const StreamingObserverDescriptor& descriptor, StreamingObserverHandle& observer) noexcept = 0;
         [[nodiscard]] virtual bool UnregisterObserver(StreamingObserverHandle observer) noexcept = 0;
-        [[nodiscard]] virtual bool UpdateObserver(StreamingObserverHandle observer,
-                                                  const StreamingObserverUpdate& update) noexcept = 0;
+        [[nodiscard]] virtual bool UpdateObserver(StreamingObserverHandle observer, const StreamingObserverUpdate& update) noexcept = 0;
         [[nodiscard]] virtual bool SetObserverEnabled(StreamingObserverHandle observer, bool enabled) noexcept = 0;
         [[nodiscard]] virtual bool SetPrimaryObserver(StreamingObserverHandle observer) noexcept = 0;
         virtual void ClearPrimaryObserver() noexcept = 0;
         [[nodiscard]] virtual bool SetGlobalDistanceScale(f32 scale) noexcept = 0;
 
-        [[nodiscard]] virtual bool Snapshot(StreamingObserverSnapshot& snapshot) const noexcept = 0;
+        [[nodiscard]] virtual bool GetSnapshot(StreamingObserverSnapshot& snapshot) const noexcept = 0;
         [[nodiscard]] virtual StreamingObserverServiceStats GetStats() const noexcept = 0;
 
     protected:

@@ -17,29 +17,52 @@ namespace vanguard::rendering
         {
             switch (source)
             {
-            case shaders::ShaderStage::Vertex: destination = rhi::ShaderStage::Vertex; return true;
-            case shaders::ShaderStage::Hull: destination = rhi::ShaderStage::Hull; return true;
-            case shaders::ShaderStage::Domain: destination = rhi::ShaderStage::Domain; return true;
-            case shaders::ShaderStage::Geometry: destination = rhi::ShaderStage::Geometry; return true;
-            case shaders::ShaderStage::Fragment: destination = rhi::ShaderStage::Pixel; return true;
-            case shaders::ShaderStage::Compute: destination = rhi::ShaderStage::Compute; return true;
-            case shaders::ShaderStage::Task: destination = rhi::ShaderStage::Amplification; return true;
-            case shaders::ShaderStage::Mesh: destination = rhi::ShaderStage::Mesh; return true;
-            default: return false;
+            case shaders::ShaderStage::Vertex:
+                destination = rhi::ShaderStage::Vertex;
+                return true;
+            case shaders::ShaderStage::Hull:
+                destination = rhi::ShaderStage::Hull;
+                return true;
+            case shaders::ShaderStage::Domain:
+                destination = rhi::ShaderStage::Domain;
+                return true;
+            case shaders::ShaderStage::Geometry:
+                destination = rhi::ShaderStage::Geometry;
+                return true;
+            case shaders::ShaderStage::Fragment:
+                destination = rhi::ShaderStage::Pixel;
+                return true;
+            case shaders::ShaderStage::Compute:
+                destination = rhi::ShaderStage::Compute;
+                return true;
+            case shaders::ShaderStage::Task:
+                destination = rhi::ShaderStage::Amplification;
+                return true;
+            case shaders::ShaderStage::Mesh:
+                destination = rhi::ShaderStage::Mesh;
+                return true;
+            default:
+                return false;
             }
         }
-    }
+    } // namespace
 
     const char* ToString(const RenderShaderResult result) noexcept
     {
         switch (result)
         {
-        case RenderShaderResult::Success: return "Success";
-        case RenderShaderResult::InvalidArgument: return "InvalidArgument";
-        case RenderShaderResult::InvalidState: return "InvalidState";
-        case RenderShaderResult::UnsupportedBackendFormat: return "UnsupportedBackendFormat";
-        case RenderShaderResult::UnsupportedStage: return "UnsupportedStage";
-        case RenderShaderResult::NativeCreationFailure: return "NativeCreationFailure";
+        case RenderShaderResult::Success:
+            return "Success";
+        case RenderShaderResult::InvalidArgument:
+            return "InvalidArgument";
+        case RenderShaderResult::InvalidState:
+            return "InvalidState";
+        case RenderShaderResult::UnsupportedBackendFormat:
+            return "UnsupportedBackendFormat";
+        case RenderShaderResult::UnsupportedStage:
+            return "UnsupportedStage";
+        case RenderShaderResult::NativeCreationFailure:
+            return "NativeCreationFailure";
         }
         return "Unknown";
     }
@@ -57,7 +80,7 @@ namespace vanguard::rendering
             return RenderShaderResult::InvalidArgument;
 
         const rhi::BackendKind backend = rhi::GetCapabilities().backend;
-        for (const shaders::StageRecord& stage : shader.Stages())
+        for (const shaders::StageRecord& stage : shader.GetStages())
         {
             if (!IsNativeFormatCompatible(stage.format, backend))
             {
@@ -70,7 +93,7 @@ namespace vanguard::rendering
                 Unload();
                 return RenderShaderResult::UnsupportedStage;
             }
-            const containers::ArraySpan<const u8> bytecode = shader.Bytecode(stage);
+            const containers::ArraySpan<const u8> bytecode = shader.GetBytecode(stage);
             const rhi::ShaderDesc description{nativeStage, bytecode.Data(), bytecode.Size(), stage.entryPointName};
             const rhi::ShaderRef native = rhi::CreateShader(description, failure);
             if (!native)
@@ -81,12 +104,12 @@ namespace vanguard::rendering
             m_stages[static_cast<u32>(stage.stage)] = native;
         }
 
-        m_kind = shader.Kind();
-        m_program = shader.Program();
-        m_permutation = shader.Permutation();
+        m_kind = shader.GetKind();
+        m_program = shader.GetProgram();
+        m_permutation = shader.GetPermutation();
         m_bindingLayoutFingerprint = shader.BindingLayoutFingerprint();
-        m_pipelineInterfaceFingerprint = shader.PipelineInterfaceFingerprint();
-        m_interface = shader.Interface();
+        m_pipelineInterfaceFingerprint = shader.GetPipelineInterfaceFingerprint();
+        m_interface = shader.GetInterface();
         m_loaded = true;
         return RenderShaderResult::Success;
     }
@@ -104,15 +127,36 @@ namespace vanguard::rendering
         m_loaded = false;
     }
 
-    bool RenderShader::IsLoaded() const noexcept { return m_loaded; }
-    shaders::ProgramKind RenderShader::Kind() const noexcept { return m_kind; }
-    u64 RenderShader::Program() const noexcept { return m_program; }
-    rhi::ShaderRef RenderShader::Stage(const shaders::ShaderStage stage) const noexcept
+    bool RenderShader::IsLoaded() const noexcept
+    {
+        return m_loaded;
+    }
+    shaders::ProgramKind RenderShader::GetKind() const noexcept
+    {
+        return m_kind;
+    }
+    u64 RenderShader::GetProgram() const noexcept
+    {
+        return m_program;
+    }
+    rhi::ShaderRef RenderShader::GetStage(const shaders::ShaderStage stage) const noexcept
     {
         return stage < shaders::ShaderStage::Count ? m_stages[static_cast<u32>(stage)] : rhi::ShaderRef{};
     }
-    const crypto::Digest256& RenderShader::Permutation() const noexcept { return m_permutation; }
-    const crypto::Digest256& RenderShader::BindingLayoutFingerprint() const noexcept { return m_bindingLayoutFingerprint; }
-    const crypto::Digest256& RenderShader::PipelineInterfaceFingerprint() const noexcept { return m_pipelineInterfaceFingerprint; }
-    const shaders::PipelineInterface& RenderShader::Interface() const noexcept { return m_interface; }
+    const crypto::Digest256& RenderShader::GetPermutation() const noexcept
+    {
+        return m_permutation;
+    }
+    const crypto::Digest256& RenderShader::BindingLayoutFingerprint() const noexcept
+    {
+        return m_bindingLayoutFingerprint;
+    }
+    const crypto::Digest256& RenderShader::GetPipelineInterfaceFingerprint() const noexcept
+    {
+        return m_pipelineInterfaceFingerprint;
+    }
+    const shaders::PipelineInterface& RenderShader::GetInterface() const noexcept
+    {
+        return m_interface;
+    }
 } // namespace vanguard::rendering

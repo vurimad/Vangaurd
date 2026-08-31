@@ -123,15 +123,14 @@ namespace vanguard::schemas
             return index < values.Size() ? &values[index] : nullptr;
         }
 
-        inline static constexpr reflection::ArrayOperations Operations{sizeof(Element), alignof(Element), &Size,
-                                                                       &ConstElement,   &Resize,          &ElementAt};
+        inline static constexpr reflection::ArrayOperations Operations{sizeof(Element), alignof(Element), &Size, &ConstElement, &Resize, &ElementAt};
     };
 
     template <typename Element>
-    [[nodiscard]] constexpr reflection::SchemaField MakeDynamicArrayField(
-        const char* const name, const reflection::SchemaTypeId elementType, const reflection::ValueKind elementKind, const u32 offset,
-        const u16 introducedVersion = 1, const u16 removedVersion = 0,
-        const reflection::FieldFlags flags = reflection::FieldFlags::None) noexcept
+    [[nodiscard]] constexpr reflection::SchemaField MakeDynamicArrayField(const char* const name, const reflection::SchemaTypeId elementType,
+                                                                          const reflection::ValueKind elementKind, const u32 offset,
+                                                                          const u16 introducedVersion = 1, const u16 removedVersion = 0,
+                                                                          const reflection::FieldFlags flags = reflection::FieldFlags::None) noexcept
     {
         reflection::SchemaField field =
             reflection::MakeField(name, elementType, reflection::ValueKind::Array, offset, sizeof(containers::DynamicArray<Element>),
@@ -149,9 +148,9 @@ namespace vanguard::schemas
 
     // Deserialization writes into an already constructed object. Load into a
     // staging/default object when transactional publication is required.
-    [[nodiscard]] Result ReadObject(serialization::BinaryReader& reader, const reflection::Schema& schema, void* object,
-                                    const ReadLimits& limits = {}, ReadInfo* info = nullptr) noexcept;
+    [[nodiscard]] Result ReadObject(serialization::BinaryReader& reader, const reflection::Schema& schema, void* object, const ReadLimits& limits = {},
+                                    ReadInfo* info = nullptr) noexcept;
 
-    [[nodiscard]] Result VisitDependencies(const reflection::Schema& schema, const void* object, DependencyVisitor visitor,
-                                           void* userData = nullptr, u32 maximumNestingDepth = 32) noexcept;
+    [[nodiscard]] Result VisitDependencies(const reflection::Schema& schema, const void* object, DependencyVisitor visitor, void* userData = nullptr,
+                                           u32 maximumNestingDepth = 32) noexcept;
 } // namespace vanguard::schemas

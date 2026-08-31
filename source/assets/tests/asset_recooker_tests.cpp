@@ -86,8 +86,15 @@ namespace
             return false;
         }
         const u8 bytes[] = {context.request.source.content[0], static_cast<u8>(context.dependencies.Count())};
-        return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, bytes,
-                          sizeof(bytes)) == assets::Result::Success;
+        return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, bytes, sizeof(bytes)) ==
+               assets::Result::Success;
+    }
+
+    [[nodiscard]] bool Estimate(const assets::BuildRequest&, const containers::ArraySpan<const assets::BuildDependency>,
+                                assets::BuildResourceEstimate& estimate, void*) noexcept
+    {
+        estimate = {1, 2};
+        return true;
     }
 
     [[nodiscard]] assets::BuildRequest MakeRequest(const resources::ResourceReference source, const resources::ResourceReference output,
@@ -96,8 +103,7 @@ namespace
         return {{source, {&byte, 1}, {}}, output, assets::TargetPlatform::WindowsD3D12, {}};
     }
 
-    [[nodiscard]] bool ResolveOutput(const resources::ResourceReference output, assets::BuildRequest& request,
-                                     void* const userData) noexcept
+    [[nodiscard]] bool ResolveOutput(const resources::ResourceReference output, assets::BuildRequest& request, void* const userData) noexcept
     {
         auto& fixture = *static_cast<Fixture*>(userData);
         if (output == fixture.sharedOutput)
@@ -118,15 +124,13 @@ namespace
         return false;
     }
 
-    [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::BuildRequest& request,
-                                        void* const userData) noexcept
+    [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::BuildRequest& request, void* const userData) noexcept
     {
         return ResolveOutput(dependency.identity, request, userData);
     }
 
     [[nodiscard]] bool BuildAndPublish(assets::BuildSystem& system, assets::DependencyIndex& index, const assets::BuildRequest& request,
-                                       const resources::ResourceReference dependency = {},
-                                       const assets::BuildFingerprint& dependencyContent = {}) noexcept
+                                       const resources::ResourceReference dependency = {}, const assets::BuildFingerprint& dependencyContent = {}) noexcept
     {
         assets::BuildPlan plan;
         if (system.Prepare(request, plan) != assets::Result::Success)
@@ -138,8 +142,7 @@ namespace
             return false;
         }
         assets::BuildOutput output;
-        return system.Execute(request, plan, output) == assets::Result::Success &&
-               index.Publish(request, plan, output) == assets::IndexResult::Success;
+        return system.Execute(request, plan, output) == assets::Result::Success && index.Publish(request, plan, output) == assets::IndexResult::Success;
     }
 
     void DeleteIndexFiles(filesystem::Manager& manager, const filesystem::AbsolutePath& root) noexcept
@@ -184,7 +187,7 @@ int main()
     assets::BuildSystem buildSystem;
     Check(buildSystem.Initialize(), "build-system initialization");
     const assets::CompilerDescriptor compiler{
-        assets::HashCompilerName("assets.recooker_test"), "assets.recooker_test", 1, SourceType, OutputType, &Discover, &Compile, &fixture};
+        assets::HashCompilerName("assets.recooker_test"), "assets.recooker_test", 1, SourceType, OutputType, &Discover, &Compile, &fixture, &Estimate};
     Check(buildSystem.RegisterCompiler(compiler) == assets::Result::Success, "compiler registration");
 
     assets::DependencyIndexConfig indexConfig;
@@ -193,8 +196,7 @@ int main()
     assets::DependencyIndex index;
     Check(index.Initialize(indexConfig) == assets::IndexResult::Success, "index initialization");
 
-    Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte)),
-          "baseline shared publication");
+    Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte)), "baseline shared publication");
     assets::DependencyRecord sharedRecord;
     Check(index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success, "baseline shared lookup");
     Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte), fixture.sharedOutput,
@@ -216,9 +218,8 @@ int main()
     {
         const u32 callsBefore = fixture.compileCalls.GetValue();
         assets::RecookBatch unchanged = recooker.Request({&sharedChange, 1});
-        Check(unchanged && unchanged.HasFinished() && unchanged.Status() == assets::RecookState::Succeeded &&
-                  unchanged.GetStats().unchangedChanges == 1 && unchanged.GetStats().rootRequests == 0 &&
-                  fixture.compileCalls.GetValue() == callsBefore && !index.HasActiveTransaction(),
+        Check(unchanged && unchanged.HasFinished() && unchanged.GetStatus() == assets::RecookState::Succeeded && unchanged.GetStats().unchangedChanges == 1 &&
+                  unchanged.GetStats().rootRequests == 0 && fixture.compileCalls.GetValue() == callsBefore && !index.HasActiveTransaction(),
               "unchanged source event performs no work");
         unchanged.Reset();
     }
@@ -232,17 +233,15 @@ int main()
         assets::RecookBatch rebuilt = recooker.Request({&sharedChange, 1}, assets::BuildPriority::High);
         rebuilt.Wait();
         const assets::RecookStats stats = rebuilt.GetStats();
-        Check(rebuilt.Status() == assets::RecookState::Succeeded, "changed leaf batch succeeds");
+        Check(rebuilt.GetStatus() == assets::RecookState::Succeeded, "changed leaf batch succeeds");
         Check(stats.dirtySeeds == 1, "changed leaf contributes one dirty seed");
         Check(stats.affectedOutputs == 3, "changed leaf expands through all transitive outputs");
         Check(stats.rootRequests == 1, "changed leaf schedules one minimized root");
         Check(stats.succeededRoots == 1, "changed leaf root succeeds");
-        Check(fixture.compileCalls.GetValue() == callsBefore + 2,
-              "changed leaf traverses the full graph while preserving a content-identical root DDC hit");
+        Check(fixture.compileCalls.GetValue() == callsBefore + 2, "changed leaf traverses the full graph while preserving a content-identical root DDC hit");
         Check(!index.HasActiveTransaction(), "successful recook closes the index transaction");
         Check(!index.HasChanges(), "successful recook atomically persists the index");
-        Check(index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success &&
-                  sharedRecord.contentFingerprint != committedSharedContent,
+        Check(index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success && sharedRecord.contentFingerprint != committedSharedContent,
               "successful batch publishes new dependency state");
         committedSharedContent = sharedRecord.contentFingerprint;
         rebuilt.Reset();
@@ -256,9 +255,8 @@ int main()
         failed.Wait();
         assets::DependencyRecord afterFailure;
         assets::DependencyRecord leftAfterFailure;
-        Check(failed.Status() == assets::RecookState::Failed && failed.Error() == assets::RecookFailure::BuildFailed &&
-                  index.Find(fixture.sharedOutput, afterFailure) == assets::IndexResult::Success &&
-                  afterFailure.contentFingerprint == committedSharedContent &&
+        Check(failed.GetStatus() == assets::RecookState::Failed && failed.GetError() == assets::RecookFailure::BuildFailed &&
+                  index.Find(fixture.sharedOutput, afterFailure) == assets::IndexResult::Success && afterFailure.contentFingerprint == committedSharedContent &&
                   index.Find(fixture.leftOutput, leftAfterFailure) == assets::IndexResult::Success &&
                   leftAfterFailure.contentFingerprint == committedLeftContent && !index.HasActiveTransaction() && !index.HasChanges(),
               "failed root rolls back successful staged dependency publications");
@@ -281,8 +279,8 @@ int main()
               "active transaction hides staged records from readers");
         Check(cancelled.Cancel(), "batch cancellation accepted");
         cancelled.Wait();
-        Check(cancelled.Status() == assets::RecookState::Cancelled && cancelled.Error() == assets::RecookFailure::Cancelled &&
-                  !index.HasActiveTransaction() && !index.HasChanges(),
+        Check(cancelled.GetStatus() == assets::RecookState::Cancelled && cancelled.GetError() == assets::RecookFailure::Cancelled && !index.HasActiveTransaction() &&
+                  !index.HasChanges(),
               "cancelled recook rolls back transaction");
         cancelled.Reset();
         fixture.blockShared = false;
@@ -291,8 +289,8 @@ int main()
     {
         const assets::AssetChange unknown{Reference("source/recook/untracked.asset", SourceType)};
         assets::RecookBatch untracked = recooker.Request({&unknown, 1});
-        Check(untracked && untracked.HasFinished() && untracked.Status() == assets::RecookState::Failed &&
-                  untracked.Error() == assets::RecookFailure::UntrackedChange,
+        Check(untracked && untracked.HasFinished() && untracked.GetStatus() == assets::RecookState::Failed &&
+                  untracked.GetError() == assets::RecookFailure::UntrackedChange,
               "untracked source change fails explicitly");
         untracked.Reset();
     }
@@ -306,8 +304,7 @@ int main()
     assets::DependencyIndex restarted;
     Check(restarted.Initialize(indexConfig) == assets::IndexResult::Success, "transactional index restart");
     assets::DependencyRecord persistedShared;
-    Check(restarted.Find(fixture.sharedOutput, persistedShared) == assets::IndexResult::Success &&
-              persistedShared.contentFingerprint == committedSharedContent,
+    Check(restarted.Find(fixture.sharedOutput, persistedShared) == assets::IndexResult::Success && persistedShared.contentFingerprint == committedSharedContent,
           "only successful recook transaction survives restart");
     Check(restarted.Shutdown(), "restarted index shutdown");
 

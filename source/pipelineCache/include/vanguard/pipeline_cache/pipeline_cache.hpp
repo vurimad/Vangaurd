@@ -67,8 +67,8 @@ namespace vanguard::pipeline_cache
         }
     };
 
-    using CreateFunction = bool (*)(pipelines::PipelineKind kind, const crypto::Digest256& concreteKey, void* payload,
-                                    NativePipeline& output, FailureEvidence& failure, void* userData) noexcept;
+    using CreateFunction = bool (*)(pipelines::PipelineKind kind, const crypto::Digest256& concreteKey, void* payload, NativePipeline& output,
+                                    FailureEvidence& failure, void* userData) noexcept;
     using DestroyFunction = void (*)(NativePipeline pipeline, void* userData) noexcept;
 
     struct Backend
@@ -129,15 +129,15 @@ namespace vanguard::pipeline_cache
 
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] explicit operator bool() const noexcept;
-        [[nodiscard]] State Status() const noexcept;
+        [[nodiscard]] State GetStatus() const noexcept;
         [[nodiscard]] bool HasFinished() const noexcept;
         [[nodiscard]] bool HasSucceeded() const noexcept;
         void Wait() const noexcept;
         [[nodiscard]] bool TryWait(u32 timeoutMilliseconds = 0) const noexcept;
-        [[nodiscard]] NativePipeline NativeObject() const noexcept;
-        [[nodiscard]] FailureEvidence Error() const noexcept;
-        [[nodiscard]] const crypto::Digest256& Key() const noexcept;
-        [[nodiscard]] u64 Generation() const noexcept;
+        [[nodiscard]] NativePipeline GetNativeObject() const noexcept;
+        [[nodiscard]] FailureEvidence GetError() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetKey() const noexcept;
+        [[nodiscard]] u64 GetGeneration() const noexcept;
         [[nodiscard]] bool IsSameGeneration(const PipelineRequest& other) const noexcept;
         void Reset() noexcept;
 

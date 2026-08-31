@@ -36,7 +36,7 @@ namespace vanguard::game
         RuntimeSystem(const RuntimeSystem&) = delete;
         RuntimeSystem& operator=(const RuntimeSystem&) = delete;
 
-        [[nodiscard]] const RuntimeSystemDescriptor& Descriptor() const noexcept;
+        [[nodiscard]] const RuntimeSystemDescriptor& GetDescriptor() const noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
         [[nodiscard]] bool IsGameAttached() const noexcept;
 

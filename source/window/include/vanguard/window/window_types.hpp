@@ -43,8 +43,7 @@ namespace vanguard::window
         {
             return index < MaximumPresentationAttachments && generation != 0;
         }
-        [[nodiscard]] friend constexpr bool operator==(const PresentationAttachmentHandle&,
-                                                       const PresentationAttachmentHandle&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const PresentationAttachmentHandle&, const PresentationAttachmentHandle&) noexcept = default;
     };
 
     inline constexpr WindowHandle InvalidWindowHandle{};
@@ -64,7 +63,10 @@ namespace vanguard::window
         u32 width = 0;
         u32 height = 0;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return width != 0 && height != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return width != 0 && height != 0;
+        }
         [[nodiscard]] friend constexpr bool operator==(const WindowExtent&, const WindowExtent&) noexcept = default;
     };
 
@@ -81,7 +83,10 @@ namespace vanguard::window
         u32 numerator = 0;
         u32 denominator = 1;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept { return numerator != 0 && denominator != 0; }
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return numerator != 0 && denominator != 0;
+        }
         [[nodiscard]] friend constexpr bool operator==(const RefreshRate&, const RefreshRate&) noexcept = default;
     };
 
@@ -137,13 +142,11 @@ namespace vanguard::window
         Occluded = 1u << 3u
     };
 
-    [[nodiscard]] constexpr PresentationRequirement operator|(const PresentationRequirement left,
-                                                               const PresentationRequirement right) noexcept
+    [[nodiscard]] constexpr PresentationRequirement operator|(const PresentationRequirement left, const PresentationRequirement right) noexcept
     {
         return static_cast<PresentationRequirement>(static_cast<u32>(left) | static_cast<u32>(right));
     }
-    [[nodiscard]] constexpr bool HasRequirement(const PresentationRequirement requirements,
-                                                const PresentationRequirement requirement) noexcept
+    [[nodiscard]] constexpr bool HasRequirement(const PresentationRequirement requirements, const PresentationRequirement requirement) noexcept
     {
         return (static_cast<u32>(requirements) & static_cast<u32>(requirement)) != 0;
     }
@@ -235,8 +238,7 @@ namespace vanguard::window
         Visibility = 1u << 4u
     };
 
-    [[nodiscard]] constexpr WindowStateField operator|(const WindowStateField left,
-                                                        const WindowStateField right) noexcept
+    [[nodiscard]] constexpr WindowStateField operator|(const WindowStateField left, const WindowStateField right) noexcept
     {
         return static_cast<WindowStateField>(static_cast<u32>(left) | static_cast<u32>(right));
     }

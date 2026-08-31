@@ -106,4 +106,10 @@ namespace vanguard::filesystem
     void Shutdown() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
     [[nodiscard]] Manager& GetManager() noexcept;
+
+    // Replaces target with a completed sibling staging file without deleting
+    // target first. Requiring one parent directory keeps the operation on one
+    // filesystem volume. On failure this function performs no cleanup, so the
+    // caller can inspect or remove staged while the previous target remains.
+    [[nodiscard]] bool ReplaceFile(const AbsolutePath& staged, const AbsolutePath& target) noexcept;
 } // namespace vanguard::filesystem

@@ -5,18 +5,15 @@
 
 namespace vanguard::math
 {
-    RED_INLINE Matrix::Matrix(const Float* f)
-        : Matrix{f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]}
-    {
-    }
+    RED_INLINE Matrix::Matrix(const Float* f) : Matrix{f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]} {}
 
     RED_FORCE_INLINE Matrix::Matrix(const Matrix& m) : Matrix{m.X, m.Y, m.Z, m.W} {}
 
     RED_FORCE_INLINE Matrix::Matrix(const Vector4& x, const Vector4& y, const Vector4& z, const Vector4& w) : X(x), Y(y), Z(z), W(w) {}
 
-    RED_INLINE Matrix::Matrix(const Float _00, const Float _01, const Float _02, const Float _03, const Float _10, const Float _11,
-                              const Float _12, const Float _13, const Float _20, const Float _21, const Float _22, const Float _23,
-                              const Float _30, const Float _31, const Float _32, const Float _33)
+    RED_INLINE Matrix::Matrix(const Float _00, const Float _01, const Float _02, const Float _03, const Float _10, const Float _11, const Float _12,
+                              const Float _13, const Float _20, const Float _21, const Float _22, const Float _23, const Float _30, const Float _31,
+                              const Float _32, const Float _33)
         : Matrix{{_00, _01, _02, _03}, {_10, _11, _12, _13}, {_20, _21, _22, _23}, {_30, _31, _32, _33}}
     {
     }

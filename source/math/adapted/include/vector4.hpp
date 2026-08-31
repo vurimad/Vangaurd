@@ -580,14 +580,12 @@ namespace vanguard::math
 
     RED_INLINE Vector4 Vector4::PLUS_MAX()
     {
-        return {std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max(),
-                std::numeric_limits<Float>::max()};
+        return {std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max(), std::numeric_limits<Float>::max()};
     }
 
     RED_INLINE Vector4 Vector4::MINUS_MAX()
     {
-        return {-std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max(),
-                -std::numeric_limits<Float>::max()};
+        return {-std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max(), -std::numeric_limits<Float>::max()};
     }
 
     RED_INLINE Vector4 Vector4::PLUS_INF()

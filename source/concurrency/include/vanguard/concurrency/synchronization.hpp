@@ -193,5 +193,4 @@ namespace vanguard::concurrency
 #define VG_CONCURRENCY_JOIN_IMPL(left, right) left##right
 #define VG_CONCURRENCY_JOIN(left, right) VG_CONCURRENCY_JOIN_IMPL(left, right)
 #define VG_SCOPE_LOCK(lock) ::vanguard::concurrency::ScopedLock<decltype(lock)> VG_CONCURRENCY_JOIN(vgScopedLock, __LINE__)(lock)
-#define VG_SCOPE_SHARED_LOCK(lock)                                                                                                         \
-    ::vanguard::concurrency::ScopedSharedLock<decltype(lock)> VG_CONCURRENCY_JOIN(vgScopedSharedLock, __LINE__)(lock)
+#define VG_SCOPE_SHARED_LOCK(lock) ::vanguard::concurrency::ScopedSharedLock<decltype(lock)> VG_CONCURRENCY_JOIN(vgScopedSharedLock, __LINE__)(lock)

@@ -272,20 +272,19 @@ namespace vanguard::math::simd
         return _mm_add_ps(c, _mm_mul_ps(a, b));
     }
 
-    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& xxxx1, const __m128& yyyy1,
-                                const __m128& zzzz1)
+    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& xxxx1, const __m128& yyyy1, const __m128& zzzz1)
     {
         return MulAdd(zzzz, zzzz1, MulAdd(xxxx, xxxx1, _mm_mul_ps(yyyy, yyyy1)));
     }
 
-    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& wwww, const __m128& xxxx1,
-                                const __m128& yyyy1, const __m128& zzzz1, const __m128& wwww1)
+    RED_FORCE_INLINE __m128 Dot(const __m128& xxxx, const __m128& yyyy, const __m128& zzzz, const __m128& wwww, const __m128& xxxx1, const __m128& yyyy1,
+                                const __m128& zzzz1, const __m128& wwww1)
     {
         return MulAdd(wwww, wwww1, MulAdd(zzzz, zzzz1, MulAdd(xxxx, xxxx1, _mm_mul_ps(yyyy, yyyy1))));
     }
 
-    RED_FORCE_INLINE void Normalize(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx,
-                                    const __m128& yyyy, const __m128& zzzz, const __m128& wwww)
+    RED_FORCE_INLINE void Normalize(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx, const __m128& yyyy,
+                                    const __m128& zzzz, const __m128& wwww)
     {
         const __m128 lengthSqr = Dot(xxxx, yyyy, zzzz, wwww, xxxx, yyyy, zzzz, wwww);
         const __m128 lengthRcp = _mm_rsqrt_ps(lengthSqr);
@@ -297,9 +296,9 @@ namespace vanguard::math::simd
 
     // this could be used as an interpolation function for quaternions.
     // ex. in animation sampling
-    RED_FORCE_INLINE void QuatNLerp(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx,
-                                    const __m128& yyyy, const __m128& zzzz, const __m128& wwww, const __m128& xxxx1, const __m128& yyyy1,
-                                    const __m128& zzzz1, const __m128& wwww1, const __m128& t)
+    RED_FORCE_INLINE void QuatNLerp(__m128* outXXXX, __m128* outYYYY, __m128* outZZZZ, __m128* outWWWW, const __m128& xxxx, const __m128& yyyy,
+                                    const __m128& zzzz, const __m128& wwww, const __m128& xxxx1, const __m128& yyyy1, const __m128& zzzz1, const __m128& wwww1,
+                                    const __m128& t)
     {
         const __m128 signMask = _mm_castsi128_ps(_mm_set1_epi32(0x80000000));
 
@@ -316,9 +315,8 @@ namespace vanguard::math::simd
     }
 
     // functions to write computation result to data in AoS (Array of Structs) format
-    RED_FORCE_INLINE void Scatter3(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1,
-                                   ::vanguard::math::simd::Vector4* output2, ::vanguard::math::simd::Vector4* output3,
-                                   const __m128 input[3], const __m128& w)
+    RED_FORCE_INLINE void Scatter3(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1, ::vanguard::math::simd::Vector4* output2,
+                                   ::vanguard::math::simd::Vector4* output3, const __m128 input[3], const __m128& w)
     {
         __m128 tmp[4] = {input[0], input[1], input[2], w};
 
@@ -330,9 +328,8 @@ namespace vanguard::math::simd
         output3[0].V = tmp[3];
     }
 
-    RED_FORCE_INLINE void Scatter4(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1,
-                                   ::vanguard::math::simd::Vector4* output2, ::vanguard::math::simd::Vector4* output3,
-                                   const __m128 input[4])
+    RED_FORCE_INLINE void Scatter4(::vanguard::math::simd::Vector4* output0, ::vanguard::math::simd::Vector4* output1, ::vanguard::math::simd::Vector4* output2,
+                                   ::vanguard::math::simd::Vector4* output3, const __m128 input[4])
     {
         __m128 tmp[4] = {input[0], input[1], input[2], input[3]};
 

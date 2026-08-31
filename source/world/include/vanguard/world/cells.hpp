@@ -85,8 +85,7 @@ namespace vanguard::world
         OptionalWorld
     };
 
-    template<typename Enum>
-    [[nodiscard]] constexpr Enum CombineFlags(const Enum left, const Enum right) noexcept
+    template <typename Enum> [[nodiscard]] constexpr Enum CombineFlags(const Enum left, const Enum right) noexcept
     {
         return static_cast<Enum>(static_cast<u32>(left) | static_cast<u32>(right));
     }
@@ -266,27 +265,24 @@ namespace vanguard::world
         void Close() noexcept;
 
         [[nodiscard]] bool IsOpen() const noexcept;
-        [[nodiscard]] u64 CellId() const noexcept;
-        [[nodiscard]] u64 WorldId() const noexcept;
-        [[nodiscard]] const i32* GridCoordinate() const noexcept;
-        [[nodiscard]] u8 HierarchyLevel() const noexcept;
-        [[nodiscard]] CellCategory Category() const noexcept;
-        [[nodiscard]] const f64* Origin() const noexcept;
-        [[nodiscard]] const Bounds& CellBounds() const noexcept;
-        [[nodiscard]] const crypto::Digest256& SourceFingerprint() const noexcept;
-        [[nodiscard]] const crypto::Digest256& ContentFingerprint() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ActivationGroupRecord> ActivationGroups() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const PlacementRecord> Placements() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ComponentOverrideRecord> Overrides() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const EntityReferenceRecord> EntityReferences() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const DependencyRecord> Dependencies() const noexcept;
-        [[nodiscard]] containers::ArraySpan<const PlacementRecord> PlacementsInGroup(
-            const ActivationGroupRecord& group) const noexcept;
-        [[nodiscard]] containers::ArraySpan<const ComponentOverrideRecord> OverridesFor(
-            const PlacementRecord& placement) const noexcept;
-        [[nodiscard]] containers::ArraySpan<const EntityReferenceRecord> ReferencesFor(
-            const PlacementRecord& placement) const noexcept;
-        [[nodiscard]] containers::ArraySpan<const u8> OverrideData(const ComponentOverrideRecord& record) const noexcept;
+        [[nodiscard]] u64 GetCellId() const noexcept;
+        [[nodiscard]] u64 GetWorldId() const noexcept;
+        [[nodiscard]] const i32* GetGridCoordinate() const noexcept;
+        [[nodiscard]] u8 GetHierarchyLevel() const noexcept;
+        [[nodiscard]] CellCategory GetCategory() const noexcept;
+        [[nodiscard]] const f64* GetOrigin() const noexcept;
+        [[nodiscard]] const Bounds& GetCellBounds() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetSourceFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ActivationGroupRecord> GetActivationGroups() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const PlacementRecord> GetPlacements() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ComponentOverrideRecord> GetOverrides() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const EntityReferenceRecord> GetEntityReferences() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const DependencyRecord> GetDependencies() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const PlacementRecord> GetPlacementsInGroup(const ActivationGroupRecord& group) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ComponentOverrideRecord> GetOverridesFor(const PlacementRecord& placement) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const EntityReferenceRecord> GetReferencesFor(const PlacementRecord& placement) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const u8> GetOverrideData(const ComponentOverrideRecord& record) const noexcept;
         [[nodiscard]] const PlacementRecord* FindPlacement(u64 entityId) const noexcept;
         [[nodiscard]] const ActivationGroupRecord* FindActivationGroup(u64 stableId) const noexcept;
 
@@ -315,11 +311,11 @@ namespace vanguard::world
     public:
         CellResource() noexcept;
 
-        [[nodiscard]] resources::ResourceTypeId Type() const noexcept override;
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
         [[nodiscard]] Result Open(const void* data, usize size, const ReadLimits& limits = {}) noexcept;
         [[nodiscard]] bool BindDependencies(const resources::LoadContext& context) noexcept;
         [[nodiscard]] const prefabs::PrefabFile* ResolvePrefab(resources::ResourceReference reference) const noexcept;
-        [[nodiscard]] const CellFile& File() const noexcept;
+        [[nodiscard]] const CellFile& GetFile() const noexcept;
 
     private:
         CellFile m_file;
@@ -327,6 +323,5 @@ namespace vanguard::world
     };
 
     [[nodiscard]] Result CookCell(const CellBuildDescription& description, filesystem::IFile& output) noexcept;
-    [[nodiscard]] Result CalculateContentFingerprint(const CellBuildDescription& description,
-                                                     crypto::Digest256& fingerprint) noexcept;
+    [[nodiscard]] Result CalculateContentFingerprint(const CellBuildDescription& description, crypto::Digest256& fingerprint) noexcept;
 } // namespace vanguard::world

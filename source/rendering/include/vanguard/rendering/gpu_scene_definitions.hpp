@@ -16,8 +16,7 @@ namespace vanguard::rendering
         }
 
         [[nodiscard]] u32 CalcHash() const noexcept;
-        [[nodiscard]] friend constexpr bool operator==(const GpuSceneDefinitionKey&,
-                                                       const GpuSceneDefinitionKey&) noexcept = default;
+        [[nodiscard]] friend constexpr bool operator==(const GpuSceneDefinitionKey&, const GpuSceneDefinitionKey&) noexcept = default;
     };
 
     struct GpuGeometryDefinition
@@ -39,7 +38,6 @@ namespace vanguard::rendering
     /// handles; phase offsets remain local to GpuRenderableDefinition::phaseParticipations.
     struct GpuPrimitiveDefinition
     {
-        GpuGeometryHandle geometry;
         GpuMaterialHandle material;
         u32 firstPhaseParticipation = 0;
         u32 phaseParticipationCount = 0;
@@ -128,38 +126,26 @@ namespace vanguard::rendering
         GpuSceneDefinitions(const GpuSceneDefinitions&) = delete;
         GpuSceneDefinitions& operator=(const GpuSceneDefinitions&) = delete;
 
-        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, GpuSceneUploader& uploader,
-                                      const GpuSceneDefinitionsConfig& config = {},
+        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, GpuSceneUploader& uploader, const GpuSceneDefinitionsConfig& config = {},
                                       GpuSceneDefinitionFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GpuSceneDefinitionFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] bool AcquireGeometries(containers::ArraySpan<const GpuGeometryDefinition> definitions,
-                                             containers::ArraySpan<GpuGeometryHandle> handles,
-                                             GpuSceneDefinitionPublication& publication,
-                                             GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AcquireMaterials(containers::ArraySpan<const GpuMaterialDefinition> definitions,
-                                            containers::ArraySpan<GpuMaterialHandle> handles,
-                                            GpuSceneDefinitionPublication& publication,
-                                            GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AcquireGeometries(containers::ArraySpan<const GpuGeometryDefinition> definitions, containers::ArraySpan<GpuGeometryHandle> handles,
+                                             GpuSceneDefinitionPublication& publication, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AcquireMaterials(containers::ArraySpan<const GpuMaterialDefinition> definitions, containers::ArraySpan<GpuMaterialHandle> handles,
+                                            GpuSceneDefinitionPublication& publication, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool AcquireRenderables(containers::ArraySpan<const GpuRenderableDefinition> definitions,
-                                              containers::ArraySpan<GpuRenderableHandle> handles,
-                                              GpuSceneDefinitionPublication& publication,
+                                              containers::ArraySpan<GpuRenderableHandle> handles, GpuSceneDefinitionPublication& publication,
                                               GpuSceneDefinitionFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool AddReference(GpuGeometryHandle handle,
-                                        GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AddReference(GpuMaterialHandle handle,
-                                        GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AddReference(GpuRenderableHandle handle,
-                                        GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AddReference(GpuGeometryHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AddReference(GpuMaterialHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AddReference(GpuRenderableHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool Release(GpuGeometryHandle handle,
-                                   GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Release(GpuMaterialHandle handle,
-                                   GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Release(GpuRenderableHandle handle,
-                                   GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Release(GpuGeometryHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Release(GpuMaterialHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Release(GpuRenderableHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] bool IsValid(GpuGeometryHandle handle) const noexcept;
         [[nodiscard]] bool IsValid(GpuMaterialHandle handle) const noexcept;

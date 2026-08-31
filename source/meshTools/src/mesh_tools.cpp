@@ -12,12 +12,12 @@ namespace
     namespace mesh = vanguard::meshes;
     namespace tools = vanguard::mesh_tools;
     using vanguard::f32;
-    using vanguard::i8;
     using vanguard::i16;
-    using vanguard::u8;
+    using vanguard::i8;
     using vanguard::u16;
     using vanguard::u32;
     using vanguard::u64;
+    using vanguard::u8;
     using vanguard::usize;
 
     bool g_initialized = false;
@@ -41,7 +41,7 @@ namespace
 
     bool IsValidVertexFormat(const mesh::VertexFormat format)
     {
-        return format <= mesh::VertexFormat::R10G10B10A2UNorm && mesh::VertexFormatByteSize(format) != 0;
+        return format <= mesh::VertexFormat::R10G10B10A2UNorm && mesh::GetVertexFormatByteSize(format) != 0;
     }
 
     bool RulesOverlap(const tools::VertexPackingRule& left, const tools::VertexPackingRule& right)
@@ -50,8 +50,7 @@ namespace
         {
             return false;
         }
-        return left.semanticIndex == right.semanticIndex ||
-               tools::HasFlag(left.flags, tools::VertexPackingRuleFlags::MatchAnySemanticIndex) ||
+        return left.semanticIndex == right.semanticIndex || tools::HasFlag(left.flags, tools::VertexPackingRuleFlags::MatchAnySemanticIndex) ||
                tools::HasFlag(right.flags, tools::VertexPackingRuleFlags::MatchAnySemanticIndex);
     }
 
@@ -63,8 +62,7 @@ namespace
         {
             return tools::ProfileRegistrationResult::RegistrySealed;
         }
-        if (profile.id == 0 || profile.version == 0 || profile.id == profile.baseProfile ||
-            profile.meshKind > mesh::MeshKind::Skinned ||
+        if (profile.id == 0 || profile.version == 0 || profile.id == profile.baseProfile || profile.meshKind > mesh::MeshKind::Skinned ||
             profile.unmatchedStreams > tools::UnmatchedVertexStreamPolicy::PreserveInDedicatedBinding ||
             (static_cast<u8>(profile.flags) & ~static_cast<u8>(tools::MeshCookingProfileFlags::QuantizePositions)) != 0)
         {
@@ -98,11 +96,10 @@ namespace
         for (u32 ruleIndex = 0; ruleIndex < profile.rules.Size(); ++ruleIndex)
         {
             const tools::VertexPackingRule& rule = profile.rules[ruleIndex];
-            if (!IsValidVertexSemantic(rule.semantic) || !IsValidVertexFormat(rule.sourceFormat) ||
-                !IsValidVertexFormat(rule.storedFormat) || rule.bindingGroup >= MaximumRulesPerProfile ||
+            if (!IsValidVertexSemantic(rule.semantic) || !IsValidVertexFormat(rule.sourceFormat) || !IsValidVertexFormat(rule.storedFormat) ||
+                rule.bindingGroup >= MaximumRulesPerProfile ||
                 (static_cast<u8>(rule.flags) &
-                 ~(static_cast<u8>(tools::VertexPackingRuleFlags::Required) |
-                   static_cast<u8>(tools::VertexPackingRuleFlags::MatchAnySemanticIndex))) != 0 ||
+                 ~(static_cast<u8>(tools::VertexPackingRuleFlags::Required) | static_cast<u8>(tools::VertexPackingRuleFlags::MatchAnySemanticIndex))) != 0 ||
                 (rule.pack == nullptr && rule.sourceFormat != rule.storedFormat))
             {
                 return tools::ProfileRegistrationResult::InvalidArgument;
@@ -207,14 +204,9 @@ namespace
     struct BuildStorage
     {
         BuildStorage() noexcept
-            : payloads(memory::pools::Assets::GetInstance()),
-              buffers(memory::pools::Assets::GetInstance()),
-              pages(memory::pools::Assets::GetInstance()),
-              layouts(memory::pools::Assets::GetInstance()),
-              streams(memory::pools::Assets::GetInstance()),
-              materials(memory::pools::Assets::GetInstance()),
-              lods(memory::pools::Assets::GetInstance()),
-              submeshes(memory::pools::Assets::GetInstance())
+            : payloads(memory::pools::Assets::GetInstance()), buffers(memory::pools::Assets::GetInstance()), pages(memory::pools::Assets::GetInstance()),
+              layouts(memory::pools::Assets::GetInstance()), streams(memory::pools::Assets::GetInstance()), materials(memory::pools::Assets::GetInstance()),
+              lods(memory::pools::Assets::GetInstance()), submeshes(memory::pools::Assets::GetInstance())
         {
         }
 
@@ -240,14 +232,10 @@ namespace
         return nullptr;
     }
 
-    bool CopyRemappedStream(
-        Payload& payload,
-        const tools::SourceVertexStream& source,
-        const u32 sourceVertexCount,
-        const u32 cookedVertexCount,
-        const u32* const remap)
+    bool CopyRemappedStream(Payload& payload, const tools::SourceVertexStream& source, const u32 sourceVertexCount, const u32 cookedVertexCount,
+                            const u32* const remap)
     {
-        const u32 elementSize = mesh::VertexFormatByteSize(source.format);
+        const u32 elementSize = mesh::GetVertexFormatByteSize(source.format);
         if (elementSize == 0 || cookedVertexCount > 0xffffffffu / elementSize)
         {
             return false;
@@ -262,20 +250,27 @@ namespace
     {
         switch (format)
         {
-        case mesh::VertexFormat::R32Float: return 1;
-        case mesh::VertexFormat::R32G32Float: return 2;
-        case mesh::VertexFormat::R32G32B32Float: return 3;
-        case mesh::VertexFormat::R32G32B32A32Float: return 4;
+        case mesh::VertexFormat::R32Float:
+            return 1;
+        case mesh::VertexFormat::R32G32Float:
+            return 2;
+        case mesh::VertexFormat::R32G32B32Float:
+            return 3;
+        case mesh::VertexFormat::R32G32B32A32Float:
+            return 4;
         case mesh::VertexFormat::R16G16Float:
         case mesh::VertexFormat::R16G16SNorm:
-        case mesh::VertexFormat::R16G16UNorm: return 2;
+        case mesh::VertexFormat::R16G16UNorm:
+            return 2;
         case mesh::VertexFormat::R16G16B16A16Float:
         case mesh::VertexFormat::R16G16B16A16SNorm:
         case mesh::VertexFormat::R16G16B16A16UNorm:
         case mesh::VertexFormat::R8G8B8A8UNorm:
         case mesh::VertexFormat::R8G8B8A8SNorm:
-        case mesh::VertexFormat::R10G10B10A2UNorm: return 4;
-        default: return 0;
+        case mesh::VertexFormat::R10G10B10A2UNorm:
+            return 4;
+        default:
+            return 0;
         }
     }
 
@@ -389,7 +384,8 @@ namespace
             }
             return true;
         }
-        default: return false;
+        default:
+            return false;
         }
     }
 
@@ -397,13 +393,20 @@ namespace
     {
         switch (semantic)
         {
-        case mesh::VertexSemantic::Normal: return weights.normal;
-        case mesh::VertexSemantic::Tangent: return weights.tangent;
-        case mesh::VertexSemantic::TexCoord: return weights.texCoord;
-        case mesh::VertexSemantic::Color: return weights.color;
-        case mesh::VertexSemantic::JointWeights: return weights.jointWeights;
-        case mesh::VertexSemantic::MorphPosition: return weights.morphPosition;
-        default: return 0.0f;
+        case mesh::VertexSemantic::Normal:
+            return weights.normal;
+        case mesh::VertexSemantic::Tangent:
+            return weights.tangent;
+        case mesh::VertexSemantic::TexCoord:
+            return weights.texCoord;
+        case mesh::VertexSemantic::Color:
+            return weights.color;
+        case mesh::VertexSemantic::JointWeights:
+            return weights.jointWeights;
+        case mesh::VertexSemantic::MorphPosition:
+            return weights.morphPosition;
+        default:
+            return 0.0f;
         }
     }
 
@@ -414,13 +417,9 @@ namespace
         ComponentLimitExceeded
     };
 
-    SimplificationAttributeBuildResult BuildSimplificationAttributes(
-        const tools::SourceSubmesh& source,
-        const containers::DynamicArray<Payload>& payloads,
-        const u32 vertexCount,
-        const tools::LodAttributeWeights& configuredWeights,
-        containers::DynamicArray<f32>& attributes,
-        containers::DynamicArray<f32>& weights)
+    SimplificationAttributeBuildResult BuildSimplificationAttributes(const tools::SourceSubmesh& source, const containers::DynamicArray<Payload>& payloads,
+                                                                     const u32 vertexCount, const tools::LodAttributeWeights& configuredWeights,
+                                                                     containers::DynamicArray<f32>& attributes, containers::DynamicArray<f32>& weights)
     {
         u32 componentCount = 0;
         for (u32 streamIndex = 0; streamIndex < source.vertexStreams.Size(); ++streamIndex)
@@ -464,9 +463,7 @@ namespace
                 const u32 components = SimplificationComponentCount(stream);
                 const Payload& payload = payloads[streamIndex];
                 f32* const destination = attributes.TypedData() + vertex * componentCount + destinationComponent;
-                if (!DecodeSimplificationAttribute(stream,
-                                                    payload.bytes.TypedData() + static_cast<usize>(vertex) * payload.stride,
-                                                    destination))
+                if (!DecodeSimplificationAttribute(stream, payload.bytes.TypedData() + static_cast<usize>(vertex) * payload.stride, destination))
                 {
                     return SimplificationAttributeBuildResult::UnsupportedFormat;
                 }
@@ -483,19 +480,15 @@ namespace
         return SimplificationAttributeBuildResult::Success;
     }
 
-    bool CompactLodStreams(
-        const containers::DynamicArray<Payload>& basePayloads,
-        containers::DynamicArray<u32>& indices,
-        const u32 baseVertexCount,
-        const bool optimizeVertexFetch,
-        containers::DynamicArray<Payload>& outputPayloads,
-        u32& outputVertexCount)
+    bool CompactLodStreams(const containers::DynamicArray<Payload>& basePayloads, containers::DynamicArray<u32>& indices, const u32 baseVertexCount,
+                           const bool optimizeVertexFetch, containers::DynamicArray<Payload>& outputPayloads, u32& outputVertexCount)
     {
         containers::DynamicArray<u32> fetchRemap(memory::pools::Assets::GetInstance());
         fetchRemap.Resize(baseVertexCount);
         if (optimizeVertexFetch)
         {
-            outputVertexCount = static_cast<u32>(meshopt_optimizeVertexFetchRemap(fetchRemap.TypedData(), indices.TypedData(), indices.Size(), baseVertexCount));
+            outputVertexCount =
+                static_cast<u32>(meshopt_optimizeVertexFetchRemap(fetchRemap.TypedData(), indices.TypedData(), indices.Size(), baseVertexCount));
         }
         else
         {
@@ -623,13 +616,10 @@ namespace
     bool DoesRuleMatch(const tools::VertexPackingRule& rule, const tools::SourceVertexStream& stream)
     {
         return rule.semantic == stream.semantic && rule.sourceFormat == stream.format &&
-               (rule.semanticIndex == stream.semanticIndex ||
-                tools::HasFlag(rule.flags, tools::VertexPackingRuleFlags::MatchAnySemanticIndex));
+               (rule.semanticIndex == stream.semanticIndex || tools::HasFlag(rule.flags, tools::VertexPackingRuleFlags::MatchAnySemanticIndex));
     }
 
-    bool ValidateSourceStreamsAgainstProfile(
-        const tools::SourceSubmesh& source,
-        const tools::MeshCookingProfile& profile)
+    bool ValidateSourceStreamsAgainstProfile(const tools::SourceSubmesh& source, const tools::MeshCookingProfile& profile)
     {
         for (const tools::SourceVertexStream& stream : source.vertexStreams)
         {
@@ -662,10 +652,7 @@ namespace
         return true;
     }
 
-    bool BuildPackedStreamPlans(
-        const tools::SourceSubmesh& source,
-        const tools::MeshCookingProfile& profile,
-        containers::DynamicArray<PackedStreamPlan>& plans)
+    bool BuildPackedStreamPlans(const tools::SourceSubmesh& source, const tools::MeshCookingProfile& profile, containers::DynamicArray<PackedStreamPlan>& plans)
     {
         if (!ValidateSourceStreamsAgainstProfile(source, profile))
         {
@@ -728,7 +715,7 @@ namespace
                 }
                 plan.group = separateGroup++;
             }
-            plan.elementSize = mesh::VertexFormatByteSize(plan.format);
+            plan.elementSize = mesh::GetVertexFormatByteSize(plan.format);
             if (plan.elementSize == 0)
             {
                 return false;
@@ -749,15 +736,11 @@ namespace
         return true;
     }
 
-    bool PackRuntimeVertexElement(
-        u8* const destination,
-        const tools::SourceVertexStream& source,
-        const u8* const sourceBytes,
-        const mesh::PositionQuantization& quantization) noexcept
+    bool PackRuntimeVertexElement(u8* const destination, const tools::SourceVertexStream& source, const u8* const sourceBytes,
+                                  const mesh::PositionQuantization& quantization) noexcept
     {
         const f32* const values = reinterpret_cast<const f32*>(sourceBytes);
-        if (source.semantic == mesh::VertexSemantic::Position && source.semanticIndex == 0 &&
-            source.format == mesh::VertexFormat::R32G32B32Float)
+        if (source.semantic == mesh::VertexSemantic::Position && source.semanticIndex == 0 && source.format == mesh::VertexFormat::R32G32B32Float)
         {
             i16* const packed = reinterpret_cast<i16*>(destination);
             for (u32 axis = 0; axis < 3; ++axis)
@@ -772,11 +755,9 @@ namespace
             packed[3] = static_cast<i16>(32767);
             return true;
         }
-        if ((source.semantic == mesh::VertexSemantic::Normal &&
-             source.format == mesh::VertexFormat::R32G32B32Float) ||
+        if ((source.semantic == mesh::VertexSemantic::Normal && source.format == mesh::VertexFormat::R32G32B32Float) ||
             (source.semantic == mesh::VertexSemantic::Tangent &&
-             (source.format == mesh::VertexFormat::R32G32B32Float ||
-              source.format == mesh::VertexFormat::R32G32B32A32Float)))
+             (source.format == mesh::VertexFormat::R32G32B32Float || source.format == mesh::VertexFormat::R32G32B32A32Float)))
         {
             for (u32 component = 0; component < 3; ++component)
             {
@@ -789,8 +770,7 @@ namespace
             const u32 y = static_cast<u32>(meshopt_quantizeUnorm(values[1] * 0.5f + 0.5f, 10));
             const u32 z = static_cast<u32>(meshopt_quantizeUnorm(values[2] * 0.5f + 0.5f, 10));
             u32 w = 3;
-            if (source.semantic == mesh::VertexSemantic::Tangent &&
-                source.format == mesh::VertexFormat::R32G32B32A32Float)
+            if (source.semantic == mesh::VertexSemantic::Tangent && source.format == mesh::VertexFormat::R32G32B32A32Float)
             {
                 if (!std::isfinite(values[3]))
                 {
@@ -801,8 +781,7 @@ namespace
             *reinterpret_cast<u32*>(destination) = x | (y << 10u) | (z << 20u) | (w << 30u);
             return true;
         }
-        if (source.semantic == mesh::VertexSemantic::TexCoord &&
-            source.format == mesh::VertexFormat::R32G32Float)
+        if (source.semantic == mesh::VertexSemantic::TexCoord && source.format == mesh::VertexFormat::R32G32Float)
         {
             if (!std::isfinite(values[0]) || !std::isfinite(values[1]))
             {
@@ -813,8 +792,7 @@ namespace
             packed[1] = meshopt_quantizeHalf(values[1]);
             return true;
         }
-        if ((source.semantic == mesh::VertexSemantic::Color ||
-             source.semantic == mesh::VertexSemantic::JointWeights) &&
+        if ((source.semantic == mesh::VertexSemantic::Color || source.semantic == mesh::VertexSemantic::JointWeights) &&
             source.format == mesh::VertexFormat::R32G32B32A32Float)
         {
             for (u32 component = 0; component < 4; ++component)
@@ -828,7 +806,7 @@ namespace
             return true;
         }
 
-        const u32 byteCount = mesh::VertexFormatByteSize(source.format);
+        const u32 byteCount = mesh::GetVertexFormatByteSize(source.format);
         for (u32 byte = 0; byte < byteCount; ++byte)
         {
             destination[byte] = sourceBytes[byte];
@@ -842,54 +820,63 @@ namespace
         constexpr tools::VertexPackingRuleFlags Required = tools::VertexPackingRuleFlags::Required;
 
         static const tools::VertexPackingRule RuntimeStaticRules[] = {
-            {mesh::VertexSemantic::Position, 0, mesh::VertexFormat::R32G32B32Float,
-             mesh::VertexFormat::R16G16B16A16SNorm, 0, Required, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Normal, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float,
-             mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float,
-             mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float,
-             mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::TexCoord, tools::AnySemanticIndex, mesh::VertexFormat::R32G32Float,
-             mesh::VertexFormat::R16G16Float, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Color, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float,
-             mesh::VertexFormat::R8G8B8A8UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::JointWeights, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float,
-             mesh::VertexFormat::R8G8B8A8UNorm, 2, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::JointIndices, tools::AnySemanticIndex, mesh::VertexFormat::R8G8B8A8UInt,
-             mesh::VertexFormat::R8G8B8A8UInt, 2, AnyIndex, nullptr},
-            {mesh::VertexSemantic::JointIndices, tools::AnySemanticIndex, mesh::VertexFormat::R16G16B16A16UInt,
-             mesh::VertexFormat::R16G16B16A16UInt, 2, AnyIndex, nullptr},
-            {mesh::VertexSemantic::JointIndices, tools::AnySemanticIndex, mesh::VertexFormat::R32UInt,
-             mesh::VertexFormat::R32UInt, 2, AnyIndex, nullptr}};
+            {mesh::VertexSemantic::Position, 0, mesh::VertexFormat::R32G32B32Float, mesh::VertexFormat::R16G16B16A16SNorm, 0, Required,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Normal, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float, mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float, mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float, mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::TexCoord, tools::AnySemanticIndex, mesh::VertexFormat::R32G32Float, mesh::VertexFormat::R16G16Float, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Color, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float, mesh::VertexFormat::R8G8B8A8UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::JointWeights, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float, mesh::VertexFormat::R8G8B8A8UNorm, 2, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::JointIndices, tools::AnySemanticIndex, mesh::VertexFormat::R8G8B8A8UInt, mesh::VertexFormat::R8G8B8A8UInt, 2, AnyIndex,
+             nullptr},
+            {mesh::VertexSemantic::JointIndices, tools::AnySemanticIndex, mesh::VertexFormat::R16G16B16A16UInt, mesh::VertexFormat::R16G16B16A16UInt, 2,
+             AnyIndex, nullptr},
+            {mesh::VertexSemantic::JointIndices, tools::AnySemanticIndex, mesh::VertexFormat::R32UInt, mesh::VertexFormat::R32UInt, 2, AnyIndex, nullptr}};
 
         static const tools::VertexPackingRule RuntimeSkinned4Rules[] = {
-            {mesh::VertexSemantic::Position, 0, mesh::VertexFormat::R32G32B32Float,
-             mesh::VertexFormat::R16G16B16A16SNorm, 0, Required, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Normal, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float,
-             mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float,
-             mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float,
-             mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::TexCoord, tools::AnySemanticIndex, mesh::VertexFormat::R32G32Float,
-             mesh::VertexFormat::R16G16Float, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::Color, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float,
-             mesh::VertexFormat::R8G8B8A8UNorm, 1, AnyIndex, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::JointWeights, 0, mesh::VertexFormat::R32G32B32A32Float,
-             mesh::VertexFormat::R8G8B8A8UNorm, 2, Required, &PackRuntimeVertexElement},
-            {mesh::VertexSemantic::JointIndices, 0, mesh::VertexFormat::R8G8B8A8UInt,
-             mesh::VertexFormat::R8G8B8A8UInt, 2, Required, nullptr}};
+            {mesh::VertexSemantic::Position, 0, mesh::VertexFormat::R32G32B32Float, mesh::VertexFormat::R16G16B16A16SNorm, 0, Required,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Normal, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float, mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32Float, mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Tangent, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float, mesh::VertexFormat::R10G10B10A2UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::TexCoord, tools::AnySemanticIndex, mesh::VertexFormat::R32G32Float, mesh::VertexFormat::R16G16Float, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::Color, tools::AnySemanticIndex, mesh::VertexFormat::R32G32B32A32Float, mesh::VertexFormat::R8G8B8A8UNorm, 1, AnyIndex,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::JointWeights, 0, mesh::VertexFormat::R32G32B32A32Float, mesh::VertexFormat::R8G8B8A8UNorm, 2, Required,
+             &PackRuntimeVertexElement},
+            {mesh::VertexSemantic::JointIndices, 0, mesh::VertexFormat::R8G8B8A8UInt, mesh::VertexFormat::R8G8B8A8UInt, 2, Required, nullptr}};
 
-        const tools::MeshCookingProfile preserveSource{
-            tools::profiles::PreserveSource, 1, 0, mesh::MeshKind::Static, tools::MeshCookingProfileFlags::None,
-            tools::UnmatchedVertexStreamPolicy::PreserveInDedicatedBinding, {}};
-        const tools::MeshCookingProfile runtimeStatic{
-            tools::profiles::RuntimeStatic, 1, 0, mesh::MeshKind::Static, tools::MeshCookingProfileFlags::QuantizePositions,
-            tools::UnmatchedVertexStreamPolicy::PreserveInDedicatedBinding,
-            {RuntimeStaticRules, static_cast<u32>(sizeof(RuntimeStaticRules) / sizeof(RuntimeStaticRules[0]))}};
+        const tools::MeshCookingProfile preserveSource{tools::profiles::PreserveSource,
+                                                       1,
+                                                       0,
+                                                       mesh::MeshKind::Static,
+                                                       tools::MeshCookingProfileFlags::None,
+                                                       tools::UnmatchedVertexStreamPolicy::PreserveInDedicatedBinding,
+                                                       {}};
+        const tools::MeshCookingProfile runtimeStatic{tools::profiles::RuntimeStatic,
+                                                      1,
+                                                      0,
+                                                      mesh::MeshKind::Static,
+                                                      tools::MeshCookingProfileFlags::QuantizePositions,
+                                                      tools::UnmatchedVertexStreamPolicy::PreserveInDedicatedBinding,
+                                                      {RuntimeStaticRules, static_cast<u32>(sizeof(RuntimeStaticRules) / sizeof(RuntimeStaticRules[0]))}};
         const tools::MeshCookingProfile runtimeSkinned4{
-            tools::profiles::RuntimeSkinned4, 1, 0, mesh::MeshKind::Skinned, tools::MeshCookingProfileFlags::QuantizePositions,
+            tools::profiles::RuntimeSkinned4,
+            1,
+            0,
+            mesh::MeshKind::Skinned,
+            tools::MeshCookingProfileFlags::QuantizePositions,
             tools::UnmatchedVertexStreamPolicy::PreserveInDedicatedBinding,
             {RuntimeSkinned4Rules, static_cast<u32>(sizeof(RuntimeSkinned4Rules) / sizeof(RuntimeSkinned4Rules[0]))}};
 
@@ -898,16 +885,9 @@ namespace
                RegisterProfileInternal(runtimeSkinned4) == tools::ProfileRegistrationResult::Success;
     }
 
-    bool EmitProfilePackedStreams(
-        BuildStorage& storage,
-        const tools::SourceSubmesh& source,
-        const tools::MeshCookingProfile& profile,
-        const containers::DynamicArray<Payload>& sourcePayloads,
-        const u32 vertexCount,
-        const u32 layoutId,
-        const bool requiredForLowestLod,
-        const mesh::PositionQuantization& quantization,
-        u32& nextBufferId)
+    bool EmitProfilePackedStreams(BuildStorage& storage, const tools::SourceSubmesh& source, const tools::MeshCookingProfile& profile,
+                                  const containers::DynamicArray<Payload>& sourcePayloads, const u32 vertexCount, const u32 layoutId,
+                                  const bool requiredForLowestLod, const mesh::PositionQuantization& quantization, u32& nextBufferId)
     {
         containers::DynamicArray<PackedStreamPlan> plans(memory::pools::Assets::GetInstance());
         if (!BuildPackedStreamPlans(source, profile, plans))
@@ -967,8 +947,8 @@ namespace
             {
                 const PackedStreamPlan& plan = plans[planIndex];
                 const tools::SourceVertexStream& sourceStream = source.vertexStreams[plan.sourceIndex];
-                storage.streams.PushBack({layoutId, sourceStream.semantic, sourceStream.semanticIndex, plan.format,
-                                          binding, packedPayload.id, plan.byteOffset, stride});
+                storage.streams.PushBack(
+                    {layoutId, sourceStream.semantic, sourceStream.semanticIndex, plan.format, binding, packedPayload.id, plan.byteOffset, stride});
             }
             storage.payloads.PushBack(static_cast<Payload&&>(packedPayload));
             ++binding;
@@ -976,7 +956,7 @@ namespace
         }
         return true;
     }
-}
+} // namespace
 
 namespace vanguard::mesh_tools
 {
@@ -984,16 +964,26 @@ namespace vanguard::mesh_tools
     {
         switch (result)
         {
-        case Result::Success: return "Success";
-        case Result::InvalidArgument: return "InvalidArgument";
-        case Result::InvalidState: return "InvalidState";
-        case Result::UnknownCookingProfile: return "UnknownCookingProfile";
-        case Result::LimitExceeded: return "LimitExceeded";
-        case Result::MissingPositionStream: return "MissingPositionStream";
-        case Result::InvalidVertexStream: return "InvalidVertexStream";
-        case Result::InvalidIndex: return "InvalidIndex";
-        case Result::OptimizationFailure: return "OptimizationFailure";
-        case Result::MeshWriteFailure: return "MeshWriteFailure";
+        case Result::Success:
+            return "Success";
+        case Result::InvalidArgument:
+            return "InvalidArgument";
+        case Result::InvalidState:
+            return "InvalidState";
+        case Result::UnknownCookingProfile:
+            return "UnknownCookingProfile";
+        case Result::LimitExceeded:
+            return "LimitExceeded";
+        case Result::MissingPositionStream:
+            return "MissingPositionStream";
+        case Result::InvalidVertexStream:
+            return "InvalidVertexStream";
+        case Result::InvalidIndex:
+            return "InvalidIndex";
+        case Result::OptimizationFailure:
+            return "OptimizationFailure";
+        case Result::MeshWriteFailure:
+            return "MeshWriteFailure";
         }
         return "Unknown";
     }
@@ -1048,10 +1038,9 @@ namespace vanguard::mesh_tools
             return Result::InvalidArgument;
         }
         g_profileRegistrySealed = true;
-        if (source.submeshes.Empty() || source.submeshes.Size() > settings.maximumSubmeshes ||
-            settings.overdrawThreshold < 1.0f || settings.lodLevels.Size() > settings.maximumLodLevels ||
-            settings.lodAttributeWeights.normal < 0.0f || settings.lodAttributeWeights.tangent < 0.0f ||
-            settings.lodAttributeWeights.texCoord < 0.0f || settings.lodAttributeWeights.color < 0.0f ||
+        if (source.submeshes.Empty() || source.submeshes.Size() > settings.maximumSubmeshes || settings.overdrawThreshold < 1.0f ||
+            settings.lodLevels.Size() > settings.maximumLodLevels || settings.lodAttributeWeights.normal < 0.0f ||
+            settings.lodAttributeWeights.tangent < 0.0f || settings.lodAttributeWeights.texCoord < 0.0f || settings.lodAttributeWeights.color < 0.0f ||
             settings.lodAttributeWeights.jointWeights < 0.0f || settings.lodAttributeWeights.morphPosition < 0.0f)
         {
             return Result::InvalidArgument;
@@ -1061,10 +1050,8 @@ namespace vanguard::mesh_tools
         f32 previousMaximumError = 0.0f;
         for (const LodLevelSettings& lod : settings.lodLevels)
         {
-            if (lod.triangleRatio <= 0.0f || lod.triangleRatio >= previousTriangleRatio ||
-                lod.maximumNormalizedError <= 0.0f || lod.maximumNormalizedError < previousMaximumError ||
-                lod.minimumScreenCoverage <= 0.0f ||
-                lod.minimumScreenCoverage >= previousScreenCoverage)
+            if (lod.triangleRatio <= 0.0f || lod.triangleRatio >= previousTriangleRatio || lod.maximumNormalizedError <= 0.0f ||
+                lod.maximumNormalizedError < previousMaximumError || lod.minimumScreenCoverage <= 0.0f || lod.minimumScreenCoverage >= previousScreenCoverage)
             {
                 return Result::InvalidArgument;
             }
@@ -1103,8 +1090,8 @@ namespace vanguard::mesh_tools
             {
                 return Result::MissingPositionStream;
             }
-            if (position->data == nullptr || position->vertexCount == 0 ||
-                position->vertexCount > settings.maximumVerticesPerSubmesh || position->stride != sizeof(f32) * 3)
+            if (position->data == nullptr || position->vertexCount == 0 || position->vertexCount > settings.maximumVerticesPerSubmesh ||
+                position->stride != sizeof(f32) * 3)
             {
                 return Result::InvalidVertexStream;
             }
@@ -1126,8 +1113,10 @@ namespace vanguard::mesh_tools
             {
                 for (u32 axis = 0; axis < 3; ++axis)
                 {
-                    if (sourceBounds.minimum[axis] < meshBounds.minimum[axis]) meshBounds.minimum[axis] = sourceBounds.minimum[axis];
-                    if (sourceBounds.maximum[axis] > meshBounds.maximum[axis]) meshBounds.maximum[axis] = sourceBounds.maximum[axis];
+                    if (sourceBounds.minimum[axis] < meshBounds.minimum[axis])
+                        meshBounds.minimum[axis] = sourceBounds.minimum[axis];
+                    if (sourceBounds.maximum[axis] > meshBounds.maximum[axis])
+                        meshBounds.maximum[axis] = sourceBounds.maximum[axis];
                 }
             }
         }
@@ -1145,9 +1134,8 @@ namespace vanguard::mesh_tools
         for (u32 submeshIndex = 0; submeshIndex < source.submeshes.Size(); ++submeshIndex)
         {
             const SourceSubmesh& input = source.submeshes[submeshIndex];
-            if (input.stableId == 0 || input.vertexStreams.Empty() ||
-                input.vertexStreams.Size() > settings.maximumVertexStreamsPerSubmesh || input.indices.Empty() ||
-                input.indices.Size() > settings.maximumIndicesPerSubmesh || input.indices.Size() % 3 != 0)
+            if (input.stableId == 0 || input.vertexStreams.Empty() || input.vertexStreams.Size() > settings.maximumVertexStreamsPerSubmesh ||
+                input.indices.Empty() || input.indices.Size() > settings.maximumIndicesPerSubmesh || input.indices.Size() % 3 != 0)
             {
                 return Result::InvalidArgument;
             }
@@ -1166,9 +1154,8 @@ namespace vanguard::mesh_tools
             for (u32 streamIndex = 0; streamIndex < input.vertexStreams.Size(); ++streamIndex)
             {
                 const SourceVertexStream& stream = input.vertexStreams[streamIndex];
-                const u32 elementSize = mesh::VertexFormatByteSize(stream.format);
-                if (stream.data == nullptr || stream.vertexCount != sourceVertexCount || stream.stride != elementSize ||
-                    elementSize == 0 || elementSize > 256)
+                const u32 elementSize = mesh::GetVertexFormatByteSize(stream.format);
+                if (stream.data == nullptr || stream.vertexCount != sourceVertexCount || stream.stride != elementSize || elementSize == 0 || elementSize > 256)
                 {
                     return Result::InvalidVertexStream;
                 }
@@ -1216,8 +1203,7 @@ namespace vanguard::mesh_tools
             containers::DynamicArray<f32> simplificationAttributes(memory::pools::Assets::GetInstance());
             containers::DynamicArray<f32> simplificationWeights(memory::pools::Assets::GetInstance());
             const SimplificationAttributeBuildResult attributeBuildResult = BuildSimplificationAttributes(
-                input, baseVertexPayloads, cookedVertexCount, settings.lodAttributeWeights,
-                simplificationAttributes, simplificationWeights);
+                input, baseVertexPayloads, cookedVertexCount, settings.lodAttributeWeights, simplificationAttributes, simplificationWeights);
             if (attributeBuildResult == SimplificationAttributeBuildResult::UnsupportedFormat)
             {
                 return Result::InvalidVertexStream;
@@ -1255,19 +1241,17 @@ namespace vanguard::mesh_tools
                         usize simplifiedCount = 0;
                         if (!simplificationWeights.Empty())
                         {
-                            simplifiedCount = meshopt_simplifyWithAttributes(
-                                lodIndices.TypedData(), indices.TypedData(), indices.Size(),
-                                basePositions, cookedVertexCount, basePositionStride, simplificationAttributes.TypedData(),
-                                static_cast<usize>(simplificationWeights.Size()) * sizeof(f32), simplificationWeights.TypedData(),
-                                simplificationWeights.Size(), nullptr, targetIndexCount, lodSettings.maximumNormalizedError,
-                                options, &normalizedError);
+                            simplifiedCount = meshopt_simplifyWithAttributes(lodIndices.TypedData(), indices.TypedData(), indices.Size(), basePositions,
+                                                                             cookedVertexCount, basePositionStride, simplificationAttributes.TypedData(),
+                                                                             static_cast<usize>(simplificationWeights.Size()) * sizeof(f32),
+                                                                             simplificationWeights.TypedData(), simplificationWeights.Size(), nullptr,
+                                                                             targetIndexCount, lodSettings.maximumNormalizedError, options, &normalizedError);
                         }
                         else
                         {
-                            simplifiedCount = meshopt_simplify(
-                                lodIndices.TypedData(), indices.TypedData(), indices.Size(),
-                                basePositions, cookedVertexCount, basePositionStride, targetIndexCount,
-                                lodSettings.maximumNormalizedError, options, &normalizedError);
+                            simplifiedCount =
+                                meshopt_simplify(lodIndices.TypedData(), indices.TypedData(), indices.Size(), basePositions, cookedVertexCount,
+                                                 basePositionStride, targetIndexCount, lodSettings.maximumNormalizedError, options, &normalizedError);
                         }
                         if (simplifiedCount == 0 || simplifiedCount > 0xffffffffu || simplifiedCount % 3 != 0)
                         {
@@ -1291,14 +1275,13 @@ namespace vanguard::mesh_tools
                 }
                 if (settings.optimizeOverdraw)
                 {
-                    meshopt_optimizeOverdraw(lodIndices.TypedData(), lodIndices.TypedData(), lodIndices.Size(), basePositions,
-                                             cookedVertexCount, basePositionStride, settings.overdrawThreshold);
+                    meshopt_optimizeOverdraw(lodIndices.TypedData(), lodIndices.TypedData(), lodIndices.Size(), basePositions, cookedVertexCount,
+                                             basePositionStride, settings.overdrawThreshold);
                 }
 
                 containers::DynamicArray<Payload> lodVertexPayloads(memory::pools::Assets::GetInstance());
                 u32 lodVertexCount = 0;
-                if (!CompactLodStreams(baseVertexPayloads, lodIndices, cookedVertexCount, settings.optimizeVertexFetch,
-                                       lodVertexPayloads, lodVertexCount))
+                if (!CompactLodStreams(baseVertexPayloads, lodIndices, cookedVertexCount, settings.optimizeVertexFetch, lodVertexPayloads, lodVertexCount))
                 {
                     return Result::OptimizationFailure;
                 }
@@ -1308,8 +1291,8 @@ namespace vanguard::mesh_tools
                 const mesh::Bounds bounds = CalculateBounds(cookedPositions, lodVertexCount, cookedPositionPayload.stride);
                 if (report != nullptr)
                 {
-                    report->lods.PushBack({input.stableId, static_cast<u16>(lodIndex), input.indices.Size(), lodIndices.Size(),
-                                           simplificationWeights.Size(), normalizedError, reachedTriangleTarget});
+                    report->lods.PushBack({input.stableId, static_cast<u16>(lodIndex), input.indices.Size(), lodIndices.Size(), simplificationWeights.Size(),
+                                           normalizedError, reachedTriangleTarget});
                     if (lodIndex == 0)
                     {
                         SubmeshCookStatistics statistics;
@@ -1317,16 +1300,19 @@ namespace vanguard::mesh_tools
                         statistics.sourceVertexCount = sourceVertexCount;
                         statistics.cookedVertexCount = lodVertexCount;
                         statistics.indexCount = lodIndices.Size();
-                        const meshopt_VertexCacheStatistics sourceCache = meshopt_analyzeVertexCache(input.indices.Data(), input.indices.Size(), sourceVertexCount, 16, 0, 0);
-                        const meshopt_VertexCacheStatistics cookedCache = meshopt_analyzeVertexCache(lodIndices.TypedData(), lodIndices.Size(), lodVertexCount, 16, 0, 0);
-                        const meshopt_VertexFetchStatistics sourceFetch = meshopt_analyzeVertexFetch(input.indices.Data(), input.indices.Size(), sourceVertexCount, sourcePosition->stride);
-                        const meshopt_VertexFetchStatistics cookedFetch = meshopt_analyzeVertexFetch(lodIndices.TypedData(), lodIndices.Size(), lodVertexCount, cookedPositionPayload.stride);
-                        const meshopt_OverdrawStatistics sourceOverdraw = meshopt_analyzeOverdraw(input.indices.Data(), input.indices.Size(),
-                                                                                                  static_cast<const f32*>(sourcePosition->data),
-                                                                                                  sourceVertexCount, sourcePosition->stride);
-                        const meshopt_OverdrawStatistics cookedOverdraw = meshopt_analyzeOverdraw(lodIndices.TypedData(), lodIndices.Size(),
-                                                                                                  cookedPositions, lodVertexCount,
-                                                                                                  cookedPositionPayload.stride);
+                        const meshopt_VertexCacheStatistics sourceCache =
+                            meshopt_analyzeVertexCache(input.indices.Data(), input.indices.Size(), sourceVertexCount, 16, 0, 0);
+                        const meshopt_VertexCacheStatistics cookedCache =
+                            meshopt_analyzeVertexCache(lodIndices.TypedData(), lodIndices.Size(), lodVertexCount, 16, 0, 0);
+                        const meshopt_VertexFetchStatistics sourceFetch =
+                            meshopt_analyzeVertexFetch(input.indices.Data(), input.indices.Size(), sourceVertexCount, sourcePosition->stride);
+                        const meshopt_VertexFetchStatistics cookedFetch =
+                            meshopt_analyzeVertexFetch(lodIndices.TypedData(), lodIndices.Size(), lodVertexCount, cookedPositionPayload.stride);
+                        const meshopt_OverdrawStatistics sourceOverdraw =
+                            meshopt_analyzeOverdraw(input.indices.Data(), input.indices.Size(), static_cast<const f32*>(sourcePosition->data),
+                                                    sourceVertexCount, sourcePosition->stride);
+                        const meshopt_OverdrawStatistics cookedOverdraw =
+                            meshopt_analyzeOverdraw(lodIndices.TypedData(), lodIndices.Size(), cookedPositions, lodVertexCount, cookedPositionPayload.stride);
                         statistics.sourceVertexCacheMissRatio = sourceCache.acmr;
                         statistics.cookedVertexCacheMissRatio = cookedCache.acmr;
                         statistics.sourceVertexFetchOverfetch = sourceFetch.overfetch;
@@ -1340,8 +1326,8 @@ namespace vanguard::mesh_tools
                 const u32 layoutId = submeshIndex * lodCount + lodIndex + 1;
                 storage.layouts.PushBack({layoutId});
                 const bool requiredForLowestLod = lodIndex + 1 == lodCount;
-                if (!EmitProfilePackedStreams(storage, input, *cookingProfile, lodVertexPayloads, lodVertexCount, layoutId,
-                                              requiredForLowestLod, positionQuantization, nextBufferId))
+                if (!EmitProfilePackedStreams(storage, input, *cookingProfile, lodVertexPayloads, lodVertexCount, layoutId, requiredForLowestLod,
+                                              positionQuantization, nextBufferId))
                 {
                     return Result::InvalidVertexStream;
                 }
@@ -1371,18 +1357,16 @@ namespace vanguard::mesh_tools
                 storage.payloads.PushBack(static_cast<Payload&&>(indexPayload));
 
                 storage.submeshes.PushBack({input.stableId, input.name, static_cast<u16>(lodIndex), materialId, layoutId, indexBufferId,
-                                            use16BitIndices ? mesh::IndexFormat::UInt16 : mesh::IndexFormat::UInt32,
-                                            mesh::PrimitiveTopology::TriangleList, input.flags, 0,
-                                            lodVertexCount, 0, lodIndices.Size(), bounds});
+                                            use16BitIndices ? mesh::IndexFormat::UInt16 : mesh::IndexFormat::UInt32, mesh::PrimitiveTopology::TriangleList,
+                                            input.flags, 0, lodVertexCount, 0, lodIndices.Size(), bounds});
             }
         }
 
         for (Payload& payload : storage.payloads)
         {
             storage.buffers.PushBack({payload.id, payload.kind, payload.stride, payload.bytes.Size()});
-            const mesh::PageFlags flags = payload.requiredForLowestLod
-                ? mesh::PageFlags::RequiredForLowestLod | mesh::PageFlags::DirectGpuUpload
-                : mesh::PageFlags::DirectGpuUpload;
+            const mesh::PageFlags flags =
+                payload.requiredForLowestLod ? mesh::PageFlags::RequiredForLowestLod | mesh::PageFlags::DirectGpuUpload : mesh::PageFlags::DirectGpuUpload;
             storage.pages.PushBack({payload.id, 0, payload.bytes.TypedData(), payload.bytes.Size(), 4, flags});
         }
 

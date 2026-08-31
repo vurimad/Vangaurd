@@ -15,4 +15,4 @@ namespace vanguard::texture_tools::tests
     [[nodiscard]] bool MakeTiledTiff16(EncodedFixture& output) noexcept;
     [[nodiscard]] bool MakeScanlineTiffFloat(EncodedFixture& output) noexcept;
     [[nodiscard]] bool MakeScanlineOpenExrFloat(EncodedFixture& output) noexcept;
-}
+} // namespace vanguard::texture_tools::tests

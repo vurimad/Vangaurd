@@ -15,8 +15,8 @@ namespace vanguard::math
         ///	Useful when transforming vectors
         ///
         {
-            return {_q.r * _v.X + _q.j * _v.Z - _v.Y * _q.k, _q.r * _v.Y + _q.k * _v.X - _v.Z * _q.i,
-                    _q.r * _v.Z + _q.i * _v.Y - _v.X * _q.j, -_q.i * _v.X - _q.j * _v.Y - _q.k * _v.Z};
+            return {_q.r * _v.X + _q.j * _v.Z - _v.Y * _q.k, _q.r * _v.Y + _q.k * _v.X - _v.Z * _q.i, _q.r * _v.Z + _q.i * _v.Y - _v.X * _q.j,
+                    -_q.i * _v.X - _q.j * _v.Y - _q.k * _v.Z};
         }
 
         RED_INLINE Quaternion Mul(const Vector3& _v, const Quaternion& _q)
@@ -25,8 +25,8 @@ namespace vanguard::math
         ///	Useful when transforming vectors
         ///
         {
-            return {_q.r * _v.X + _q.j * _v.Z - _v.Y * _q.k, _q.r * _v.Y + _q.k * _v.X - _v.Z * _q.i,
-                    _q.r * _v.Z + _q.i * _v.Y - _v.X * _q.j, -_q.i * _v.X - _q.j * _v.Y - _q.k * _v.Z};
+            return {_q.r * _v.X + _q.j * _v.Z - _v.Y * _q.k, _q.r * _v.Y + _q.k * _v.X - _v.Z * _q.i, _q.r * _v.Z + _q.i * _v.Y - _v.X * _q.j,
+                    -_q.i * _v.X - _q.j * _v.Y - _q.k * _v.Z};
         }
 
         RED_INLINE Float Dot(const Vector3& _v, const Quaternion& _q)
@@ -81,9 +81,7 @@ namespace vanguard::math
 
     RED_FORCE_INLINE Quaternion::Quaternion() : i(0.0f), j(0.0f), k(0.0f), r(1.0f) {}
 
-    RED_FORCE_INLINE Quaternion::Quaternion(const Float _i, const Float _j, const Float _k, const Float real) : i(_i), j(_j), k(_k), r(real)
-    {
-    }
+    RED_FORCE_INLINE Quaternion::Quaternion(const Float _i, const Float _j, const Float _k, const Float real) : i(_i), j(_j), k(_k), r(real) {}
 
     RED_FORCE_INLINE Quaternion::Quaternion(const Vector4& v) : vec(v) {}
 
@@ -714,8 +712,7 @@ namespace vanguard::math
         Bool valid = std::isfinite(i) && std::isfinite(j) && std::isfinite(k) && std::isfinite(r);
         Float length = Magnitude();
         Float err = length - 1.0f;
-        Bool validLength =
-            (vanguard::math::Abs(err) < unitTolerance); // changed because the vectorized math has a little bit less precision.
+        Bool validLength = (vanguard::math::Abs(err) < unitTolerance); // changed because the vectorized math has a little bit less precision.
         valid = valid && validLength;
         return valid;
     }
@@ -723,8 +720,8 @@ namespace vanguard::math
     RED_INLINE Bool Quaternion::IsAlmostEqual(const Quaternion& q, const Float epsilon) const
     {
         const Quaternion delta = *this - q;
-        return (vanguard::math::Abs(delta.r) < epsilon && vanguard::math::Abs(delta.i) < epsilon &&
-                vanguard::math::Abs(delta.j) < epsilon && vanguard::math::Abs(delta.k) < epsilon);
+        return (vanguard::math::Abs(delta.r) < epsilon && vanguard::math::Abs(delta.i) < epsilon && vanguard::math::Abs(delta.j) < epsilon &&
+                vanguard::math::Abs(delta.k) < epsilon);
     }
 
     RED_INLINE void Quaternion::RemoveAxisComponent(const Vector4& axis)

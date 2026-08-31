@@ -20,8 +20,7 @@ namespace
     struct OwnedBuildRequest
     {
         OwnedBuildRequest() noexcept
-            : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()),
-              settings(memory::pools::Assets::GetInstance())
+            : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()), settings(memory::pools::Assets::GetInstance())
         {
         }
 
@@ -61,6 +60,21 @@ namespace
                     {settings.TypedData(), settings.Size()}};
         }
 
+        [[nodiscard]] u64 ByteCount() const noexcept
+        {
+            return static_cast<u64>(source.Size()) + metadata.Size() + settings.Size();
+        }
+
+        void ReleasePayload() noexcept
+        {
+            source.Clear();
+            source.Shrink();
+            metadata.Clear();
+            metadata.Shrink();
+            settings.Clear();
+            settings.Shrink();
+        }
+
         resources::ResourceReference sourceReference;
         resources::ResourceReference outputReference;
         TargetPlatform target = TargetPlatform::WindowsD3D12;
@@ -83,16 +97,14 @@ namespace
 
     void HashU32(crypto::Sha256Builder& hash, const u32 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u)};
+        const u8 bytes[] = {static_cast<u8>(value), static_cast<u8>(value >> 8u), static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
     void HashU64(crypto::Sha256Builder& hash, const u64 value) noexcept
     {
-        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u),
-                            static_cast<u8>(value >> 24u), static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u),
-                            static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
+        const u8 bytes[] = {static_cast<u8>(value),        static_cast<u8>(value >> 8u),  static_cast<u8>(value >> 16u), static_cast<u8>(value >> 24u),
+                            static_cast<u8>(value >> 32u), static_cast<u8>(value >> 40u), static_cast<u8>(value >> 48u), static_cast<u8>(value >> 56u)};
         static_cast<void>(hash.Update(bytes, sizeof(bytes)));
     }
 
@@ -101,9 +113,9 @@ namespace
         constexpr char Domain[] = "vanguard.asset-graph-request.v1";
         crypto::Sha256Builder hash;
         static_cast<void>(hash.Update(Domain, sizeof(Domain) - 1u));
-        HashU64(hash, request.source.identity.Path().Id());
+        HashU64(hash, request.source.identity.GetPath().Id());
         HashU32(hash, request.source.identity.ExpectedType());
-        HashU64(hash, request.output.Path().Id());
+        HashU64(hash, request.output.GetPath().Id());
         HashU32(hash, request.output.ExpectedType());
         HashU8(hash, static_cast<u8>(request.target));
         const BuildFingerprint source = crypto::Sha256(request.source.content.Data(), request.source.content.SizeInBytes());
@@ -134,8 +146,7 @@ namespace
         return jobs::Priority::CriticalPath;
     }
 
-    [[nodiscard]] bool CopyArtifacts(const containers::ArraySpan<const Artifact> source,
-                                     containers::DynamicArray<Artifact>& destination) noexcept
+    [[nodiscard]] bool CopyArtifacts(const containers::ArraySpan<const Artifact> source, containers::DynamicArray<Artifact>& destination) noexcept
     {
         destination.Clear();
         destination.Resize(source.Count());
@@ -153,6 +164,35 @@ namespace
             }
         }
         return true;
+    }
+
+    [[nodiscard]] u64 ArtifactByteCount(const BuildOutput& output) noexcept
+    {
+        u64 bytes = 0;
+        for (const Artifact& artifact : output.artifacts)
+        {
+            bytes += artifact.bytes.Size();
+        }
+        return bytes;
+    }
+
+    [[nodiscard]] bool ExecutionReservation(const BuildResourceEstimate& estimate, u64& bytes) noexcept
+    {
+        if (!estimate.IsValid() || estimate.compilerTransientBytes > ~u64{0} - estimate.artifactBytes ||
+            estimate.artifactBytes > ~u64{0} / 3ull)
+        {
+            return false;
+        }
+        const u64 duringCompile = estimate.compilerTransientBytes + estimate.artifactBytes;
+        const u64 duringPublication = estimate.artifactBytes * 3ull;
+        bytes = duringCompile > duringPublication ? duringCompile : duringPublication;
+        return bytes != 0;
+    }
+
+    void ReleaseOutputArtifacts(BuildOutput& output) noexcept
+    {
+        output.artifacts.Clear();
+        output.artifacts.Shrink();
     }
 } // namespace
 
@@ -176,12 +216,20 @@ namespace vanguard::assets
         jobs::Counter completion;
         jobs::CompletionDeferral completionDeferral;
         jobs::Counter stageCounter;
+        jobs::Counter executionCounter;
         ResolutionMark resolution = ResolutionMark::New;
         BuildPriority priority = BuildPriority::Normal;
         u32 externalInterests = 0;
         u32 dependencyInterests = 0;
+        u64 requestBytes = 0;
+        u64 executionBytes = 0;
+        u64 outputBytes = 0;
+        u64 admissionSequence = 0;
         bool scheduled = false;
         bool dependenciesReleased = false;
+        bool waitingForAdmission = false;
+        bool executionReserved = false;
+        bool outputBytesTracked = false;
         concurrency::Atomic<bool> cancelRequested;
     };
 
@@ -190,13 +238,15 @@ namespace vanguard::assets
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
 
         explicit Impl(const BuildGraphConfig& value) noexcept
-            : config(value), completionSeedName("Assets/BuildGraph/CompletionSeed"), executeName("Assets/BuildGraph/Execute"),
-              operations(memory::pools::Assets::GetInstance())
+            : config(value), completionSeedName("Assets/BuildGraph/CompletionSeed"), admissionName("Assets/BuildGraph/Admission"),
+              executeName("Assets/BuildGraph/Execute"), operations(memory::pools::Assets::GetInstance()),
+              readyOperations(memory::pools::Assets::GetInstance())
         {
         }
 
         BuildGraphConfig config;
         jobs::JobName completionSeedName;
+        jobs::JobName admissionName;
         jobs::JobName executeName;
         BuildSystem* buildSystem = nullptr;
         DependencyIndex* dependencyIndex = nullptr;
@@ -205,15 +255,16 @@ namespace vanguard::assets
         mutable concurrency::Mutex lock;
         concurrency::Mutex requestLock;
         containers::DynamicArray<BuildOperation*> operations;
+        containers::DynamicArray<BuildOperation*> readyOperations;
         BuildGraphStats stats;
+        u64 nextAdmissionSequence = 1;
 
         [[nodiscard]] BuildOperation* FindReusable(const BuildFingerprint& key) noexcept
         {
             for (BuildOperation* operation : operations)
             {
                 const BuildState state = static_cast<BuildState>(operation->state.GetValue());
-                if (operation->requestKey == key &&
-                    (state == BuildState::Resolving || state == BuildState::Queued || state == BuildState::Building))
+                if (operation->requestKey == key && (state == BuildState::Resolving || state == BuildState::Queued || state == BuildState::Building))
                 {
                     return operation;
                 }
@@ -238,30 +289,49 @@ namespace vanguard::assets
             return operation.completionDeferral.IsValid();
         }
 
-        [[nodiscard]] BuildOperation* CreateOperation(const BuildRequest& request, const BuildFingerprint& key,
-                                                      const BuildPriority priority) noexcept
+        [[nodiscard]] BuildOperation* CreateOperation(const BuildRequest& request, const BuildFingerprint& key, const BuildPriority priority,
+                                                      BuildFailure& failure) noexcept
         {
             if (operations.Size() >= config.maximumKnownOperations)
             {
+                failure = BuildFailure::LimitExceeded;
                 return nullptr;
+            }
+            const u64 requestBytes = static_cast<u64>(request.source.content.Size()) + request.source.metadata.Size() + request.settings.Size();
+            if (requestBytes > config.maximumQueuedRequestBytes || requestBytes > config.maximumQueuedRequestBytes - stats.queuedRequestBytes)
+            {
+                failure = BuildFailure::LimitExceeded;
+                return nullptr;
+            }
+            stats.queuedRequestBytes += requestBytes;
+            if (stats.queuedRequestBytes > stats.peakQueuedRequestBytes)
+            {
+                stats.peakQueuedRequestBytes = stats.queuedRequestBytes;
             }
             BuildOperation* const operation = VANGUARD_NEW(BuildOperation);
             if (operation == nullptr)
             {
+                stats.queuedRequestBytes -= requestBytes;
+                failure = BuildFailure::OutOfMemory;
                 return nullptr;
             }
             operation->requestKey = key;
             operation->priority = priority;
+            operation->requestBytes = requestBytes;
             if (!operation->request.CopyFrom(request) || !CreateCompletion(*operation))
             {
+                stats.queuedRequestBytes -= requestBytes;
                 VANGUARD_DELETE(operation);
+                failure = BuildFailure::OutOfMemory;
                 return nullptr;
             }
             const u32 previous = operations.Size();
             operations.PushBack(operation);
             if (operations.Size() != previous + 1u)
             {
+                stats.queuedRequestBytes -= requestBytes;
                 VANGUARD_DELETE(operation);
+                failure = BuildFailure::OutOfMemory;
                 return nullptr;
             }
             stats.knownOperations = operations.Size();
@@ -282,8 +352,7 @@ namespace vanguard::assets
                 {
                     --edge.operation->dependencyInterests;
                 }
-                if (edge.operation->externalInterests == 0 && edge.operation->dependencyInterests == 0 &&
-                    !edge.operation->finished.TryWait())
+                if (edge.operation->externalInterests == 0 && edge.operation->dependencyInterests == 0 && !edge.operation->finished.TryWait())
                 {
                     edge.operation->cancelRequested.SetValue(true);
                     ReleaseDependenciesLocked(*edge.operation);
@@ -291,7 +360,29 @@ namespace vanguard::assets
             }
         }
 
-        void Complete(BuildOperation& operation, const BuildState state, const BuildFailure failure, const Result buildError) noexcept
+        void RemoveReadyLocked(BuildOperation& operation) noexcept
+        {
+            if (!operation.waitingForAdmission)
+            {
+                return;
+            }
+            for (u32 index = 0; index < readyOperations.Size(); ++index)
+            {
+                if (readyOperations[index] == &operation)
+                {
+                    static_cast<void>(readyOperations.RemoveAt(index));
+                    break;
+                }
+            }
+            operation.waitingForAdmission = false;
+            if (stats.waitingForAdmission != 0)
+            {
+                --stats.waitingForAdmission;
+            }
+        }
+
+        void Complete(BuildOperation& operation, const BuildState state, const BuildFailure failure, const Result buildError,
+                      const bool drainAdmission = true) noexcept
         {
             lock.Acquire();
             const BuildState previous = static_cast<BuildState>(operation.state.GetValue());
@@ -300,10 +391,32 @@ namespace vanguard::assets
                 lock.Release();
                 return;
             }
+            RemoveReadyLocked(operation);
+            if (operation.executionReserved)
+            {
+                operation.executionReserved = false;
+                stats.activeExecutionBytes -= operation.executionBytes;
+            }
+            if (operation.requestBytes != 0)
+            {
+                stats.queuedRequestBytes -= operation.requestBytes;
+                operation.requestBytes = 0;
+                operation.request.ReleasePayload();
+            }
             operation.failure.SetValue(static_cast<u32>(failure));
             operation.buildError.SetValue(static_cast<u32>(buildError));
             operation.state.SetValue(static_cast<u32>(state));
             ReleaseDependenciesLocked(operation);
+            if (state == BuildState::Succeeded && operation.externalInterests != 0 && operation.outputBytes != 0)
+            {
+                operation.outputBytesTracked = true;
+                stats.retainedOutputBytes += operation.outputBytes;
+            }
+            else
+            {
+                operation.outputBytes = 0;
+                ReleaseOutputArtifacts(operation.output);
+            }
             if (stats.activeOperations != 0)
             {
                 --stats.activeOperations;
@@ -323,17 +436,20 @@ namespace vanguard::assets
             lock.Release();
             operation.finished.Signal();
             operation.completionDeferral.Finish();
+            if (drainAdmission)
+            {
+                DrainAdmissionQueue();
+            }
         }
 
-        [[nodiscard]] BuildOperation* ResolveRequest(const BuildRequest& request, const BuildPriority priority,
-                                                     BuildFailure& failure) noexcept
+        [[nodiscard]] BuildOperation* ResolveRequest(const BuildRequest& request, const BuildPriority priority, BuildFailure& failure) noexcept
         {
             const BuildFingerprint key = RequestKey(request);
             lock.Acquire();
             BuildOperation* operation = FindReusable(key);
             if (operation != nullptr)
             {
-                if (priority > operation->priority && !operation->scheduled)
+                if (priority > operation->priority && (!operation->scheduled || operation->waitingForAdmission))
                 {
                     operation->priority = priority;
                 }
@@ -346,10 +462,9 @@ namespace vanguard::assets
                 }
                 return operation;
             }
-            operation = CreateOperation(request, key, priority);
+            operation = CreateOperation(request, key, priority, failure);
             if (operation == nullptr)
             {
-                failure = operations.Size() >= config.maximumKnownOperations ? BuildFailure::LimitExceeded : BuildFailure::OutOfMemory;
                 lock.Release();
                 return nullptr;
             }
@@ -383,8 +498,23 @@ namespace vanguard::assets
                 operation.resolution = ResolutionMark::Resolved;
                 return false;
             }
+            if (!operation.plan.HasResourceEstimate())
+            {
+                failure = BuildFailure::ResolutionFailed;
+                Complete(operation, BuildState::Failed, failure, Result::ResourceEstimationFailed);
+                operation.resolution = ResolutionMark::Resolved;
+                return false;
+            }
+            if (!ExecutionReservation(operation.plan.GetResourceEstimate(), operation.executionBytes) ||
+                operation.executionBytes > config.maximumActiveExecutionBytes)
+            {
+                failure = BuildFailure::LimitExceeded;
+                Complete(operation, BuildState::Failed, failure, Result::LimitExceeded);
+                operation.resolution = ResolutionMark::Resolved;
+                return false;
+            }
 
-            for (const BuildDependency& dependency : operation.plan.Dependencies())
+            for (const BuildDependency& dependency : operation.plan.GetDependencies())
             {
                 if (dependency.role != DependencyRole::Generated)
                 {
@@ -416,7 +546,8 @@ namespace vanguard::assets
                 if (child == nullptr)
                 {
                     failure = childFailure;
-                    Complete(operation, BuildState::Failed, failure, Result::OutOfMemory);
+                    Complete(operation, BuildState::Failed, failure,
+                             childFailure == BuildFailure::LimitExceeded ? Result::LimitExceeded : Result::OutOfMemory);
                     operation.resolution = ResolutionMark::Resolved;
                     return false;
                 }
@@ -446,6 +577,125 @@ namespace vanguard::assets
             return true;
         }
 
+        [[nodiscard]] bool DispatchExecution(BuildOperation& operation) noexcept
+        {
+            jobs::Builder builder{{ToJobPriority(operation.priority), jobs::Affinity::AnyWorker}, &operation};
+            jobs::Task task = jobs::Task::Create([this, operationPointer = &operation](const jobs::JobContext&) noexcept { Execute(*operationPointer); });
+            if (!builder.IsValid() || !task || !builder.Dispatch(executeName, static_cast<jobs::Task&&>(task)))
+            {
+                return false;
+            }
+            operation.executionCounter = builder.ExtractCounter();
+            return operation.executionCounter.IsValid();
+        }
+
+        void DrainAdmissionQueue() noexcept
+        {
+            for (;;)
+            {
+                BuildOperation* selected = nullptr;
+                u32 selectedIndex = 0;
+                bool cancelled = false;
+                lock.Acquire();
+                for (u32 index = 0; index < readyOperations.Size(); ++index)
+                {
+                    BuildOperation* const candidate = readyOperations[index];
+                    if (candidate->cancelRequested.GetValue())
+                    {
+                        selected = candidate;
+                        selectedIndex = index;
+                        cancelled = true;
+                        break;
+                    }
+                    if (candidate->executionBytes > config.maximumActiveExecutionBytes - stats.activeExecutionBytes)
+                    {
+                        continue;
+                    }
+                    if (selected == nullptr || candidate->priority > selected->priority ||
+                        (candidate->priority == selected->priority && candidate->admissionSequence < selected->admissionSequence))
+                    {
+                        selected = candidate;
+                        selectedIndex = index;
+                    }
+                }
+                if (selected == nullptr)
+                {
+                    lock.Release();
+                    return;
+                }
+                static_cast<void>(readyOperations.RemoveAt(selectedIndex));
+                selected->waitingForAdmission = false;
+                if (stats.waitingForAdmission != 0)
+                {
+                    --stats.waitingForAdmission;
+                }
+                if (!cancelled)
+                {
+                    selected->executionReserved = true;
+                    stats.activeExecutionBytes += selected->executionBytes;
+                    if (stats.activeExecutionBytes > stats.peakActiveExecutionBytes)
+                    {
+                        stats.peakActiveExecutionBytes = stats.activeExecutionBytes;
+                    }
+                }
+                lock.Release();
+
+                if (cancelled)
+                {
+                    Complete(*selected, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled, false);
+                    continue;
+                }
+                if (!DispatchExecution(*selected))
+                {
+                    Complete(*selected, BuildState::Failed, BuildFailure::SchedulingFailed, Result::InvalidState, false);
+                }
+            }
+        }
+
+        void Admit(BuildOperation& operation) noexcept
+        {
+            lock.Acquire();
+            if (operation.finished.TryWait())
+            {
+                lock.Release();
+                return;
+            }
+            if (operation.cancelRequested.GetValue())
+            {
+                lock.Release();
+                Complete(operation, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled);
+                return;
+            }
+            if (operation.executionBytes <= config.maximumActiveExecutionBytes - stats.activeExecutionBytes)
+            {
+                operation.executionReserved = true;
+                stats.activeExecutionBytes += operation.executionBytes;
+                if (stats.activeExecutionBytes > stats.peakActiveExecutionBytes)
+                {
+                    stats.peakActiveExecutionBytes = stats.activeExecutionBytes;
+                }
+                lock.Release();
+                if (!DispatchExecution(operation))
+                {
+                    Complete(operation, BuildState::Failed, BuildFailure::SchedulingFailed, Result::InvalidState);
+                }
+                return;
+            }
+
+            const u32 previous = readyOperations.Size();
+            readyOperations.PushBack(&operation);
+            if (readyOperations.Size() != previous + 1u)
+            {
+                lock.Release();
+                Complete(operation, BuildState::Failed, BuildFailure::OutOfMemory, Result::OutOfMemory);
+                return;
+            }
+            operation.waitingForAdmission = true;
+            operation.admissionSequence = nextAdmissionSequence++;
+            ++stats.waitingForAdmission;
+            lock.Release();
+        }
+
         void Execute(BuildOperation& operation) noexcept
         {
             lock.Acquire();
@@ -466,8 +716,7 @@ namespace vanguard::assets
                 const BuildState childState = static_cast<BuildState>(edge.operation->state.GetValue());
                 if (childState == BuildState::Succeeded)
                 {
-                    if (operation.plan.SetGeneratedDependencyContent(edge.identity, edge.operation->output.contentFingerprint) !=
-                        Result::Success)
+                    if (operation.plan.SetGeneratedDependencyContent(edge.identity, edge.operation->output.contentFingerprint) != Result::Success)
                     {
                         Complete(operation, BuildState::Failed, BuildFailure::DependencyFailed, Result::InvalidState);
                         return;
@@ -475,8 +724,7 @@ namespace vanguard::assets
                 }
                 else if (edge.requirement == DependencyRequirement::Required)
                 {
-                    Complete(operation, BuildState::Failed, BuildFailure::DependencyFailed,
-                             static_cast<Result>(edge.operation->buildError.GetValue()));
+                    Complete(operation, BuildState::Failed, BuildFailure::DependencyFailed, static_cast<Result>(edge.operation->buildError.GetValue()));
                     return;
                 }
             }
@@ -487,12 +735,12 @@ namespace vanguard::assets
             const Result result = buildSystem->Execute(request, operation.plan, operation.output, cancellation, &operation);
             if (result == Result::Success)
             {
-                if (dependencyIndex != nullptr &&
-                    dependencyIndex->Publish(request, operation.plan, operation.output) != IndexResult::Success)
+                if (dependencyIndex != nullptr && dependencyIndex->Publish(request, operation.plan, operation.output) != IndexResult::Success)
                 {
                     Complete(operation, BuildState::Failed, BuildFailure::IndexPublicationFailed, Result::InvalidState);
                     return;
                 }
+                operation.outputBytes = ArtifactByteCount(operation.output);
                 Complete(operation, BuildState::Succeeded, BuildFailure::None, Result::Success);
             }
             else if (result == Result::Cancelled || operation.cancelRequested.GetValue())
@@ -524,11 +772,10 @@ namespace vanguard::assets
             {
                 builder.AddDependency(edge.operation->completion);
             }
-            jobs::Task task =
-                jobs::Task::Create([this, operationPointer = &operation](const jobs::JobContext&) noexcept { Execute(*operationPointer); });
+            jobs::Task task = jobs::Task::Create([this, operationPointer = &operation](const jobs::JobContext&) noexcept { Admit(*operationPointer); });
             operation.scheduled = true;
             operation.state.SetValue(static_cast<u32>(BuildState::Queued));
-            if (!builder.IsValid() || !task || !builder.Dispatch(executeName, static_cast<jobs::Task&&>(task)))
+            if (!builder.IsValid() || !task || !builder.Dispatch(admissionName, static_cast<jobs::Task&&>(task)))
             {
                 Complete(operation, BuildState::Failed, BuildFailure::SchedulingFailed, Result::InvalidState);
                 return false;
@@ -543,8 +790,7 @@ namespace vanguard::assets
     {
     }
 
-    GraphRequest::GraphRequest(GraphRequest&& other) noexcept
-        : m_graph(other.m_graph), m_operation(other.m_operation), m_hasInterest(other.m_hasInterest)
+    GraphRequest::GraphRequest(GraphRequest&& other) noexcept : m_graph(other.m_graph), m_operation(other.m_operation), m_hasInterest(other.m_hasInterest)
     {
         other.m_graph = nullptr;
         other.m_operation = nullptr;
@@ -586,12 +832,12 @@ namespace vanguard::assets
         return m_graph == other.m_graph && m_operation == other.m_operation && m_operation != nullptr;
     }
 
-    BuildState GraphRequest::Status() const noexcept
+    BuildState GraphRequest::GetStatus() const noexcept
     {
         return m_operation != nullptr ? static_cast<BuildState>(m_operation->state.GetValue()) : BuildState::Failed;
     }
 
-    BuildFailure GraphRequest::Error() const noexcept
+    BuildFailure GraphRequest::GetError() const noexcept
     {
         return m_operation != nullptr ? static_cast<BuildFailure>(m_operation->failure.GetValue()) : BuildFailure::InvalidRequest;
     }
@@ -603,13 +849,13 @@ namespace vanguard::assets
 
     bool GraphRequest::HasFinished() const noexcept
     {
-        const BuildState state = Status();
+        const BuildState state = GetStatus();
         return state == BuildState::Succeeded || state == BuildState::Failed || state == BuildState::Cancelled;
     }
 
     bool GraphRequest::HasSucceeded() const noexcept
     {
-        return Status() == BuildState::Succeeded;
+        return GetStatus() == BuildState::Succeeded;
     }
 
     void GraphRequest::Wait() const noexcept
@@ -665,7 +911,7 @@ namespace vanguard::assets
             return true;
         }
         if (!memory::IsInitialized() || !jobs::IsInitialized() || !buildSystem.IsInitialized() || config.maximumKnownOperations == 0 ||
-            config.maximumGeneratedDependenciesPerOperation == 0)
+            config.maximumGeneratedDependenciesPerOperation == 0 || config.maximumActiveExecutionBytes == 0 || config.maximumQueuedRequestBytes == 0)
         {
             return false;
         }
@@ -688,7 +934,8 @@ namespace vanguard::assets
             return true;
         }
         m_impl->lock.Acquire();
-        if (m_impl->stats.externalRequests != 0 || m_impl->stats.activeOperations != 0)
+        if (m_impl->stats.externalRequests != 0 || m_impl->stats.activeOperations != 0 || !m_impl->readyOperations.Empty() ||
+            m_impl->stats.queuedRequestBytes != 0 || m_impl->stats.activeExecutionBytes != 0)
         {
             m_impl->lock.Release();
             return false;
@@ -758,6 +1005,7 @@ namespace vanguard::assets
         {
             return;
         }
+        bool completeCancelled = false;
         m_impl->lock.Acquire();
         if (operation->externalInterests != 0)
         {
@@ -767,12 +1015,26 @@ namespace vanguard::assets
         {
             --m_impl->stats.externalRequests;
         }
-        if (operation->externalInterests == 0 && operation->dependencyInterests == 0 && !operation->finished.TryWait())
+        const BuildState state = static_cast<BuildState>(operation->state.GetValue());
+        const bool terminal = state == BuildState::Succeeded || state == BuildState::Failed || state == BuildState::Cancelled;
+        if (operation->externalInterests == 0 && operation->outputBytesTracked)
+        {
+            operation->outputBytesTracked = false;
+            m_impl->stats.retainedOutputBytes -= operation->outputBytes;
+            operation->outputBytes = 0;
+            ReleaseOutputArtifacts(operation->output);
+        }
+        if (operation->externalInterests == 0 && operation->dependencyInterests == 0 && !terminal)
         {
             operation->cancelRequested.SetValue(true);
             m_impl->ReleaseDependenciesLocked(*operation);
+            completeCancelled = operation->waitingForAdmission;
         }
         m_impl->lock.Release();
+        if (completeCancelled)
+        {
+            m_impl->Complete(*operation, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled);
+        }
     }
 
     bool BuildGraph::CopyOperationOutput(const BuildOperation* const operation, BuildOutput& output) const noexcept

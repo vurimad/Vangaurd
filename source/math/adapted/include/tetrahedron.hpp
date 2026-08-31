@@ -6,13 +6,9 @@
 
 namespace vanguard::math
 {
-    RED_INLINE Tetrahedron::Tetrahedron(const Tetrahedron& tetra)
-        : Tetrahedron{tetra.m_points[0], tetra.m_points[1], tetra.m_points[2], tetra.m_points[3]}
-    {
-    }
+    RED_INLINE Tetrahedron::Tetrahedron(const Tetrahedron& tetra) : Tetrahedron{tetra.m_points[0], tetra.m_points[1], tetra.m_points[2], tetra.m_points[3]} {}
 
-    RED_INLINE Tetrahedron::Tetrahedron(const Vector4& pos1, const Vector4& pos2, const Vector4& pos3, const Vector4& pos4)
-        : m_points{pos1, pos2, pos3, pos4}
+    RED_INLINE Tetrahedron::Tetrahedron(const Vector4& pos1, const Vector4& pos2, const Vector4& pos3, const Vector4& pos4) : m_points{pos1, pos2, pos3, pos4}
     {
     }
 

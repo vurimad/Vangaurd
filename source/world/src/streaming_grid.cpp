@@ -13,18 +13,18 @@ namespace
     using namespace vanguard;
     namespace world = vanguard::world;
 
-    template<typename Type, typename... Args>
-    [[nodiscard]] Type* AllocateWorldStreamingObject(Args&&... args) noexcept
+    template <typename Type, typename... Args> [[nodiscard]] Type* AllocateWorldStreamingObject(Args&&... args) noexcept
     {
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Streaming, sizeof(Type), alignof(Type));
-        if (!block) return nullptr;
+        if (!block)
+            return nullptr;
         return ::new (block.address) Type(static_cast<Args&&>(args)...);
     }
 
-    template<typename Type>
-    void DeleteWorldStreamingObject(Type* const object) noexcept
+    template <typename Type> void DeleteWorldStreamingObject(Type* const object) noexcept
     {
-        if (object == nullptr) return;
+        if (object == nullptr)
+            return;
         object->~Type();
         memory::MemoryBlock block{object, sizeof(Type), memory::PoolId::Streaming};
         memory::Free(block);
@@ -49,9 +49,8 @@ namespace
         static constexpr f32 InfiniteRadius = std::numeric_limits<f32>::max();
 
         StreamingProxyQuery() noexcept
-            : m_x(memory::pools::Streaming::GetInstance()), m_y(memory::pools::Streaming::GetInstance()),
-              m_z(memory::pools::Streaming::GetInstance()), m_radiusSquared(memory::pools::Streaming::GetInstance()),
-              m_threeDimensional(memory::pools::Streaming::GetInstance())
+            : m_x(memory::pools::Streaming::GetInstance()), m_y(memory::pools::Streaming::GetInstance()), m_z(memory::pools::Streaming::GetInstance()),
+              m_radiusSquared(memory::pools::Streaming::GetInstance()), m_threeDimensional(memory::pools::Streaming::GetInstance())
         {
             Reserve(512);
         }
@@ -73,12 +72,11 @@ namespace
             m_z.PushBack(position.z);
             m_radiusSquared.PushBack(radius == InvalidRadius || radius == InfiniteRadius ? radius : radius * radius);
             m_threeDimensional.PushBack(threeDimensional ? 1.0f : 0.0f);
-            return m_x.Size() == expected && m_y.Size() == expected && m_z.Size() == expected &&
-                   m_radiusSquared.Size() == expected && m_threeDimensional.Size() == expected;
+            return m_x.Size() == expected && m_y.Size() == expected && m_z.Size() == expected && m_radiusSquared.Size() == expected &&
+                   m_threeDimensional.Size() == expected;
         }
 
-        void CollectSingle(const LocalPosition reference, containers::BitSet64Dynamic& output,
-                           const f32 distanceScale) const noexcept
+        void CollectSingle(const LocalPosition reference, containers::BitSet64Dynamic& output, const f32 distanceScale) const noexcept
         {
             const __m128 referenceX = _mm_set1_ps(reference.x);
             const __m128 referenceY = _mm_set1_ps(reference.y);
@@ -93,11 +91,8 @@ namespace
                     const __m128 dimensional = _mm_loadu_ps(m_threeDimensional.TypedData() + offset);
                     const __m128 deltaX = _mm_sub_ps(_mm_loadu_ps(m_x.TypedData() + offset), referenceX);
                     const __m128 deltaY = _mm_sub_ps(_mm_loadu_ps(m_y.TypedData() + offset), referenceY);
-                    const __m128 deltaZ = _mm_sub_ps(_mm_mul_ps(_mm_loadu_ps(m_z.TypedData() + offset), dimensional),
-                                                     _mm_mul_ps(referenceZ, dimensional));
-                    const __m128 distanceSquared = _mm_add_ps(_mm_add_ps(_mm_mul_ps(deltaX, deltaX),
-                                                                          _mm_mul_ps(deltaY, deltaY)),
-                                                               _mm_mul_ps(deltaZ, deltaZ));
+                    const __m128 deltaZ = _mm_sub_ps(_mm_mul_ps(_mm_loadu_ps(m_z.TypedData() + offset), dimensional), _mm_mul_ps(referenceZ, dimensional));
+                    const __m128 distanceSquared = _mm_add_ps(_mm_add_ps(_mm_mul_ps(deltaX, deltaX), _mm_mul_ps(deltaY, deltaY)), _mm_mul_ps(deltaZ, deltaZ));
                     const __m128 radiusSquared = _mm_mul_ps(_mm_loadu_ps(m_radiusSquared.TypedData() + offset), scaleSquared);
                     return static_cast<u8>(_mm_movemask_ps(_mm_sub_ps(distanceSquared, radiusSquared)));
                 };
@@ -111,14 +106,16 @@ namespace
                 const f32 deltaY = m_y[index] - reference.y;
                 const f32 deltaZ = (m_z[index] - reference.z) * dimensional;
                 const f32 distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
-                if (distanceSquared < m_radiusSquared[index] * distanceScale * distanceScale) output.Set(index);
+                if (distanceSquared < m_radiusSquared[index] * distanceScale * distanceScale)
+                    output.Set(index);
             }
         }
 
-        void CollectMultiple(const containers::ArraySpan<const LocalPosition> references,
-                             containers::BitSet64Dynamic& output, const f32 distanceScale) const noexcept
+        void CollectMultiple(const containers::ArraySpan<const LocalPosition> references, containers::BitSet64Dynamic& output,
+                             const f32 distanceScale) const noexcept
         {
-            if (references.Empty()) return;
+            if (references.Empty())
+                return;
             const __m128 scaleSquared = _mm_set1_ps(distanceScale * distanceScale);
             u8* const mask = reinterpret_cast<u8*>(const_cast<u64*>(output.Data()));
             u32 index = 0;
@@ -135,13 +132,10 @@ namespace
                         const __m128 dimensional = _mm_loadu_ps(m_threeDimensional.TypedData() + offset);
                         const __m128 deltaX = _mm_sub_ps(_mm_loadu_ps(m_x.TypedData() + offset), referenceX);
                         const __m128 deltaY = _mm_sub_ps(_mm_loadu_ps(m_y.TypedData() + offset), referenceY);
-                        const __m128 deltaZ = _mm_sub_ps(_mm_mul_ps(_mm_loadu_ps(m_z.TypedData() + offset), dimensional),
-                                                         _mm_mul_ps(referenceZ, dimensional));
-                        const __m128 distanceSquared = _mm_add_ps(_mm_add_ps(_mm_mul_ps(deltaX, deltaX),
-                                                                              _mm_mul_ps(deltaY, deltaY)),
-                                                                   _mm_mul_ps(deltaZ, deltaZ));
-                        const __m128 radiusSquared =
-                            _mm_mul_ps(_mm_loadu_ps(m_radiusSquared.TypedData() + offset), scaleSquared);
+                        const __m128 deltaZ = _mm_sub_ps(_mm_mul_ps(_mm_loadu_ps(m_z.TypedData() + offset), dimensional), _mm_mul_ps(referenceZ, dimensional));
+                        const __m128 distanceSquared =
+                            _mm_add_ps(_mm_add_ps(_mm_mul_ps(deltaX, deltaX), _mm_mul_ps(deltaY, deltaY)), _mm_mul_ps(deltaZ, deltaZ));
+                        const __m128 radiusSquared = _mm_mul_ps(_mm_loadu_ps(m_radiusSquared.TypedData() + offset), scaleSquared);
                         return static_cast<u8>(_mm_movemask_ps(_mm_sub_ps(distanceSquared, radiusSquared)));
                     };
                     currentMask |= static_cast<u8>((collectFour(index) & 0x0fu) | (collectFour(index + 4u) << 4u));
@@ -158,10 +152,10 @@ namespace
                     const f32 deltaX = m_x[index] - reference.x;
                     const f32 deltaY = m_y[index] - reference.y;
                     const f32 deltaZ = (m_z[index] - reference.z) * dimensional;
-                    inRange |= deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ <
-                               m_radiusSquared[index] * distanceScale * distanceScale;
+                    inRange |= deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ < m_radiusSquared[index] * distanceScale * distanceScale;
                 }
-                if (inRange) output.Set(index);
+                if (inRange)
+                    output.Set(index);
             }
         }
 
@@ -213,23 +207,19 @@ namespace vanguard::world
         };
 
         explicit Impl(const StreamingGridConfig& value) noexcept
-            : config(value), nodes(memory::pools::Streaming::GetInstance()),
-              observerPositions(memory::pools::Streaming::GetInstance()),
+            : config(value), nodes(memory::pools::Streaming::GetInstance()), observerPositions(memory::pools::Streaming::GetInstance()),
               queryMask(memory::pools::Streaming::GetInstance()), retentionMask(memory::pools::Streaming::GetInstance()),
               nearMask(memory::pools::Streaming::GetInstance()), secondaryMask(memory::pools::Streaming::GetInstance()),
               inRangeMask(memory::pools::Streaming::GetInstance()), lockedMask(memory::pools::Streaming::GetInstance()),
-              antiStreamingLockedMask(memory::pools::Streaming::GetInstance()),
-              toStreamInMask(memory::pools::Streaming::GetInstance()),
-              toStreamOutMask(memory::pools::Streaming::GetInstance()),
-              candidates(memory::pools::Streaming::GetInstance())
+              antiStreamingLockedMask(memory::pools::Streaming::GetInstance()), toStreamInMask(memory::pools::Streaming::GetInstance()),
+              toStreamOutMask(memory::pools::Streaming::GetInstance()), candidates(memory::pools::Streaming::GetInstance())
         {
             observerPositions.Reserve(MaximumStreamingObservers);
         }
 
         [[nodiscard]] LocalPosition ToLocal(const f64* const global) const noexcept
         {
-            return {static_cast<f32>(global[0] - origin[0]), static_cast<f32>(global[1] - origin[1]),
-                    static_cast<f32>(global[2] - origin[2])};
+            return {static_cast<f32>(global[0] - origin[0]), static_cast<f32>(global[1] - origin[1]), static_cast<f32>(global[2] - origin[2])};
         }
 
         [[nodiscard]] u32 FindNodeIndex(const StreamingNodeKey key) const noexcept
@@ -240,30 +230,40 @@ namespace vanguard::world
             {
                 const u32 step = count / 2u;
                 const u32 index = first + step;
-                if (nodes[index].key.id < key.id) { first = index + 1u; count -= step + 1u; }
-                else count = step;
+                if (nodes[index].key.id < key.id)
+                {
+                    first = index + 1u;
+                    count -= step + 1u;
+                }
+                else
+                    count = step;
             }
             return first < nodes.Size() && nodes[first].key == key ? first : 0xffffffffu;
         }
 
         [[nodiscard]] bool IsReplacementReady(const StreamingNodeKey key, const u32 depth = 0) const noexcept
         {
-            if (depth > proxyCount) return false;
+            if (depth > proxyCount)
+                return false;
             const u32 nodeIndex = FindNodeIndex(key);
-            if (nodeIndex == 0xffffffffu) return false;
-            if (nodes[nodeIndex].renderReady) return true;
-            if (key.kind != StreamingNodeKind::DistantProxy) return false;
-            const DistantProxyRecord& proxy = world->DistantProxies()[nodes[nodeIndex].sourceIndex];
-            if (IsFlagSet(proxy.flags, DistantProxyFlags::ProxyOnly)) return false;
+            if (nodeIndex == 0xffffffffu)
+                return false;
+            if (nodes[nodeIndex].renderReady)
+                return true;
+            if (key.kind != StreamingNodeKind::DistantProxy)
+                return false;
+            const DistantProxyRecord& proxy = world->GetDistantProxies()[nodes[nodeIndex].sourceIndex];
+            if (IsFlagSet(proxy.flags, DistantProxyFlags::ProxyOnly))
+                return false;
             bool foundRequiredChild = false;
-            for (const ProxyChildRecord& child : world->ChildrenOf(proxy))
+            for (const ProxyChildRecord& child : world->GetChildrenOf(proxy))
             {
-                if (!IsFlagSet(child.flags, ProxyChildFlags::RequiredForReplacement)) continue;
+                if (!IsFlagSet(child.flags, ProxyChildFlags::RequiredForReplacement))
+                    continue;
                 foundRequiredChild = true;
-                const StreamingNodeKey childKey{child.childId, child.kind == ProxyChildKind::Cell
-                                                                   ? StreamingNodeKind::Cell
-                                                                   : StreamingNodeKind::DistantProxy};
-                if (!IsReplacementReady(childKey, depth + 1u)) return false;
+                const StreamingNodeKey childKey{child.childId, child.kind == ProxyChildKind::Cell ? StreamingNodeKind::Cell : StreamingNodeKind::DistantProxy};
+                if (!IsReplacementReady(childKey, depth + 1u))
+                    return false;
             }
             return foundRequiredChild;
         }
@@ -273,18 +273,20 @@ namespace vanguard::world
             antiStreamingLockedMask.ClearAll();
             for (u32 proxyIndex = 0; proxyIndex < proxyCount; ++proxyIndex)
             {
-                const DistantProxyRecord& proxy = world->DistantProxies()[proxyIndex];
-                if (IsFlagSet(proxy.flags, DistantProxyFlags::ProxyOnly)) continue;
+                const DistantProxyRecord& proxy = world->GetDistantProxies()[proxyIndex];
+                if (IsFlagSet(proxy.flags, DistantProxyFlags::ProxyOnly))
+                    continue;
                 bool saturated = true;
-                for (const ProxyChildRecord& child : world->ChildrenOf(proxy))
+                for (const ProxyChildRecord& child : world->GetChildrenOf(proxy))
                 {
-                    if (!IsFlagSet(child.flags, ProxyChildFlags::RequiredForReplacement)) continue;
-                    const StreamingNodeKey childKey{child.childId, child.kind == ProxyChildKind::Cell
-                                                                       ? StreamingNodeKind::Cell
-                                                                       : StreamingNodeKind::DistantProxy};
+                    if (!IsFlagSet(child.flags, ProxyChildFlags::RequiredForReplacement))
+                        continue;
+                    const StreamingNodeKey childKey{child.childId,
+                                                    child.kind == ProxyChildKind::Cell ? StreamingNodeKind::Cell : StreamingNodeKind::DistantProxy};
                     saturated &= IsReplacementReady(childKey);
                 }
-                if (!saturated) antiStreamingLockedMask.Set(cellCount + proxyIndex);
+                if (!saturated)
+                    antiStreamingLockedMask.Set(cellCount + proxyIndex);
             }
         }
 
@@ -323,15 +325,18 @@ namespace vanguard::world
 
     bool WorldStreamingGrid::Initialize(const WorldFile& worldFile, const StreamingGridConfig& config) noexcept
     {
-        if (m_impl != nullptr) return true;
-        if (!worldFile.IsOpen() || config.maximumStreamInsPerUpdate == 0 ||
-            !std::isfinite(config.runtimeDistanceBoost) || config.runtimeDistanceBoost < 0.0f) return false;
+        if (m_impl != nullptr)
+            return true;
+        if (!worldFile.IsOpen() || config.maximumStreamInsPerUpdate == 0 || !std::isfinite(config.runtimeDistanceBoost) || config.runtimeDistanceBoost < 0.0f)
+            return false;
         Impl* const impl = AllocateWorldStreamingObject<Impl>(config);
-        if (impl == nullptr) return false;
+        if (impl == nullptr)
+            return false;
         impl->world = &worldFile;
-        impl->cellCount = worldFile.Cells().Size();
-        impl->proxyCount = worldFile.DistantProxies().Size();
-        for (u32 axis = 0; axis < 3; ++axis) impl->origin[axis] = worldFile.Origin()[axis];
+        impl->cellCount = worldFile.GetCells().Size();
+        impl->proxyCount = worldFile.GetDistantProxies().Size();
+        for (u32 axis = 0; axis < 3; ++axis)
+            impl->origin[axis] = worldFile.GetOrigin()[axis];
         const u32 nodeCount = impl->cellCount + impl->proxyCount;
         impl->nodes.Reserve(nodeCount);
         impl->mainQuery.Reserve(nodeCount);
@@ -340,7 +345,7 @@ namespace vanguard::world
         impl->secondaryQuery.Reserve(nodeCount);
         for (u32 index = 0; index < impl->cellCount; ++index)
         {
-            const WorldCellRecord& cell = worldFile.Cells()[index];
+            const WorldCellRecord& cell = worldFile.GetCells()[index];
             const f32 boost = IsFlagSet(cell.flags, WorldCellFlags::AllowDistanceBoosting) ? config.runtimeDistanceBoost : 0.0f;
             const LocalPosition position = impl->ToLocal(cell.streamingReferencePoint);
             if (!IsFinite(position))
@@ -349,8 +354,8 @@ namespace vanguard::world
                 return false;
             }
             const bool threeDimensional = !IsFlagSet(cell.flags, WorldCellFlags::TwoDimensionalStreaming);
-            impl->nodes.PushBack({{cell.cellId, StreamingNodeKind::Cell}, cell.cell, cell.streamingPriority,
-                                  StreamingNodeState::Unloaded, position, index, true, false});
+            impl->nodes.PushBack(
+                {{cell.cellId, StreamingNodeKind::Cell}, cell.cell, cell.streamingPriority, StreamingNodeState::Unloaded, position, index, true, false});
             if (!impl->mainQuery.PushBack(position, cell.activationDistance + boost, threeDimensional) ||
                 !impl->retentionQuery.PushBack(position, cell.retentionDistance + boost, threeDimensional) ||
                 !impl->nearQuery.PushBack({}, StreamingProxyQuery::InvalidRadius, true) ||
@@ -362,7 +367,7 @@ namespace vanguard::world
         }
         for (u32 index = 0; index < impl->proxyCount; ++index)
         {
-            const DistantProxyRecord& proxy = worldFile.DistantProxies()[index];
+            const DistantProxyRecord& proxy = worldFile.GetDistantProxies()[index];
             const f32 boost = IsFlagSet(proxy.flags, DistantProxyFlags::AllowDistanceBoosting) ? config.runtimeDistanceBoost : 0.0f;
             const LocalPosition streamingPosition = impl->ToLocal(proxy.streamingReferencePoint);
             const LocalPosition preboostPosition = impl->ToLocal(proxy.preboostStreamingReferencePoint);
@@ -373,13 +378,18 @@ namespace vanguard::world
                 return false;
             }
             const bool threeDimensional = !IsFlagSet(proxy.flags, DistantProxyFlags::TwoDimensionalStreaming);
-            impl->nodes.PushBack({{proxy.proxyId, StreamingNodeKind::DistantProxy}, proxy.mesh, proxy.streamingPriority,
-                                  StreamingNodeState::Unloaded, preboostPosition, index, true, false});
+            impl->nodes.PushBack({{proxy.proxyId, StreamingNodeKind::DistantProxy},
+                                  proxy.mesh,
+                                  proxy.streamingPriority,
+                                  StreamingNodeState::Unloaded,
+                                  preboostPosition,
+                                  index,
+                                  true,
+                                  false});
             if (!impl->mainQuery.PushBack(streamingPosition, proxy.streamingDistance + boost, threeDimensional) ||
                 !impl->retentionQuery.PushBack(streamingPosition, proxy.streamingDistance + boost, threeDimensional) ||
                 !impl->nearQuery.PushBack(preboostPosition, proxy.nearHideDistance + boost, threeDimensional) ||
-                !impl->secondaryQuery.PushBack(secondaryPosition, proxy.secondaryReferencePointDistance + boost,
-                                               threeDimensional))
+                !impl->secondaryQuery.PushBack(secondaryPosition, proxy.secondaryReferencePointDistance + boost, threeDimensional))
             {
                 DeleteWorldStreamingObject(impl);
                 return false;
@@ -401,9 +411,10 @@ namespace vanguard::world
         impl->toStreamOutMask.Resize(nodeCount);
         impl->RefreshAntiStreamingLocks();
         for (u32 index = 0; index < impl->cellCount; ++index)
-            if (IsFlagSet(worldFile.Cells()[index].flags, WorldCellFlags::AlwaysLoaded)) impl->lockedMask.Set(index);
+            if (IsFlagSet(worldFile.GetCells()[index].flags, WorldCellFlags::AlwaysLoaded))
+                impl->lockedMask.Set(index);
         for (u32 index = 0; index < impl->proxyCount; ++index)
-            if (IsFlagSet(worldFile.DistantProxies()[index].flags, DistantProxyFlags::KeepResident))
+            if (IsFlagSet(worldFile.GetDistantProxies()[index].flags, DistantProxyFlags::KeepResident))
                 impl->lockedMask.Set(impl->cellCount + index);
         m_impl = impl;
         return true;
@@ -411,19 +422,25 @@ namespace vanguard::world
 
     bool WorldStreamingGrid::Shutdown() noexcept
     {
-        if (m_impl == nullptr) return true;
+        if (m_impl == nullptr)
+            return true;
         for (const Impl::RuntimeNode& node : m_impl->nodes)
-            if (node.state != StreamingNodeState::Unloaded) return false;
+            if (node.state != StreamingNodeState::Unloaded)
+                return false;
         DeleteWorldStreamingObject(m_impl);
         m_impl = nullptr;
         return true;
     }
 
-    bool WorldStreamingGrid::IsInitialized() const noexcept { return m_impl != nullptr; }
+    bool WorldStreamingGrid::IsInitialized() const noexcept
+    {
+        return m_impl != nullptr;
+    }
 
     bool WorldStreamingGrid::RequestShutdown() noexcept
     {
-        if (m_impl == nullptr || m_impl->shutdownRequested) return false;
+        if (m_impl == nullptr || m_impl->shutdownRequested)
+            return false;
         m_impl->shutdownRequested = true;
         return true;
     }
@@ -433,34 +450,40 @@ namespace vanguard::world
         return m_impl != nullptr && m_impl->shutdownRequested;
     }
 
-    bool WorldStreamingGrid::Process(const StreamingProcessInput& input,
-                                     containers::DynamicArray<StreamingCommand>& commands) noexcept
+    bool WorldStreamingGrid::Process(const StreamingProcessInput& input, containers::DynamicArray<StreamingCommand>& commands) noexcept
     {
         commands.Clear();
-        if (m_impl == nullptr || input.observers.Empty() || input.observers.Size() > MaximumStreamingObservers ||
-            !std::isfinite(input.globalDistanceScale) ||
-            input.globalDistanceScale <= 0.0f) return false;
-        for (const f64 coordinate : input.cameraPosition) if (!std::isfinite(coordinate)) return false;
+        if (m_impl == nullptr || input.observers.Empty() || input.observers.Size() > MaximumStreamingObservers || !std::isfinite(input.globalDistanceScale) ||
+            input.globalDistanceScale <= 0.0f)
+            return false;
+        for (const f64 coordinate : input.cameraPosition)
+            if (!std::isfinite(coordinate))
+                return false;
         m_impl->observerPositions.Clear();
         for (const StreamingObserver& observer : input.observers)
         {
-            for (const f64 coordinate : observer.predictedPosition) if (!std::isfinite(coordinate)) return false;
+            for (const f64 coordinate : observer.predictedPosition)
+                if (!std::isfinite(coordinate))
+                    return false;
             const LocalPosition position = m_impl->ToLocal(observer.predictedPosition);
-            if (!IsFinite(position)) return false;
+            if (!IsFinite(position))
+                return false;
             m_impl->observerPositions.PushBack(position);
         }
-        if (m_impl->observerPositions.Size() != input.observers.Size()) return false;
+        if (m_impl->observerPositions.Size() != input.observers.Size())
+            return false;
         m_impl->queryMask.ClearAll();
         m_impl->retentionMask.ClearAll();
         m_impl->nearMask.ClearAll();
         m_impl->secondaryMask.ClearAll();
         m_impl->mainQuery.CollectMultiple(m_impl->observerPositions, m_impl->queryMask, input.globalDistanceScale);
-        m_impl->retentionQuery.CollectMultiple(m_impl->observerPositions, m_impl->retentionMask,
-                                               input.globalDistanceScale);
+        m_impl->retentionQuery.CollectMultiple(m_impl->observerPositions, m_impl->retentionMask, input.globalDistanceScale);
         for (u32 index = 0; index < m_impl->cellCount; ++index)
-            if (m_impl->inRangeMask.Get(index) && m_impl->retentionMask.Get(index)) m_impl->queryMask.Set(index);
+            if (m_impl->inRangeMask.Get(index) && m_impl->retentionMask.Get(index))
+                m_impl->queryMask.Set(index);
         const LocalPosition camera = m_impl->ToLocal(input.cameraPosition);
-        if (!IsFinite(camera)) return false;
+        if (!IsFinite(camera))
+            return false;
         m_impl->secondaryQuery.CollectSingle(camera, m_impl->secondaryMask, input.globalDistanceScale);
         m_impl->queryMask &= m_impl->secondaryMask;
         m_impl->nearQuery.CollectSingle(camera, m_impl->nearMask, input.globalDistanceScale);
@@ -468,30 +491,32 @@ namespace vanguard::world
         m_impl->nearMask -= m_impl->antiStreamingLockedMask;
         m_impl->queryMask -= m_impl->nearMask;
         m_impl->queryMask |= m_impl->lockedMask;
-        if (m_impl->shutdownRequested) m_impl->queryMask.ClearAll();
+        if (m_impl->shutdownRequested)
+            m_impl->queryMask.ClearAll();
 
         m_impl->toStreamInMask = m_impl->queryMask;
         m_impl->toStreamInMask -= m_impl->inRangeMask;
         m_impl->candidates.Clear();
         const LocalPosition primaryObserver = m_impl->observerPositions[0];
-        for (u32 index = m_impl->toStreamInMask.FindNextSet(0); index < m_impl->toStreamInMask.Size();
-             index = m_impl->toStreamInMask.FindNextSet(index + 1u))
+        for (u32 index = m_impl->toStreamInMask.FindNextSet(0); index < m_impl->toStreamInMask.Size(); index = m_impl->toStreamInMask.FindNextSet(index + 1u))
         {
             const Impl::RuntimeNode& node = m_impl->nodes[index];
-            if (!node.streamInAllowed || node.state != StreamingNodeState::Unloaded) continue;
+            if (!node.streamInAllowed || node.state != StreamingNodeState::Unloaded)
+                continue;
             const f32 deltaX = node.preboostPosition.x - primaryObserver.x;
             const f32 deltaY = node.preboostPosition.y - primaryObserver.y;
             const f32 deltaZ = node.preboostPosition.z - primaryObserver.z;
-            m_impl->candidates.PushBack({index, deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ,
-                                         static_cast<u8>(node.priority)});
+            m_impl->candidates.PushBack({index, deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ, static_cast<u8>(node.priority)});
         }
-        std::sort(m_impl->candidates.Begin(), m_impl->candidates.End(), [](const Impl::SortEntry& left,
-                                                                          const Impl::SortEntry& right) noexcept
-        {
-            if (left.priority != right.priority) return left.priority > right.priority;
-            if (left.distanceSquared != right.distanceSquared) return left.distanceSquared < right.distanceSquared;
-            return left.nodeIndex < right.nodeIndex;
-        });
+        std::sort(m_impl->candidates.Begin(), m_impl->candidates.End(),
+                  [](const Impl::SortEntry& left, const Impl::SortEntry& right) noexcept
+                  {
+                      if (left.priority != right.priority)
+                          return left.priority > right.priority;
+                      if (left.distanceSquared != right.distanceSquared)
+                          return left.distanceSquared < right.distanceSquared;
+                      return left.nodeIndex < right.nodeIndex;
+                  });
         const u32 streamInCount = std::min(m_impl->config.maximumStreamInsPerUpdate, m_impl->candidates.Size());
         commands.Reserve(streamInCount + m_impl->inRangeMask.PopulationCount());
         for (u32 index = 0; index < streamInCount; ++index)
@@ -517,12 +542,13 @@ namespace vanguard::world
         return true;
     }
 
-    bool WorldStreamingGrid::NotifyStreamInComplete(const StreamingNodeKey key, const bool success,
-                                                    const bool renderReady) noexcept
+    bool WorldStreamingGrid::NotifyStreamInComplete(const StreamingNodeKey key, const bool success, const bool renderReady) noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
-        if (index == 0xffffffffu || m_impl->nodes[index].state != StreamingNodeState::StreamingIn) return false;
+        if (index == 0xffffffffu || m_impl->nodes[index].state != StreamingNodeState::StreamingIn)
+            return false;
         m_impl->nodes[index].state = success ? StreamingNodeState::Streamed : StreamingNodeState::Failed;
         m_impl->nodes[index].renderReady = success && renderReady;
         return true;
@@ -530,9 +556,11 @@ namespace vanguard::world
 
     bool WorldStreamingGrid::NotifyStreamOutComplete(const StreamingNodeKey key) noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
-        if (index == 0xffffffffu || m_impl->nodes[index].state != StreamingNodeState::StreamingOut) return false;
+        if (index == 0xffffffffu || m_impl->nodes[index].state != StreamingNodeState::StreamingOut)
+            return false;
         m_impl->nodes[index].state = StreamingNodeState::Unloaded;
         m_impl->nodes[index].renderReady = false;
         return true;
@@ -540,9 +568,11 @@ namespace vanguard::world
 
     bool WorldStreamingGrid::NotifyResidentFailed(const StreamingNodeKey key) noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
-        if (index == 0xffffffffu || m_impl->nodes[index].state != StreamingNodeState::Streamed) return false;
+        if (index == 0xffffffffu || m_impl->nodes[index].state != StreamingNodeState::Streamed)
+            return false;
         m_impl->nodes[index].state = StreamingNodeState::Failed;
         m_impl->nodes[index].renderReady = false;
         return true;
@@ -550,49 +580,60 @@ namespace vanguard::world
 
     bool WorldStreamingGrid::SetRenderReady(const StreamingNodeKey key, const bool ready) noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
-        if (index == 0xffffffffu || (ready && m_impl->nodes[index].state != StreamingNodeState::Streamed)) return false;
+        if (index == 0xffffffffu || (ready && m_impl->nodes[index].state != StreamingNodeState::Streamed))
+            return false;
         m_impl->nodes[index].renderReady = ready;
         return true;
     }
 
     bool WorldStreamingGrid::SetLocked(const StreamingNodeKey key, const bool locked) noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
-        if (index == 0xffffffffu) return false;
-        if (locked) m_impl->lockedMask.Set(index);
-        else m_impl->lockedMask.Clear(index);
+        if (index == 0xffffffffu)
+            return false;
+        if (locked)
+            m_impl->lockedMask.Set(index);
+        else
+            m_impl->lockedMask.Clear(index);
         return true;
     }
 
     bool WorldStreamingGrid::SetStreamInAllowed(const StreamingNodeKey key, const bool allowed) noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
-        if (index == 0xffffffffu) return false;
+        if (index == 0xffffffffu)
+            return false;
         m_impl->nodes[index].streamInAllowed = allowed;
         return true;
     }
 
-    StreamingNodeState WorldStreamingGrid::State(const StreamingNodeKey key) const noexcept
+    StreamingNodeState WorldStreamingGrid::GetState(const StreamingNodeKey key) const noexcept
     {
-        if (m_impl == nullptr) return StreamingNodeState::Unloaded;
+        if (m_impl == nullptr)
+            return StreamingNodeState::Unloaded;
         const u32 index = m_impl->FindNodeIndex(key);
         return index == 0xffffffffu ? StreamingNodeState::Unloaded : m_impl->nodes[index].state;
     }
 
     bool WorldStreamingGrid::IsRenderReady(const StreamingNodeKey key) const noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex(key);
         return index != 0xffffffffu && m_impl->nodes[index].renderReady;
     }
 
     bool WorldStreamingGrid::IsAntiStreamingLocked(const u64 proxyId) const noexcept
     {
-        if (m_impl == nullptr) return false;
+        if (m_impl == nullptr)
+            return false;
         const u32 index = m_impl->FindNodeIndex({proxyId, StreamingNodeKind::DistantProxy});
         return index != 0xffffffffu && m_impl->antiStreamingLockedMask.Get(index);
     }
@@ -600,15 +641,15 @@ namespace vanguard::world
     StreamingGridStats WorldStreamingGrid::GetStats() const noexcept
     {
         StreamingGridStats stats;
-        if (m_impl == nullptr) return stats;
+        if (m_impl == nullptr)
+            return stats;
         stats.registeredNodes = m_impl->nodes.Size();
         stats.desiredNodes = m_impl->queryMask.PopulationCount();
         stats.inRangeNodes = m_impl->inRangeMask.PopulationCount();
         stats.antiStreamingLockedProxies = m_impl->antiStreamingLockedMask.PopulationCount();
         for (const Impl::RuntimeNode& node : m_impl->nodes)
         {
-            stats.streamingNodes += node.state == StreamingNodeState::StreamingIn ||
-                                    node.state == StreamingNodeState::StreamingOut;
+            stats.streamingNodes += node.state == StreamingNodeState::StreamingIn || node.state == StreamingNodeState::StreamingOut;
             stats.streamedNodes += node.state == StreamingNodeState::Streamed;
             stats.failedNodes += node.state == StreamingNodeState::Failed;
         }

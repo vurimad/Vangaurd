@@ -30,4 +30,14 @@ namespace vanguard::filesystem
     {
         return backend::GetManager();
     }
+
+    bool ReplaceFile(const AbsolutePath& staged, const AbsolutePath& target) noexcept
+    {
+        if (!IsInitialized() || staged.Empty() || target.Empty() || !staged.IsFilePath() || !target.IsFilePath() || staged == target ||
+            paths::ParentAbsolutePath(staged) != paths::ParentAbsolutePath(target) || !GetManager().FileExist(staged))
+        {
+            return false;
+        }
+        return SystemIO::MoveFile(staged.AsChar(), target.AsChar());
+    }
 } // namespace vanguard::filesystem

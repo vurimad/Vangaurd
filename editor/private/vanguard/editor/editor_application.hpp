@@ -2,6 +2,7 @@
 
 #include <vanguard/application/application.hpp>
 #include <vanguard/containers/containers.hpp>
+#include <vanguard/engine/rendering_service.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 
 #include <vanguard/editor/editor_project_service.hpp>
@@ -43,12 +44,12 @@ namespace vanguard::editor
     {
     public:
         [[nodiscard]] ApplicationTraits GetTraits() const noexcept override;
-        [[nodiscard]] application::CompositionStatus Compose(const application::ApplicationStartupContext& startup,
-                                                             application::EngineHost& services,
+        [[nodiscard]] application::CompositionStatus Compose(const application::ApplicationStartupContext& startup, application::EngineHost& services,
                                                              application::ApplicationStateMachine& states) noexcept override;
 
     private:
         filesystem::Config m_filesystemConfig;
+        engine::RenderingServiceConfig m_renderingConfig;
         ProjectWorkspaceConfig m_workspaceConfig;
         StartupSessionState m_startupSessionState;
         RunningState m_runningState;

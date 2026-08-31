@@ -61,7 +61,7 @@ namespace vanguard::concurrency::backend
     [[nodiscard]] bool TryWaitManualResetEvent(void* storage, u32 timeout) noexcept;
     [[nodiscard]] const void* GetManualResetEventHandle(const void* storage) noexcept;
 
-    [[nodiscard]] ThreadId CurrentThreadId() noexcept;
+    [[nodiscard]] ThreadId GetCurrentThreadId() noexcept;
     void YieldCurrentThread() noexcept;
     void SleepOnCurrentThread(u32 milliseconds) noexcept;
     void SetCurrentThreadAffinity(u64 mask) noexcept;

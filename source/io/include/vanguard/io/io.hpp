@@ -112,6 +112,6 @@ namespace vanguard::io
     [[nodiscard]] bool Initialize(const InitSetup& setup = InitSetup{}) noexcept;
     void Shutdown() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
-    [[nodiscard]] AsyncIO& System() noexcept;
+    [[nodiscard]] AsyncIO& GetSystem() noexcept;
     [[nodiscard]] const char* GetRequestSourceDebugText(RequestSource source) noexcept;
 } // namespace vanguard::io

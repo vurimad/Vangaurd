@@ -4,11 +4,9 @@
 
 namespace
 {
-    ::red::UniquePtr<
-        ::CFileManager,
-        vanguard::memory::pools::Filesystem> g_manager;
+    ::red::UniquePtr<::CFileManager, vanguard::memory::pools::Filesystem> g_manager;
     bool g_initialized = false;
-}
+} // namespace
 
 namespace vanguard::filesystem::backend
 {
@@ -20,12 +18,7 @@ namespace vanguard::filesystem::backend
         }
 
         ::compression::InitializeMemoryPools();
-        g_manager = ::red::CreateUniquePtr<
-            ::CFileManager,
-            vanguard::memory::pools::Filesystem>(
-                config.engineRoot,
-                config.gameRoot,
-                config.cacheRoot);
+        g_manager = ::red::CreateUniquePtr<::CFileManager, vanguard::memory::pools::Filesystem>(config.engineRoot, config.gameRoot, config.cacheRoot);
         if (!g_manager)
         {
             return false;
@@ -58,4 +51,4 @@ namespace vanguard::filesystem::backend
         RED_FATAL_ASSERT(g_manager);
         return *g_manager;
     }
-}
+} // namespace vanguard::filesystem::backend

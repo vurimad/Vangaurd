@@ -39,9 +39,10 @@ project "streaming"
     fatalwarnings "All"
     targetdir(output_root)
     objdir(object_root)
-    files { "include/**.hpp", "src/**.hpp", "src/**.cpp" }
+    files { "include/**.hpp", "private/**.hpp", "src/**.hpp", "src/**.cpp" }
     includedirs {
         "include",
+        "private",
         "src",
         "../system/include",
         "../memory/include",
@@ -60,6 +61,7 @@ project "streaming"
     }
     links {
         "packages",
+        "crypto",
         "schemas",
         "reflection",
         "resources",
@@ -74,6 +76,7 @@ project "streaming"
     }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
+        ["Private API/*"] = { "private/**.hpp" },
         ["Source/*"] = { "src/**.hpp", "src/**.cpp" }
     }
 

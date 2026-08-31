@@ -40,14 +40,12 @@ namespace
         if (!(left.id == right.id) || left.name != right.name || left.technicalName != right.technicalName ||
             left.engine.minimumMajor != right.engine.minimumMajor || left.engine.minimumMinor != right.engine.minimumMinor ||
             left.engine.minimumPatch != right.engine.minimumPatch || left.engine.maximumMajor != right.engine.maximumMajor ||
-            left.engine.maximumMinor != right.engine.maximumMinor ||
-            left.engine.maximumPatchWildcard != right.engine.maximumPatchWildcard ||
+            left.engine.maximumMinor != right.engine.maximumMinor || left.engine.maximumPatchWildcard != right.engine.maximumPatchWildcard ||
             left.engine.maximumPatch != right.engine.maximumPatch || left.assets != right.assets || left.derivedData != right.derivedData ||
-            left.intermediate != right.intermediate || left.saved != right.saved || left.builds != right.builds ||
-            left.config != right.config || left.pluginsRoot != right.pluginsRoot || left.cookingPolicy != right.cookingPolicy ||
-            left.packagingPolicy != right.packagingPolicy || left.editorWorld != right.editorWorld ||
-            left.runtimeWorld != right.runtimeWorld || left.input != right.input || left.targets.Size() != right.targets.Size() ||
-            left.plugins.Size() != right.plugins.Size())
+            left.intermediate != right.intermediate || left.saved != right.saved || left.builds != right.builds || left.config != right.config ||
+            left.pluginsRoot != right.pluginsRoot || left.cookingPolicy != right.cookingPolicy || left.packagingPolicy != right.packagingPolicy ||
+            left.editorWorld != right.editorWorld || left.runtimeWorld != right.runtimeWorld || left.input != right.input ||
+            left.targets.Size() != right.targets.Size() || left.plugins.Size() != right.plugins.Size())
             return false;
 
         for (vanguard::u32 index = 0; index < left.targets.Size(); ++index)
@@ -111,8 +109,7 @@ int main()
     {
         filesystem::MemoryFileReader reader(firstBytes, 0);
         projects::ProjectDescriptor read;
-        Check(projects::Read(reader, read, &diagnostic) == projects::Result::Success && Equal(source, read),
-              "IFile read path preserves the descriptor");
+        Check(projects::Read(reader, read, &diagnostic) == projects::Result::Success && Equal(source, read), "IFile read path preserves the descriptor");
     }
 
     containers::String commented = Text(firstBytes);
@@ -132,25 +129,21 @@ int main()
                                         "policy.cooking = \"default\"\npolicy.packaging = \"default\"\n"
                                         "startup.editorWorld = \"\"\nstartup.runtimeWorld = \"\"\nstartup.input = \"\"\n";
     projects::ProjectDescriptor escaped;
-    Check(projects::Parse(escapedDocument, escaped, &diagnostic) == projects::Result::Success,
-          "JSON escapes, surrogate pairs, and trailing comments parse");
+    Check(projects::Parse(escapedDocument, escaped, &diagnostic) == projects::Result::Success, "JSON escapes, surrogate pairs, and trailing comments parse");
 
     projects::ProjectDescriptor sentinel = MakeProject();
     sentinel.name = "unchanged";
     containers::String duplicate = Text(firstBytes);
     duplicate.Append("project.name = \"duplicate\"\n", 27);
-    Check(projects::Parse(duplicate, sentinel, &diagnostic) == projects::Result::DuplicateField && sentinel.name == "unchanged" &&
-              diagnostic.line != 0,
+    Check(projects::Parse(duplicate, sentinel, &diagnostic) == projects::Result::DuplicateField && sentinel.name == "unchanged" && diagnostic.line != 0,
           "duplicate scalar rejection is transactional and located");
 
     containers::String unknown = Text(firstBytes);
     unknown.Append("future.field = \"value\"\n", 23);
     Check(projects::Parse(unknown, sentinel, &diagnostic) == projects::Result::UnknownField, "unknown fields are rejected");
-    Check(projects::Parse("vproject 1.0\n", sentinel, &diagnostic) == projects::Result::MissingField,
-          "missing required fields are rejected");
+    Check(projects::Parse("vproject 1.0\n", sentinel, &diagnostic) == projects::Result::MissingField, "missing required fields are rejected");
 
-    const char invalidUtf8[]{
-        'v', 'p', 'r', 'o', 'j', 'e', 'c', 't', ' ', '1', '.', '0', '\n', static_cast<char>(0xC0), static_cast<char>(0xAF)};
+    const char invalidUtf8[]{'v', 'p', 'r', 'o', 'j', 'e', 'c', 't', ' ', '1', '.', '0', '\n', static_cast<char>(0xC0), static_cast<char>(0xAF)};
     Check(projects::Parse(containers::StringView(invalidUtf8, sizeof(invalidUtf8)), sentinel, &diagnostic) == projects::Result::InvalidUtf8,
           "malformed UTF-8 is rejected");
 
@@ -171,8 +164,7 @@ int main()
 
     containers::String oversized;
     Check(oversized.Resize(projects::MaximumProjectFileBytes + 1), "oversized test allocation");
-    Check(projects::Parse(oversized, sentinel, &diagnostic) == projects::Result::FileTooLarge,
-          "direct parsing enforces the document size bound");
+    Check(projects::Parse(oversized, sentinel, &diagnostic) == projects::Result::FileTooLarge, "direct parsing enforces the document size bound");
 
     if (g_failures == 0)
         std::printf("Vanguard project document conformance passed.\n");

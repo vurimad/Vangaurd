@@ -112,63 +112,33 @@ namespace vanguard::rhi
         u64 value = 0;
 
         constexpr ResourceRef() noexcept = default;
-        constexpr ResourceRef(const TextureRef reference) noexcept
-            : value(Pack(ResourceKind::Texture, reference.index, reference.generation))
+        constexpr ResourceRef(const TextureRef reference) noexcept : value(Pack(ResourceKind::Texture, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const TextureReadbackRef reference) noexcept : value(Pack(ResourceKind::TextureReadback, reference.index, reference.generation))
         {
         }
-        constexpr ResourceRef(const TextureReadbackRef reference) noexcept
-            : value(Pack(ResourceKind::TextureReadback, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const BufferRef reference) noexcept : value(Pack(ResourceKind::Buffer, reference.index, reference.generation))
-        {
-        }
+        constexpr ResourceRef(const BufferRef reference) noexcept : value(Pack(ResourceKind::Buffer, reference.index, reference.generation)) {}
         constexpr ResourceRef(const HeapRef reference) noexcept : value(Pack(ResourceKind::Heap, reference.index, reference.generation)) {}
-        constexpr ResourceRef(const SamplerStateRef reference) noexcept
-            : value(Pack(ResourceKind::SamplerState, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const ShaderRef reference) noexcept : value(Pack(ResourceKind::Shader, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const VertexLayoutRef reference) noexcept
-            : value(Pack(ResourceKind::VertexLayout, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const PipelineRef reference) noexcept
-            : value(Pack(ResourceKind::Pipeline, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const BindingLayoutRef reference) noexcept
-            : value(Pack(ResourceKind::BindingLayout, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const DescriptorDomainRef reference) noexcept
-            : value(Pack(ResourceKind::DescriptorDomain, reference.index, reference.generation))
+        constexpr ResourceRef(const SamplerStateRef reference) noexcept : value(Pack(ResourceKind::SamplerState, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const ShaderRef reference) noexcept : value(Pack(ResourceKind::Shader, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const VertexLayoutRef reference) noexcept : value(Pack(ResourceKind::VertexLayout, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const PipelineRef reference) noexcept : value(Pack(ResourceKind::Pipeline, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const BindingLayoutRef reference) noexcept : value(Pack(ResourceKind::BindingLayout, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const DescriptorDomainRef reference) noexcept : value(Pack(ResourceKind::DescriptorDomain, reference.index, reference.generation))
         {
         }
         constexpr ResourceRef(const AccelerationStructureRef reference) noexcept
             : value(Pack(ResourceKind::AccelerationStructure, reference.index, reference.generation))
         {
         }
-        constexpr ResourceRef(const ShaderTableRef reference) noexcept
-            : value(Pack(ResourceKind::ShaderTable, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const SwapChainRef reference) noexcept
-            : value(Pack(ResourceKind::SwapChain, reference.index, reference.generation))
-        {
-        }
-        constexpr ResourceRef(const CommandListRef reference) noexcept
-            : value(Pack(ResourceKind::CommandList, reference.index, reference.generation))
-        {
-        }
+        constexpr ResourceRef(const ShaderTableRef reference) noexcept : value(Pack(ResourceKind::ShaderTable, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const SwapChainRef reference) noexcept : value(Pack(ResourceKind::SwapChain, reference.index, reference.generation)) {}
+        constexpr ResourceRef(const CommandListRef reference) noexcept : value(Pack(ResourceKind::CommandList, reference.index, reference.generation)) {}
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return Kind() != ResourceKind::None && Index() <= MaximumResourceReferenceIndex && Generation() != 0;
+            return GetKind() != ResourceKind::None && Index() <= MaximumResourceReferenceIndex && GetGeneration() != 0;
         }
-        [[nodiscard]] constexpr ResourceKind Kind() const noexcept
+        [[nodiscard]] constexpr ResourceKind GetKind() const noexcept
         {
             return static_cast<ResourceKind>(value >> 60u);
         }
@@ -176,7 +146,7 @@ namespace vanguard::rhi
         {
             return static_cast<u32>(value & MaximumResourceReferenceIndex);
         }
-        [[nodiscard]] constexpr u32 Generation() const noexcept
+        [[nodiscard]] constexpr u32 GetGeneration() const noexcept
         {
             return static_cast<u32>((value >> 28u) & 0xffffffffu);
         }
@@ -264,9 +234,8 @@ namespace vanguard::rhi
 
     template <typename ReferenceType> [[nodiscard]] constexpr ReferenceType CastResourceRef(const ResourceRef resource) noexcept
     {
-        return resource.Kind() == GetResourceKind<ReferenceType>() && resource.IsValid()
-                   ? ReferenceType{resource.Index(), resource.Generation()}
-                   : ReferenceType{};
+        return resource.GetKind() == GetResourceKind<ReferenceType>() && resource.IsValid() ? ReferenceType{resource.Index(), resource.GetGeneration()}
+                                                                                         : ReferenceType{};
     }
 
     enum class BackendKind : u8
@@ -621,6 +590,7 @@ namespace vanguard::rhi
         u64 uploadBufferAlignment = 1;
         u64 constantBufferAlignment = 1;
         u32 maximumTextureDimension2D = 0;
+        u32 maximumTextureDimension3D = 0;
         u32 maximumTextureArrayLayers = 0;
         u32 maximumBindlessResources = 0;
         u32 maximumBindlessSamplers = 0;
@@ -659,7 +629,10 @@ namespace vanguard::rhi
         {
             return currentUsage < budget ? budget - currentUsage : 0;
         }
-        [[nodiscard]] constexpr bool IsOverBudget() const noexcept { return currentUsage > budget; }
+        [[nodiscard]] constexpr bool IsOverBudget() const noexcept
+        {
+            return currentUsage > budget;
+        }
     };
 
     struct ResidencyFenceSet
@@ -1107,13 +1080,12 @@ namespace vanguard::rhi
         PreferFastBuild = 1u << 3u,
         MinimizeMemory = 1u << 4u
     };
-    [[nodiscard]] constexpr RayTracingGeometryFlags operator|(const RayTracingGeometryFlags left,
-                                                               const RayTracingGeometryFlags right) noexcept
+    [[nodiscard]] constexpr RayTracingGeometryFlags operator|(const RayTracingGeometryFlags left, const RayTracingGeometryFlags right) noexcept
     {
         return CombineFlags(left, right);
     }
     [[nodiscard]] constexpr AccelerationStructureBuildFlags operator|(const AccelerationStructureBuildFlags left,
-                                                                       const AccelerationStructureBuildFlags right) noexcept
+                                                                      const AccelerationStructureBuildFlags right) noexcept
     {
         return CombineFlags(left, right);
     }
@@ -1175,9 +1147,7 @@ namespace vanguard::rhi
     struct RayTracingInstanceDesc
     {
         /// Row-major 3x4 object-to-world transform.
-        f32 transform[12]{1.0f, 0.0f, 0.0f, 0.0f,
-                          0.0f, 1.0f, 0.0f, 0.0f,
-                          0.0f, 0.0f, 1.0f, 0.0f};
+        f32 transform[12]{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
         AccelerationStructureRef bottomLevel;
         u32 instanceId = 0;
         u32 instanceMask = 0xffu;
@@ -1187,9 +1157,7 @@ namespace vanguard::rhi
     struct RayTracingGpuInstanceDesc
     {
         /// Row-major 3x4 object-to-world transform.
-        f32 transform[12]{1.0f, 0.0f, 0.0f, 0.0f,
-                          0.0f, 1.0f, 0.0f, 0.0f,
-                          0.0f, 0.0f, 1.0f, 0.0f};
+        f32 transform[12]{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
         /// Low 24 bits contain the instance id; high 8 bits contain the visibility mask.
         u32 instanceIdAndMask = 0xff000000u;
         /// Low 24 bits contain the hit-group offset; high 8 bits contain RayTracingInstanceFlags.
@@ -1546,7 +1514,10 @@ namespace vanguard::rhi
         {
             return swapChain.IsValid() && texture.IsValid() && serial != 0 && width != 0 && height != 0;
         }
-        [[nodiscard]] constexpr explicit operator bool() const noexcept { return IsValid(); }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
     };
 
     struct SwapChainStats
@@ -1674,8 +1645,7 @@ namespace vanguard::rhi
         {
             return {};
         }
-        [[nodiscard]] static constexpr BackendStatus Failure(const FailureCode code, const i64 backendCode,
-                                                             const char* const message) noexcept
+        [[nodiscard]] static constexpr BackendStatus Failure(const FailureCode code, const i64 backendCode, const char* const message) noexcept
         {
             return {false, code, backendCode, message};
         }

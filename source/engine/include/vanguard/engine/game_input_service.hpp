@@ -12,8 +12,8 @@ namespace vanguard::engine
     public:
         ~GameInputService() override = default;
 
-        [[nodiscard]] virtual game_input::ActionMap& Mappings() noexcept = 0;
-        [[nodiscard]] virtual const game_input::ActionMap& Mappings() const noexcept = 0;
+        [[nodiscard]] virtual game_input::ActionMap& GetMappings() noexcept = 0;
+        [[nodiscard]] virtual const game_input::ActionMap& GetMappings() const noexcept = 0;
         /// Atomically replaces the current map with a validated cooked mapping.
         [[nodiscard]] virtual game_input::MappingResult Install(const game_input::MappingFile& mapping) noexcept = 0;
 
@@ -23,4 +23,4 @@ namespace vanguard::engine
 
     [[nodiscard]] GameInputService* FindGameInputService(application::EngineHost& host) noexcept;
     [[nodiscard]] GameInputService* FindGameInputService(application::ServiceContext& context) noexcept;
-}
+} // namespace vanguard::engine

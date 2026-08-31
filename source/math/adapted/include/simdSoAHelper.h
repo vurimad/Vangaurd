@@ -9,8 +9,8 @@ namespace vanguard::math::simd
         __m128 zzzz;
         __m128 wwww;
     };
-    RED_INLINE void Load(Vector4SoA* soa, const vanguard::math::Vector4& a, const vanguard::math::Vector4& b,
-                         const vanguard::math::Vector4& c, const vanguard::math::Vector4& d)
+    RED_INLINE void Load(Vector4SoA* soa, const vanguard::math::Vector4& a, const vanguard::math::Vector4& b, const vanguard::math::Vector4& c,
+                         const vanguard::math::Vector4& d)
     {
         /*
         xyzw xyzw xyzw xyzw
@@ -39,8 +39,7 @@ namespace vanguard::math::simd
         soa->zzzz = _mm_shuffle_ps(tmp2, tmp3, _MM_SHUFFLE(2, 0, 2, 0));
         soa->wwww = _mm_shuffle_ps(tmp2, tmp3, _MM_SHUFFLE(3, 1, 3, 1));
     }
-    RED_INLINE void Store(vanguard::math::Vector4* a, vanguard::math::Vector4* b, vanguard::math::Vector4* c, vanguard::math::Vector4* d,
-                          const Vector4SoA& soa)
+    RED_INLINE void Store(vanguard::math::Vector4* a, vanguard::math::Vector4* b, vanguard::math::Vector4* c, vanguard::math::Vector4* d, const Vector4SoA& soa)
     {
         /*
         ax|bx|cx|dx
@@ -90,18 +89,14 @@ namespace vanguard::math::simd
     RED_INLINE Vector4SoA Mul(const MatrixSoA& m, const Vector4SoA& v)
     {
         Vector4SoA result;
-        result.xxxx =
-            _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.xxxx, v.xxxx), _mm_mul_ps(m.y.xxxx, v.yyyy)), _mm_mul_ps(m.z.xxxx, v.zzzz)),
-                       _mm_mul_ps(m.w.xxxx, v.wwww));
-        result.yyyy =
-            _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.yyyy, v.xxxx), _mm_mul_ps(m.y.yyyy, v.yyyy)), _mm_mul_ps(m.z.yyyy, v.zzzz)),
-                       _mm_mul_ps(m.w.yyyy, v.wwww));
-        result.zzzz =
-            _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.zzzz, v.xxxx), _mm_mul_ps(m.y.zzzz, v.yyyy)), _mm_mul_ps(m.z.zzzz, v.zzzz)),
-                       _mm_mul_ps(m.w.zzzz, v.wwww));
-        result.wwww =
-            _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.wwww, v.xxxx), _mm_mul_ps(m.y.wwww, v.yyyy)), _mm_mul_ps(m.z.wwww, v.zzzz)),
-                       _mm_mul_ps(m.w.wwww, v.wwww));
+        result.xxxx = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.xxxx, v.xxxx), _mm_mul_ps(m.y.xxxx, v.yyyy)), _mm_mul_ps(m.z.xxxx, v.zzzz)),
+                                 _mm_mul_ps(m.w.xxxx, v.wwww));
+        result.yyyy = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.yyyy, v.xxxx), _mm_mul_ps(m.y.yyyy, v.yyyy)), _mm_mul_ps(m.z.yyyy, v.zzzz)),
+                                 _mm_mul_ps(m.w.yyyy, v.wwww));
+        result.zzzz = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.zzzz, v.xxxx), _mm_mul_ps(m.y.zzzz, v.yyyy)), _mm_mul_ps(m.z.zzzz, v.zzzz)),
+                                 _mm_mul_ps(m.w.zzzz, v.wwww));
+        result.wwww = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(m.x.wwww, v.xxxx), _mm_mul_ps(m.y.wwww, v.yyyy)), _mm_mul_ps(m.z.wwww, v.zzzz)),
+                                 _mm_mul_ps(m.w.wwww, v.wwww));
 
         return result;
     }

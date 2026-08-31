@@ -4,7 +4,7 @@ namespace
 {
     bool g_vanguardIOInitialized = false;
     bool g_vanguardIOTerminated = false;
-}
+} // namespace
 
 namespace vanguard::io::backend
 {
@@ -43,8 +43,8 @@ namespace vanguard::io::backend
         return g_vanguardIOInitialized;
     }
 
-    AsyncIO& System() noexcept
+    AsyncIO& GetSystem() noexcept
     {
         return ::io::GAsyncIO;
     }
-}
+} // namespace vanguard::io::backend

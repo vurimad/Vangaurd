@@ -22,23 +22,22 @@ namespace vanguard::editor
     public:
         ~ProjectWorkspaceService() override = default;
 
-        [[nodiscard]] virtual const projects::ProjectDescriptor& Project() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& ProjectFile() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& ProjectRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& AssetsRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& DerivedDataRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& IntermediateRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& SavedRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& BuildsRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& ConfigRoot() const noexcept = 0;
-        [[nodiscard]] virtual const filesystem::AbsolutePath& PluginsRoot() const noexcept = 0;
+        [[nodiscard]] virtual const projects::ProjectDescriptor& GetProject() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetProjectFile() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetProjectRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetAssetsRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetDerivedDataRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetIntermediateRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetSavedRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetBuildsRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetConfigRoot() const noexcept = 0;
+        [[nodiscard]] virtual const filesystem::AbsolutePath& GetPluginsRoot() const noexcept = 0;
 
     protected:
         ProjectWorkspaceService() noexcept = default;
     };
 
-    [[nodiscard]] bool RegisterProjectWorkspaceService(application::EngineHost& host,
-                                                       const ProjectWorkspaceConfig& config,
+    [[nodiscard]] bool RegisterProjectWorkspaceService(application::EngineHost& host, const ProjectWorkspaceConfig& config,
                                                        application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] ProjectWorkspaceService* FindProjectWorkspaceService(application::EngineHost& host) noexcept;
     [[nodiscard]] ProjectWorkspaceService* FindProjectWorkspaceService(application::ServiceContext& context) noexcept;

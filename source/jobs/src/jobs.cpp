@@ -10,9 +10,9 @@ namespace vanguard::jobs
         return backend::RuntimeConfig();
     }
 
-    Config EditorConfig() noexcept
+    Config GetEditorConfig() noexcept
     {
-        return backend::EditorConfig();
+        return backend::GetEditorConfig();
     }
 
     Config ToolConfig() noexcept
@@ -39,14 +39,14 @@ namespace vanguard::jobs
         return backend::IsInitialized();
     }
 
-    u32 WorkerCount() noexcept
+    u32 GetWorkerCount() noexcept
     {
-        return backend::WorkerCount();
+        return backend::GetWorkerCount();
     }
 
-    u32 OutstandingJobCount() noexcept
+    u32 GetOutstandingJobCount() noexcept
     {
-        return backend::OutstandingJobCount();
+        return backend::GetOutstandingJobCount();
     }
 
     SchedulerStats GetSchedulerStats() noexcept
@@ -54,9 +54,9 @@ namespace vanguard::jobs
         return backend::GetSchedulerStats();
     }
 
-    u32 DispatcherThreadIndex() noexcept
+    u32 GetDispatcherThreadIndex() noexcept
     {
-        return backend::DispatcherThreadIndex();
+        return backend::GetDispatcherThreadIndex();
     }
 
     bool IsWorkerThread() noexcept
@@ -164,6 +164,11 @@ namespace vanguard::jobs
         return m_backend != nullptr && backend::WaitCounter(m_backend, processLatent, timeoutMilliseconds);
     }
 
+    bool Counter::WaitOnProcessFrame() const noexcept
+    {
+        return m_backend != nullptr && backend::WaitCounterOnProcessFrame(m_backend);
+    }
+
     CompletionDeferral Counter::CreateDeferral(const char* staticDebugName, const void* debugUserData) noexcept
     {
         return CompletionDeferral{m_backend != nullptr ? backend::CreateDeferral(m_backend, staticDebugName, debugUserData) : nullptr};
@@ -177,10 +182,7 @@ namespace vanguard::jobs
         }
     }
 
-    Builder::Builder(const Schedule schedule, const void* debugUserData) noexcept
-        : m_backend(backend::CreateBuilder(schedule, debugUserData))
-    {
-    }
+    Builder::Builder(const Schedule schedule, const void* debugUserData) noexcept : m_backend(backend::CreateBuilder(schedule, debugUserData)) {}
 
     Builder::Builder(const JobContext& continuationContext) noexcept : m_backend(backend::CreateContinuationBuilder(continuationContext)) {}
 
@@ -237,8 +239,7 @@ namespace vanguard::jobs
         }
         VG_ASSERT_MSG(fence != Fence::Full || !m_hasOpenFenceGroup, "DispatchFence() is required before a Fence::Full dispatch.");
 
-        const bool dispatched =
-            backend::DispatchParallel(m_backend, name.m_storage, elementCount, task.Release(), epilogue.Release(), maximumBatchSize, fence);
+        const bool dispatched = backend::DispatchParallel(m_backend, name.m_storage, elementCount, task.Release(), epilogue.Release(), maximumBatchSize, fence);
         if (dispatched)
         {
             m_hasOpenFenceGroup = fence == Fence::None;

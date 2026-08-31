@@ -91,8 +91,7 @@ namespace vanguard::math
         return point - NormalDistance * DistanceTo(point);
     }
 
-    RED_INLINE Bool Plane::FrontIntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint,
-                                              Float& intersectionDistance) const
+    RED_INLINE Bool Plane::FrontIntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint, Float& intersectionDistance) const
     {
         Float proj = -Vector4::Dot3(NormalDistance, direction);
         if (proj > 0.0f)
@@ -105,8 +104,7 @@ namespace vanguard::math
         return false;
     }
 
-    RED_INLINE Plane::ESide Plane::IntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint,
-                                                 Float& intersectionDistance) const
+    RED_INLINE Plane::ESide Plane::IntersectLine(const Vector4& origin, const Vector4& direction, Vector4& intersectionPoint, Float& intersectionDistance) const
     {
         Float proj = -Vector4::Dot3(NormalDistance, direction);
         if (Abs(proj) < 0.0001f)
@@ -128,9 +126,7 @@ namespace vanguard::math
             return false;
         }
 
-        outOrigin = (Vector4::Cross(cross, p1.NormalDistance) * p0.NormalDistance.W +
-                     Vector4::Cross(p0.NormalDistance, cross) * p1.NormalDistance.W) /
-                    det;
+        outOrigin = (Vector4::Cross(cross, p1.NormalDistance) * p0.NormalDistance.W + Vector4::Cross(p0.NormalDistance, cross) * p1.NormalDistance.W) / det;
 
         outDirection = cross * (1.f / sqrtf(det));
         return true;

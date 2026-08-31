@@ -96,8 +96,7 @@ namespace vanguard::world
 
         /// Produces explicit stream-in/out commands. Stream-in commands are sorted by descending
         /// priority and then ascending distance, and are capped by maximumStreamInsPerUpdate.
-        [[nodiscard]] bool Process(const StreamingProcessInput& input,
-                                   containers::DynamicArray<StreamingCommand>& commands) noexcept;
+        [[nodiscard]] bool Process(const StreamingProcessInput& input, containers::DynamicArray<StreamingCommand>& commands) noexcept;
 
         [[nodiscard]] bool NotifyStreamInComplete(StreamingNodeKey key, bool success, bool renderReady = false) noexcept;
         [[nodiscard]] bool NotifyResidentFailed(StreamingNodeKey key) noexcept;
@@ -106,7 +105,7 @@ namespace vanguard::world
         [[nodiscard]] bool SetLocked(StreamingNodeKey key, bool locked) noexcept;
         [[nodiscard]] bool SetStreamInAllowed(StreamingNodeKey key, bool allowed) noexcept;
 
-        [[nodiscard]] StreamingNodeState State(StreamingNodeKey key) const noexcept;
+        [[nodiscard]] StreamingNodeState GetState(StreamingNodeKey key) const noexcept;
         [[nodiscard]] bool IsRenderReady(StreamingNodeKey key) const noexcept;
         [[nodiscard]] bool IsAntiStreamingLocked(u64 proxyId) const noexcept;
         [[nodiscard]] StreamingGridStats GetStats() const noexcept;

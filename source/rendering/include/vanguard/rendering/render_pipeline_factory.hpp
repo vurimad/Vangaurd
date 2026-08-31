@@ -40,6 +40,5 @@ namespace vanguard::rendering
         pipeline_cache::Priority priority = pipeline_cache::Priority::Normal;
     };
 
-    [[nodiscard]] RenderPipelineResult RequestRenderPipeline(const RenderPipelineRequest& request, PipelineCache& cache,
-                                                             PipelineRequest& output) noexcept;
+    [[nodiscard]] RenderPipelineResult RequestRenderPipeline(const RenderPipelineRequest& request, PipelineCache& cache, PipelineRequest& output) noexcept;
 } // namespace vanguard::rendering

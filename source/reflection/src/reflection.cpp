@@ -29,9 +29,8 @@ namespace
     [[nodiscard]] bool ValidateSchema(const reflection::Schema& schema) noexcept
     {
         if (schema.id == reflection::InvalidSchemaTypeId || schema.id != reflection::HashSchemaName(schema.name) || schema.size == 0 ||
-            !IsPowerOfTwo(schema.alignment) || schema.alignment > 4096 || schema.currentVersion == 0 ||
-            schema.minimumReadableVersion == 0 || schema.minimumReadableVersion > schema.currentVersion ||
-            (schema.fieldCount != 0 && schema.fields == nullptr) || schema.fieldCount > 4096)
+            !IsPowerOfTwo(schema.alignment) || schema.alignment > 4096 || schema.currentVersion == 0 || schema.minimumReadableVersion == 0 ||
+            schema.minimumReadableVersion > schema.currentVersion || (schema.fieldCount != 0 && schema.fields == nullptr) || schema.fieldCount > 4096)
         {
             return false;
         }
@@ -40,17 +39,14 @@ namespace
         {
             const reflection::SchemaField& field = schema.fields[index];
             if (field.id == reflection::InvalidSchemaFieldId || field.id != reflection::HashFieldName(field.name) ||
-                field.valueType == reflection::InvalidSchemaTypeId || field.size == 0 || !IsPowerOfTwo(field.alignment) ||
-                field.alignment > schema.alignment || (field.offset & (field.alignment - 1u)) != 0 || field.offset > schema.size ||
-                field.size > schema.size - field.offset || field.introducedVersion == 0 ||
-                field.introducedVersion > schema.currentVersion ||
+                field.valueType == reflection::InvalidSchemaTypeId || field.size == 0 || !IsPowerOfTwo(field.alignment) || field.alignment > schema.alignment ||
+                (field.offset & (field.alignment - 1u)) != 0 || field.offset > schema.size || field.size > schema.size - field.offset ||
+                field.introducedVersion == 0 || field.introducedVersion > schema.currentVersion ||
                 (field.removedVersion != 0 && field.removedVersion <= field.introducedVersion) ||
                 (field.kind == reflection::ValueKind::Array &&
-                 (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) ||
-                  field.elementKind == reflection::ValueKind::Array)) ||
+                 (field.arrayOperations == nullptr || !static_cast<bool>(*field.arrayOperations) || field.elementKind == reflection::ValueKind::Array)) ||
                 (field.kind != reflection::ValueKind::Array && field.arrayOperations != nullptr) ||
-                (reflection::HasFlag(field.flags, reflection::FieldFlags::Transient) &&
-                 reflection::HasFlag(field.flags, reflection::FieldFlags::Required)))
+                (reflection::HasFlag(field.flags, reflection::FieldFlags::Transient) && reflection::HasFlag(field.flags, reflection::FieldFlags::Required)))
             {
                 return false;
             }
@@ -145,7 +141,7 @@ namespace vanguard::reflection
         return FindSchema(HashSchemaName(name));
     }
 
-    u32 SchemaCount() noexcept
+    u32 GetSchemaCount() noexcept
     {
         if (g_schemas == nullptr)
         {

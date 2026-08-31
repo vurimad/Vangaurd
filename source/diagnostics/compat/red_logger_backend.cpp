@@ -13,18 +13,12 @@ namespace
 {
     using namespace vanguard::diagnostics;
 
-    static_assert(
-        static_cast<vanguard::u8>(Level::Trace) ==
-        static_cast<vanguard::u8>(red::LoggerLevel_Trace));
-    static_assert(
-        static_cast<vanguard::u8>(Category::Count) ==
-        static_cast<vanguard::u8>(red::LoggerCategory_MAX));
+    static_assert(static_cast<vanguard::u8>(Level::Trace) == static_cast<vanguard::u8>(red::LoggerLevel_Trace));
+    static_assert(static_cast<vanguard::u8>(Category::Count) == static_cast<vanguard::u8>(red::LoggerCategory_MAX));
 
     [[nodiscard]] red::LoggerMode ToImported(const Mode mode) noexcept
     {
-        return mode == Mode::Asynchronous
-            ? red::LoggerMode_Async
-            : red::LoggerMode_Sync;
+        return mode == Mode::Asynchronous ? red::LoggerMode_Async : red::LoggerMode_Sync;
     }
 
     [[nodiscard]] red::LoggerLevel ToImported(const Level level) noexcept
@@ -32,8 +26,7 @@ namespace
         return static_cast<red::LoggerLevel>(level);
     }
 
-    [[nodiscard]] red::LoggerCategory ToImported(
-        const Category category) noexcept
+    [[nodiscard]] red::LoggerCategory ToImported(const Category category) noexcept
     {
         return static_cast<red::LoggerCategory>(category);
     }
@@ -41,41 +34,30 @@ namespace
     class VanguardSink final : public red::LoggerSink
     {
     public:
-        void SinkLogLine(
-            const char* const formattedMessage,
-            const red::LoggerLine& message) override
+        void SinkLogLine(const char* const formattedMessage, const red::LoggerLine& message) override
         {
-            const SinkCallback callback =
-                m_callback.load(std::memory_order_acquire);
+            const SinkCallback callback = m_callback.load(std::memory_order_acquire);
             if (callback == nullptr)
             {
                 return;
             }
 
-            MessageView view = {
-                formattedMessage,
-                message.buffer,
-                message.prefix,
-                message.frame,
-                message.threadId,
-                message.threadContextId,
-                message.netPeerId,
-                static_cast<Level>(message.level),
-                static_cast<Category>(message.category)
-            };
+            MessageView view = {formattedMessage,
+                                message.buffer,
+                                message.prefix,
+                                message.frame,
+                                message.threadId,
+                                message.threadContextId,
+                                message.netPeerId,
+                                static_cast<Level>(message.level),
+                                static_cast<Category>(message.category)};
 
-            callback(
-                view,
-                m_userData.load(std::memory_order_acquire));
+            callback(view, m_userData.load(std::memory_order_acquire));
         }
 
-        void Flush() override
-        {
-        }
+        void Flush() override {}
 
-        void SetCallback(
-            const SinkCallback callback,
-            void* const userData) noexcept
+        void SetCallback(const SinkCallback callback, void* const userData) noexcept
         {
             m_userData.store(userData, std::memory_order_release);
             m_callback.store(callback, std::memory_order_release);
@@ -90,7 +72,7 @@ namespace
     bool g_fileSinkRegistered = false;
     VanguardSink g_vanguardSink;
     red::LoggerFileSink g_fileSink;
-}
+} // namespace
 
 namespace vanguard::diagnostics::backend
 {
@@ -163,9 +145,7 @@ namespace vanguard::diagnostics::backend
         }
     }
 
-    void EnableCategory(
-        const Category category,
-        const bool enabled) noexcept
+    void EnableCategory(const Category category, const bool enabled) noexcept
     {
         if (g_initialized && category < Category::Count)
         {
@@ -175,10 +155,7 @@ namespace vanguard::diagnostics::backend
 
     bool CanLog(const Level level, const Category category) noexcept
     {
-        return
-            g_initialized &&
-            category < Category::Count &&
-            red::CanPrintLog(ToImported(level), ToImported(category));
+        return g_initialized && category < Category::Count && red::CanPrintLog(ToImported(level), ToImported(category));
     }
 
     void SetThreadContextId(const u32 contextId) noexcept
@@ -197,8 +174,7 @@ namespace vanguard::diagnostics::backend
         }
     }
 
-    void SetFrameNumberRetriever(
-        const FrameNumberRetriever retriever) noexcept
+    void SetFrameNumberRetriever(const FrameNumberRetriever retriever) noexcept
     {
         if (g_initialized && retriever != nullptr)
         {
@@ -222,16 +198,12 @@ namespace vanguard::diagnostics::backend
         }
     }
 
-    void SetSinkCallback(
-        const SinkCallback callback,
-        void* const userData) noexcept
+    void SetSinkCallback(const SinkCallback callback, void* const userData) noexcept
     {
         g_vanguardSink.SetCallback(callback, userData);
     }
 
-    bool OpenFileSink(
-        const char* const path,
-        const FileMode mode) noexcept
+    bool OpenFileSink(const char* const path, const FileMode mode) noexcept
     {
         if (!g_initialized || path == nullptr || path[0] == '\0')
         {
@@ -239,8 +211,7 @@ namespace vanguard::diagnostics::backend
         }
 
         CloseFileSink();
-        const char* const importedMode =
-            mode == FileMode::Append ? "a" : "w";
+        const char* const importedMode = mode == FileMode::Append ? "a" : "w";
 
         if (!g_fileSink.OpenFile(path, importedMode))
         {
@@ -263,18 +234,11 @@ namespace vanguard::diagnostics::backend
         g_fileSink.CloseFile();
     }
 
-    void Log(
-        const Level level,
-        const Category category,
-        const char* const message) noexcept
+    void Log(const Level level, const Category category, const char* const message) noexcept
     {
-        if (vanguard::diagnostics::backend::CanLog(level, category) &&
-            message != nullptr)
+        if (vanguard::diagnostics::backend::CanLog(level, category) && message != nullptr)
         {
-            red::LogMessage(
-                ToImported(level),
-                message,
-                ToImported(category));
+            red::LogMessage(ToImported(level), message, ToImported(category));
         }
     }
 
@@ -282,10 +246,7 @@ namespace vanguard::diagnostics::backend
     {
         if (g_initialized)
         {
-            red::LogFlush(
-                mode == FlushMode::Synchronous
-                    ? red::LoggerFlushMode_Sync
-                    : red::LoggerFlushMode_Async);
+            red::LogFlush(mode == FlushMode::Synchronous ? red::LoggerFlushMode_Sync : red::LoggerFlushMode_Async);
         }
     }
-}
+} // namespace vanguard::diagnostics::backend

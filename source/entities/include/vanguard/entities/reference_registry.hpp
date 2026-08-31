@@ -74,15 +74,13 @@ namespace vanguard::entities
 
         /// Publishes one completely materialized cell. References whose source entity is not part of the
         /// published activation set are ignored. Required local targets must be present in the same set.
-        [[nodiscard]] ReferenceResult RegisterCell(u64 cellId, u32 generation,
-                                                   containers::ArraySpan<const ecs::EntityId> entities,
+        [[nodiscard]] ReferenceResult RegisterCell(u64 cellId, u32 generation, containers::ArraySpan<const ecs::EntityId> entities,
                                                    containers::ArraySpan<const world::EntityReferenceRecord> references) noexcept;
 
         /// Publishes an independently owned part of a cell. Activation groups use their stable group ID as
         /// the partition ID, allowing exact add/remove transactions without rebuilding the rest of the cell.
-        [[nodiscard]] ReferenceResult RegisterPartition(
-            u64 cellId, u32 generation, u64 partitionId, containers::ArraySpan<const ecs::EntityId> entities,
-            containers::ArraySpan<const world::EntityReferenceRecord> references) noexcept;
+        [[nodiscard]] ReferenceResult RegisterPartition(u64 cellId, u32 generation, u64 partitionId, containers::ArraySpan<const ecs::EntityId> entities,
+                                                        containers::ArraySpan<const world::EntityReferenceRecord> references) noexcept;
 
         /// Removes outgoing references first, then makes the cell's identities unavailable. Incoming links
         /// immediately become unresolved and are relinked automatically if the identity is published again.
@@ -92,7 +90,7 @@ namespace vanguard::entities
         [[nodiscard]] ResolvedEntityReference Resolve(ecs::EntityId sourceEntityId, u64 slot) const noexcept;
         [[nodiscard]] bool IsCellReady(u64 cellId, u32 generation) const noexcept;
         [[nodiscard]] bool IsPartitionReady(u64 cellId, u32 generation, u64 partitionId) const noexcept;
-        [[nodiscard]] bool ContainsEntity(ecs::EntityId entityId) const noexcept;
+        [[nodiscard]] bool HasEntity(ecs::EntityId entityId) const noexcept;
         [[nodiscard]] ReferenceRegistryStats GetStats() const noexcept;
         [[nodiscard]] ecs::World* RegisteredWorld() const noexcept;
 
@@ -102,8 +100,7 @@ namespace vanguard::entities
 
     /// Compile-time slot tags prevent unrelated reference roles from being mixed by gameplay code while the
     /// serialized representation remains the same stable 64-bit slot identity used by editor tooling.
-    template<typename SlotTag>
-    struct TypedEntityReference
+    template <typename SlotTag> struct TypedEntityReference
     {
         ecs::EntityId sourceEntityId = ecs::InvalidEntityId;
         u64 slot = 0;
