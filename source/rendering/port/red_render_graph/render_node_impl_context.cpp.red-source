@@ -1,0 +1,413 @@
+#include "build.h"
+#include "renderNodeImplContext.h"
+#include "renderInterface.h"
+#include "renderScene.h"
+#include "renderNodeGraph.h"
+#include "renderViewport.h"
+#include "../../redCore/include/globalModeInfo.h"
+#include "../../renderData/include/renderDrawBuffer.h"
+
+struct Local
+{
+	// This stuff is here only so that allocator wouldn't need to allocate too many surfaces
+	// in case of used changing resolutionScale too fast. It won't be needed after we'll 
+	// implement a nextGenApi version of the allocator.
+	static Uint32 RoundUpResolution( Uint32 res )
+	{
+#ifndef RED_PLATFORM_CONSOLE
+		if( false == IsGameMode() )
+		{
+			const Uint32 m = 256;
+			return ((res + m - 1) / m) * m;
+		}
+#endif
+		return res;
+	}
+};
+
+GpuWrapApi::eTextureFormat SRenderNodeImplContext::GetRegularPrecisionColorTargetFormat() const
+{
+	if ( Config::GGlobalRenderingSettings.UseHighPrecisionRenderTargets || GetFrameInfo().GetFramePurpose() == FP_ScreenShot )
+	{
+		return GpuWrapApi::TEXFMT_R16G16B16A16_Float;
+	}
+	else
+	{
+		return GpuWrapApi::TEXFMT_R11G11B10_Float;
+	}
+}
+
+GpuWrapApi::eTextureFormat SRenderNodeImplContext::GetHighPrecisionColorTargetFormat() const
+{
+	return GpuWrapApi::TEXFMT_R16G16B16A16_Float;
+}
+
+Uint32 SRenderNodeImplContext::GetColorTargetWidth() const
+{
+	if ( IsCameraDataAvailable() )
+	{
+		return GetCameraData()->GetResolutionState().GetInternalWidth();
+	}
+
+	if ( m_maxCameraRenderWidth != 0 && m_maxCameraRenderHeight != 0 )
+	{
+		return m_maxCameraRenderWidth;
+	}
+
+	return GetRenderer()->GetResolution().m_width;
+}
+
+Uint32 SRenderNodeImplContext::GetColorTargetHeight() const
+{
+	if ( IsCameraDataAvailable() )
+	{
+		return GetCameraData()->GetResolutionState().GetInternalHeight();
+	}
+
+	if ( m_maxCameraRenderWidth != 0 && m_maxCameraRenderHeight != 0 )
+	{
+		return m_maxCameraRenderHeight;
+	}
+
+	return GetRenderer()->GetResolution().m_height;
+}
+
+SRenderFlowTargetDesc SRenderNodeImplContext::GetColorTargetDesc( GpuWrapApi::eTextureFormat format ) const
+{
+	SRenderFlowTargetDesc desc;
+	desc.m_format			= format;
+	desc.m_isSamplable		= true;
+	desc.m_sizeWidth		= GetColorTargetWidth();
+	desc.m_sizeHeight		= GetColorTargetHeight();
+
+	if ( IsCameraDataAvailable() )
+	{
+		desc.m_maxWidth		= GetCameraData()->GetResolutionState().GetMaxInternalWidth();
+		desc.m_maxHeight	= GetCameraData()->GetResolutionState().GetMaxInternalHeight();
+	}
+	else
+	{
+		desc.m_maxWidth		= desc.m_sizeWidth;
+		desc.m_maxHeight	= desc.m_sizeHeight;
+	}
+
+	return desc;
+}
+
+SRenderFlowTargetDesc SRenderNodeImplContext::GetResolvedFinalTargetDesc() const
+{
+	const CRenderFrameInfo& info = GetFrameInfo();
+
+	const auto& renderResolution = GetRenderer()->GetResolution();
+	const Uint32 surfacesWidth	= Max( renderResolution.m_width, info.GetViewportWidth() );
+	const Uint32 surfacesHeight = Max( renderResolution.m_height, info.GetViewportHeight() );
+
+	SRenderFlowTargetDesc desc;
+	desc.m_format			= GpuWrapApi::GetHdrModeTextureFormat( info.GetHDRMode() );
+	desc.m_isSamplable		= true;
+	desc.m_maxWidth			= surfacesWidth;
+	desc.m_maxHeight		= surfacesHeight;
+	desc.m_sizeWidth		= surfacesWidth;
+	desc.m_sizeHeight		= surfacesHeight;
+	return desc;
+}
+
+SRenderFlowTargetDesc SRenderNodeImplContext::GetScreenshotTargetDesc() const
+{
+	SRenderFlowTargetDesc desc = GetResolvedFinalTargetDesc();
+
+	// NOTE: GetResolvedFinalTargetDesc max viewport resolution with render resolution, which in case of screensots
+	//       will produce staging texture of bigger size (way bigger in case of save thumbnails) than required
+	//       and will stall GNM when it linearize/untile its memory.
+	desc.m_maxWidth = desc.m_sizeWidth = GetFrameInfo().GetViewportWidth();
+	desc.m_maxHeight = desc.m_sizeHeight = GetFrameInfo().GetViewportHeight();
+
+	return desc;
+}
+
+SRenderFlowTargetDesc SRenderNodeImplContext::GetVelocityBufferDesc() const
+{
+	// TODO ideally should be R8G8
+	GpuWrapApi::eTextureFormat format = GpuWrapApi::TEXFMT_R16G16_Float;
+
+#ifdef USE_RAY_TRACING
+	if ( Config::GGlobalRenderingSettings.allowRaytracing )
+	{
+		format = GpuWrapApi::TEXFMT_R16G16B16A16_Float;
+	}
+#endif // USE_RAY_TRACING
+
+	auto desc = GetColorTargetDesc( format );
+	desc.m_denyUnorderedAccess = true;
+	return desc;
+}
+
+SRenderFlowTargetDesc SRenderNodeImplContext::GetDepthBufferDesc() const
+{
+	return GetColorTargetDesc( GpuWrapApi::TEXFMT_D32FS8 );
+}
+
+SRenderFlowTargetDesc SRenderNodeImplContext::GetCompositionDesc() const
+{
+	rend::DrawBuffer* composition = GetFrameInfo().m_composition.Get();
+	RED_ASSERT( composition != nullptr, "Should only call this if we have a composition" );
+
+	const Uint32 compositionWidth = composition->GetSurfaceWidth();
+	const Uint32 compositionHeight = composition->GetSurfaceHeight();
+	RED_FATAL_ASSERT( compositionWidth > 0 && compositionHeight > 0, "Invalid composition size (%d x %d)", compositionWidth, compositionHeight );
+
+	// compute number of mips based on current resolution
+	const Uint32 compositionMaxMipLevels = 5; // HUD shader doesn't use more
+	const Uint32 compositionMipLevels = Min<Uint32>( MLog2( Max( compositionWidth, compositionHeight ) ) + 1, compositionMaxMipLevels );
+
+	SRenderFlowTargetDesc compTargetDesc;
+	compTargetDesc.m_format				= GpuWrapApi::TEXFMT_R8G8B8A8_Unorm_SRGB;
+	compTargetDesc.m_isSamplable		= true;
+	compTargetDesc.m_maxWidth			= compositionWidth;
+	compTargetDesc.m_maxHeight			= compositionHeight;
+	compTargetDesc.m_sizeWidth			= compositionWidth;
+	compTargetDesc.m_sizeHeight			= compositionHeight;
+	compTargetDesc.m_maxNumMipLevels	= compositionMipLevels;
+	compTargetDesc.m_numMipLevels		= compositionMipLevels;
+	return compTargetDesc;
+}
+
+
+void SRenderNodeImplContext::SetCommandList( GpuApi::CommandListRef cl ) const
+{
+	GetRenderer()->GetFrameCommandLists().SetCommandList( GetRenderFlowGroup() + ReservedCls::CL_COUNT, cl );
+}
+
+GpuApi::CommandListRef SRenderNodeImplContext::GetCommandList() const
+{
+	GpuApi::CommandListRef cl = GetRenderer()->GetFrameCommandLists().GetCommandList( GetRenderFlowGroup() + ReservedCls::CL_COUNT );
+	RED_ASSERT(cl, "Don't have a command list");
+	return cl;
+}
+
+Bool SRenderNodeImplContext::HasCommandList() const
+{
+	GpuApi::CommandListRef cl = GetRenderer()->GetFrameCommandLists().GetCommandList( GetRenderFlowGroup() + ReservedCls::CL_COUNT );
+	return !cl.isNull();
+}
+
+
+
+void SRenderNodeImplContext::Unbind( Bool clearRenderTarget ) const
+{
+	using namespace GpuWrapApi;
+	if( m_texturesToUnbind )
+	{
+		const Uint32 numSlots = red::BitUtils::BitScanReverse<Uint32>( m_texturesToUnbind ) + 1;
+
+		if( m_usedStages & eVERTEX )	GpuApi::BindTextures( 0, numSlots, nullptr, VertexShader );
+		if( m_usedStages & ePIXEL )		GpuApi::BindTextures( 0, numSlots, nullptr, PixelShader );
+		if( m_usedStages & eCOMPUTE )	GpuApi::BindTextures( 0, numSlots, nullptr, ComputeShader );
+	}
+	if( m_uavToUnbind )
+	{
+		const Uint32 numSlots = red::BitUtils::BitScanReverse<Uint32>( m_uavToUnbind ) + 1;
+		GpuApi::BindTextureUAVs( 0, numSlots, nullptr );
+	}
+	if( m_psoBound && clearRenderTarget )
+	{
+		m_psoBound		= 0;
+		GpuApi::SetupBlankRenderTargets();
+	}
+
+	m_uavToUnbind		= 0;
+	m_texturesToUnbind	= 0;
+	m_usedStages		= 0;
+}
+
+RenderFlowNameTag SRenderNodeImplContext::RTAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const
+{
+	return GetResourceAllocator()->RequestAlloc( name.GetName(), RTNameTag( name ), m_renderFlowGroup, desc );
+}
+
+RenderFlowNameTag SRenderNodeImplContext::RTAlloc( const RenderFlowNameAndHash name, const RenderFlowNameTag &nameTagDesc ) const
+{
+	return GetResourceAllocator()->RequestAlloc( name.GetName(), RTNameTag( name ), m_renderFlowGroup, nameTagDesc );
+}
+
+RenderFlowNameTag SRenderNodeImplContext::RTInject( const RenderFlowNameAndHash name, GpuApi::TextureRef& texture ) const
+{
+	return GetResourceAllocator()->RequestInjection( name.GetName(), RTNameTag( name ), m_renderFlowGroup, texture );
+}
+
+void SRenderNodeImplContext::RTFree( RenderFlowNameTag tag ) const
+{
+	return GetResourceAllocator()->RequestFree( tag, m_renderFlowGroup );
+}
+
+RenderFlowNameTag SRenderNodeImplContext::RTSharedAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const
+{
+	return GetResourceAllocator()->RequestAlloc( name.GetName(), RTSharedNameTag( name ), m_renderFlowGroup, desc );
+}
+
+RenderFlowNameTag SRenderNodeImplContext::RTTempAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const
+{
+	return GetResourceAllocator()->RequestAlloc( name.GetName(), RenderFlowNameTag::NAMELESS_ALLOC_REQUEST, m_renderFlowGroup, desc );
+}
+
+RenderFlowNameTag SRenderNodeImplContext::RTTempAlloc( const RenderFlowNameAndHash name, const RenderFlowNameTag &nameTagDesc ) const
+{
+	return GetResourceAllocator()->RequestAlloc( name.GetName(), RenderFlowNameTag::NAMELESS_ALLOC_REQUEST, m_renderFlowGroup, nameTagDesc );
+}
+
+void SRenderNodeImplContext::RTUseBegin( const  RenderFlowNameTag& tag, Uint32 usageFlags ) const
+{
+	GetResourceAllocator()->RequestUseBegin( tag, m_renderFlowGroup, usageFlags );
+}
+
+Bool SRenderNodeImplContext::RTIsAlloc( const RenderFlowNameTag& tag ) const
+{
+	return GetResourceAllocator()->RequestIsAlloc( tag, m_renderFlowGroup );
+}
+
+void SRenderNodeImplContext::RTUseEnd( const RenderFlowNameTag& tag ) const
+{
+	GetResourceAllocator()->RequestUseEnd( tag, m_renderFlowGroup );
+}
+
+void SRenderNodeImplContext::RTSwap( const RenderFlowNameTag& tagA, const RenderFlowNameTag& tagB ) const
+{
+	GetResourceAllocator()->RequestSwap( tagA, tagB, m_renderFlowGroup );
+}
+void SRenderNodeImplContext::RTSwap( const ScopeNameTag& tagA, const ScopeNameTag& tagB ) const
+{
+	GetResourceAllocator()->RequestSwap( tagA, tagB, m_renderFlowGroup );
+}
+
+void SRenderNodeImplContext::RTSwap( const RenderFlowNameTag& tagA, GpuApi::TextureRef& tagB ) const
+{
+	GetResourceAllocator()->RequestSwapRef( tagA, tagB, m_renderFlowGroup );
+}
+void SRenderNodeImplContext::RTSwap( const ScopeNameTag& tagA, GpuApi::TextureRef& tagB ) const
+{
+	GetResourceAllocator()->RequestSwapRef( tagA, tagB, m_renderFlowGroup );
+}
+
+Bool SRenderNodeImplContext::RTDecision( Bool baseDecision ) const
+{
+	return GetResourceAllocator()->RequestDecision( baseDecision, m_renderFlowGroup );
+}
+
+
+Bool SRenderNodeImplContext::IsConsumePhase() const
+{
+	return m_isConsumePhase;
+}
+
+const CRenderFrameInfo& SRenderNodeImplContext::GetFrameInfo() const
+{
+	RED_FATAL_ASSERT( m_frame, "" );
+	return m_frame->GetFrameInfo();
+}
+
+CRenderSceneEx* SRenderNodeImplContext::GetScene() const
+{
+	return static_cast< CRenderSceneEx* >( GetFrameInfo().GetScene() );
+}
+
+void SRenderNodeImplContext::SetupNodeData( const SRenderNodeContext &nodeContext, const SRenderNodeParameters &nodeParams )
+{
+	m_renderFlowSpace	= 0xFF;
+	m_renderFlowGroup	= nodeContext.m_renderFlowGroups[RNDT_Gpu];
+	m_isNodeUnique		= RNT_Unique == nodeParams.m_type;
+	m_isConsumePhase	= GetResourceAllocator()->IsConsumePhase();
+
+	if ( !m_isNodeUnique && m_cameraStorage && m_cameraStorage->HasAnyCamera() )
+	{
+		const CRenderFrameCameraStorage::SCameraData *cameraData = m_cameraStorage->GetCameraData(nodeContext.m_cameraIndex);
+		m_renderFlowSpace			= cameraData->m_renderFlowSpace;
+		m_visViewId					= cameraData->m_renderFlowSpace + 1; // VIS_HACK: Just use i+1 as vis::ViewID. This leaves 0 available for non-view-based queries (such as dyndecals).
+		m_cameraData				= cameraData;
+		RED_ASSERT(m_visViewId > 0);
+	}
+	else
+	{
+		m_cameraData	= nullptr;
+		m_visViewId		= 0;
+	}
+}
+
+void SRenderNodeImplContext::ResetNodeData()
+{
+	m_renderFlowGroup	= std::numeric_limits<TRenderFlowGroup>::max();
+	m_renderFlowSpace	= 0xff; // 8 bit, setting max value properly
+	m_isNodeUnique		= false;
+	m_cameraData		= nullptr;
+	m_visViewId			= 0;
+
+	BeginNewNode();
+}
+
+void SRenderNodeImplContext::BeginNewNode() const
+{
+	m_texturesToUnbind	= 0;
+	m_srvToUnbind		= 0;
+	m_uavToUnbind		= 0;
+	m_usedStages		= 0;
+	m_psoBound			= 0;
+}
+
+void SRenderNodeImplContext::Init( const SInitData &initData )
+{
+	RED_FATAL_ASSERT( initData.m_frame, "" );
+	RED_FATAL_ASSERT( initData.m_dispatcherThreadIndex != -1, "Uninitialized dispatcherThreadIndex in SInitData" );
+	
+	m_frame					= initData.m_frame;
+	m_resAlloc				= initData.m_resAlloc;
+	m_cameraIndex			= initData.m_cameraIndex;
+	m_dispatcherThreadIndex	= initData.m_dispatcherThreadIndex;
+
+	m_cameraData			= nullptr;
+	m_cameraStorage			= nullptr;
+	m_maxCameraRenderWidth	= 0;
+	m_maxCameraRenderHeight = 0;
+
+	if ( !initData.m_skipCameraData )
+	{
+		if ( CRenderSceneEx *scene = static_cast<CRenderSceneEx*>(initData.m_frame->GetFrameInfo().GetScene()) )
+		{
+			m_cameraStorage = scene->GetCameraStorage();
+			RED_FATAL_ASSERT( m_cameraStorage, "Expected camera storage in every scene" );
+		}
+		if ( m_cameraStorage )
+		{
+			Uint32 width = 0, height = 0;
+			{
+				m_cameraStorage->GetMaxActiveCameraRenderSize( true, true, width, height );
+			}
+			m_maxCameraRenderWidth	= width;
+			m_maxCameraRenderHeight	= height;
+		}
+	}
+
+	ResetNodeData();
+}
+
+SRenderNodeImplContext::SRenderNodeImplContext()
+	: m_renderFlowGroup( std::numeric_limits<TRenderFlowGroup>::max() )
+	, m_renderFlowSpace( 0xff )  // 8 bit, setting max value properly
+	, m_isNodeUnique( false )
+	, m_visViewId( 0 )
+	, m_cameraData( nullptr )
+	, m_cameraStorage( nullptr )
+	, m_maxCameraRenderWidth( 0 )
+	, m_maxCameraRenderHeight( 0 )
+{
+	ResetNodeData();
+}
+
+SRenderNodeImplContext::SRenderNodeImplContext( const SRenderNodeImplContext& other, Uint32 dispatcherThreadIndex )
+	: SRenderNodeImplContext( other )
+{
+	m_dispatcherThreadIndex = dispatcherThreadIndex;
+}
+
+SRenderNodeImplContext::~SRenderNodeImplContext()
+{
+}
+

@@ -1,0 +1,75 @@
+#include "gpu_scene_types.hlsli"
+
+struct DirectionalDiffuseConstants
+{
+    uint tableDirectoryDescriptor;
+    uint pageDirectoryDescriptor;
+    uint selectionDescriptor;
+    uint viewIndex;
+    uint baseColorDescriptor;
+    uint normalDescriptor;
+    uint visibilityMask;
+    uint reserved;
+};
+[[push_constant]] ConstantBuffer<DirectionalDiffuseConstants> diffuse;
+
+struct DirectionalDiffuseVertex
+{
+    float4 position : SV_Position;
+};
+
+[shader("vertex")]
+DirectionalDiffuseVertex DirectionalDiffuseVertexMain(uint vertex : SV_VertexID)
+{
+    float2 uv = float2((vertex << 1u) & 2u, vertex & 2u);
+    DirectionalDiffuseVertex output;
+    output.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0, 1);
+    return output;
+}
+
+[shader("fragment")]
+float4 DirectionalDiffuseFragmentMain(DirectionalDiffuseVertex input) : SV_Target0
+{
+    Texture2D<float4> normals = ResourceDescriptorHeap[diffuse.normalDescriptor];
+    int2 pixel = int2(input.position.xy);
+    float3 normal = normals.Load(int3(pixel, 0)).xyz;
+    float lengthSquared = dot(normal, normal);
+    // GBuffer clears normals to zero; valid surfaces write unit signed normals.
+    // Background and masked holes stay black without reading a depth descriptor.
+    if (!(lengthSquared > 0.0))
+        return float4(0, 0, 0, 1);
+    normal *= rsqrt(lengthSquared);
+
+    StructuredBuffer<GpuDirectionalLightSelection> selections = ResourceDescriptorHeap[diffuse.selectionDescriptor];
+    GpuDirectionalLightSelection selection = selections[diffuse.viewIndex];
+    if (selection.count == 0u || selection.count > VG_MAXIMUM_DIRECTIONAL_LIGHTS_PER_VIEW)
+        return float4(0, 0, 0, 1);
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[diffuse.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[diffuse.pageDirectoryDescriptor];
+    GpuSceneTableDirectory table = tables[VG_GPU_SCENE_TABLE_LIGHT];
+    float3 illuminance = float3(0, 0, 0);
+    // Bounded selected identities, never a scan of allocated GPU light slots.
+    for (uint index = 0u; index < selection.count; ++index)
+    {
+        uint2 identity = selection.lights[index];
+        if (identity.x == VG_GPU_SCENE_INVALID_INDEX || identity.y == 0u)
+            continue;
+        uint2 address = DecodeGpuSceneIndex(identity.x, table);
+        if (address.x >= table.pageCapacity)
+            continue;
+        GpuScenePageDirectoryEntry page = pages[table.firstPageEntry + address.x];
+        if (page.shaderResourceDescriptor == VG_GPU_SCENE_INVALID_INDEX || address.y >= page.elementCount)
+            continue;
+        StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[NonUniformResourceIndex(page.shaderResourceDescriptor)];
+        GpuLight light = lights[address.y];
+        if (!IsGpuLightActive(light, identity.y, diffuse.visibilityMask) || light.type != VG_GPU_LIGHT_DIRECTIONAL)
+            continue;
+        // Direction follows emitted rays: negate it for surface-to-light.
+        illuminance += light.color * light.intensity * saturate(dot(normal, -light.direction));
+    }
+    Texture2D<float4> baseColors = ResourceDescriptorHeap[diffuse.baseColorDescriptor];
+    float3 baseColor = baseColors.Load(int3(pixel, 0)).rgb;
+    // Simple unshadowed Lambert diffuse, in linear light. No emissive, ambient,
+    // specular, exposure or tone mapping is included in this first-light pass.
+    return float4(baseColor * illuminance * (1.0 / 3.14159265358979323846), 1);
+}

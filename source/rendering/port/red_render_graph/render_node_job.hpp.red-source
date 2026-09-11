@@ -1,0 +1,42 @@
+/**
+* Copyright (c) 2016 CD Projekt Red. All Rights Reserved.
+*/
+#pragma once
+
+#include "renderNodeGraph.h"
+
+class CRenderNodeBase;
+
+#ifdef USE_PROFILER
+
+class CDynamicPerfScope : public red::NonCopyable
+{
+public:
+	CDynamicPerfScope( CRenderNodeBase* node, Bool cmdListBucketOpen );
+	~CDynamicPerfScope();
+
+private:
+	CRenderNodeBase*	m_renderNodeImpl;
+	Bool				m_cmdListOpen;
+	Uint32				m_gpuProfilerEntryIndex;
+	Uint32				m_gpuProfilerID;
+};
+#endif
+
+//////////////////////////////////////////////////////////////////////////
+
+class CRenderNodeJob
+{
+public:
+	static void SetJobsRenderFrame( IRenderFrame *renderFrame )
+	{
+		ms_jobInitFrame = TRenderPtr<IRenderFrame>::MakePtr( renderFrame );
+	}
+
+	static TRenderPtr<IRenderFrame> GetJobsRenderFrame() 
+	{ 
+		return ms_jobInitFrame;
+	}
+private:
+	static TRenderPtr< IRenderFrame > ms_jobInitFrame;
+};

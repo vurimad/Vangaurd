@@ -1,25 +1,23 @@
 #pragma once
 
 #include <vanguard/engine/game_world_service.hpp>
-#include <vanguard/engine/resource_streaming_service.hpp>
-#include <vanguard/filesystem/filesystem.hpp>
 
 namespace vanguard::engine
 {
     enum class WorldSessionStatus : u8
     {
         Idle,
-        Mounted,
         LoadingWorld,
         Running,
         Stopping,
         Failed
     };
 
-    enum class WorldSessionStopMode : u8
+    enum class WorldSessionInputMode : u8
     {
-        ReleaseWorld,
-        ReleaseEverything
+        Unspecified,
+        None,
+        Mapping
     };
 
     enum class WorldSessionFailureCode : u8
@@ -27,35 +25,33 @@ namespace vanguard::engine
         None,
         InvalidState,
         InvalidRequest,
-        PackageMountFailure,
         InputRequestFailure,
         InputLoadFailure,
         InputInstallFailure,
+        InputClearFailure,
         WorldRequestFailure,
         WorldLoadFailure,
         GameWorldStartFailure,
-        GameWorldStopFailure,
-        PackageUnmountFailure
+        GameWorldStopFailure
     };
 
     struct WorldSessionFailure
     {
         WorldSessionFailureCode code = WorldSessionFailureCode::None;
-        streaming::PackageSetMountResult packageResult = streaming::PackageSetMountResult::Success;
         resources::Failure resourceFailure = resources::Failure::None;
         const char* message = nullptr;
     };
 
     struct WorldSessionStartRequest
     {
-        filesystem::AbsolutePath gameDirectory;
         resources::ResourceReference world;
-        streaming::PackageSetMountConfig packageConfig;
-        bool mountPackages = true;
+        resources::ResourceReference input;
+        WorldSessionInputMode inputMode = WorldSessionInputMode::Unspecified;
     };
 
-    /// Owns the active package/world/game-world transaction, not the engine-wide services that execute it.
-    /// ReleaseWorld retains the mounted package set for another Begin request; ReleaseEverything returns to Idle.
+    /// Owns the world/game-world/input transaction. Sources are already available
+    /// through ResourceStreamingService, independently of package or loose storage.
+    /// Stop releases the session input after component teardown and returns to Idle.
     class WorldSessionService : public application::Service
     {
     public:
@@ -63,7 +59,7 @@ namespace vanguard::engine
 
         [[nodiscard]] virtual bool Begin(const WorldSessionStartRequest& request, WorldSessionFailure* failure = nullptr) noexcept = 0;
         [[nodiscard]] virtual WorldSessionStatus Poll(WorldSessionFailure* failure = nullptr) noexcept = 0;
-        [[nodiscard]] virtual bool RequestStop(WorldSessionStopMode mode, WorldSessionFailure* failure = nullptr) noexcept = 0;
+        [[nodiscard]] virtual bool RequestStop(WorldSessionFailure* failure = nullptr) noexcept = 0;
 
         [[nodiscard]] virtual WorldSessionStatus GetStatus() const noexcept = 0;
         [[nodiscard]] virtual const WorldSessionFailure& GetLastFailure() const noexcept = 0;

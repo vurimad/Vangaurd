@@ -1,7 +1,7 @@
 # concurrency
 
 The `concurrency` project adapts RED's proven low-level threading image for
-Vanguard. It preserves full-barrier atomic operations, thread creation and
+Vanguard. It preserves full-barrier atomic modifications, thread creation and
 lifecycle, synchronization primitives, affinity, naming, priority, sleep, and
 yield behavior.
 
@@ -10,9 +10,19 @@ Thread bridge objects use fixed inline storage owned by
 engine-heap allocation. OS thread-stack and handle creation remains the
 responsibility of the imported platform thread implementation.
 
-Public and normal source code contain no RED headers or `red::` names.
-`concurrencyCompat` is the quarantined bridge to the already imported and
-compiled `redSystem` implementation.
+`atomic.hpp` is the inline public adaptation boundary for the imported RED
+WinAPI atomic operations, like Memory's compile-time pool boundary. Callers
+continue to use only `vanguard::concurrency::Atomic`. Other threading operations
+use `concurrencyCompat`, the quarantined bridge to compiled `redSystem`.
+
+On the supported MSVC x64 target, `GetValue()` uses the imported aligned volatile
+load with acquire semantics under the workspace's explicit `/volatile:ms` setting.
+It is not a full fence or an ownership operation. All modifications, including
+`SetValue()`, still use the imported full-barrier interlocked operations. No
+out-of-line atomic backend calls, heap allocation, or additional storage are
+introduced. Boolean storage remains 32 bits to preserve the existing layout.
+Consumers built outside this workspace must also use `/volatile:ms`; this is a
+Windows compiler contract, not a portable ISO C++ volatile synchronization claim.
 
 The initial Windows x64 contract includes:
 

@@ -1,0 +1,1135 @@
+/**
+* Copyright (c) 2018 CD Projekt Red. All Rights Reserved.
+*/
+
+
+#pragma once
+
+// AC: renderNodeImplContext is tempshit. will be removed at one point.
+// ctremblay: when ? I've cleaned it up in the mean time...
+
+#include "renderFlowResourceAllocator.h"
+#include "renderFrameCamera.h"
+#include "visibilityCommon.h"
+#include "../../gpuApi/include/gpuApiInterface.h"
+#include "../../renderData/include/renderScene.h"
+
+class CRenderCollector;
+struct SRenderNodeContext;
+struct SRenderNodeParameters;
+
+// Stages
+enum EBindTarget
+{
+	eVERTEX		= RED_FLAG( 0 ),
+	ePIXEL		= RED_FLAG( 1 ),
+	eCOMPUTE	= RED_FLAG( 2 ),
+	eRAYTRACING = RED_FLAG( 3 )
+};
+
+// Some simple enum operators, so we can use eVERTEX | ePIXEL without casting
+RED_FORCE_INLINE constexpr EBindTarget operator|( const EBindTarget a, const EBindTarget b ) { return EBindTarget( (Uint32)a | (Uint32)b ); }
+RED_FORCE_INLINE constexpr Bool operator&( const EBindTarget a, const EBindTarget b ) { return 0 != ( (Uint32)a & (Uint32)b ); }
+
+struct BlankOutput
+{
+};
+
+struct ColorTarget
+{
+	Uint8				slot;
+	Int16				slice;
+	GpuApi::TextureRef	texture;
+
+	ColorTarget( Uint32 _slot, const GpuApi::TextureRef& _texture, Int16 _slice = -1 )
+		: slot( _slot )
+		, texture( _texture )
+		, slice( _slice )
+	{}
+
+};
+
+struct NullColorTarget
+{
+};
+
+struct DepthTarget
+{
+	GpuApi::TextureRef	texture;
+	Int16				slice;
+	Bool				readOnly;
+
+	DepthTarget( const GpuApi::TextureRef& _texture, Int16 _slice = -1, Bool _readOnly = false )
+		: texture( _texture )
+		, slice( _slice )
+		, readOnly( _readOnly )
+	{}
+
+};
+
+struct UnorderedAccessView
+{
+	Uint8				slot;
+	GpuApi::TextureRef	texture;
+
+	UnorderedAccessView( Uint32 _slot, const GpuApi::TextureRef _texture )
+		: slot( _slot )
+		, texture( _texture )
+	{}
+};
+
+struct UnorderedAccessViewBase
+{
+	Uint8		baseSlot;
+
+	UnorderedAccessViewBase( Uint32 _baseSlot )
+		: baseSlot( _baseSlot )
+	{}
+};
+
+
+//********************************************************************************//
+//********************************************************************************//
+
+struct SRenderNodeImplContext
+{
+	struct SInitData
+	{
+		SInitData( Uint32 dispatcherThreadIndex )
+			: m_resAlloc( nullptr )
+			, m_cameraIndex( -1 )
+			, m_dispatcherThreadIndex( dispatcherThreadIndex )
+			, m_skipCameraData( false )
+		{}
+
+		TRenderPtr< IRenderFrame >			m_frame;
+		CRenderFlowResourceAllocator*		m_resAlloc;
+		Int32								m_cameraIndex;
+		Uint32								m_dispatcherThreadIndex;
+		Bool								m_skipCameraData;
+	};
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	class ScopeNameTag
+	{
+		const SRenderNodeImplContext*		m_rctx;
+		RenderFlowNameTag					m_tag;
+
+		// Not copyable
+		ScopeNameTag() = delete;
+		ScopeNameTag& operator =( const ScopeNameTag & ) = delete;
+		
+		RED_FORCE_INLINE ScopeNameTag( const SRenderNodeImplContext* rctx, const RenderFlowNameTag tag )
+			: m_rctx( rctx )
+			, m_tag( tag )
+		{}
+
+	public:
+
+		RED_FORCE_INLINE ~ScopeNameTag()
+		{
+			if( m_rctx ) m_rctx->RTUseEnd( m_tag );
+		}
+
+		RED_FORCE_INLINE ScopeNameTag& operator =( ScopeNameTag && other )
+		{
+			std::swap( m_rctx, other.m_rctx );
+			std::swap( m_tag, other.m_tag );
+			return *this;
+		}
+
+		// - - - - - - - - - - - - - - - - -
+
+		template <Uint32 usageFlags>
+		static RED_FORCE_INLINE ScopeNameTag Create( const SRenderNodeImplContext* rctx, const RenderFlowNameTag tag )
+		{
+			rctx->RTUseBegin( tag, usageFlags );
+			return ScopeNameTag( rctx, tag );
+		}
+
+		static RED_FORCE_INLINE ScopeNameTag CreateNull()
+		{
+			return ScopeNameTag( nullptr, RenderFlowNameTag::Null() );
+		}
+
+		// - - - - - - - - - - - - - - - - -
+
+		RED_FORCE_INLINE operator const GpuApi::TextureRef() const { return Get<GpuApi::TextureRef>(); }
+		RED_FORCE_INLINE operator const GpuApi::BufferRef() const { return Get<GpuApi::BufferRef>(); }
+
+		RED_FORCE_INLINE operator const RenderFlowNameTag&() const { return m_tag; }
+		RED_FORCE_INLINE operator const Bool() const { return m_rctx != nullptr; }
+
+		RED_FORCE_INLINE ScopeNameTag( ScopeNameTag&& other )
+			: m_rctx( other.m_rctx )
+			, m_tag( other.m_tag )
+		{
+			other.m_rctx = nullptr;
+		}
+
+		// - - - - - - - - - - - - - - - - -
+
+		template <typename ResourceRef>
+		RED_FORCE_INLINE ResourceRef Get() const { return m_rctx ? m_rctx->RTGet<ResourceRef>( m_tag ) : ResourceRef::Null(); }
+
+		template <typename ResourceRef>
+		RED_FORCE_INLINE ResourceRef GetSafe() const { return m_rctx ? m_rctx->RTGetOrNull<ResourceRef>(m_tag) : ResourceRef::Null(); }
+
+		// - - - - - - - - - - - - - - - - -
+
+		RED_FORCE_INLINE ScopeNameTag&	Clear() { m_rctx = nullptr; return *this; }
+
+		RED_FORCE_INLINE Bool			IsValid() const { return m_rctx && m_tag != RenderFlowNameTag::Null(); }
+
+	};
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	SRenderNodeImplContext();
+	~SRenderNodeImplContext();
+
+	// copy and update dispatcher thread index
+	SRenderNodeImplContext( const SRenderNodeImplContext& other, Uint32 dispatcherThreadIndex );
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// Setupping
+
+	void Init( const SInitData &initData );
+	void SetupNodeData( const SRenderNodeContext &nodeContext, const SRenderNodeParameters &nodeParams );
+	void ResetNodeData();
+	void BeginNewNode() const;
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// Resource access 
+
+	RenderFlowNameTag RTNameTag( const RenderFlowNameAndHash name ) const;
+
+	static RenderFlowNameTag RTSharedNameTag( const RenderFlowNameAndHash name );
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RT( const RenderFlowNameAndHash name ) const;
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RT( const RenderFlowNameTag& tag ) const;
+
+	static ScopeNameTag	RTNull();
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RTShared( const RenderFlowNameAndHash name ) const;
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RTSharedAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const;
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RTAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const;
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RTAlloc( const RenderFlowNameAndHash name, const RenderFlowNameTag &desc ) const;
+
+	RenderFlowNameTag RTAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const;
+	RenderFlowNameTag RTAlloc( const RenderFlowNameAndHash name, const RenderFlowNameTag &nameTagDesc ) const;
+
+	RenderFlowNameTag RTInject( const RenderFlowNameAndHash name, GpuApi::TextureRef& texture ) const;
+
+	void RTFree( RenderFlowNameTag tag ) const;
+
+	RenderFlowNameTag RTSharedAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const;
+
+	RenderFlowNameTag RTTempAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const;
+	RenderFlowNameTag RTTempAlloc( const RenderFlowNameAndHash name, const RenderFlowNameTag &nameTagDesc ) const;
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RTTempAlloc( const RenderFlowNameAndHash name, const ScopeNameTag &nameTagDesc ) const;
+
+	template <Uint32 usageFlags>
+	ScopeNameTag RTTempAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const;
+
+	void RTUseBegin( const RenderFlowNameTag& tag, Uint32 usageFlags ) const;
+	Bool RTIsAlloc( const RenderFlowNameTag& tag ) const;			//< this function shouldn't be present in renderFlowAllocator since we'll be building commandlists from different threads so we'll be unable to implement it
+	void RTUseEnd( const RenderFlowNameTag& tag ) const;
+
+	void RTSwap( const RenderFlowNameTag& tagA, const RenderFlowNameTag& tagB ) const;
+	void RTSwap( const ScopeNameTag& tagA, const ScopeNameTag& tagB ) const;
+	void RTSwap( const RenderFlowNameTag& tagA, GpuApi::TextureRef& tagB ) const;
+	void RTSwap( const ScopeNameTag& tagA, GpuApi::TextureRef& tagB ) const;
+	RED_FORCE_INLINE void RTSwap( GpuApi::TextureRef& tagB, const RenderFlowNameTag& tagA ) const { RTSwap( tagA, tagB ); }
+	RED_FORCE_INLINE void RTSwap( GpuApi::TextureRef& tagB, const ScopeNameTag& tagA ) const { RTSwap( tagA, tagB ); }
+
+	template <Uint32 usageFlags>
+	void RTUseBegin( const RenderFlowNameAndHash name ) const;
+
+	void RTUseEnd( const RenderFlowNameAndHash name ) const;
+
+	template< typename ResourceRef >
+	ResourceRef	RTGet( const RenderFlowNameTag& tag ) const;
+
+	template< typename ResourceRef >
+	ResourceRef	RTGet( const RenderFlowNameAndHash name ) const;
+
+	template< typename ResourceRef >
+	ResourceRef	RTGetOrNull( const RenderFlowNameTag& tag ) const;
+
+	// Ensures a consistent branch between Prepare and Consume phases. Value of baseDecision during Prepare will be kept
+	// and reproduced in Consume.
+	Bool RTDecision( Bool baseDecision ) const;
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// Accessors
+
+	const vis::ViewID GetVisibilityView() const;
+
+	const CRenderFrameCameraStorage::SCameraData* GetCameraData() const;
+
+	Uint32 GetNumCameras() const;
+
+	//!< Checks if there is proper camera data available for that context
+	Bool IsCameraDataAvailable() const;
+
+	Bool HasAnyCameraStorage() const;
+
+	//!< Checks if there is at least one camera
+	Bool HasAnyCamera() const;
+
+	const CRenderFrameCameraStorage* GetCameraStorage() const;
+
+	const CRenderFrameCameraStorage::SCameraData* GetCameraDataByIndex( Uint32 cameraIndex ) const; 
+
+	Uint32 GetAllCameraPositions( Vector3* buf, Uint32 maxCount ) const;
+
+	const CRenderFrameCameraStorage::SCameraData* GetFirstOnScreeenCamera() const;
+	
+	CRenderCollector* GetCollector() const;
+	
+	CRenderCollector* GetCollectorUnitialized() const;
+	
+	const CRenderCameraFrameInfo&	GetCameraInfo() const;
+	
+	const Bool HasScene() const;
+	
+	const Bool Test( const rend::DebugFilter& filter ) const;
+
+	const Bool Test( const ERenderFeatureFlags f ) const;
+	
+
+	IRenderFrame* GetFrame() const;
+	TRenderFlowGroup GetRenderFlowGroup() const;
+	TRenderFlowSpace GetRenderFlowSpace() const;
+	CRenderFlowResourceAllocator* GetResourceAllocator() const;
+	const CRenderCamera& GetRenderCamera( ERenderingPlane plane = RPl_Scene ) const;
+
+	// internal resolution for current frame, before AA and upsampling
+	Uint32 GetWidth() const;
+	Uint32 GetHeight() const;
+	// max possible internal resolution, before AA
+	Uint32 GetMaxWidth() const;
+	Uint32 GetMaxHeight() const;
+	// resolution for current frame after temporal upsampling, before contrast adaptive upsampling
+	// Note: this will be equal to final size when DLSS is enabled, as it replaces TAA and performs upsampling in one pass
+	Uint32 GetPostAAWidth() const;
+	Uint32 GetPostAAHeight() const;
+	// max possible resolution after temporal upsampling, before contrast adaptive upsampling
+	// Note: this will be equal to final size when DLSS is enabled, as it replaces TAA and performs upsampling in one pass
+	Uint32 GetPostAAMaxWidth() const;
+	Uint32 GetPostAAMaxHeight() const;
+	// final output resolution after all upsampling, equal to UI composition resolution
+	Uint32 GetFinalWidth() const;
+	Uint32 GetFinalHeight() const;
+
+	Bool IsUniqueNode() const; 
+	Bool IsConsumePhase() const;
+
+	const CRenderFrameInfo&	GetFrameInfo() const;
+	CRenderSceneEx* GetScene() const;
+
+	GpuWrapApi::eTextureFormat GetRegularPrecisionColorTargetFormat() const;
+	GpuWrapApi::eTextureFormat GetHighPrecisionColorTargetFormat() const;
+
+	Uint32 GetColorTargetWidth() const;
+	Uint32 GetColorTargetHeight() const;
+
+	SRenderFlowTargetDesc GetVelocityBufferDesc() const;
+	SRenderFlowTargetDesc GetResolvedFinalTargetDesc() const;
+	SRenderFlowTargetDesc GetScreenshotTargetDesc() const;
+	SRenderFlowTargetDesc GetColorTargetDesc( GpuWrapApi::eTextureFormat format ) const;
+	SRenderFlowTargetDesc GetRegularPrecisionColorTargetDesc() const { return GetColorTargetDesc( GetRegularPrecisionColorTargetFormat() ); }
+	SRenderFlowTargetDesc GetHighPrecisionColorTargetDesc() const { return GetColorTargetDesc( GetHighPrecisionColorTargetFormat() ); }
+	SRenderFlowTargetDesc GetDepthBufferDesc() const;
+	SRenderFlowTargetDesc GetCompositionDesc() const;
+
+
+	// - - - - - - - - -  - - - - - - - - - - - - - - - - - - - - - - -
+
+	void SetCommandList( GpuApi::CommandListRef cl ) const;
+	GpuApi::CommandListRef GetCommandList() const;
+	Bool HasCommandList() const;
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// Unbind all resources that used to be bound during ConsumePhase
+
+	void Unbind( Bool clearRenderTarget = false ) const;
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTexture( const GpuApi::TextureRef& tex ) const;
+
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTexture( const RenderFlowNameTag tag ) const;
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTexture( const ScopeNameTag& tag ) const;
+	
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTextureMip( const GpuApi::TextureRef& tex, Uint32 mip ) const;
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTextureStencil( const GpuApi::TextureRef& tex ) const;
+	
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTextureStencil( const RenderFlowNameTag tag ) const;
+	
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindTextureStencil( const ScopeNameTag& tag ) const;
+
+	template <Uint32 SLOT, EBindTarget STAGE, Uint32 N>
+	void BindTextures( const GpuApi::TextureRef( &tex )[N] ) const;
+
+	template <Uint32 SLOT, EBindTarget STAGE, Uint32 N>
+	void BindTextures( const RenderFlowNameTag ( &tags )[N] ) const;
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindSampler( const GpuApi::eSamplerStatePreset preset ) const;
+
+
+	template <Uint32 SLOT, EBindTarget STAGE, Uint32 N>
+	void BindSamplers( const GpuApi::eSamplerStatePreset( &preset )[N] ) const;
+
+	template <Uint32 SLOT, EBindTarget STAGE = ePIXEL>
+	void BindBufferSRV( const GpuApi::BufferRef& tex ) const;
+
+	template < Uint32 SLOT, EBindTarget STAGE = ePIXEL >
+	void BindConstantBuffer( const GpuApi::BufferRef& constantBuffer ) const;
+
+	template <Uint32 SLOT>
+	void BindBufferUAV( const GpuApi::BufferRef& tex, Uint32 initialCount = -1 ) const;
+
+	template <Uint32 SLOT>
+	void BindTextureUAV( const GpuApi::TextureRef& tex ) const;
+
+	template <Uint32 SLOT>
+	void BindTextureMipUAV( const GpuApi::TextureRef& tex, Uint32 mipIndex ) const;
+
+
+	template <Uint32 SLOT>
+	void BindTextureUAV( const RenderFlowNameTag tag ) const;
+
+	template <Uint32 SLOT>
+	void BindTextureUAV( const ScopeNameTag& tag ) const;
+
+	template <Uint32 SLOT, Uint32 N>
+	void BindTextureUAVs( const GpuApi::TextureRef( &tex )[N] ) const;
+
+
+	template <Uint32 SLOT, Uint32 N>
+	void BindTextureUAVs( const RenderFlowNameTag( &tags )[N] ) const;
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	// Set constant as object reflection for stage
+	template <Uint32 STAGE, typename T>
+	static void SetConstant( const T& obj );
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+
+	template <typename ...Args>
+	void BindPSO( const Args& ... args ) const;
+
+	void SetViewport( const GpuApi::ViewportDesc& viewportDesc ) const;
+
+	RED_FORCE_INLINE Uint32 GetDispatcherThreadIndex() const
+	{
+		return m_dispatcherThreadIndex;
+	}
+
+private:
+	struct PSO
+	{
+		GpuApi::RenderTargetSetup	renderTargets;
+	};
+
+	static void BindPSOImpl( PSO& pso );
+
+	template <typename ...Args>
+	static void BindPSOImpl( PSO& pso, const BlankOutput&, const Args& ... args );
+
+	template <typename ...Args>
+	static void BindPSOImpl( PSO& pso, const ColorTarget& colorTarget, const Args& ... args );
+
+
+	template <typename ...Args>
+	static void BindPSOImpl( PSO& pso, const NullColorTarget& colorTarget, const Args& ... args );
+
+	template <typename ...Args>
+	static void BindPSOImpl( PSO& pso, const DepthTarget& depthTarget, const Args& ... args );
+
+	template <typename ...Args>
+	static void BindPSOImpl( PSO& pso, const UnorderedAccessView& uav, const Args& ... args );
+
+	template <typename ...Args>
+	static void BindPSOImpl( PSO& pso, const UnorderedAccessViewBase& uavBase, const Args& ... args );
+
+	TRenderPtr< IRenderFrame >		m_frame;
+	CRenderFlowResourceAllocator*	m_resAlloc { nullptr };
+	Int32							m_cameraIndex { -1 };
+	Uint32							m_dispatcherThreadIndex { UINT32_MAX };
+
+	const CRenderFrameCameraStorage::SCameraData*	m_cameraData;
+	const CRenderFrameCameraStorage*				m_cameraStorage;
+	vis::ViewID						m_visViewId;
+
+	Uint16							m_maxCameraRenderWidth;
+	Uint16							m_maxCameraRenderHeight;
+	Bool							m_isNodeUnique : 1;
+	Bool							m_isConsumePhase : 1;
+
+	TRenderFlowSpace				m_renderFlowSpace : 8;	// Assume that there will not be more simultaneous flow spaces at the same frame
+	TRenderFlowGroup				m_renderFlowGroup;
+
+private:
+
+	mutable Uint16					m_texturesToUnbind;
+	mutable Uint16					m_srvToUnbind;
+	mutable Uint16					m_uavToUnbind;
+	mutable Uint8					m_usedStages;
+	mutable Bool					m_psoBound : 1;
+
+};
+
+RED_FORCE_INLINE RenderFlowNameTag SRenderNodeImplContext::RTNameTag( const RenderFlowNameAndHash name ) const
+{
+	return RenderFlowNameTag( name, m_isNodeUnique ? 0 : m_renderFlowSpace );
+}
+
+RED_FORCE_INLINE RenderFlowNameTag SRenderNodeImplContext::RTSharedNameTag( const RenderFlowNameAndHash name )
+{ 
+	return RenderFlowNameTag( name, 0 );
+}
+
+template <Uint32 usageFlags>
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RT( const RenderFlowNameAndHash name ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTNameTag( name ) );
+};
+
+template <Uint32 usageFlags>
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RT( const RenderFlowNameTag& tag ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, tag );
+};
+
+
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTNull() 
+{ 
+	return ScopeNameTag::CreateNull(); 
+}
+
+template <Uint32 usageFlags>
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTShared( const RenderFlowNameAndHash name ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTSharedNameTag( name ) );
+}
+;
+template <Uint32 usageFlags>
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTSharedAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTSharedAlloc( name, desc ) );
+};
+
+template <Uint32 usageFlags>
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTAlloc( name, desc ) );
+};
+
+template <Uint32 usageFlags>
+RED_FORCE_INLINE SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTAlloc( const RenderFlowNameAndHash name, const RenderFlowNameTag &desc ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTAlloc( name, desc ) );
+}
+
+template <Uint32 usageFlags>
+SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTTempAlloc( const RenderFlowNameAndHash name, const ScopeNameTag &nameTagDesc ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTTempAlloc( name, (RenderFlowNameTag)nameTagDesc ) );
+}
+template <Uint32 usageFlags>
+SRenderNodeImplContext::ScopeNameTag SRenderNodeImplContext::RTTempAlloc( const RenderFlowNameAndHash name, const SRenderFlowTargetDesc &desc ) const
+{
+	return ScopeNameTag::Create<usageFlags>( this, RTTempAlloc( name, desc ) );
+}
+
+template <Uint32 usageFlags>
+RED_FORCE_INLINE void SRenderNodeImplContext::RTUseBegin( const RenderFlowNameAndHash name ) const
+{
+	RTUseBegin( RTNameTag( name ), usageFlags );
+}
+RED_FORCE_INLINE void SRenderNodeImplContext::RTUseEnd( const RenderFlowNameAndHash name ) const
+{
+	RTUseEnd( RTNameTag( name ) );
+}
+
+
+template<>
+RED_FORCE_INLINE GpuApi::TextureRef SRenderNodeImplContext::RTGet( const RenderFlowNameTag& tag ) const
+{
+	const GpuApi::TextureRef res = GetResourceAllocator()->GetTexture( tag, GetRenderFlowGroup() );
+	RED_ASSERT( res );
+	return res;
+}
+
+template<>
+RED_FORCE_INLINE GpuApi::BufferRef SRenderNodeImplContext::RTGet( const RenderFlowNameTag& tag ) const
+{
+	const GpuApi::BufferRef res = GetResourceAllocator()->GetBuffer( tag, GetRenderFlowGroup() );
+	RED_ASSERT( res );
+	return res;
+}
+
+template<>
+RED_FORCE_INLINE GpuApi::TextureRef SRenderNodeImplContext::RTGet( const RenderFlowNameAndHash name ) const
+{
+	const GpuApi::TextureRef res = GetResourceAllocator()->GetTexture( RTNameTag( name ), GetRenderFlowGroup() );
+	RED_ASSERT( res );
+	return res;
+}
+
+template<>
+RED_FORCE_INLINE GpuApi::BufferRef SRenderNodeImplContext::RTGet( const RenderFlowNameAndHash name ) const
+{
+	const GpuApi::BufferRef res = GetResourceAllocator()->GetBuffer( RTNameTag( name ), GetRenderFlowGroup() );
+	RED_ASSERT( res );
+	return res;
+}
+
+template<>
+RED_FORCE_INLINE GpuApi::TextureRef SRenderNodeImplContext::RTGetOrNull( const RenderFlowNameTag& tag ) const
+{
+	if ( RenderFlowNameTag::INVALID != tag )
+	{
+		const GpuApi::TextureRef res = GetResourceAllocator()->GetTexture( tag, GetRenderFlowGroup(), true );
+		return res;
+	}
+	else
+	{
+		return GpuApi::TextureRef::Null();
+	}
+}
+
+template<>
+RED_FORCE_INLINE GpuApi::BufferRef SRenderNodeImplContext::RTGetOrNull( const RenderFlowNameTag& tag ) const
+{
+	if ( RenderFlowNameTag::INVALID != tag )
+	{
+		const GpuApi::BufferRef res = GetResourceAllocator()->GetBuffer( tag, GetRenderFlowGroup(), true );
+		return res;
+	}
+	else
+	{
+		return GpuApi::BufferRef::Null();
+	}
+}
+
+RED_FORCE_INLINE const vis::ViewID SRenderNodeImplContext::GetVisibilityView() const
+{
+	RED_FATAL_ASSERT( 0 != m_visViewId, "No visibility ID passed" );
+	return m_visViewId;
+}
+
+RED_FORCE_INLINE const CRenderFrameCameraStorage::SCameraData* SRenderNodeImplContext::GetCameraData() const
+{
+	RED_FATAL_ASSERT( m_cameraData, "No camera data" );
+	RED_FATAL_ASSERT( !m_isNodeUnique, "Node cannot be unique" );
+	return m_cameraData;
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetNumCameras() const
+{
+	return m_cameraStorage ? m_cameraStorage->GetNumCameras() : 0;
+}
+
+//!< Checks if there is proper camera data available for that context
+RED_FORCE_INLINE Bool SRenderNodeImplContext::IsCameraDataAvailable() const
+{
+	return m_cameraData && m_cameraStorage;
+}
+
+RED_FORCE_INLINE Bool SRenderNodeImplContext::HasAnyCameraStorage() const
+{
+	return nullptr != m_cameraStorage;
+}
+
+//!< Checks if there is at least one camera
+RED_FORCE_INLINE Bool SRenderNodeImplContext::HasAnyCamera() const
+{
+	return HasAnyCameraStorage() && m_cameraStorage->HasAnyCamera();
+}
+
+RED_FORCE_INLINE const CRenderFrameCameraStorage* SRenderNodeImplContext::GetCameraStorage() const
+{
+	RED_FATAL_ASSERT( m_cameraStorage, "" );
+	return m_cameraStorage;
+}
+
+RED_FORCE_INLINE const CRenderFrameCameraStorage::SCameraData* SRenderNodeImplContext::GetCameraDataByIndex( Uint32 cameraIndex ) const
+{
+	RED_FATAL_ASSERT( HasAnyCameraStorage(), "No camera storage" );
+	RED_FATAL_ASSERT( m_isNodeUnique, "Node must be unique" );
+	RED_FATAL_ASSERT( cameraIndex < GetNumCameras(), "Invalid camera index" );
+	const CRenderFrameCameraStorage::SCameraData* cameraData = m_cameraStorage->GetCameraData( cameraIndex );
+	RED_FATAL_ASSERT( cameraData, "" );
+	return cameraData;
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetAllCameraPositions( Vector3* buf, Uint32 maxCount ) const
+{
+	return GetCameraStorage()->GetAllCameraPositions( buf, maxCount );
+}
+
+RED_FORCE_INLINE const CRenderFrameCameraStorage::SCameraData* SRenderNodeImplContext::GetFirstOnScreeenCamera() const
+{
+	const auto* camStorage = GetCameraStorage();
+	for ( Uint32 camIndex = 0; camIndex < camStorage->GetNumCameras(); camIndex++ )
+	{
+		const auto* camData = camStorage->GetCameraData( camIndex );
+		if ( camData->IsOnscreen() )
+		{
+			return camData;
+		}
+	}
+
+	return nullptr;
+}
+
+RED_FORCE_INLINE CRenderCollector* SRenderNodeImplContext::GetCollector() const
+{
+	RED_FATAL_ASSERT( !m_isNodeUnique, "Cannot access from unique node" );
+	RED_FATAL_ASSERT( m_cameraData->IsAccesible( CRenderFrameCameraStorage::DAF_Collector ), "Collector not ready" );
+	return &m_cameraData->GetCollector();
+}
+
+RED_FORCE_INLINE CRenderCollector* SRenderNodeImplContext::GetCollectorUnitialized() const
+{
+	RED_FATAL_ASSERT( !m_isNodeUnique, "Cannot access from unique node" );
+	RED_FATAL_ASSERT( false == m_cameraData->IsAccesible( CRenderFrameCameraStorage::DAF_Collector ), "Collector not ready" );
+	return &m_cameraData->GetCollector();
+}
+
+RED_FORCE_INLINE const CRenderCameraFrameInfo&	SRenderNodeImplContext::GetCameraInfo() const
+{
+	RED_FATAL_ASSERT( !m_isNodeUnique, "Cannot access from unique node" );
+	RED_FATAL_ASSERT( m_cameraData, "There's no camera data" );
+	return m_cameraData->GetInfo();
+}
+
+RED_INLINE const Bool SRenderNodeImplContext::HasScene() const
+{
+	return m_frame && IRenderScene::IsValid( GetFrameInfo().GetScene() );
+}
+
+RED_INLINE const Bool SRenderNodeImplContext::Test( const rend::DebugFilter& filter ) const
+{
+	// If its camera related node AND have data -> check it
+	if(!m_isNodeUnique && m_cameraData)
+		return GetCameraInfo().GetRenderingMask().Test( filter );
+
+	// Check if any camera has this
+	else if(m_cameraStorage)
+		return m_cameraStorage->TestDebugFlag( filter );
+
+	// Assume false
+	return false;
+}
+
+RED_INLINE const Bool SRenderNodeImplContext::Test( const ERenderFeatureFlags f ) const
+{
+	// If its camera related node AND have data -> check it
+	if(!m_isNodeUnique && m_cameraData)
+		return GetCameraInfo().HasFeature( f );
+
+	return false;
+}
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTexture( const GpuApi::TextureRef& tex ) const
+{
+	static_assert(SLOT <= rend::Binding::Textures::MAX_CUSTOM, "Slots exceeded safe binding range");
+	m_texturesToUnbind |= RED_FLAG( SLOT );
+	m_usedStages |= STAGE;
+	if(STAGE & eVERTEX)	GpuApi::BindTextures( SLOT, 1, &tex, GpuWrapApi::VertexShader );
+	if(STAGE & ePIXEL)	GpuApi::BindTextures( SLOT, 1, &tex, GpuWrapApi::PixelShader );
+	if(STAGE & eCOMPUTE)	GpuApi::BindTextures( SLOT, 1, &tex, GpuWrapApi::ComputeShader );
+	// UnrollMask::call<bindImpl::Texture,STAGE, Uint32, Uint32, const GpuApi::TextureRef*>( SLOT, 1, &tex );
+};
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTexture( const RenderFlowNameTag tag ) const
+{
+	BindTexture<SLOT, STAGE>( RTGet<GpuApi::TextureRef>( tag ) );
+}
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTexture( const ScopeNameTag& tag ) const
+{
+	BindTexture<SLOT, STAGE>( tag.Get<GpuApi::TextureRef>() );
+}
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureMip( const GpuApi::TextureRef& tex, Uint32 mip ) const
+{
+	static_assert(SLOT <= rend::Binding::Textures::MAX_CUSTOM, "Slots exceeded safe binding range");
+	m_texturesToUnbind |= RED_FLAG( SLOT );
+	m_usedStages |= STAGE;
+	if(STAGE & eVERTEX)	GpuApi::BindTextureMipLevel( SLOT, tex, 0, mip, GpuWrapApi::VertexShader );
+	if(STAGE & ePIXEL)	GpuApi::BindTextureMipLevel( SLOT, tex, 0, mip, GpuWrapApi::PixelShader );
+	if(STAGE & eCOMPUTE)	GpuApi::BindTextureMipLevel( SLOT, tex, 0, mip, GpuWrapApi::ComputeShader );
+	// UnrollMask::call<bindImpl::Texture,STAGE, Uint32, Uint32, const GpuApi::TextureRef*>( SLOT, 1, &tex );
+};
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureStencil( const GpuApi::TextureRef& tex ) const
+{
+	static_assert(SLOT <= rend::Binding::Textures::MAX_CUSTOM, "Slots exceeded safe binding range");
+	m_texturesToUnbind |= RED_FLAG( SLOT );
+	m_usedStages |= STAGE;
+	if(STAGE & eVERTEX)	GpuApi::BindTextureStencil( SLOT, tex, GpuWrapApi::VertexShader );
+	if(STAGE & ePIXEL)	GpuApi::BindTextureStencil( SLOT, tex, GpuWrapApi::PixelShader );
+	if(STAGE & eCOMPUTE)	GpuApi::BindTextureStencil( SLOT, tex, GpuWrapApi::ComputeShader );
+	// UnrollMask::call<bindImpl::Texture,STAGE, Uint32, Uint32, const GpuApi::TextureRef*>( SLOT, 1, &tex );
+};
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureStencil( const RenderFlowNameTag tag ) const
+{
+	BindTextureStencil<SLOT, STAGE>( RTGet<GpuApi::TextureRef>( tag ) );
+}
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureStencil( const ScopeNameTag& tag ) const
+{
+	BindTextureStencil<SLOT, STAGE>( tag.Get<GpuApi::TextureRef>() );
+}
+
+
+template <Uint32 SLOT, EBindTarget STAGE, Uint32 N>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextures( const GpuApi::TextureRef( &tex )[N] ) const
+{
+	static_assert(SLOT + N <= rend::Binding::Textures::MAX_CUSTOM, "Slots exceeded safe binding range");
+	m_texturesToUnbind |= (RED_FLAG( N ) - 1) << SLOT;
+	m_usedStages |= STAGE;
+	if(STAGE & eVERTEX)	GpuApi::BindTextures( SLOT, N, tex, GpuWrapApi::VertexShader );
+	if(STAGE & ePIXEL)	GpuApi::BindTextures( SLOT, N, tex, GpuWrapApi::PixelShader );
+	if(STAGE & eCOMPUTE)	GpuApi::BindTextures( SLOT, N, tex, GpuWrapApi::ComputeShader );
+	// UnrollMask::call<bindImpl::Texture,STAGE, Uint32, Uint32, const GpuApi::TextureRef*>( SLOT, N, tex );
+};
+
+template <Uint32 SLOT, EBindTarget STAGE, Uint32 N>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextures( const RenderFlowNameTag( &tags )[N] ) const
+{
+	GpuApi::TextureRef refs[N];	for(Uint32 i = 0; i < N; ++i) refs[i] = RTGetOrNull<GpuApi::TextureRef>( tags[i] );
+	BindTextures<SLOT, STAGE, N>( refs );
+}
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindSampler( const GpuApi::eSamplerStatePreset preset ) const
+{
+	static_assert(SLOT <= rend::Binding::Samplers::MAX_CUSTOM, "Slots exceeded safe binding range");
+	m_usedStages |= STAGE;
+	// UnrollMask::call<bindImpl::Sampler,STAGE, Uint32, const GpuApi::eSamplerStatePreset>( SLOT, preset );
+	if(STAGE & eVERTEX)	GpuApi::SetSamplerStatePreset( SLOT, preset, GpuWrapApi::VertexShader );
+	if(STAGE & ePIXEL)	GpuApi::SetSamplerStatePreset( SLOT, preset, GpuWrapApi::PixelShader );
+	if(STAGE & eCOMPUTE)	GpuApi::SetSamplerStatePreset( SLOT, preset, GpuWrapApi::ComputeShader );
+};
+
+template <Uint32 SLOT, EBindTarget STAGE, Uint32 N>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindSamplers( const GpuApi::eSamplerStatePreset( &preset )[N] ) const
+{
+	static_assert(SLOT + N <= rend::Binding::Samplers::MAX_CUSTOM, "Slots exceeded safe binding range");
+	m_usedStages |= STAGE;
+	for(Uint32 i = 0; i < N; ++i)
+	{
+		if(STAGE & eVERTEX)	GpuApi::SetSamplerStatePreset( SLOT + i, preset[i], GpuWrapApi::VertexShader );
+		if(STAGE & ePIXEL)	GpuApi::SetSamplerStatePreset( SLOT + i, preset[i], GpuWrapApi::PixelShader );
+		if(STAGE & eCOMPUTE)	GpuApi::SetSamplerStatePreset( SLOT + i, preset[i], GpuWrapApi::ComputeShader );
+	}
+	//UnrollMask::call<bindImpl::Sampler,STAGE, Uint32, const GpuApi::eSamplerStatePreset>( SLOT+i, preset[i] );
+};
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindBufferSRV( const GpuApi::BufferRef& tex ) const
+{
+	static_assert(SLOT <= rend::Binding::Buffers::MAX_CUSTOM, "Slots exceeded safe binding range");
+
+	if(STAGE & eVERTEX)		GpuApi::BindBufferSRV( tex, SLOT, GpuWrapApi::VertexShader );
+	if(STAGE & ePIXEL)		GpuApi::BindBufferSRV( tex, SLOT, GpuWrapApi::PixelShader );
+	if(STAGE & eCOMPUTE)		GpuApi::BindBufferSRV( tex, SLOT, GpuWrapApi::ComputeShader );
+
+};
+
+template <Uint32 SLOT, EBindTarget STAGE >
+RED_FORCE_INLINE void SRenderNodeImplContext::BindConstantBuffer( const GpuApi::BufferRef& constantBuffer ) const
+{
+	static_assert( SLOT <= rend::Binding::Buffers::MAX_CUSTOM, "Slots exceeded safe binding range" );
+
+	if ( STAGE & eVERTEX )		GpuApi::BindConstantBuffer( SLOT, constantBuffer, GpuWrapApi::VertexShader );
+	if ( STAGE & ePIXEL )		GpuApi::BindConstantBuffer( SLOT, constantBuffer, GpuWrapApi::PixelShader );
+	if ( STAGE & eCOMPUTE )		GpuApi::BindConstantBuffer( SLOT, constantBuffer, GpuWrapApi::ComputeShader );
+
+};
+
+template <Uint32 SLOT>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindBufferUAV( const GpuApi::BufferRef& tex, Uint32 initialCount ) const
+{
+	static_assert(SLOT <= rend::Binding::Buffers::MAX_CUSTOM, "");
+	m_uavToUnbind |= RED_FLAG( SLOT );
+	GpuApi::BindBufferUAV( tex, SLOT, initialCount );
+};
+
+template <Uint32 SLOT>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureUAV( const GpuApi::TextureRef& tex ) const
+{
+	static_assert(SLOT <= rend::Binding::Buffers::MAX_CUSTOM, "");
+	m_uavToUnbind |= RED_FLAG( SLOT );
+	GpuApi::BindTextureUAVs( SLOT, 1, &tex );
+};
+
+template <Uint32 SLOT>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureMipUAV( const GpuApi::TextureRef& tex, Uint32 mipIndex ) const
+{
+	static_assert(SLOT <= rend::Binding::Buffers::MAX_CUSTOM, "");
+	m_uavToUnbind |= RED_FLAG( SLOT );
+	GpuApi::BindTextureMipLevelUAV( SLOT, tex, mipIndex );
+};
+
+template <Uint32 SLOT>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureUAV( const RenderFlowNameTag tag ) const
+{
+	BindTextureUAV<SLOT>( RTGet<GpuApi::TextureRef>( tag ) );
+}
+template <Uint32 SLOT>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureUAV( const ScopeNameTag& tag ) const
+{
+	RED_ASSERT( tag.IsValid() );
+	BindTextureUAV<SLOT>( tag.Get<GpuApi::TextureRef>() );
+}
+
+template <Uint32 SLOT, Uint32 N>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureUAVs( const GpuApi::TextureRef( &tex )[N] ) const
+{
+	static_assert(SLOT <= rend::Binding::Buffers::MAX_CUSTOM, "");
+	m_uavToUnbind |= (RED_FLAG( N ) - 1) << SLOT;
+	GpuApi::BindTextureUAVs( SLOT, N, tex );
+};
+
+template <Uint32 SLOT, Uint32 N>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindTextureUAVs( const RenderFlowNameTag( &tags )[N] ) const
+{
+	GpuApi::TextureRef refs[N];	for(Uint32 i = 0; i < N; ++i) refs[i] = RTGetOrNull<GpuApi::TextureRef>( tags[i] );
+	BindTextureUAVs<SLOT, N>( refs );
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+// Set constant as object reflection for stage
+template <Uint32 STAGE, typename T>
+RED_FORCE_INLINE void SRenderNodeImplContext::SetConstant( const T& obj )
+{
+	// Unroll code using SetConstImpl implementation. Pass object
+	// UnrollMask::call<bindImpl::SetConst<T>,STAGE,const T&>( std::forward<const T&>( obj ) );
+	static_assert(sizeof( obj ) <= rend::Binding::Constants::SHARED_MAX_SIZE, "Struct is too big. Try to pack data");
+
+	if(STAGE & eVERTEX)		GpuApi::SetVertexShaderConsts( obj );
+	if(STAGE & ePIXEL)		GpuApi::SetPixelShaderConsts( obj );
+	if(STAGE & eCOMPUTE)		GpuApi::SetComputeShaderConsts( obj );
+}
+
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso )
+{
+	(void)pso;
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso, const BlankOutput&, const Args& ... args )
+{
+	pso.renderTargets.Reset();
+	BindPSOImpl( pso, args... );
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso, const ColorTarget& colorTarget, const Args& ... args )
+{
+	pso.renderTargets.SetColorTarget( colorTarget.slot, colorTarget.texture, colorTarget.slice );
+	BindPSOImpl( pso, args... );
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso, const NullColorTarget& colorTarget, const Args& ... args )
+{
+	pso.renderTargets.SetNullColorTarget();
+	BindPSOImpl( pso, args... );
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso, const DepthTarget& depthTarget, const Args& ... args )
+{
+	pso.renderTargets.SetDepthStencilTarget( depthTarget.texture, depthTarget.slice, depthTarget.readOnly );
+	BindPSOImpl( pso, args... );
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso, const UnorderedAccessView& uav, const Args& ... args )
+{
+	pso.renderTargets.SetUnorderedAccessView( uav.slot, uav.texture );
+	BindPSOImpl( pso, args... );
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSOImpl( PSO& pso, const UnorderedAccessViewBase& uavBase, const Args& ... args )
+{
+	pso.renderTargets.uavStartSlot = uavBase.baseSlot;
+	BindPSOImpl( pso, args... );
+}
+
+template <typename ...Args>
+RED_FORCE_INLINE void SRenderNodeImplContext::BindPSO( const Args& ... args ) const
+{
+	PSO pso;
+
+	BindPSOImpl( pso, args... );
+
+	GpuApi::SetupRenderTargets( pso.renderTargets );
+	m_psoBound = true;
+}
+
+RED_FORCE_INLINE void SRenderNodeImplContext::SetViewport( const GpuApi::ViewportDesc& viewportDesc ) const
+{
+	// TODO: consider some overseeing here, allow/disallow nodes to set viewport.
+	GpuApi::SetViewport( viewportDesc );
+}
+
+RED_FORCE_INLINE IRenderFrame* SRenderNodeImplContext::GetFrame() const 
+{ 
+	RED_FATAL_ASSERT( m_frame.Get(), "" );  
+	return m_frame.Get(); 
+}
+
+RED_FORCE_INLINE TRenderFlowGroup SRenderNodeImplContext::GetRenderFlowGroup() const 
+{ 
+	return m_renderFlowGroup;
+}
+
+RED_FORCE_INLINE TRenderFlowSpace SRenderNodeImplContext::GetRenderFlowSpace() const 
+{ 
+	return m_renderFlowSpace; 
+}
+
+RED_FORCE_INLINE CRenderFlowResourceAllocator* SRenderNodeImplContext::GetResourceAllocator() const 
+{ 
+	RED_FATAL_ASSERT( m_resAlloc, "" ); 
+	return m_resAlloc; 
+}
+
+RED_FORCE_INLINE const CRenderCamera& SRenderNodeImplContext::GetRenderCamera( ERenderingPlane plane ) const 
+{ 
+	return GetCameraData()->GetRenderCamera( plane );
+}
+
+//********************************************************************************//
+//********************************************************************************//
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetWidth() const 
+{ 
+	return GetCameraData()->GetResolutionState().GetInternalWidth();
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetHeight() const
+{ 
+	return GetCameraData()->GetResolutionState().GetInternalHeight(); 
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetMaxWidth() const
+{
+	return GetCameraData()->GetResolutionState().GetMaxInternalWidth();
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetMaxHeight() const
+{
+	return GetCameraData()->GetResolutionState().GetMaxInternalHeight();
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetFinalWidth() const
+{
+	return GetCameraData()->GetResolutionState().GetTargetWidth();
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetFinalHeight() const
+{
+	return GetCameraData()->GetResolutionState().GetTargetHeight();
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetPostAAWidth() const
+{
+#ifdef USE_DLSS
+	return Test( RFF_DLSS ) ? GetFinalWidth() : GetWidth();
+#else
+	return GetWidth();
+#endif // USE_DLSS
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetPostAAHeight() const
+{
+#ifdef USE_DLSS
+	return Test( RFF_DLSS ) ? GetFinalHeight() : GetHeight();
+#else
+	return GetHeight();
+#endif // USE_DLSS
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetPostAAMaxWidth() const
+{
+#ifdef USE_DLSS
+	return Test( RFF_DLSS ) ? GetFinalWidth() : GetMaxWidth();
+#else
+	return GetMaxWidth();
+#endif // USE_DLSS
+}
+
+RED_FORCE_INLINE Uint32 SRenderNodeImplContext::GetPostAAMaxHeight() const
+{
+#ifdef USE_DLSS
+	return Test( RFF_DLSS ) ? GetFinalHeight() : GetMaxHeight();
+#else
+	return GetMaxHeight();
+#endif // USE_DLSS
+}
+
+//********************************************************************************//
+//********************************************************************************//
+
+RED_FORCE_INLINE Bool SRenderNodeImplContext::IsUniqueNode() const 
+{
+	return m_isNodeUnique; 
+}
+
+
+//********************************************************************************//
+//********************************************************************************//
+
+// For easy use outside
+using RenderScopeNameTag = SRenderNodeImplContext::ScopeNameTag;
+
+//********************************************************************************//
+//********************************************************************************//
+

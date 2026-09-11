@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{51F9D463-60E2-4C2D-88E1-891EFB07D054}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)bin\</OutDir>
+    <IntDir>$(ProjectDir)obj\</IntDir>
+    <TargetName>shader_compile_check</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>4324;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;VG_BUILD_DEBUG=1;VG_ENABLE_ASSERTS=1;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\ENGINE\source\materialTools\include;D:\ENGINE\source\shaderTools\include;D:\ENGINE\source\shaders\include;D:\ENGINE\source\crypto\include;D:\ENGINE\source\serialization\include;D:\ENGINE\source\resources\include;D:\ENGINE\source\filesystem\include;D:\ENGINE\source\io\include;D:\ENGINE\source\containers\include;D:\ENGINE\source\concurrency\include;D:\ENGINE\source\memory\include;D:\ENGINE\source\diagnostics\include;D:\ENGINE\source\system\include;D:\ENGINE\source\imported\common\redContainers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>D:\ENGINE\source\imported\external\nvToolsExt\lib\x64.Release;D:\ENGINE\external\slang\upstream\lib;D:\ENGINE\source\imported\external\oodle\lib\x64.Debug;D:\ENGINE\source\imported\internal\FileSync\lib\release_x64;D:\ENGINE\source\imported\external\udt\lib\release_x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvToolsExt64_1.lib;Advapi32.lib;Dbghelp.lib;Psapi.lib;Shlwapi.lib;Shell32.lib;Version.lib;ws2_32.lib;slang-compiler.lib;oo2ext_win64_debug.lib;FileSync.lib;udt.lib;%(AdditionalDependencies);libcpmtd.lib</AdditionalDependencies>
+      <SubSystem>Console</SubSystem>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="shader_compile_check.cpp" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\projects\vs2022\materialTools.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\assets.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\shaderTools.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\shaders.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\pipelines.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\materials.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\jobs.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\jobsCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\concurrency.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\concurrencyCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\packages.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\crypto.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\serialization.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\serializationCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\resources.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\filesystem.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\filesystemCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\io.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redFileSystemCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redCompressionCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redCoreCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redIOCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redContainersCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redMathCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\diagnostics.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\diagnosticsCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\containers.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\containersCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\memory.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\redSystemCompat.vcxproj" />
+    <ProjectReference Include="..\projects\vs2022\system.vcxproj" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

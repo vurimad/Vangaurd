@@ -29,6 +29,8 @@ namespace vanguard::materials
 
     struct TechniqueBuildRecord
     {
+        // Pipeline material shaders share the layout-authority shader's domain,
+        // material layout and graph permutation; pass entries/resources may differ.
         u64 name = 0;
         resources::ResourceReference pipeline;
         const pipelines::PipelineFile* pipelineReflection = nullptr;
@@ -57,26 +59,26 @@ namespace vanguard::materials
         AccelerationStructure
     };
 
-    struct ResourceParameterBuildRecord
+    /// One sealed offline compatibility rule. Asset types absent from this table
+    /// are not assignable to material resource parameters of that kind.
+    struct ResourceTypeCompatibility
     {
-        u64 name = 0;
-        u32 arrayCount = 1;
         ResourceParameterKind kind = ResourceParameterKind::Texture;
+        resources::ResourceTypeId assetType = resources::InvalidResourceTypeId;
     };
 
-    /// Describes a fully flattened runtime material. Selected names identify the
-    /// material-owned part of the logical shader interface. Byte layout and value
+    /// Describes a fully flattened runtime material. The shader's sealed material
+    /// contract identifies the complete logical interface. Byte layout and value
     /// types are derived from reflection; descriptor placement is renderer policy.
     struct BuildDescription
     {
         u64 name = 0;
         resources::ResourceReference shader;
         const shaders::ShaderFile* shaderReflection = nullptr;
-        containers::ArraySpan<const u64> materialConstantBuffers;
-        containers::ArraySpan<const ResourceParameterBuildRecord> resourceParameters;
         containers::ArraySpan<const TechniqueBuildRecord> techniques;
         containers::ArraySpan<const ConstantValueBuildRecord> constants;
         containers::ArraySpan<const ResourceValueBuildRecord> resources;
+        containers::ArraySpan<const ResourceTypeCompatibility> resourceTypeCompatibility;
     };
 
     struct TechniqueRecord
@@ -112,7 +114,9 @@ namespace vanguard::materials
     {
         u64 name = 0;
         u32 arrayIndex = 0;
+        u32 slot = 0;
         ResourceParameterKind kind = ResourceParameterKind::Texture;
+        resources::ResourceTypeId expectedAssetType = resources::InvalidResourceTypeId;
         resources::ResourceReference resource;
         resources::DependencyKind dependency = resources::DependencyKind::Optional;
     };
@@ -129,7 +133,7 @@ namespace vanguard::materials
         u32 maximumTechniques = 256;
         u32 maximumConstantBuffers = 256;
         u32 maximumParameters = 16384;
-        u32 maximumResourceParameters = 16384;
+        u32 maximumResourceParameters = 256;
         u32 maximumParameterBytes = 16u * 1024u * 1024u;
         u32 maximumDependencies = 32768;
     };
@@ -150,6 +154,8 @@ namespace vanguard::materials
         [[nodiscard]] u64 GetName() const noexcept;
         [[nodiscard]] const resources::ResourceReference& GetShader() const noexcept;
         [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetMaterialDomainFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetMaterialLayoutFingerprint() const noexcept;
         [[nodiscard]] containers::ArraySpan<const TechniqueRecord> GetTechniques() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ConstantBufferRecord> GetConstantBuffers() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ParameterRecord> GetParameters() const noexcept;
@@ -162,6 +168,8 @@ namespace vanguard::materials
         u64 m_name = 0;
         resources::ResourceReference m_shader;
         crypto::Digest256 m_contentFingerprint;
+        crypto::Digest256 m_materialDomainFingerprint;
+        crypto::Digest256 m_materialLayoutFingerprint;
         containers::DynamicArray<TechniqueRecord> m_techniques;
         containers::DynamicArray<ConstantBufferRecord> m_constantBuffers;
         containers::DynamicArray<ParameterRecord> m_parameters;
@@ -170,6 +178,46 @@ namespace vanguard::materials
         containers::DynamicArray<u8> m_parameterData;
         bool m_open = false;
     };
+
+    struct LoadedMaterialDependency
+    {
+        resources::ResourceReference resource;
+        resources::DependencyKind kind = resources::DependencyKind::Required;
+        resources::ResourceHandle handle;
+        resources::Failure failure = resources::Failure::None;
+    };
+
+    /// Immutable CPU material artifact and the exact non-Soft dependency
+    /// generations observed at construction. Optional failures remain visible;
+    /// Soft references remain only in MaterialFile and do not become load edges.
+    class MaterialResourceObject final : public resources::ResourceObject
+    {
+    public:
+        MaterialResourceObject() noexcept;
+        ~MaterialResourceObject() override = default;
+
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
+        [[nodiscard]] bool IsOpen() const noexcept;
+        [[nodiscard]] const MaterialFile& GetFile() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const LoadedMaterialDependency> GetLoadedDependencies() const noexcept;
+
+    private:
+        MaterialFile m_file;
+        containers::DynamicArray<LoadedMaterialDependency> m_loadedDependencies;
+
+        friend resources::ResourceObject* DecodeMaterialResource(resources::ResourceReference, const void*, usize, const resources::LoadContext&, resources::Failure&, void*) noexcept;
+    };
+
+    struct MaterialResourceDecoderConfig
+    {
+        ReadLimits limits;
+    };
+
+    /// ResourceStreamer-compatible callbacks. The optional user data points to a
+    /// MaterialResourceDecoderConfig and must outlive decoder registration.
+    [[nodiscard]] resources::ResourceObject* DecodeMaterialResource(resources::ResourceReference reference, const void* data, usize size, const resources::LoadContext& context, resources::Failure& failure,
+                                                                    void* userData) noexcept;
+    void DestroyMaterialResource(resources::ResourceObject* resource, void* userData) noexcept;
 
     [[nodiscard]] Result WriteMaterial(filesystem::IFile& writer, const BuildDescription& description) noexcept;
     [[nodiscard]] Result CalculateContentFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;

@@ -2,6 +2,43 @@
 
 Date: 2026-08-28
 
+Latest source checkpoint (2026-09-09): 9C now has StaticMeshComponent,
+directional/point/spot LightComponent and perspective CameraComponent adapters, saved schemas,
+managed-world registration, bounded mesh preparation and post-transform camera
+publication. See [the component ledger](../../source/entities/docs/concrete-rendering-components.md).
+The subsequent [light maturity pass](../../source/rendering/docs/light-contract.md)
+adds stable edits/visibility, coherent bounds and canonical CPU/GPU contracts.
+Executable verification remains deferred, including preceding 9B.2 proof gates.
+9D source now transfers strong drawable ownership into RenderScene and performs
+revision-safe GPU binding cutover through a bounded changed-proxy queue. Phase 10
+must consume the accepted binding handoff for actual indirect drawing. Executable
+9D proof remains deferred. The historical missing-production list below is not
+today's implementation ledger.
+
+Current continuation note (2026-09-09): the material runtime and mesh 9A topology
+detours are complete within their recorded scopes. The missing-production list
+below describes the original pause, not today's implementation status. See the
+[geometry rendering study](geometry-rendering-study.md), especially its world/
+RenderScene ownership analysis and current slice **9B.2 -- shell/bin placement
+and strong drawable mesh binding**. 9B.1 implementation is complete; combined
+verification is deferred. The 9B.2 interruption ended after unpublished shell/bin
+leases. Recovery source now implements complete anchor aggregation, shared
+placement/residency publication, strong bindings, safe withdrawal and lifetime
+retention, plus normal retirement sealing from actual submission receipts.
+These paths are statically inspected only: live acceptance, compilation and
+integrated lifecycle verification remain unproven. The phase is not declared
+complete. See `source/rendering/docs/geometry-batcher-port.md`. No compilation,
+test execution or writing tests until the user's explicit final batch.
+Keep the existing component/runtime/relink machinery; complete
+ready mesh bindings before 9C concrete components and 9D scene lifecycle. Phase
+10 renders through GPU-generated indirect work from the start.
+
+9B.2 static review follow-up: active drawable work is now queued rather than
+found by scanning residency records. Progress and publication have explicit
+budgets; ready bindings are not polled. Cancellation, staged callback ownership,
+retirement snapshot failure, and oversized publication handling were reviewed
+and tightened in source. Builds and all test work remain deferred.
+
 ## Purpose
 
 Work on concrete game-world rendering components is intentionally paused while Vanguard builds the production mesh resource and GPU-residency path. Resume from this document after that detour; do not reconstruct the phase order from the historical RenderScene plan.

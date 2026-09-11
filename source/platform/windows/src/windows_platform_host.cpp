@@ -145,14 +145,25 @@ namespace
                 Push(translated);
                 break;
             case SDL_EVENT_MOUSE_MOTION:
+            {
                 translated.type = EventType::MouseMoved;
                 translated.deviceType = DeviceType::Mouse;
                 translated.device = MakeSimpleDevice(DeviceType::Mouse, event.motion.which);
                 translated.timestampNanoseconds = event.motion.timestamp;
                 translated.window = window;
                 translated.data.mouseMotion = {event.motion.x, event.motion.y, event.motion.xrel, event.motion.yrel};
+                SDL_Window* const nativeWindow = SDL_GetWindowFromID(event.motion.windowID);
+                int originX = 0;
+                int originY = 0;
+                if (nativeWindow != nullptr && SDL_GetWindowPosition(nativeWindow, &originX, &originY))
+                {
+                    translated.data.mouseMotion.desktopX = event.motion.x + static_cast<vanguard::f32>(originX);
+                    translated.data.mouseMotion.desktopY = event.motion.y + static_cast<vanguard::f32>(originY);
+                    translated.data.mouseMotion.hasDesktopPosition = true;
+                }
                 Push(translated);
                 break;
+            }
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
             case SDL_EVENT_MOUSE_BUTTON_UP:
                 if (TranslateMouseButton(event.button.button, translated.data.mouseButton.button))
@@ -387,7 +398,7 @@ namespace vanguard::platform::windows
         return "Windows";
     }
 
-    application::PlatformStatus WindowsPlatformHost::Initialize(const application::PlatformStartupInfo&) noexcept
+    application::PlatformStatus WindowsPlatformHost::Initialize(const application::PlatformStartupInfo& startup) noexcept
     {
         if (m_initialized)
             return application::PlatformStatus::Failure("Windows platform host is already initialized");
@@ -397,6 +408,10 @@ namespace vanguard::platform::windows
         // This must happen before any product service creates an HWND. Failure is non-fatal when process metadata or
         // an embedding host has already selected the awareness mode.
         ConfigureDpiAwareness();
+
+        // An editor activation click also operates the clicked tab/control, matching normal multi-window tool interaction.
+        if (application::HasProfile(startup.profile, application::ApplicationProfile::Editor))
+            static_cast<void>(SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1"));
 
         g_consoleExitRequested.SetValue(false);
         if (::SetConsoleCtrlHandler(ConsoleControlHandler, TRUE) == FALSE)

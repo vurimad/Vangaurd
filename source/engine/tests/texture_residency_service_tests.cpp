@@ -15,6 +15,7 @@
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/packages/packages.hpp>
+#include <vanguard/rendering/material_program_layout.hpp>
 #include <vanguard/rhi/d3d12/backend.hpp>
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/texture_tools/texture_asset_compiler.hpp>
@@ -67,8 +68,7 @@ namespace
         const char* path = nullptr;
     };
 
-    [[nodiscard]] bool ResolvePackagePath(const resources::ResourceReference resource, char* const destination,
-                                          const vanguard::usize capacity, vanguard::usize& written, void* const userData) noexcept
+    [[nodiscard]] bool ResolvePackagePath(const resources::ResourceReference resource, char* const destination, const vanguard::usize capacity, vanguard::usize& written, void* const userData) noexcept
     {
         const PackagePathContext& context = *static_cast<const PackagePathContext*>(userData);
         if (resource != context.resource || context.path == nullptr)
@@ -84,12 +84,10 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool BuildAndPublish(assets::BuildSystem& system, assets::DependencyIndex& index,
-                                       const assets::BuildRequest& request, assets::BuildOutput& output) noexcept
+    [[nodiscard]] bool BuildAndPublish(assets::BuildSystem& system, assets::DependencyIndex& index, const assets::BuildRequest& request, assets::BuildOutput& output) noexcept
     {
         assets::BuildPlan plan;
-        return system.Prepare(request, plan) == assets::Result::Success &&
-               system.Execute(request, plan, output) == assets::Result::Success &&
+        return system.Prepare(request, plan) == assets::Result::Success && system.Execute(request, plan, output) == assets::Result::Success &&
                index.Publish(request, plan, output) == assets::IndexResult::Success;
     }
 
@@ -128,8 +126,7 @@ namespace
 
     [[nodiscard]] bool WaitRetirementFences(const rhi::ResidencyFenceSet& fences, rhi::Failure& failure) noexcept
     {
-        return rhi::WaitForGpuFence({rhi::QueueType::Graphics, fences.graphics}, 5'000'000'000ull, &failure) &&
-               rhi::WaitForGpuFence({rhi::QueueType::Compute, fences.compute}, 5'000'000'000ull, &failure) &&
+        return rhi::WaitForGpuFence({rhi::QueueType::Graphics, fences.graphics}, 5'000'000'000ull, &failure) && rhi::WaitForGpuFence({rhi::QueueType::Compute, fences.compute}, 5'000'000'000ull, &failure) &&
                rhi::WaitForGpuFence({rhi::QueueType::Copy, fences.copy}, 5'000'000'000ull, &failure);
     }
 
@@ -143,8 +140,7 @@ namespace
         return false;
     }
 
-    [[nodiscard]] bool DriveUntilReady(engine::FramePipelineService& frames, TestClock& clock,
-                                       rendering::TextureResidencyRuntime& runtime, const rendering::GpuTextureResidencyHandle residency) noexcept
+    [[nodiscard]] bool DriveUntilReady(engine::FramePipelineService& frames, TestClock& clock, rendering::TextureResidencyRuntime& runtime, const rendering::GpuTextureResidencyHandle residency) noexcept
     {
         rendering::TextureResidencyRuntimeFailure failure;
         rendering::TextureRuntimeInfo info;
@@ -161,8 +157,7 @@ namespace
         return false;
     }
 
-    [[nodiscard]] bool VerifyPhysicalMip(const textures::TextureResourceObject& resource, const rendering::TextureResidencyInfo& residency,
-                                         const vanguard::u32 assetMip) noexcept
+    [[nodiscard]] bool VerifyPhysicalMip(const textures::TextureResourceObject& resource, const rendering::TextureResidencyInfo& residency, const vanguard::u32 assetMip) noexcept
     {
         const textures::TextureFile& metadata = resource.GetMetadata();
         const vanguard::u32 subresource = metadata.FindSubresource(static_cast<vanguard::u8>(assetMip));
@@ -173,19 +168,16 @@ namespace
             return false;
         }
         const textures::SubresourceRecord& record = subresources[subresource];
-        if (record.depth != 1 || record.rowPitch == 0 || record.slicePitch == 0 || record.slicePitch % record.rowPitch != 0 ||
-            record.byteSize != record.slicePitch)
+        if (record.depth != 1 || record.rowPitch == 0 || record.slicePitch == 0 || record.slicePitch % record.rowPitch != 0 || record.byteSize != record.slicePitch)
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u has unsupported proof layout: %ux%u row=%u slice=%u bytes=%llu depth=%u\n",
-                         assetMip, record.width, record.height, record.rowPitch, record.slicePitch,
-                         static_cast<unsigned long long>(record.byteSize), record.depth);
+            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u has unsupported proof layout: %ux%u row=%u slice=%u bytes=%llu depth=%u\n", assetMip, record.width, record.height, record.rowPitch,
+                         record.slicePitch, static_cast<unsigned long long>(record.byteSize), record.depth);
             return false;
         }
 
         textures::TextureSubresourceReadRequest expectedRead;
-        if (resource.GetSubresourceSource().ReadSubresourceAsync(metadata, subresource, expectedRead) != textures::Result::Success ||
-            !expectedRead.TryWait(10'000) || expectedRead.GetResult() != textures::Result::Success ||
-            expectedRead.GetBytes().Count() != record.byteSize)
+        if (resource.GetSubresourceSource().ReadSubresourceAsync(metadata, subresource, expectedRead) != textures::Result::Success || !expectedRead.TryWait(10'000) ||
+            expectedRead.GetResult() != textures::Result::Success || expectedRead.GetBytes().Count() != record.byteSize)
         {
             std::fprintf(stderr, "[textureResidencyServiceTests] mip %u cooked-byte read failed\n", assetMip);
             return false;
@@ -195,8 +187,7 @@ namespace
         rhi::CommandListRef commands = rhi::CreateCommandList(rhi::CommandListType::Default, 0x5458545244424b31ull, &failure);
         if (!commands)
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback command-list creation failed: %s\n", assetMip,
-                         failure.message != nullptr ? failure.message : "unknown");
+            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback command-list creation failed: %s\n", assetMip, failure.message != nullptr ? failure.message : "unknown");
             return false;
         }
         if (!rhi::BindCommandList(commands, &failure))
@@ -211,65 +202,51 @@ namespace
         bool recorded = rhi::TransitionTexture(residency.texture, shaderRead, rhi::ResourceState::CopySource, range, &failure);
         rhi::TextureReadback readback;
         if (recorded)
-            readback = rhi::TextureReadback(rhi::AdoptReference,
-                                            rhi::RequestTextureReadback(residency.texture, {{physicalMip, 0}}, &failure));
-        recorded = recorded && readback.IsValid() &&
-                   rhi::TransitionTexture(residency.texture, rhi::ResourceState::CopySource, shaderRead, range, &failure);
+            readback = rhi::TextureReadback(rhi::AdoptReference, rhi::RequestTextureReadback(residency.texture, {{physicalMip, 0}}, &failure));
+        recorded = recorded && readback.IsValid() && rhi::TransitionTexture(residency.texture, rhi::ResourceState::CopySource, shaderRead, range, &failure);
         rhi::UnbindCommandList();
         if (!recorded)
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback recording failed: %s\n", assetMip,
-                         failure.message != nullptr ? failure.message : "unknown");
+            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback recording failed: %s\n", assetMip, failure.message != nullptr ? failure.message : "unknown");
             rhi::DiscardCommandList(commands);
             return false;
         }
 
         const rhi::CommandListRef submissions[]{commands};
         rhi::GpuFence completion;
-        if (!rhi::CloseAndSubmitCommandLists("texture residency physical mip proof", {submissions, 1}, rhi::CommandListSyncType::None, completion,
-                                             &failure) ||
+        if (!rhi::CloseAndSubmitCommandLists("texture residency physical mip proof", {submissions, 1}, rhi::CommandListSyncType::None, completion, &failure) ||
             !rhi::WaitForGpuFence(completion, 5'000'000'000ull, &failure) || !rhi::RetireResources(&failure))
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback submission failed: %s\n", assetMip,
-                         failure.message != nullptr ? failure.message : "unknown");
+            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback submission failed: %s\n", assetMip, failure.message != nullptr ? failure.message : "unknown");
             return false;
         }
 
         rhi::TextureReadbackInfo readbackInfo;
         rhi::TextureReadbackMapping mapping;
-        if (!rhi::GetTextureReadbackInfo(readback.GetRef(), readbackInfo, &failure) ||
-            readbackInfo.state != rhi::TextureReadbackState::Ready || readbackInfo.extent.width != record.width ||
-            readbackInfo.extent.height != record.height || readbackInfo.extent.depth != 1 ||
-            !rhi::MapTextureReadback(readback.GetRef(), mapping, &failure))
+        if (!rhi::GetTextureReadbackInfo(readback.GetRef(), readbackInfo, &failure) || readbackInfo.state != rhi::TextureReadbackState::Ready || readbackInfo.extent.width != record.width ||
+            readbackInfo.extent.height != record.height || readbackInfo.extent.depth != 1 || !rhi::MapTextureReadback(readback.GetRef(), mapping, &failure))
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback map failed: extent=%ux%ux%u expected=%ux%u state=%u message=%s\n",
-                         assetMip, readbackInfo.extent.width, readbackInfo.extent.height, readbackInfo.extent.depth,
-                         record.width, record.height, static_cast<unsigned>(readbackInfo.state),
-                         failure.message != nullptr ? failure.message : "unknown");
+            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback map failed: extent=%ux%ux%u expected=%ux%u state=%u message=%s\n", assetMip, readbackInfo.extent.width,
+                         readbackInfo.extent.height, readbackInfo.extent.depth, record.width, record.height, static_cast<unsigned>(readbackInfo.state), failure.message != nullptr ? failure.message : "unknown");
             return false;
         }
 
         const auto expected = expectedRead.GetBytes();
         const auto* const actualBytes = static_cast<const vanguard::u8*>(mapping.data);
         const vanguard::u32 rows = record.slicePitch / record.rowPitch;
-        bool matches = mapping.rowPitch >= record.rowPitch && mapping.depthPitch >= record.slicePitch &&
-                       mapping.dataSize >= mapping.depthPitch;
+        bool matches = mapping.rowPitch >= record.rowPitch && mapping.depthPitch >= record.slicePitch && mapping.dataSize >= mapping.depthPitch;
         if (matches)
             for (vanguard::u32 row = 0; row < rows; ++row)
-                matches = matches && std::memcmp(actualBytes + static_cast<vanguard::u64>(row) * mapping.rowPitch,
-                                                 expected.Data() + static_cast<vanguard::u64>(row) * record.rowPitch,
-                                                 record.rowPitch) == 0;
+                matches = matches && std::memcmp(actualBytes + static_cast<vanguard::u64>(row) * mapping.rowPitch, expected.Data() + static_cast<vanguard::u64>(row) * record.rowPitch, record.rowPitch) == 0;
         if (!matches)
-            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback mismatch: rows=%u gpuRow=%llu gpuDepth=%llu gpuBytes=%llu cookedRow=%u cookedSlice=%u\n",
-                         assetMip, rows, static_cast<unsigned long long>(mapping.rowPitch),
-                         static_cast<unsigned long long>(mapping.depthPitch), static_cast<unsigned long long>(mapping.dataSize),
-                         record.rowPitch, record.slicePitch);
+            std::fprintf(stderr, "[textureResidencyServiceTests] mip %u readback mismatch: rows=%u gpuRow=%llu gpuDepth=%llu gpuBytes=%llu cookedRow=%u cookedSlice=%u\n", assetMip, rows,
+                         static_cast<unsigned long long>(mapping.rowPitch), static_cast<unsigned long long>(mapping.depthPitch), static_cast<unsigned long long>(mapping.dataSize), record.rowPitch,
+                         record.slicePitch);
         const bool unmapped = rhi::UnmapTextureReadback(readback.GetRef(), &failure);
         return unmapped && matches;
     }
 
-    [[nodiscard]] bool VerifyGpuTextureRecord(const rendering::GpuSceneRuntime& gpuScene,
-                                              const rendering::TextureResidencyInfo& residency) noexcept
+    [[nodiscard]] bool VerifyGpuTextureRecord(const rendering::GpuSceneRuntime& gpuScene, const rendering::TextureResidencyInfo& residency) noexcept
     {
         rendering::GpuSceneElementAddress address;
         if (!gpuScene.GetTables().Resolve<rendering::GpuTextureResidency>(residency.handle.index, address))
@@ -293,8 +270,7 @@ namespace
 
         const rhi::ResourceState shaderRead = rhi::ResourceState::ShaderResourceGraphics | rhi::ResourceState::ShaderResourceCompute;
         const bool recorded = rhi::TransitionBuffer(address.buffer, rhi::ResourceState::Unknown, rhi::ResourceState::CopySource, &failure) &&
-                              rhi::CopyBuffer(readback.GetRef(), 0, address.buffer, address.byteOffset,
-                                              sizeof(rendering::GpuTextureResidency), &failure) &&
+                              rhi::CopyBuffer(readback.GetRef(), 0, address.buffer, address.byteOffset, sizeof(rendering::GpuTextureResidency), &failure) &&
                               rhi::TransitionBuffer(address.buffer, rhi::ResourceState::Unknown, shaderRead, &failure);
         rhi::UnbindCommandList();
         if (!recorded)
@@ -305,28 +281,22 @@ namespace
 
         const rhi::CommandListRef submissions[]{commands};
         rhi::GpuFence completion;
-        if (!rhi::CloseAndSubmitCommandLists("texture residency GPU Scene record proof", {submissions, 1}, rhi::CommandListSyncType::None,
-                                             completion, &failure) ||
+        if (!rhi::CloseAndSubmitCommandLists("texture residency GPU Scene record proof", {submissions, 1}, rhi::CommandListSyncType::None, completion, &failure) ||
             !rhi::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
             return false;
 
-        const auto* const uploaded = static_cast<const rendering::GpuTextureResidency*>(
-            rhi::LockBuffer(readback.GetRef(), 0, sizeof(rendering::GpuTextureResidency), &failure));
+        const auto* const uploaded = static_cast<const rendering::GpuTextureResidency*>(rhi::LockBuffer(readback.GetRef(), 0, sizeof(rendering::GpuTextureResidency), &failure));
         if (uploaded == nullptr)
             return false;
         const rendering::GpuTextureResidency copy = *uploaded;
         rhi::UnlockBuffer(readback.GetRef());
         const vanguard::u32 generation = copy.generationAndFlags & rendering::GpuTextureResidencyGenerationMask;
         const vanguard::u32 flags = copy.generationAndFlags >> rendering::GpuTextureResidencyFlagsShift;
-        return copy.descriptor == residency.descriptor.GpuIndex() && copy.firstResidentMip == residency.firstResidentMip &&
-               copy.residentMipCount == residency.residentMipCount &&
-               generation == (residency.handle.generation & rendering::GpuTextureResidencyGenerationMask) &&
-               flags == static_cast<vanguard::u32>(rendering::GpuTextureResidencyFlags::BindlessReady);
+        return copy.descriptor == residency.descriptor.GpuIndex() && copy.firstResidentMip == residency.firstResidentMip && copy.residentMipCount == residency.residentMipCount &&
+               generation == (residency.handle.generation & rendering::GpuTextureResidencyGenerationMask) && flags == static_cast<vanguard::u32>(rendering::GpuTextureResidencyFlags::BindlessReady);
     }
 
-    [[nodiscard]] bool VerifyTextureInstallation(const textures::TextureResourceObject& resource,
-                                                 engine::RenderingService& service,
-                                                 const rendering::GpuTextureResidencyHandle handle,
+    [[nodiscard]] bool VerifyTextureInstallation(const textures::TextureResourceObject& resource, engine::RenderingService& service, const rendering::GpuTextureResidencyHandle handle,
                                                  const vanguard::crypto::Digest256& expectedSourceFingerprint) noexcept
     {
         if (!(resource.GetMetadata().GetSourceFingerprint() == expectedSourceFingerprint))
@@ -337,21 +307,19 @@ namespace
         rhi::Failure rhiFailure;
         if (!rhi::WaitIdle(&rhiFailure))
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] proof GPU idle wait failed: %s\n",
-                         rhiFailure.message != nullptr ? rhiFailure.message : "unknown");
+            std::fprintf(stderr, "[textureResidencyServiceTests] proof GPU idle wait failed: %s\n", rhiFailure.message != nullptr ? rhiFailure.message : "unknown");
             return false;
         }
 
         rendering::TextureResidencyInfo residency;
         rendering::TextureResidencyFailure residencyFailure;
-        if (!service.GetTextureResidency().GetResidencyManager().GetInfo(handle, residency, &residencyFailure) ||
-            residency.handle != handle || residency.state != rendering::TextureResidencyState::BindlessReady || !residency.texture ||
-            !residency.descriptor || !(residency.contentFingerprint == resource.GetMetadata().GetContentFingerprint()) ||
-            residency.residentMipCount == 0 || residency.firstResidentMip + residency.residentMipCount > resource.GetMetadata().GetMipCount())
+        if (!service.GetTextureResidency().GetResidencyManager().GetInfo(handle, residency, &residencyFailure) || residency.handle != handle ||
+            residency.state != rendering::TextureResidencyState::BindlessReady || !residency.texture || !residency.descriptor ||
+            !(residency.contentFingerprint == resource.GetMetadata().GetContentFingerprint()) || residency.residentMipCount == 0 ||
+            residency.firstResidentMip + residency.residentMipCount > resource.GetMetadata().GetMipCount())
         {
-            std::fprintf(stderr, "[textureResidencyServiceTests] physical residency proof failed: state=%u first=%u count=%u total=%u message=%s\n",
-                         static_cast<unsigned>(residency.state), residency.firstResidentMip, residency.residentMipCount,
-                         resource.GetMetadata().GetMipCount(), residencyFailure.message != nullptr ? residencyFailure.message : "");
+            std::fprintf(stderr, "[textureResidencyServiceTests] physical residency proof failed: state=%u first=%u count=%u total=%u message=%s\n", static_cast<unsigned>(residency.state),
+                         residency.firstResidentMip, residency.residentMipCount, resource.GetMetadata().GetMipCount(), residencyFailure.message != nullptr ? residencyFailure.message : "");
             return false;
         }
         for (vanguard::u32 mip = residency.firstResidentMip; mip < residency.firstResidentMip + residency.residentMipCount; ++mip)
@@ -368,8 +336,7 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool RetireTexture(engine::FramePipelineService& frames, TestClock& clock,
-                                     engine::RenderingService& service, rendering::TextureDemandHandle& demand) noexcept
+    [[nodiscard]] bool RetireTexture(engine::FramePipelineService& frames, TestClock& clock, engine::RenderingService& service, rendering::TextureDemandHandle& demand) noexcept
     {
         demand.Reset();
         if (!RunFrame(frames, clock))
@@ -377,14 +344,14 @@ namespace
 
         rhi::Failure rhiFailure;
         rhi::ResidencyFenceSet safeAfter;
-        rendering::TextureResidencyRuntimeFailure textureFailure;
-        rendering::GpuSceneLifetimeFailure lifetimeFailure;
         rendering::TextureResidencyRuntime& runtime = service.GetTextureResidency();
         rendering::GpuSceneLifetime& lifetime = service.GetGpuScene().GetLifetime();
-        if (!SubmitRetirementFences(safeAfter, rhiFailure) || !runtime.SealRetirements(safeAfter, &textureFailure) ||
-            !lifetime.SealRetirements(safeAfter, &lifetimeFailure) || !WaitRetirementFences(safeAfter, rhiFailure) ||
+        engine::RenderingRetirementFailure retirementFailure;
+        if (!SubmitRetirementFences(safeAfter, rhiFailure) || !service.SealResidencyRetirements(safeAfter, &retirementFailure) || !WaitRetirementFences(safeAfter, rhiFailure) ||
             !rhi::RetireResources(&rhiFailure))
             return false;
+        rendering::GpuSceneLifetimeFailure lifetimeFailure;
+        rendering::TextureResidencyRuntimeFailure textureFailure;
         static_cast<void>(lifetime.Collect(&lifetimeFailure));
         static_cast<void>(runtime.CollectRetirements(&textureFailure));
         return RunFrame(frames, clock) && runtime.GetStats().residencyRecords == 0 && runtime.GetStats().liveDemands == 0;
@@ -396,18 +363,16 @@ namespace
         {
             const resources::PipelineStats pipelineStats = pipeline.GetStats();
             const streaming::Stats streamingStats = streamer.GetStats();
-            if (pipelineStats.activeOperations == 0 && pipelineStats.activeJobs == 0 && pipelineStats.activePreparations == 0 &&
-                pipelineStats.externalRequests == 0 && streamingStats.activeLoads == 0 && streamingStats.activeReads == 0 &&
-                streamingStats.stagingBytesInUse == 0)
+            if (pipelineStats.activeOperations == 0 && pipelineStats.activeJobs == 0 && pipelineStats.activePreparations == 0 && pipelineStats.externalRequests == 0 && streamingStats.activeLoads == 0 &&
+                streamingStats.activeReads == 0 && streamingStats.stagingBytesInUse == 0)
                 return true;
             vanguard::concurrency::SleepOnCurrentThread(1);
         }
         return false;
     }
 
-    [[nodiscard]] bool ExerciseTexture(const resources::ResourceReference reference, streaming::ResourceStreamer& streamer,
-                                       engine::FramePipelineService& frames, TestClock& clock, engine::RenderingService& service,
-                                       const vanguard::crypto::Digest256& expectedSourceFingerprint) noexcept
+    [[nodiscard]] bool ExerciseTexture(const resources::ResourceReference reference, streaming::ResourceStreamer& streamer, engine::FramePipelineService& frames, TestClock& clock,
+                                       engine::RenderingService& service, const vanguard::crypto::Digest256& expectedSourceFingerprint) noexcept
     {
         resources::PipelineRequest request = streamer.Request(reference, resources::LoadPriority::High);
         if (!request.TryWait(10'000) || !request.HasLoaded())
@@ -425,8 +390,8 @@ namespace
             !VerifyTextureInstallation(*texture, service, demand.GetResidency(), expectedSourceFingerprint))
             return false;
         const rendering::GpuSceneRuntimeStats after = service.GetGpuScene().GetStats();
-        if (after.submittedBatches != before.submittedBatches + 1 || after.stagedContributions != before.stagedContributions + 1 ||
-            after.acceptedContributions != before.acceptedContributions + 1 || after.retriedContributions != before.retriedContributions)
+        if (after.submittedBatches != before.submittedBatches + 1 || after.stagedContributions != before.stagedContributions + 1 || after.acceptedContributions != before.acceptedContributions + 1 ||
+            after.retriedContributions != before.retriedContributions)
             return false;
         if (!RetireTexture(frames, clock, service, demand))
             return false;
@@ -434,13 +399,24 @@ namespace
         request.Reset();
         return true;
     }
+
+    [[nodiscard]] bool VerifyMaterialInitializationRollback(engine::RenderingServiceConfig config) noexcept
+    {
+        config.materialResources.maximumProviders = 0;
+        vanguard::application::EngineHost host;
+        vanguard::application::HostFailure failure;
+        if (!engine::RegisterEngineModule(host, &failure) || !engine::RegisterIoService(host, &failure) || !engine::RegisterFilesystemService(host, &failure) || !engine::RegisterJobsService(host, &failure) ||
+            !engine::RegisterFramePipelineService(host, &failure) || !engine::RegisterResourcesService(host, &failure) || !engine::RegisterRenderingService(host, config, &failure) ||
+            !host.Compile(vanguard::application::ApplicationProfile::Runtime, &failure))
+            return false;
+        return !host.Start(&failure) && !rhi::IsInitialized();
+    }
 } // namespace
 
 int main()
 {
     Check(vanguard::memory::Initialize(), "memory initialization");
-    Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "textureResidencyServiceTests"),
-          "diagnostics initialization");
+    Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "textureResidencyServiceTests"), "diagnostics initialization");
     Check(vanguard::containers::Initialize(), "containers initialization");
 
     vanguard::application::EngineHost host;
@@ -449,6 +425,8 @@ int main()
     renderingConfig.deviceMode = engine::RenderingDeviceMode::Required;
     renderingConfig.backendFactory = rhi::d3d12::GetBackendFactory();
     renderingConfig.resourceDescriptors.capacity = 128;
+    renderingConfig.samplerDescriptors.capacity = 16;
+    renderingConfig.maximumMaterialProgramLayouts = 8;
     renderingConfig.gpuScene.tables.maximumPagesPerTable = 2;
     renderingConfig.gpuScene.lifetime.retirementEpochCount = 4;
     renderingConfig.gpuScene.lifetime.initialRetirementsPerEpoch = 8;
@@ -476,6 +454,23 @@ int main()
     renderingConfig.textureResidency.maximumInstallationsPerTick = 4;
     renderingConfig.textureResidency.maximumTableInstallationsPerFrame = 4;
     renderingConfig.textureResidency.maximumStateChecksPerTick = 4;
+    renderingConfig.materialResources.maximumProviders = 4;
+    renderingConfig.materialResources.maximumFallbacks = 4;
+    renderingConfig.materialResources.maximumOperations = 8;
+    renderingConfig.materialResources.maximumDescriptorCacheEntries = 8;
+    renderingConfig.materialMaterializer.maximumOperations = 8;
+    renderingConfig.materialMaterializer.maximumRolesPerMaterial = 8;
+    renderingConfig.materialMaterializer.maximumMaterialsPerBatch = 4;
+    renderingConfig.materialMaterializer.maximumOperationsProgressedPerUpdate = 4;
+    renderingConfig.materialMaterializer.maximumResourceRolePollsPerUpdate = 16;
+    renderingConfig.materialResidency.maximumResidencies = 4;
+    renderingConfig.materialResidency.maximumDemands = 8;
+    renderingConfig.materialResidency.maximumTechniqueRequests = 4;
+    renderingConfig.materialResidency.maximumNativePrograms = 4;
+    renderingConfig.materialResidency.maximumResidencyChecksPerUpdate = 4;
+    renderingConfig.materialResidency.maximumRetirementsPerSeal = 4;
+    renderingConfig.materialBindings.maximumBindings = 4;
+    renderingConfig.materialBindings.maximumChecksPerUpdate = 4;
 
     Check(engine::RegisterEngineModule(host, &hostFailure), "engine module registration");
     Check(engine::RegisterIoService(host, &hostFailure), "I/O service registration");
@@ -493,17 +488,28 @@ int main()
     engine::ResourcesService* const resourcesService = engine::FindResourcesService(host);
     engine::ResourceStreamingService* const streamingService = engine::FindResourceStreamingService(host);
     engine::RenderingService* const renderingService = engine::FindRenderingService(host);
-    Check(frames != nullptr && resourcesService != nullptr && streamingService != nullptr && renderingService != nullptr &&
-              renderingService->GetTextureResidency().IsInitialized() && renderingService->GetGpuScene().IsInitialized(),
+    Check(frames != nullptr && resourcesService != nullptr && streamingService != nullptr && renderingService != nullptr && renderingService->GetTextureResidency().IsInitialized() &&
+              renderingService->GetGpuScene().IsInitialized(),
           "required rendering and resource services are initialized");
+    Check(renderingService != nullptr && renderingService->GetMaterialProgramLayouts().IsInitialized() && renderingService->GetMaterialProgramLayouts().GetStats().capacity == 8,
+          "RenderingService owns the bounded material program-layout registry beside both descriptor domains");
+    Check(renderingService != nullptr && renderingService->GetMaterialResources().IsInitialized() && renderingService->GetMaterialMaterializer().IsInitialized() &&
+              renderingService->GetMaterialResidency().IsInitialized() && renderingService->GetMaterialBindings().IsInitialized(),
+          "RenderingService owns the complete material runtime chain in dependency order");
+    const engine::RenderingResourceAllocatorDiagnostics frameResourceDiagnostics =
+        renderingService != nullptr ? renderingService->GetResourceAllocatorDiagnostics() : engine::RenderingResourceAllocatorDiagnostics{};
+    Check(frameResourceDiagnostics.initialized && frameResourceDiagnostics.stats.state == rendering::RenderFlowResourceSessionState::Idle && frameResourceDiagnostics.stats.chargedNativeBytes == 0,
+          "FrameRenderer owns an initialized idle frame-resource allocator after device startup");
+    engine::RenderingRetirementFailure missingCutoverFailure;
+    Check(renderingService != nullptr && !renderingService->SealResidencyRetirements({}, &missingCutoverFailure) && missingCutoverFailure.code == engine::RenderingRetirementFailureCode::MissingCutover,
+          "RenderingService rejects residency retirement without complete queue cutover evidence");
 
     TestClock clock;
     engine::FrameFailure frameFailure;
     engine::FramePipelineConfig frameConfig;
     frameConfig.clock = {&ReadClock, 1'000, &clock};
     frameConfig.pacing = engine::FramePacingMode::Disabled;
-    Check(frames != nullptr && frames->Configure(frameConfig, &frameFailure) && frames->Compile(&frameFailure),
-          "ordinary engine frame pipeline compilation");
+    Check(frames != nullptr && frames->Configure(frameConfig, &frameFailure) && frames->Compile(&frameFailure), "ordinary engine frame pipeline compilation");
 
     const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
     const filesystem::AbsolutePath directory = root.AddDirPath("vanguard_texture_service_tests");
@@ -516,25 +522,22 @@ int main()
     Check(files.CreatePath(directory), "fresh texture cook integration directory");
 
     Check(textureTools::Initialize(), "texture tools initialization");
-    const textureTools::TextureCookingProfile runtimeProofProfile{
-        RuntimeProofProfile,
-        1,
-        textures::PixelFormat::R8G8B8A8UNorm,
-        textures::ColorSpace::SRgb,
-        textureTools::TextureCookingFlags::GenerateFullMipChain | textureTools::TextureCookingFlags::Streamable,
-        4,
-        3,
-        0.5f,
-        0};
-    Check(textureTools::RegisterCookingProfile(runtimeProofProfile) == textureTools::ProfileRegistrationResult::Success,
-          "register deterministic uncompressed streamable texture proof profile");
+    const textureTools::TextureCookingProfile runtimeProofProfile{RuntimeProofProfile,
+                                                                  1,
+                                                                  textures::PixelFormat::R8G8B8A8UNorm,
+                                                                  textures::ColorSpace::SRgb,
+                                                                  textureTools::TextureCookingFlags::GenerateFullMipChain | textureTools::TextureCookingFlags::Streamable,
+                                                                  4,
+                                                                  3,
+                                                                  0.5f,
+                                                                  0};
+    Check(textureTools::RegisterCookingProfile(runtimeProofProfile) == textureTools::ProfileRegistrationResult::Success, "register deterministic uncompressed streamable texture proof profile");
     assets::BuildSystem buildSystem;
     assets::Config buildConfig;
     buildConfig.persistentCacheRoot = directory.AsChar();
     Check(buildSystem.Initialize(buildConfig), "persistent texture build-system initialization");
     textureTools::TextureAssetCompiler textureCompiler;
-    Check(textureCompiler.Initialize() && textureCompiler.Register(buildSystem) == assets::Result::Success,
-          "registered VTSR-to-VTEX compiler");
+    Check(textureCompiler.Initialize() && textureCompiler.Register(buildSystem) == assets::Result::Success, "registered VTSR-to-VTEX compiler");
 
     assets::DependencyIndexConfig indexConfig;
     indexConfig.root = directory.AsChar();
@@ -543,81 +546,60 @@ int main()
     Check(dependencyIndex.Initialize(indexConfig) == assets::IndexResult::Success, "texture dependency index initialization");
 
     ByteArray jpegBytes(vanguard::memory::pools::Assets::GetInstance());
-    const filesystem::AbsolutePath jpegPath =
-        root.AddDirPath("source").AddDirPath("textureTools").AddDirPath("tests").AddDirPath("data").AddFilePath("libjpeg_rgb.jpg");
+    const filesystem::AbsolutePath jpegPath = root.AddDirPath("source").AddDirPath("textureTools").AddDirPath("tests").AddDirPath("data").AddFilePath("libjpeg_rgb.jpg");
     Check(filesystem::LoadFileToBuffer(jpegPath, jpegBytes), "load the real encoded JPEG source fixture");
-    const resources::ResourceReference jpegSource(resources::ResourcePath::FromString("tests/textures/runtime_source.jpg"),
-                                                    textureTools::TextureSourceResourceType);
-    const resources::ResourceReference jpegOutput(resources::ResourcePath::FromString("textures/runtime_source.vtex"),
-                                                    textures::TextureResourceType);
+    const resources::ResourceReference jpegSource(resources::ResourcePath::FromString("tests/textures/runtime_source.jpg"), textureTools::TextureSourceResourceType);
+    const resources::ResourceReference jpegOutput(resources::ResourcePath::FromString("textures/runtime_source.vtex"), textures::TextureResourceType);
     textureTools::TextureBuildDescription jpegDescription;
     jpegDescription.sourceMode = textureTools::TextureBuildSourceMode::Image2D;
     jpegDescription.colorSpace = textureTools::ImportedColorSpace::Automatic;
     jpegDescription.profile = RuntimeProofProfile;
     ByteArray jpegSettings(vanguard::memory::pools::Assets::GetInstance());
-    Check(textureTools::EncodeTextureBuildSettings(jpegDescription, jpegSettings) == textureTools::TextureBuildSettingsResult::Success,
-          "encode canonical JPEG texture settings");
-    const assets::BuildRequest jpegRequest{{jpegSource, {jpegBytes.TypedData(), jpegBytes.Size()}, {}}, jpegOutput,
-                                            assets::TargetPlatform::WindowsD3D12, jpegSettings};
+    Check(textureTools::EncodeTextureBuildSettings(jpegDescription, jpegSettings) == textureTools::TextureBuildSettingsResult::Success, "encode canonical JPEG texture settings");
+    const assets::BuildRequest jpegRequest{{jpegSource, {jpegBytes.TypedData(), jpegBytes.Size()}, {}}, jpegOutput, assets::TargetPlatform::WindowsD3D12, jpegSettings};
     assets::BuildOutput jpegOutputBuild;
-    Check(BuildAndPublish(buildSystem, dependencyIndex, jpegRequest, jpegOutputBuild) &&
-              jpegOutputBuild.disposition == assets::BuildDisposition::Built,
+    Check(BuildAndPublish(buildSystem, dependencyIndex, jpegRequest, jpegOutputBuild) && jpegOutputBuild.disposition == assets::BuildDisposition::Built,
           "real JPEG source compiles and publishes through BuildSystem/DDC/index");
     assets::BuildPlan jpegCachedPlan;
     assets::BuildOutput jpegCachedBuild;
-    Check(buildSystem.Prepare(jpegRequest, jpegCachedPlan) == assets::Result::Success &&
-              buildSystem.Execute(jpegRequest, jpegCachedPlan, jpegCachedBuild) == assets::Result::Success &&
-              jpegCachedBuild.disposition == assets::BuildDisposition::CacheHit &&
-              jpegCachedBuild.buildFingerprint == jpegOutputBuild.buildFingerprint,
+    Check(buildSystem.Prepare(jpegRequest, jpegCachedPlan) == assets::Result::Success && buildSystem.Execute(jpegRequest, jpegCachedPlan, jpegCachedBuild) == assets::Result::Success &&
+              jpegCachedBuild.disposition == assets::BuildDisposition::CacheHit && jpegCachedBuild.buildFingerprint == jpegOutputBuild.buildFingerprint,
           "identical JPEG request hits the generic texture build cache");
-    const vanguard::crypto::Digest256 jpegSourceFingerprint =
-        vanguard::crypto::Sha256(jpegBytes.TypedData(), jpegBytes.Size());
+    const vanguard::crypto::Digest256 jpegSourceFingerprint = vanguard::crypto::Sha256(jpegBytes.TypedData(), jpegBytes.Size());
 
     textureTools::TextureBuildDescription alternateJpegDescription = jpegDescription;
     alternateJpegDescription.profile = textureTools::profiles::Ui;
     ByteArray alternateJpegSettings(vanguard::memory::pools::Assets::GetInstance());
-    Check(textureTools::EncodeTextureBuildSettings(alternateJpegDescription, alternateJpegSettings) ==
-              textureTools::TextureBuildSettingsResult::Success,
-          "encode alternate valid JPEG profile");
-    const assets::BuildRequest alternateJpegRequest{{jpegSource, {jpegBytes.TypedData(), jpegBytes.Size()}, {}}, jpegOutput,
-                                                     assets::TargetPlatform::WindowsD3D12, alternateJpegSettings};
+    Check(textureTools::EncodeTextureBuildSettings(alternateJpegDescription, alternateJpegSettings) == textureTools::TextureBuildSettingsResult::Success, "encode alternate valid JPEG profile");
+    const assets::BuildRequest alternateJpegRequest{{jpegSource, {jpegBytes.TypedData(), jpegBytes.Size()}, {}}, jpegOutput, assets::TargetPlatform::WindowsD3D12, alternateJpegSettings};
     assets::BuildOutput alternateJpegBuild;
-    Check(buildSystem.Build(alternateJpegRequest, alternateJpegBuild) == assets::Result::Success &&
-              alternateJpegBuild.disposition == assets::BuildDisposition::Built &&
+    Check(buildSystem.Build(alternateJpegRequest, alternateJpegBuild) == assets::Result::Success && alternateJpegBuild.disposition == assets::BuildDisposition::Built &&
               !(alternateJpegBuild.buildFingerprint == jpegOutputBuild.buildFingerprint),
           "texture profile change rebuilds under a different build identity");
 
     constexpr const char* RuntimeTexturePath = "textures/runtime_source.vtex";
     const resources::ResourceReference runtimeTexture = jpegOutput;
-    Check(!jpegOutputBuild.artifacts.Empty() && dependencyIndex.Save() == assets::IndexResult::Success,
-          "streamable JPEG cook publishes its indexed metadata and mip artifacts");
+    Check(!jpegOutputBuild.artifacts.Empty() && dependencyIndex.Save() == assets::IndexResult::Success, "streamable JPEG cook publishes its indexed metadata and mip artifacts");
 
     assets::DependencyRecord runtimeRecord;
     assets::DerivedDataArtifactSource artifactSource;
-    Check(dependencyIndex.Find(runtimeTexture, runtimeRecord) == assets::IndexResult::Success &&
-              artifactSource.Initialize({directory.AsChar(), {}}),
+    Check(dependencyIndex.Find(runtimeTexture, runtimeRecord) == assets::IndexResult::Success && artifactSource.Initialize({directory.AsChar(), {}}),
           "open the indexed real-JPEG artifact set through the generic DDC source");
     assets::LooseResourceMaterializer materializer;
-    Check(materializer.Materialize(runtimeRecord, runtimeTexture, artifactSource, loosePath, looseTemporaryPath) ==
-                  assets::LooseMaterializationResult::Success &&
-              !files.FileExist(looseTemporaryPath),
+    Check(materializer.Materialize(runtimeRecord, runtimeTexture, artifactSource, loosePath, looseTemporaryPath) == assets::LooseMaterializationResult::Success && !files.FileExist(looseTemporaryPath),
           "materialize the indexed JPEG artifacts as one loose VTEX");
 
     assets::PackageManifest manifest;
     manifest.packageId = 0x5458545356435003ull;
-    Check(manifest.AddRoot({runtimeTexture, assets::PackageRootFlags::Startup}) == assets::PackagingResult::Success,
-          "select the same indexed VTEX as the package root");
+    Check(manifest.AddRoot({runtimeTexture, assets::PackageRootFlags::Startup}) == assets::PackagingResult::Success, "select the same indexed VTEX as the package root");
     assets::PackagePlanner packagePlanner;
     assets::PackageBuildPlan packagePlan;
-    Check(packagePlanner.Prepare(manifest, dependencyIndex, packagePlan) == assets::PackagingResult::Success,
-          "prepare VPAK directly from the dependency index");
+    Check(packagePlanner.Prepare(manifest, dependencyIndex, packagePlan) == assets::PackagingResult::Success, "prepare VPAK directly from the dependency index");
     PackagePathContext packagePathContext{runtimeTexture, RuntimeTexturePath};
     assets::DerivedDataPackageArtifactReader artifactReader(artifactSource);
-    const assets::PackageAssemblyCallbacks packageCallbacks{&ResolvePackagePath, &packagePathContext,
-                                                             &assets::DerivedDataPackageArtifactReader::ReadCallback, &artifactReader};
+    const assets::PackageAssemblyCallbacks packageCallbacks{&ResolvePackagePath, &packagePathContext, &assets::DerivedDataPackageArtifactReader::ReadCallback, &artifactReader};
     assets::PackageAssembler packageAssembler;
-    Check(packageAssembler.Publish(packagePlan, packagePath, packageTemporaryPath, packageCallbacks) == assets::PackagingResult::Success &&
-              !files.FileExist(packageTemporaryPath),
+    Check(packageAssembler.Publish(packagePlan, packagePath, packageTemporaryPath, packageCallbacks) == assets::PackagingResult::Success && !files.FileExist(packageTemporaryPath),
           "assemble and safely publish VPAK from the same immutable JPEG artifact set");
     artifactReader.Reset();
 
@@ -639,15 +621,19 @@ int main()
     Check(streamer.UnmountPackage(mountedPackage), "packaged VTEX unmount");
     mountedPackage.Close();
 
-    Check(renderingService->GetTextureResidency().GetStats().residencyRecords == 0 &&
-              renderingService->GetTextureResidency().GetStats().liveDemands == 0,
+    Check(renderingService->GetTextureResidency().GetStats().residencyRecords == 0 && renderingService->GetTextureResidency().GetStats().liveDemands == 0,
           "texture runtime has no live residency or demand at shutdown");
+    Check(renderingService->GetMaterialBindings().GetStats().bindings == 0 && renderingService->GetMaterialResidency().GetStats().residencyRecords == 0 &&
+              renderingService->GetMaterialResidency().GetStats().liveDemands == 0 && renderingService->GetMaterialMaterializer().GetStats().activeOperations == 0 &&
+              renderingService->GetMaterialResources().GetStats().activeOperations == 0,
+          "material service chain reaches zero state before renderer shutdown");
     Check(artifactSource.Shutdown(), "derived-data artifact source shutdown");
     Check(dependencyIndex.Shutdown(), "texture dependency index shutdown");
     Check(textureCompiler.Shutdown(), "texture compiler unregistration and shutdown");
     Check(buildSystem.Shutdown(), "texture BuildSystem shutdown");
     DeleteDirectoryTree(files, directory);
     Check(host.Shutdown(&hostFailure), "engine graph and device shutdown");
+    Check(VerifyMaterialInitializationRollback(renderingConfig), "material runtime initialization failure rolls back every earlier renderer/device owner");
 
     vanguard::diagnostics::Shutdown();
 

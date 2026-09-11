@@ -1,0 +1,72 @@
+/**
+* Copyright (c) 2016 CD Projekt Red. All Rights Reserved.
+*/
+#include "build.h"
+
+#include "renderGraphCache.h"
+
+//***************************************************************************************************************//
+//***************************************************************************************************************//
+
+CRenderGraphCache::CacheEntry& CRenderGraphCache::GetGraph( Uint32 frameTick, SCameraHash cameraHash, Uint32 numCameraSetups, Bool& outNeedsRebuild, bool forceClear )
+{
+	Uint32 oldestFrameTick = UINT32_MAX;
+	Uint32 oldestCacheEntryIndex = 0;
+
+	for ( Uint32 i = 0; i < m_cacheEntries.Size(); ++i )
+	{
+		CacheEntry& cacheEntry = m_cacheEntries[ i ];
+
+		if ( cacheEntry.m_cameraHash == cameraHash && cacheEntry.m_cameraBuildData.Size() == numCameraSetups && !forceClear )
+		{
+			// valid entry found
+			outNeedsRebuild = false;
+			cacheEntry.m_lastUsedFrame = frameTick;
+			return cacheEntry;
+		}
+
+		if ( cacheEntry.m_lastUsedFrame < oldestFrameTick )
+		{
+			oldestFrameTick = cacheEntry.m_lastUsedFrame;
+			oldestCacheEntryIndex = i;
+		}
+	}
+
+	// no graph entry found, reuse the oldest
+	CacheEntry& cacheEntry = m_cacheEntries[ oldestCacheEntryIndex ];
+	cacheEntry.m_graph.Reset();
+	cacheEntry.m_cameraBuildData.Resize( numCameraSetups );
+	for ( Uint32 i = 0; i < numCameraSetups; ++i ) cacheEntry.m_cameraBuildData[ i ] = red::CreateUniquePtr<SCameraSetupData>();
+	cacheEntry.m_cameraHash = cameraHash;
+	cacheEntry.m_lastUsedFrame = frameTick;
+	outNeedsRebuild = true;
+	return cacheEntry;
+}
+
+void CRenderGraphCache::CacheEntry::PostBuildClear()
+{
+	// Clear graph. They are no longer needed
+	for ( const CameraSetupDataPtr& cameraSetupData : m_cameraBuildData )
+	{
+		cameraSetupData->m_graph.Reset();
+	}
+
+	// NOTE: nodes need to be kept due to references from final graph
+}
+
+CRenderGraphCache::SCameraSetupData* CRenderGraphCache::CacheEntry::FindCameraSetup( const SCameraHash& cameraHash ) const
+{
+	for( const CameraSetupDataPtr& cameraSetupData : m_cameraBuildData )
+	{
+		if( !cameraSetupData->m_cameraSetupHash.IsValid() || cameraSetupData->m_cameraSetupHash == cameraHash )
+		{
+			return cameraSetupData.Get();
+		}
+	}
+
+	RED_FATAL( "No valid camera set found" );
+	return nullptr;
+}
+
+//***************************************************************************************************************//
+//***************************************************************************************************************//

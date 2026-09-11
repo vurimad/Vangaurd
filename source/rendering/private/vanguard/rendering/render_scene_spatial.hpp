@@ -9,6 +9,7 @@ namespace vanguard::rendering::spatial
         u32 cellIndex = ~u32{0};
         u32 objectIndex = ~u32{0};
         bool unindexed = false;
+        bool global = false;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
@@ -61,6 +62,9 @@ namespace vanguard::rendering::spatial
         containers::DynamicArray<u32> activeCellIndices;
         containers::DynamicArray<u32> dirtyCellIndices;
         containers::DynamicArray<RenderProxyHandle> unindexedProxies;
+        // Exclusive Global membership, separate from bounded out-of-range
+        // proxies so global consumers never traverse unrelated spatial objects.
+        containers::DynamicArray<RenderProxyHandle> globalProxies;
     };
 
     enum class InsertResult : u8
@@ -80,6 +84,7 @@ namespace vanguard::rendering::spatial
         const u32* visibilityMask = nullptr;
         const RenderProxyPayloadKind* payloadKind = nullptr;
         const GpuInstanceIndex* gpuInstanceIndex = nullptr;
+        bool global = false;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
@@ -90,6 +95,7 @@ namespace vanguard::rendering::spatial
     using ResolveVisibilityProxyFunction = bool (*)(void* userData, RenderProxyHandle proxy, VisibilityProxyReadView& view) noexcept;
 
     void Reset(WriteIndex& index, const SpatialWriteIndexConfig& config, CounterDelta* delta = nullptr) noexcept;
+    [[nodiscard]] u32 TraversalCount(const WriteIndex& index) noexcept;
     [[nodiscard]] bool BoundsInFiniteExtent(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept;
     [[nodiscard]] bool BoundsAccepted(const WriteIndex& index, const RenderProxyBounds& bounds) noexcept;
     [[nodiscard]] InsertResult Insert(WriteIndex& index, RenderProxyHandle proxy, const RenderProxyBounds& bounds, RenderProxySpatialMode mode,
@@ -106,9 +112,10 @@ namespace vanguard::rendering::spatial
     void BuildBatches(u32 cellCount, u32 targetCellsPerBatch, containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan) noexcept;
     void BuildLiveBatches(const WriteIndex& index, RenderSceneHandle scene, u64 mutationEpoch, u32 targetCellsPerBatch,
                           containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan) noexcept;
-    [[nodiscard]] bool BuildGpuCandidateBatches(const WriteIndex& index, RenderSceneHandle scene, u64 mutationEpoch, u64 planSerial,
-                                                u32 targetCandidatesPerBatch, containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
-                                                RenderSceneGpuCandidatePlan& plan) noexcept;
+    [[nodiscard]] bool PrepareGpuCandidatePlan(const WriteIndex& index, RenderSceneHandle scene, u64 mutationEpoch, u64 planSerial,
+                                               u32 targetCandidatesPerBatch, RenderSceneGpuCandidatePlan& plan) noexcept;
+    [[nodiscard]] bool BuildGpuCandidateBatches(const WriteIndex& index, const RenderSceneGpuCandidatePlan& plan,
+                                                containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage) noexcept;
     void CollectLive(const WriteIndex& index, const VisibilityQueryRequest& request, void* userData, ResolveVisibilityProxyFunction resolveProxy,
                      containers::DynamicArray<RenderProxyHandle>& proxies, VisibilityQueryResult& result) noexcept;
     void CollectLiveRange(const WriteIndex& index, const VisibilityQueryRequest& request, const VisibilityQueryBatch& batch, void* userData,

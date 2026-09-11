@@ -27,13 +27,9 @@ namespace vanguard::rendering
         }
     };
 
-    using WriteGpuSceneContribution = bool (*)(void* owner, GpuSceneContributionToken token,
-                                                containers::ArraySpan<const GpuSceneUploadReservation> reservations,
-                                                const char*& failureMessage) noexcept;
-    using AcceptGpuSceneContribution = void (*)(void* owner, GpuSceneContributionToken token,
-                                                 rhi::GpuFence sharedCompletion) noexcept;
-    using RetryGpuSceneContribution = bool (*)(void* owner, GpuSceneContributionToken token,
-                                                const char*& failureMessage) noexcept;
+    using WriteGpuSceneContribution = bool (*)(void* owner, GpuSceneContributionToken token, containers::ArraySpan<const GpuSceneUploadReservation> reservations, const char*& failureMessage) noexcept;
+    using AcceptGpuSceneContribution = void (*)(void* owner, GpuSceneContributionToken token, rhi::GpuFence sharedCompletion) noexcept;
+    using RetryGpuSceneContribution = bool (*)(void* owner, GpuSceneContributionToken token, const char*& failureMessage) noexcept;
 
     /// One already frozen producer contribution. StageContribution copies the request span into bounded
     /// coordinator storage; owner and token must remain valid until ResolveContributions completes.
@@ -48,8 +44,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return owner != nullptr && token.IsValid() && !requests.Empty() && requests.Data() != nullptr &&
-                   write != nullptr && accept != nullptr && retry != nullptr;
+            return owner != nullptr && token.IsValid() && !requests.Empty() && requests.Data() != nullptr && write != nullptr && accept != nullptr && retry != nullptr;
         }
     };
 
@@ -95,6 +90,14 @@ namespace vanguard::rendering
         bool publicationFailurePending = false;
     };
 
+    struct GpuSceneContributionBudget
+    {
+        u32 maximumUpdates = 0;
+        u32 availableUpdates = 0;
+        u64 maximumBytes = 0;
+        u64 availableBytes = 0;
+    };
+
     /// Owns the renderer-wide persistent GPU Scene stack in dependency order. Initialization requires
     /// a live RHI descriptor domain and must happen before any RenderScene is created.
     class GpuSceneRuntime final
@@ -110,6 +113,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool Initialize(RenderSceneManager& scenes, const GpuSceneRuntimeConfig& config, GpuSceneRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(const rhi::DescriptorRetirement& safeAfter, GpuSceneRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AbandonDevice(GpuSceneRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
         [[nodiscard]] bool Manages(const RenderSceneManager& scenes) const noexcept;
 
@@ -117,14 +121,17 @@ namespace vanguard::rendering
         /// Range writers and submission are appended to the supplied RenderPath continuation without a CPU wait.
         [[nodiscard]] bool Publish(RenderFrameTickContext& context, GpuSceneRuntimeFailure* failure = nullptr) noexcept;
         /// Main-thread. Copies one producer's frozen update requests into the next shared GPU Scene batch.
-        [[nodiscard]] bool StageContribution(const GpuSceneContributionDesc& contribution,
-                                             GpuSceneRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool StageContribution(const GpuSceneContributionDesc& contribution, GpuSceneRuntimeFailure* failure = nullptr) noexcept;
+        /// Main-thread admission budget after already staged producers.
+        [[nodiscard]] GpuSceneContributionBudget GetContributionBudget() const noexcept;
         /// Main-thread after the renderer CPU tail is flushed. Accepts submitted contributions or returns
         /// pre-submit failures to their producer queues.
         [[nodiscard]] bool ResolveContributions(GpuSceneRuntimeFailure* failure = nullptr) noexcept;
         /// Consumes the first asynchronous publication failure after the owning RenderCommandSystem CPU tail is flushed.
         [[nodiscard]] bool ConsumePublicationFailure(GpuSceneRuntimeFailure& failure) noexcept;
         [[nodiscard]] GpuSceneRuntimeStats GetStats() const noexcept;
+        // Read only after the existing publication CPU continuation has joined.
+        [[nodiscard]] rhi::GpuFence GetPublicationFence() const noexcept { return m_lastPublicationFence; }
 
         [[nodiscard]] GpuSceneTables& GetTables() noexcept;
         [[nodiscard]] const GpuSceneTables& GetTables() const noexcept;
@@ -148,5 +155,6 @@ namespace vanguard::rendering
         RenderSceneGpuPublisher m_scenePublisher;
         PublicationState* m_publication = nullptr;
         bool m_initialized = false;
+        rhi::GpuFence m_lastPublicationFence;
     };
 } // namespace vanguard::rendering

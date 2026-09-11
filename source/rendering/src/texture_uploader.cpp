@@ -45,8 +45,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool FencesComplete(const rhi::ResidencyFenceSet& fences) noexcept
         {
             return (fences.graphics == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Graphics, fences.graphics})) &&
-                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) &&
-                   (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
+                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) && (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
         }
 
         struct UploadRequestKey
@@ -121,8 +120,8 @@ namespace vanguard::rendering
 
     bool SubmittedTextureCandidate::IsValid() const noexcept
     {
-        return !contentFingerprint.IsEmpty() && residency.IsValid() && texture.IsValid() && copyCompletion.IsValid() && residentMipCount != 0 && subresourceCount != 0 &&
-               candidateGpuBytes != 0 && sourceBytesUploaded <= candidateGpuBytes && gpuBytesCopied <= candidateGpuBytes;
+        return !contentFingerprint.IsEmpty() && residency.IsValid() && texture.IsValid() && copyCompletion.IsValid() && residentMipCount != 0 && subresourceCount != 0 && candidateGpuBytes != 0 &&
+               sourceBytesUploaded <= candidateGpuBytes && gpuBytesCopied <= candidateGpuBytes;
     }
 
     void SubmittedTextureCandidate::Reset() noexcept
@@ -255,9 +254,8 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool CanRetainCandidate(const UploadEntry& entry) const noexcept
         {
-            return entry.candidateGpuBytesCharged ||
-                   (entry.candidateGpuBytes != 0 && entry.candidateGpuBytes <= config.maximumPendingCandidateGpuBytes &&
-                    pendingCandidateGpuBytes <= config.maximumPendingCandidateGpuBytes - entry.candidateGpuBytes);
+            return entry.candidateGpuBytesCharged || (entry.candidateGpuBytes != 0 && entry.candidateGpuBytes <= config.maximumPendingCandidateGpuBytes &&
+                                                      pendingCandidateGpuBytes <= config.maximumPendingCandidateGpuBytes - entry.candidateGpuBytes);
         }
 
         void ChargeCandidate(UploadEntry& entry) noexcept
@@ -379,9 +377,8 @@ namespace vanguard::rendering
             return Fail(failure, TextureUploadFailureCode::NotInitialized, "texture uploader requires an initialized RHI");
         if (config.maximumRequests == 0 || config.maximumAcquisitionStartsPerTick == 0 || config.maximumCandidatesPerBatch == 0 || config.maximumCompletionPollsPerTick == 0 ||
             config.maximumReadyCandidates == 0 || config.maximumWritesPerBatch == 0 || config.maximumCopiesPerBatch == 0 || config.maximumAcquisitionWindowSubresources == 0 ||
-            config.maximumBytesPerBatch == 0 || config.maximumCopyBytesPerBatch == 0 || config.maximumCandidateGpuBytesPerBatch == 0 ||
-            config.maximumPendingCandidateGpuBytes == 0 || config.maximumPendingCandidateBytes == 0 ||
-            config.maximumAcquisitionWindowBytes == 0)
+            config.maximumBytesPerBatch == 0 || config.maximumCopyBytesPerBatch == 0 || config.maximumCandidateGpuBytesPerBatch == 0 || config.maximumPendingCandidateGpuBytes == 0 ||
+            config.maximumPendingCandidateBytes == 0 || config.maximumAcquisitionWindowBytes == 0)
             return Fail(failure, TextureUploadFailureCode::InvalidConfiguration, "texture uploader configuration is invalid");
         m_impl = AllocateObject<Impl>(config);
         if (m_impl == nullptr)
@@ -403,13 +400,31 @@ namespace vanguard::rendering
         return true;
     }
 
+    void TextureUploader::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        for (u32 index = 0; index < m_impl->slots.Size(); ++index)
+        {
+            UploadEntry* const entry = m_impl->slots[index].entry;
+            if (entry == nullptr)
+                continue;
+            static_cast<void>(entry->acquisition.Cancel());
+            entry->residencyManager = nullptr;
+            entry->transitionToken = {};
+            m_impl->Remove(index);
+        }
+        DeleteObject(m_impl);
+        m_impl = nullptr;
+    }
+
     bool TextureUploader::IsInitialized() const noexcept
     {
         return m_impl != nullptr;
     }
 
-    bool TextureUploader::RequestMipTail(const resources::ResourceHandle& resource, const GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
-                                         const io::AsyncPriority priority, TextureUploadFailure* const failure) noexcept
+    bool TextureUploader::RequestMipTail(const resources::ResourceHandle& resource, const GpuTextureResidencyHandle residency, TextureUploadRequestId& request, const io::AsyncPriority priority,
+                                         TextureUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         request = {};
@@ -421,15 +436,14 @@ namespace vanguard::rendering
         return RequestInternal(resource, nullptr, residency, object->GetMetadata().GetMipTailFirstLevel(), request, priority, failure);
     }
 
-    bool TextureUploader::RequestMipTransition(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, const GpuTextureResidencyHandle residency,
-                                               const u32 targetFirstResidentMip, TextureUploadRequestId& request, const io::AsyncPriority priority,
-                                               TextureUploadFailure* const failure) noexcept
+    bool TextureUploader::RequestMipTransition(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, const GpuTextureResidencyHandle residency, const u32 targetFirstResidentMip,
+                                               TextureUploadRequestId& request, const io::AsyncPriority priority, TextureUploadFailure* const failure) noexcept
     {
         return RequestInternal(resource, &residencyManager, residency, targetFirstResidentMip, request, priority, failure);
     }
 
-    bool TextureUploader::RequestMipTail(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, const GpuTextureResidencyHandle residency,
-                                         TextureUploadRequestId& request, const io::AsyncPriority priority, TextureUploadFailure* const failure) noexcept
+    bool TextureUploader::RequestMipTail(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, const GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
+                                         const io::AsyncPriority priority, TextureUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         request = {};
@@ -442,8 +456,7 @@ namespace vanguard::rendering
     }
 
     bool TextureUploader::RequestInternal(const resources::ResourceHandle& resource, TextureResidencyManager* const residencyManager, const GpuTextureResidencyHandle residency,
-                                          const u32 requestedFirstResidentMip, TextureUploadRequestId& request, const io::AsyncPriority priority,
-                                          TextureUploadFailure* const failure) noexcept
+                                          const u32 requestedFirstResidentMip, TextureUploadRequestId& request, const io::AsyncPriority priority, TextureUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         request = {};
@@ -723,8 +736,7 @@ namespace vanguard::rendering
             // allocation. That makes later ticks reject it from the two budgets without create/reset churn.
             if (entry.candidateGpuBytes != 0)
             {
-                if (entry.candidateGpuBytes > m_impl->config.maximumCandidateGpuBytesPerBatch ||
-                    entry.candidateGpuBytes > m_impl->config.maximumPendingCandidateGpuBytes)
+                if (entry.candidateGpuBytes > m_impl->config.maximumCandidateGpuBytesPerBatch || entry.candidateGpuBytes > m_impl->config.maximumPendingCandidateGpuBytes)
                 {
                     FailUnretainableCandidate();
                     return false;
@@ -759,15 +771,13 @@ namespace vanguard::rendering
                 return false;
             }
             entry.candidateGpuBytes = exactGpuBytes;
-            if (entry.candidateGpuBytes > m_impl->config.maximumCandidateGpuBytesPerBatch ||
-                entry.candidateGpuBytes > m_impl->config.maximumPendingCandidateGpuBytes)
+            if (entry.candidateGpuBytes > m_impl->config.maximumCandidateGpuBytesPerBatch || entry.candidateGpuBytes > m_impl->config.maximumPendingCandidateGpuBytes)
             {
                 entry.candidateTexture.Reset();
                 FailUnretainableCandidate();
                 return false;
             }
-            if (entry.candidateGpuBytes > m_impl->config.maximumCandidateGpuBytesPerBatch - candidateByteCount ||
-                !m_impl->CanRetainCandidate(entry))
+            if (entry.candidateGpuBytes > m_impl->config.maximumCandidateGpuBytesPerBatch - candidateByteCount || !m_impl->CanRetainCandidate(entry))
             {
                 entry.candidateTexture.Reset();
                 return false;
@@ -910,8 +920,7 @@ namespace vanguard::rendering
                     continue;
                 TextureTransitionInfo transitionInfo;
                 TextureResidencyFailure residencyFailure;
-                if (entry->residencyManager == nullptr || !entry->residencyManager->GetTransitionInfo(entry->transitionToken, transitionInfo, &residencyFailure) ||
-                    !transitionInfo.currentTexture.IsValid())
+                if (entry->residencyManager == nullptr || !entry->residencyManager->GetTransitionInfo(entry->transitionToken, transitionInfo, &residencyFailure) || !transitionInfo.currentTexture.IsValid())
                 {
                     TextureUploadFailure requestFailure;
                     requestFailure.code = TextureUploadFailureCode::ResidencyFailure;
@@ -1156,8 +1165,7 @@ namespace vanguard::rendering
         if (!concurrency::IsMainThread())
             return Fail(failure, TextureUploadFailureCode::WrongThread, "submitted texture candidate ownership must be taken on the main thread", request);
         UploadEntry* const entry = m_impl->Find(request);
-        if (entry == nullptr || (entry->state != TextureUploadState::Submitted && entry->state != TextureUploadState::ReadyToInstall) || entry->discardOnCompletion ||
-            candidate.texture.IsValid())
+        if (entry == nullptr || (entry->state != TextureUploadState::Submitted && entry->state != TextureUploadState::ReadyToInstall) || entry->discardOnCompletion || candidate.texture.IsValid())
             return Fail(failure, TextureUploadFailureCode::InvalidArgument, "texture upload request is not submitted or output already owns a candidate", request);
         candidate = std::move(entry->submitted);
         m_impl->Remove(request.index);

@@ -85,25 +85,57 @@ namespace vanguard::rendering
         SwapChainPolicy swapChain;
     };
 
-    struct PresentationOutputSnapshot
+    class PresentationService;
+
+    class PresentationOutput final
     {
-        PresentationOutputHandle handle;
-        PresentationOutputState state = PresentationOutputState::Vacant;
-        window::WindowHandle window;
-        window::PresentationAttachmentHandle attachment;
-        RenderViewportHandle renderViewport;
-        SwapChainPolicy swapChain;
-        rhi::Format activeFormat = rhi::Format::Unknown;
-        rhi::ColorSpace activeColorSpace = rhi::ColorSpace::Srgb;
-        rhi::DisplayColorCapabilities displayColor;
-        f32 sdrWhiteLevel = 1.0f;
-        f32 hdrHeadroom = 1.0f;
-        u64 reconciliations = 0;
-        u64 swapChainCreations = 0;
-        u64 resizeApplications = 0;
-        u64 surfaceReplacements = 0;
-        u64 colorFallbacks = 0;
-        u64 failures = 0;
+    public:
+        PresentationOutput() noexcept = default;
+        PresentationOutput(const PresentationOutput&) = delete;
+        PresentationOutput& operator=(const PresentationOutput&) = delete;
+
+        [[nodiscard]] bool IsValid() const noexcept { return m_active && m_handle.IsValid() && m_renderViewport != nullptr; }
+        [[nodiscard]] PresentationOutputHandle GetHandle() const noexcept { return m_handle; }
+        [[nodiscard]] PresentationOutputState GetState() const noexcept { return m_state; }
+        [[nodiscard]] window::WindowHandle GetWindow() const noexcept { return m_window; }
+        [[nodiscard]] window::PresentationAttachmentHandle GetAttachment() const noexcept { return m_attachment; }
+        [[nodiscard]] RenderViewport* GetRenderViewport() const noexcept { return m_renderViewport; }
+        [[nodiscard]] const SwapChainPolicy& GetSwapChainPolicy() const noexcept { return m_swapChainPolicy; }
+        [[nodiscard]] rhi::Format GetActiveFormat() const noexcept { return m_activeFormat; }
+        [[nodiscard]] rhi::ColorSpace GetActiveColorSpace() const noexcept { return m_activeColorSpace; }
+        [[nodiscard]] const rhi::DisplayColorCapabilities& GetDisplayColor() const noexcept { return m_displayColor; }
+        [[nodiscard]] f32 GetSdrWhiteLevel() const noexcept { return m_sdrWhiteLevel; }
+        [[nodiscard]] f32 GetHdrHeadroom() const noexcept { return m_hdrHeadroom; }
+        [[nodiscard]] u64 GetReconciliationCount() const noexcept { return m_reconciliations; }
+        [[nodiscard]] u64 GetSwapChainCreationCount() const noexcept { return m_swapChainCreations; }
+        [[nodiscard]] u64 GetResizeApplicationCount() const noexcept { return m_resizeApplications; }
+        [[nodiscard]] u64 GetSurfaceReplacementCount() const noexcept { return m_surfaceReplacements; }
+        [[nodiscard]] u64 GetColorFallbackCount() const noexcept { return m_colorFallbacks; }
+        [[nodiscard]] u64 GetFailureCount() const noexcept { return m_failures; }
+
+    private:
+        void Reset() noexcept;
+
+        PresentationOutputHandle m_handle;
+        PresentationOutputState m_state = PresentationOutputState::Vacant;
+        window::WindowHandle m_window;
+        window::PresentationAttachmentHandle m_attachment;
+        RenderViewport* m_renderViewport = nullptr;
+        SwapChainPolicy m_swapChainPolicy;
+        rhi::Format m_activeFormat = rhi::Format::Unknown;
+        rhi::ColorSpace m_activeColorSpace = rhi::ColorSpace::Srgb;
+        rhi::DisplayColorCapabilities m_displayColor;
+        f32 m_sdrWhiteLevel = 1.0f;
+        f32 m_hdrHeadroom = 1.0f;
+        u64 m_reconciliations = 0;
+        u64 m_swapChainCreations = 0;
+        u64 m_resizeApplications = 0;
+        u64 m_surfaceReplacements = 0;
+        u64 m_colorFallbacks = 0;
+        u64 m_failures = 0;
+        bool m_active = false;
+
+        friend class PresentationService;
     };
 
     struct PresentationServiceStats
@@ -142,8 +174,8 @@ namespace vanguard::rendering
         [[nodiscard]] bool DestroyOutput(PresentationOutputHandle output, PresentationFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Tick(PresentationFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool GetSnapshot(PresentationOutputHandle output, PresentationOutputSnapshot& snapshot) const noexcept;
-        [[nodiscard]] RenderViewportHandle ResolveRenderViewport(PresentationOutputHandle output) const noexcept;
+        [[nodiscard]] PresentationOutput* Resolve(PresentationOutputHandle output) noexcept;
+        [[nodiscard]] const PresentationOutput* Resolve(PresentationOutputHandle output) const noexcept;
         [[nodiscard]] PresentationServiceStats GetStats() const noexcept;
 
     private:

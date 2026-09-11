@@ -1,5 +1,6 @@
 #include <vanguard/rendering/render_scene.hpp>
 #include <vanguard/rendering/render_camera.hpp>
+#include <vanguard/rendering/mesh_residency.hpp>
 #include <vanguard/rendering/render_scene_gpu.hpp>
 #include <vanguard/rendering/render_scene_gpu_read.hpp>
 
@@ -25,8 +26,7 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(RenderSceneFailure* const failure, const RenderSceneFailureCode code, const char* const message,
-                                const RenderSceneHandle scene = {}, const RenderProxyHandle proxy = {}) noexcept
+        [[nodiscard]] bool Fail(RenderSceneFailure* const failure, const RenderSceneFailureCode code, const char* const message, const RenderSceneHandle scene = {}, const RenderProxyHandle proxy = {}) noexcept
         {
             if (failure != nullptr)
             {
@@ -50,7 +50,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool ValidSpatialMode(const RenderProxySpatialMode mode) noexcept
         {
-            return static_cast<u32>(mode) <= static_cast<u32>(RenderProxySpatialMode::Bounds);
+            return static_cast<u32>(mode) <= static_cast<u32>(RenderProxySpatialMode::Global);
         }
 
         [[nodiscard]] bool CopyName(char* const destination, const u32 capacity, const char* const source) noexcept
@@ -109,8 +109,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool SameTransform(const RenderProxyTransform& left, const RenderProxyTransform& right) noexcept
         {
             for (u32 component = 0; component < 4; ++component)
-                if (left.row0[component] != right.row0[component] || left.row1[component] != right.row1[component] ||
-                    left.row2[component] != right.row2[component])
+                if (left.row0[component] != right.row0[component] || left.row1[component] != right.row1[component] || left.row2[component] != right.row2[component])
                     return false;
             return true;
         }
@@ -160,13 +159,18 @@ namespace vanguard::rendering
             return true;
         }
 
-        [[nodiscard]] bool ValidLightProperties(const RenderLightKind kind, const f32* const color, const f32 intensity, const f32 range, const f32 innerCone,
-                                                const f32 outerCone) noexcept
+        [[nodiscard]] bool ValidLightProperties(const RenderLightKind kind, const f32* const color, const f32 intensity, const f32 range, const f32 innerCone, const f32 outerCone) noexcept
         {
-            if (static_cast<u32>(kind) > static_cast<u32>(RenderLightKind::Spot) || !std::isfinite(intensity) || !std::isfinite(range) || intensity < 0.0f ||
-                range < 0.0f || !std::isfinite(innerCone) || !std::isfinite(outerCone) || innerCone < 0.0f || outerCone < innerCone)
-                return false;
-            return std::isfinite(color[0]) && std::isfinite(color[1]) && std::isfinite(color[2]);
+            return ValidRenderLight(kind, color, intensity, range, innerCone, outerCone);
+        }
+
+        [[nodiscard]] RenderProxyBounds LightBounds(const RenderProxyTransform& transform, const RenderLightKind kind, const f32 range) noexcept
+        {
+            // Local lights have a world-space spherical cutoff; orientation and
+            // transform scale do not shrink the conservative influence bounds.
+            const f32 radius = kind == RenderLightKind::Directional ? 0.1f : range;
+            return {{transform.row0[3] - radius, transform.row1[3] - radius, transform.row2[3] - radius},
+                    {transform.row0[3] + radius, transform.row1[3] + radius, transform.row2[3] + radius}};
         }
 
         [[nodiscard]] bool SameResourceHandle(const resources::ResourceHandle& left, const resources::ResourceHandle& right) noexcept
@@ -193,7 +197,8 @@ namespace vanguard::rendering
 
         [[nodiscard]] constexpr bool ValidFields(const MeshProxyUpdateFields fields) noexcept
         {
-            return fields != MeshProxyUpdateFields::None && (static_cast<u8>(fields) & ~static_cast<u8>(MeshProxyUpdateFields::All)) == 0;
+            constexpr u8 known = static_cast<u8>(MeshProxyUpdateFields::All) | static_cast<u8>(MeshProxyUpdateFields::Drawable);
+            return fields != MeshProxyUpdateFields::None && (static_cast<u8>(fields) & ~known) == 0;
         }
 
         [[nodiscard]] constexpr bool ValidFields(const LightProxyUpdateFields fields) noexcept
@@ -232,6 +237,7 @@ namespace vanguard::rendering
             u32 payloadGeneration = 0;
             GpuInstanceIndex gpuInstanceIndex = InvalidGpuSceneIndex;
             u32 nextFree = InvalidSlotIndex;
+            bool retirementPending = false;
             u64 producerId = 0;
             u64 producerGeneration = 0;
             RenderProducerHandle producer;
@@ -296,8 +302,7 @@ namespace vanguard::rendering
             };
 
             RelinkState(const u32 capacity, const u32 maximumProxies) noexcept
-                : pendingA(memory::pools::Rendering::GetInstance()), pendingB(memory::pools::Rendering::GetInstance()),
-                  proxyPages(memory::pools::Rendering::GetInstance())
+                : pendingA(memory::pools::Rendering::GetInstance()), pendingB(memory::pools::Rendering::GetInstance()), proxyPages(memory::pools::Rendering::GetInstance())
             {
                 pendingA.Resize(capacity);
                 pendingB.Resize(capacity);
@@ -467,14 +472,24 @@ namespace vanguard::rendering
             resources::ResourceReference material;
             resources::ResourceHandle meshHandle;
             resources::ResourceHandle materialHandle;
+            MeshDrawableBinding activeDrawable;
+            MeshDrawableBinding candidateDrawable;
+            RenderSceneGpuBindingReceipt bindingReceipt;
+            u32 previousBinding = InvalidSlotIndex;
+            u32 nextBinding = InvalidSlotIndex;
             u32 submeshMask = 0;
             u32 renderFlags = 0;
+            bool bindingQueued = false;
+            bool clearingBinding = false;
         };
 
         struct LightPayloadSlot
         {
             RenderProxyState state = RenderProxyState::Vacant;
             RenderProxyHandle proxy;
+            // Borrowed immutable allocation identity, like ProxySlot's mesh
+            // instance index. The publisher remains the allocation owner.
+            GpuLightHandle gpuIdentity;
             u32 generation = 0;
             u32 nextFree = InvalidSlotIndex;
             RenderLightKind kind = RenderLightKind::Point;
@@ -515,9 +530,8 @@ namespace vanguard::rendering
         struct SceneSlot
         {
             SceneSlot() noexcept
-                : proxies(memory::pools::Rendering::GetInstance()), meshPayloads(memory::pools::Rendering::GetInstance()),
-                  lightPayloads(memory::pools::Rendering::GetInstance()), decalPayloads(memory::pools::Rendering::GetInstance()),
-                  producerPages(memory::pools::Rendering::GetInstance())
+                : proxies(memory::pools::Rendering::GetInstance()), meshPayloads(memory::pools::Rendering::GetInstance()), lightPayloads(memory::pools::Rendering::GetInstance()),
+                  decalPayloads(memory::pools::Rendering::GetInstance()), producerPages(memory::pools::Rendering::GetInstance())
             {
             }
 
@@ -533,6 +547,9 @@ namespace vanguard::rendering
             u32 firstFreeMeshPayload = InvalidSlotIndex;
             u32 firstFreeLightPayload = InvalidSlotIndex;
             u32 firstFreeDecalPayload = InvalidSlotIndex;
+            u32 firstPendingMeshBinding = InvalidSlotIndex;
+            u32 lastPendingMeshBinding = InvalidSlotIndex;
+            u32 pendingMeshBindingCount = 0;
             u32 framePipelineSceneIndex = InvalidSlotIndex;
             u64 createdSerial = 0;
             u64 lifecycleRevision = 0;
@@ -582,6 +599,41 @@ namespace vanguard::rendering
             slot.state = RenderProxyState::Retired;
             slot.nextFree = scene.firstFreeProxy;
             scene.firstFreeProxy = index;
+        }
+
+        static void QueueMeshBinding(SceneSlot& scene, const u32 index) noexcept
+        {
+            MeshPayloadSlot& payload = scene.meshPayloads[index];
+            if (payload.bindingQueued)
+                return;
+            payload.previousBinding = scene.lastPendingMeshBinding;
+            payload.nextBinding = InvalidSlotIndex;
+            if (scene.lastPendingMeshBinding != InvalidSlotIndex)
+                scene.meshPayloads[scene.lastPendingMeshBinding].nextBinding = index;
+            else
+                scene.firstPendingMeshBinding = index;
+            scene.lastPendingMeshBinding = index;
+            payload.bindingQueued = true;
+            ++scene.pendingMeshBindingCount;
+        }
+
+        static void RemoveMeshBinding(SceneSlot& scene, const u32 index) noexcept
+        {
+            MeshPayloadSlot& payload = scene.meshPayloads[index];
+            if (!payload.bindingQueued)
+                return;
+            if (payload.previousBinding != InvalidSlotIndex)
+                scene.meshPayloads[payload.previousBinding].nextBinding = payload.nextBinding;
+            else
+                scene.firstPendingMeshBinding = payload.nextBinding;
+            if (payload.nextBinding != InvalidSlotIndex)
+                scene.meshPayloads[payload.nextBinding].previousBinding = payload.previousBinding;
+            else
+                scene.lastPendingMeshBinding = payload.previousBinding;
+            payload.previousBinding = InvalidSlotIndex;
+            payload.nextBinding = InvalidSlotIndex;
+            payload.bindingQueued = false;
+            --scene.pendingMeshBindingCount;
         }
 
         [[nodiscard]] static ProducerSlot* ResolveProducer(SceneSlot& scene, const RenderProducerHandle producer, const bool materialize) noexcept
@@ -641,8 +693,7 @@ namespace vanguard::rendering
             scene.producerPages.Clear();
         }
 
-        [[nodiscard]] static u32 FindProducerProxyIndex(const SceneSlot& scene, const RenderProducerHandle producer,
-                                                        const RenderContributorId contributor) noexcept
+        [[nodiscard]] static u32 FindProducerProxyIndex(const SceneSlot& scene, const RenderProducerHandle producer, const RenderContributorId contributor) noexcept
         {
             const ProducerSlot* const owner = ResolveProducer(scene, producer);
             if (owner == nullptr || !contributor.IsValid())
@@ -696,8 +747,7 @@ namespace vanguard::rendering
             proxy.nextProducerProxy = InvalidSlotIndex;
         }
 
-        explicit Impl(const RenderSceneManagerConfig& value) noexcept
-            : slots(memory::pools::Rendering::GetInstance()), relinkStates(memory::pools::Rendering::GetInstance())
+        explicit Impl(const RenderSceneManagerConfig& value) noexcept : slots(memory::pools::Rendering::GetInstance()), relinkStates(memory::pools::Rendering::GetInstance())
         {
             slots.Reserve(value.maximumScenes);
             relinkStates.Reserve(value.maximumScenes);
@@ -712,8 +762,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool ValidHandle(const RenderSceneHandle scene) const noexcept
         {
-            return scene.index < slots.Size() && scene.generation != 0 && slots[scene.index].generation == scene.generation &&
-                   slots[scene.index].state != RenderSceneState::Vacant;
+            return scene.index < slots.Size() && scene.generation != 0 && slots[scene.index].generation == scene.generation && slots[scene.index].state != RenderSceneState::Vacant;
         }
 
         [[nodiscard]] bool ValidAliveScene(const RenderSceneHandle scene) const noexcept
@@ -770,8 +819,7 @@ namespace vanguard::rendering
             if (!ValidAliveScene(proxy.scene))
                 return false;
             const SceneSlot& scene = slots[proxy.scene.index];
-            return proxy.index < scene.proxies.Size() && proxy.generation != 0 && scene.proxies[proxy.index].generation == proxy.generation &&
-                   scene.proxies[proxy.index].state != RenderProxyState::Vacant;
+            return proxy.index < scene.proxies.Size() && proxy.generation != 0 && scene.proxies[proxy.index].generation == proxy.generation && scene.proxies[proxy.index].state != RenderProxyState::Vacant;
         }
 
         [[nodiscard]] bool ValidAliveProxy(const RenderProxyHandle proxy) const noexcept
@@ -789,20 +837,14 @@ namespace vanguard::rendering
             switch (kind)
             {
             case RenderProxyPayloadKind::Mesh:
-                return slot.payloadIndex < slots[proxy.scene.index].meshPayloads.Size() &&
-                       slots[proxy.scene.index].meshPayloads[slot.payloadIndex].state == RenderProxyState::Alive &&
-                       slots[proxy.scene.index].meshPayloads[slot.payloadIndex].generation == proxy.generation &&
-                       slots[proxy.scene.index].meshPayloads[slot.payloadIndex].proxy == proxy;
+                return slot.payloadIndex < slots[proxy.scene.index].meshPayloads.Size() && slots[proxy.scene.index].meshPayloads[slot.payloadIndex].state == RenderProxyState::Alive &&
+                       slots[proxy.scene.index].meshPayloads[slot.payloadIndex].generation == proxy.generation && slots[proxy.scene.index].meshPayloads[slot.payloadIndex].proxy == proxy;
             case RenderProxyPayloadKind::Light:
-                return slot.payloadIndex < slots[proxy.scene.index].lightPayloads.Size() &&
-                       slots[proxy.scene.index].lightPayloads[slot.payloadIndex].state == RenderProxyState::Alive &&
-                       slots[proxy.scene.index].lightPayloads[slot.payloadIndex].generation == proxy.generation &&
-                       slots[proxy.scene.index].lightPayloads[slot.payloadIndex].proxy == proxy;
+                return slot.payloadIndex < slots[proxy.scene.index].lightPayloads.Size() && slots[proxy.scene.index].lightPayloads[slot.payloadIndex].state == RenderProxyState::Alive &&
+                       slots[proxy.scene.index].lightPayloads[slot.payloadIndex].generation == proxy.generation && slots[proxy.scene.index].lightPayloads[slot.payloadIndex].proxy == proxy;
             case RenderProxyPayloadKind::Decal:
-                return slot.payloadIndex < slots[proxy.scene.index].decalPayloads.Size() &&
-                       slots[proxy.scene.index].decalPayloads[slot.payloadIndex].state == RenderProxyState::Alive &&
-                       slots[proxy.scene.index].decalPayloads[slot.payloadIndex].generation == proxy.generation &&
-                       slots[proxy.scene.index].decalPayloads[slot.payloadIndex].proxy == proxy;
+                return slot.payloadIndex < slots[proxy.scene.index].decalPayloads.Size() && slots[proxy.scene.index].decalPayloads[slot.payloadIndex].state == RenderProxyState::Alive &&
+                       slots[proxy.scene.index].decalPayloads[slot.payloadIndex].generation == proxy.generation && slots[proxy.scene.index].decalPayloads[slot.payloadIndex].proxy == proxy;
             case RenderProxyPayloadKind::None:
                 return false;
             }
@@ -960,8 +1002,7 @@ namespace vanguard::rendering
             return static_cast<const Impl*>(userData)->ResolveSpatialProxyBounds(proxy, bounds);
         }
 
-        static bool ValidateSpatialProxyEntryThunk(void* const userData, const RenderProxyHandle proxy, spatial::EntryHandle& entry,
-                                                   RenderProxyBounds& bounds) noexcept
+        static bool ValidateSpatialProxyEntryThunk(void* const userData, const RenderProxyHandle proxy, spatial::EntryHandle& entry, RenderProxyBounds& bounds) noexcept
         {
             return static_cast<const Impl*>(userData)->ValidateSpatialProxyEntry(proxy, entry, bounds);
         }
@@ -979,6 +1020,7 @@ namespace vanguard::rendering
             view.visibilityMask = &slot.visibilityMask;
             view.payloadKind = &slot.payloadKind;
             view.gpuInstanceIndex = &slot.gpuInstanceIndex;
+            view.global = slot.spatialMode == RenderProxySpatialMode::Global;
             return true;
         }
 
@@ -1002,6 +1044,7 @@ namespace vanguard::rendering
         RenderSceneManagerStats stats;
         RenderCameraStorage* cameraStorage = nullptr;
         RenderSceneGpuPublisher* gpuPublisher = nullptr;
+        u32 nextMeshBindingScene = 0;
         u64 nextCreatedSerial = 1;
         u64 nextProxyCreatedSerial = 1;
     };
@@ -1076,9 +1119,8 @@ namespace vanguard::rendering
             return Fail(failure, RenderSceneFailureCode::WrongThread, "RenderScene creation must run on the main thread");
         }
         concurrency::ScopedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!ValidMode(desc.mode) || !ValidOwnership(desc.ownership) || !ValidSpatialConfig(desc.spatial) || desc.maximumProxies == 0 ||
-            desc.maximumProxies > MaximumRenderProxySlotsPerScene || desc.maximumPendingProxyMutations == 0 || desc.maximumViews == 0 ||
-            desc.maximumViews > MaximumRenderViews)
+        if (!ValidMode(desc.mode) || !ValidOwnership(desc.ownership) || !ValidSpatialConfig(desc.spatial) || desc.maximumProxies == 0 || desc.maximumProxies > MaximumRenderProxySlotsPerScene ||
+            desc.maximumPendingProxyMutations == 0 || desc.maximumViews == 0 || desc.maximumViews > MaximumRenderViews)
         {
             ++m_impl->stats.failedCreates;
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid RenderScene creation descriptor");
@@ -1272,8 +1314,7 @@ namespace vanguard::rendering
             ++m_impl->stats.failedProxyCreates;
             return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for RenderProxy creation", desc.scene);
         }
-        if (desc.typeId == 0 || !ValidTransform(desc.transform) || !ValidBounds(desc.bounds) || !ValidSpatialMode(desc.spatialMode) ||
-            (desc.producer.IsValid() != desc.contributor.IsValid()))
+        if (desc.typeId == 0 || !ValidTransform(desc.transform) || !ValidBounds(desc.bounds) || !ValidSpatialMode(desc.spatialMode) || (desc.producer.IsValid() != desc.contributor.IsValid()))
         {
             ++m_impl->stats.failedProxyCreates;
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid RenderProxy creation descriptor", desc.scene);
@@ -1385,8 +1426,12 @@ namespace vanguard::rendering
     {
         ClearFailure(failure);
         proxy = {};
-        if (!desc.mesh.IsValid())
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "MeshProxy requires a valid mesh resource reference", desc.proxy.scene);
+        const MeshDrawableInfo* const drawable = desc.drawable != nullptr ? desc.drawable->GetDrawable() : nullptr;
+        if (!desc.mesh.IsValid() || (desc.drawable != nullptr && (drawable == nullptr || !drawable->renderable.IsValid())))
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "MeshProxy requires a valid mesh reference and any supplied drawable must be ready", desc.proxy.scene);
+        MeshDrawableBinding retainedDrawable;
+        if (desc.drawable != nullptr && !desc.drawable->Retain(retainedDrawable))
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "MeshProxy could not retain its drawable binding", desc.proxy.scene);
 
         RenderSceneGpuIdentity gpuIdentity;
         if (m_impl != nullptr && m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->ReserveIdentity(RenderSceneGpuObjectKind::Instance, gpuIdentity))
@@ -1414,6 +1459,7 @@ namespace vanguard::rendering
         payload.material = desc.material;
         payload.meshHandle = desc.meshHandle;
         payload.materialHandle = desc.materialHandle;
+        payload.candidateDrawable = static_cast<MeshDrawableBinding&&>(retainedDrawable);
         payload.submeshMask = desc.submeshMask;
         payload.renderFlags = desc.renderFlags;
 
@@ -1429,6 +1475,21 @@ namespace vanguard::rendering
             proxy = {};
             return Fail(failure, RenderSceneFailureCode::InvalidState, "MeshProxy GPU identity tracking failed", desc.proxy.scene);
         }
+        if (m_impl->gpuPublisher != nullptr && drawable != nullptr)
+        {
+            RenderSceneGpuFailure gpuFailure;
+            const RenderSceneGpuMeshBinding binding{drawable->renderable, {}};
+            if (!m_impl->gpuPublisher->BindMesh(proxy, binding, payload.bindingReceipt, &gpuFailure))
+            {
+                static_cast<void>(DestroyProxy(proxy));
+                proxy = {};
+                return Fail(failure, gpuFailure.code == RenderSceneGpuFailureCode::Busy ? RenderSceneFailureCode::Busy : RenderSceneFailureCode::InvalidState,
+                            gpuFailure.message != nullptr ? gpuFailure.message : "MeshProxy GPU drawable binding failed", desc.proxy.scene);
+            }
+            Impl::QueueMeshBinding(scene, payloadIndex);
+        }
+        else if (drawable != nullptr)
+            payload.activeDrawable = static_cast<MeshDrawableBinding&&>(payload.candidateDrawable);
         return true;
     }
 
@@ -1446,6 +1507,9 @@ namespace vanguard::rendering
         RenderProxyDesc baseDesc = desc.proxy;
         if (baseDesc.typeId == 0)
             baseDesc.typeId = LightProxyTypeId;
+        if (desc.kind == RenderLightKind::Directional)
+            baseDesc.spatialMode = RenderProxySpatialMode::Global;
+        baseDesc.bounds = LightBounds(baseDesc.transform, desc.kind, desc.range);
         if (!CreateProxy(baseDesc, proxy, failure))
         {
             if (m_impl != nullptr && m_impl->gpuPublisher != nullptr)
@@ -1476,13 +1540,18 @@ namespace vanguard::rendering
         base.payloadGeneration = proxy.generation;
         ++m_impl->stats.activeLightPayloads;
         ++m_impl->stats.createdPayloads;
-        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->TrackProxy(proxy, gpuIdentity))
+        if (m_impl->gpuPublisher != nullptr)
         {
-            m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
-            static_cast<void>(DestroyProxy(proxy));
-            proxy = {};
-            return Fail(failure, RenderSceneFailureCode::InvalidState, "LightProxy GPU identity tracking failed", desc.proxy.scene);
+            const bool tracked = m_impl->gpuPublisher->TrackProxy(proxy, gpuIdentity);
+            if (!tracked)
+            {
+                m_impl->gpuPublisher->CancelIdentity(gpuIdentity);
+                static_cast<void>(DestroyProxy(proxy));
+                proxy = {};
+                return Fail(failure, RenderSceneFailureCode::InvalidState, "LightProxy GPU identity tracking failed", desc.proxy.scene);
+            }
         }
+        payload.gpuIdentity = gpuIdentity.allocation.AsSlotHandle<GpuLightHandle>();
         return true;
     }
 
@@ -1490,8 +1559,8 @@ namespace vanguard::rendering
     {
         ClearFailure(failure);
         proxy = {};
-        if (!desc.material.IsValid() || !std::isfinite(desc.extents[0]) || !std::isfinite(desc.extents[1]) || !std::isfinite(desc.extents[2]) ||
-            !std::isfinite(desc.fadeDistance) || desc.extents[0] < 0.0f || desc.extents[1] < 0.0f || desc.extents[2] < 0.0f || desc.fadeDistance < 0.0f)
+        if (!desc.material.IsValid() || !std::isfinite(desc.extents[0]) || !std::isfinite(desc.extents[1]) || !std::isfinite(desc.extents[2]) || !std::isfinite(desc.fadeDistance) || desc.extents[0] < 0.0f ||
+            desc.extents[1] < 0.0f || desc.extents[2] < 0.0f || desc.fadeDistance < 0.0f)
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "DecalProxy requires a valid material and non-negative extents", desc.proxy.scene);
 
         RenderSceneGpuIdentity gpuIdentity;
@@ -1540,8 +1609,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::CreateProducerMeshProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const MeshProxyDesc& desc,
-                                                     RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateProducerMeshProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const MeshProxyDesc& desc, RenderProxyHandle& proxy,
+                                                     RenderSceneFailure* const failure) noexcept
     {
         MeshProxyDesc producerDesc = desc;
         producerDesc.proxy.producer = producer;
@@ -1549,8 +1618,8 @@ namespace vanguard::rendering
         return CreateMeshProxy(producerDesc, proxy, failure);
     }
 
-    bool RenderSceneManager::CreateProducerLightProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const LightProxyDesc& desc,
-                                                      RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateProducerLightProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const LightProxyDesc& desc, RenderProxyHandle& proxy,
+                                                      RenderSceneFailure* const failure) noexcept
     {
         LightProxyDesc producerDesc = desc;
         producerDesc.proxy.producer = producer;
@@ -1558,8 +1627,8 @@ namespace vanguard::rendering
         return CreateLightProxy(producerDesc, proxy, failure);
     }
 
-    bool RenderSceneManager::CreateProducerDecalProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const DecalProxyDesc& desc,
-                                                      RenderProxyHandle& proxy, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::CreateProducerDecalProxy(const RenderProducerHandle producer, const RenderContributorId contributor, const DecalProxyDesc& desc, RenderProxyHandle& proxy,
+                                                      RenderSceneFailure* const failure) noexcept
     {
         DecalProxyDesc producerDesc = desc;
         producerDesc.proxy.producer = producer;
@@ -1632,6 +1701,7 @@ namespace vanguard::rendering
         case RenderProxyPayloadKind::Mesh:
             if (slot.payloadIndex < scene.meshPayloads.Size() && scene.meshPayloads[slot.payloadIndex].state == RenderProxyState::Alive)
             {
+                Impl::RemoveMeshBinding(scene, slot.payloadIndex);
                 Impl::ReleasePayloadSlot(scene.meshPayloads, scene.firstFreeMeshPayload, slot.payloadIndex);
                 --m_impl->stats.activeMeshPayloads;
                 ++m_impl->stats.destroyedPayloads;
@@ -1669,8 +1739,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::DestroyProducerContribution(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer,
-                                                         const RenderContributorId contributor, RenderProxyHandle* const destroyed,
+    bool RenderSceneManager::DestroyProducerContribution(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer, const RenderContributorId contributor, RenderProxyHandle* const destroyed,
                                                          RenderSceneFailure* const failure) noexcept
     {
         if (destroyed != nullptr)
@@ -1691,8 +1760,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::DestroyProducer(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer,
-                                             containers::DynamicArray<RenderProducerProxy>* const destroyed, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::DestroyProducer(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer, containers::DynamicArray<RenderProducerProxy>* const destroyed,
+                                             RenderSceneFailure* const failure) noexcept
     {
         if (destroyed != nullptr)
             destroyed->Clear();
@@ -1722,8 +1791,8 @@ namespace vanguard::rendering
 
     // WARNING: This cold reset scans every proxy in the scene. Destruction is not transactional;
     // callers must process the returned partial result if a later proxy destruction fails.
-    bool RenderSceneManager::DestroySceneProducers(const RenderSceneHandle sceneHandle, const u64 producerGeneration,
-                                                   containers::DynamicArray<RenderProducerProxy>& destroyed, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::DestroySceneProducers(const RenderSceneHandle sceneHandle, const u64 producerGeneration, containers::DynamicArray<RenderProducerProxy>& destroyed,
+                                                   RenderSceneFailure* const failure) noexcept
     {
         destroyed.Clear();
         if (m_impl == nullptr)
@@ -1745,8 +1814,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::UpdateProxyTransform(const RenderProxyHandle proxy, const RenderProxyTransform& transform, const RenderProxyBounds& bounds,
-                                                  const u64 producerGeneration, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::UpdateProxyTransform(const RenderProxyHandle proxy, const RenderProxyTransform& transform, const RenderProxyBounds& bounds, const u64 producerGeneration,
+                                                  RenderSceneFailure* const failure) noexcept
     {
         RenderProxyRelinkRequest request;
         request.proxy = proxy;
@@ -1756,8 +1825,23 @@ namespace vanguard::rendering
         return ScheduleRelink(request, failure);
     }
 
-    bool RenderSceneManager::UpdateProxyVisibility(const RenderProxyHandle proxy, const RenderProxyVisibilityFlags visibility, const u32 visibilityMask,
-                                                   RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::BeginProxyRetirement(const RenderProxyHandle proxy, RenderSceneFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (!concurrency::IsMainThread())
+            return Fail(failure, RenderSceneFailureCode::WrongThread, "proxy retirement requires the owner thread", proxy.scene, proxy);
+        if (m_impl == nullptr || !m_impl->ValidAliveProxy(proxy))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "proxy retirement requires a live proxy", proxy.scene, proxy);
+        auto& slot = m_impl->slots[proxy.scene.index].proxies[proxy.index];
+        if (slot.retirementPending)
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderProxy is already pending retirement", proxy.scene, proxy);
+        if (!UpdateProxyVisibility(proxy, RenderProxyVisibilityFlags::None, 0, failure))
+            return false;
+        slot.retirementPending = true;
+        return true;
+    }
+
+    bool RenderSceneManager::UpdateProxyVisibility(const RenderProxyHandle proxy, const RenderProxyVisibilityFlags visibility, const u32 visibilityMask, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -1781,8 +1865,7 @@ namespace vanguard::rendering
         if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy visibility update is blocked between scene preparation and commit", proxy.scene,
-                        proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy visibility update is blocked between scene preparation and commit", proxy.scene, proxy);
         }
         if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
@@ -1861,8 +1944,7 @@ namespace vanguard::rendering
         if (scene.framePrepared || m_impl->CandidateProductionOpen(proxy.scene))
         {
             ++m_impl->stats.failedProxyMutations;
-            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy user-data update is blocked between scene preparation and commit", proxy.scene,
-                        proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy user-data update is blocked between scene preparation and commit", proxy.scene, proxy);
         }
         if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
@@ -1908,18 +1990,56 @@ namespace vanguard::rendering
 
         Impl::ProxySlot& base = scene.proxies[proxy.index];
         Impl::MeshPayloadSlot& payload = scene.meshPayloads[base.payloadIndex];
+        const bool drawableChanged = HasField(update.fields, MeshProxyUpdateFields::Drawable);
+        const MeshDrawableInfo* const drawable = drawableChanged && update.drawable != nullptr ? update.drawable->GetDrawable() : nullptr;
+        if (drawableChanged && update.drawable != nullptr && (drawable == nullptr || !drawable->renderable.IsValid()))
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "mesh drawable replacement is not ready", proxy.scene, proxy);
+        MeshDrawableBinding retainedDrawable;
+        if (drawableChanged && update.drawable != nullptr && !update.drawable->Retain(retainedDrawable))
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "mesh drawable replacement could not be retained", proxy.scene, proxy);
         const bool resourcesChanged =
-            HasField(update.fields, MeshProxyUpdateFields::Resources) &&
-            (payload.mesh != update.mesh || payload.material != update.material || !SameResourceHandle(payload.meshHandle, update.meshHandle) ||
-             !SameResourceHandle(payload.materialHandle, update.materialHandle));
+            HasField(update.fields, MeshProxyUpdateFields::Resources) && (payload.mesh != update.mesh || payload.material != update.material || !SameResourceHandle(payload.meshHandle, update.meshHandle) ||
+                                                                          !SameResourceHandle(payload.materialHandle, update.materialHandle));
         const bool submeshesChanged = HasField(update.fields, MeshProxyUpdateFields::SubmeshSelection) && payload.submeshMask != update.submeshMask;
         const bool flagsChanged = HasField(update.fields, MeshProxyUpdateFields::RenderFlags) && payload.renderFlags != update.renderFlags;
-        if (!resourcesChanged && !submeshesChanged && !flagsChanged)
+        if (!resourcesChanged && !submeshesChanged && !flagsChanged && !drawableChanged)
             return true;
         if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
             ++m_impl->stats.failedProxyMutations;
             return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "MeshProxy payload mutation budget exceeded", proxy.scene, proxy);
+        }
+        const bool bindingPublication = m_impl->gpuPublisher != nullptr && (drawableChanged || resourcesChanged);
+        if (m_impl->gpuPublisher != nullptr && !bindingPublication && (submeshesChanged || flagsChanged) &&
+            !m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties))
+        {
+            m_impl->RollbackMutation(scene);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "mesh property update GPU journal admission failed", proxy.scene, proxy);
+        }
+        if (bindingPublication)
+        {
+            RenderSceneGpuFailure gpuFailure;
+            RenderSceneGpuBindingReceipt bindingReceipt;
+            const bool bound = drawableChanged && drawable != nullptr
+                                   ? m_impl->gpuPublisher->BindMesh(proxy, {drawable->renderable, {}}, bindingReceipt, &gpuFailure)
+                                   : m_impl->gpuPublisher->ClearMeshBinding(proxy, bindingReceipt, &gpuFailure);
+            if (!bound)
+            {
+                m_impl->RollbackMutation(scene);
+                return Fail(failure, gpuFailure.code == RenderSceneGpuFailureCode::Busy ? RenderSceneFailureCode::Busy : RenderSceneFailureCode::InvalidState,
+                            gpuFailure.message != nullptr ? gpuFailure.message : "mesh drawable publication failed", proxy.scene, proxy);
+            }
+            payload.bindingReceipt = bindingReceipt;
+            payload.candidateDrawable = static_cast<MeshDrawableBinding&&>(retainedDrawable);
+            payload.clearingBinding = !drawableChanged || drawable == nullptr;
+            Impl::QueueMeshBinding(scene, base.payloadIndex);
+        }
+        else if (drawableChanged || resourcesChanged)
+        {
+            payload.activeDrawable = static_cast<MeshDrawableBinding&&>(retainedDrawable);
+            payload.candidateDrawable.Reset();
+            payload.bindingReceipt = {};
+            payload.clearingBinding = update.drawable == nullptr;
         }
         if (resourcesChanged)
         {
@@ -1934,13 +2054,87 @@ namespace vanguard::rendering
             payload.renderFlags = update.renderFlags;
         ++base.lifecycleRevision;
         ++scene.lifecycleRevision;
-        if (m_impl->gpuPublisher != nullptr)
+        return true;
+    }
+
+    bool RenderSceneManager::ResolveMeshBindings(const u32 maximumChecks, RenderSceneFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr || !concurrency::IsMainThread() || maximumChecks == 0)
+            return Fail(failure, m_impl == nullptr ? RenderSceneFailureCode::NotInitialized :
+                                 (!concurrency::IsMainThread() ? RenderSceneFailureCode::WrongThread : RenderSceneFailureCode::InvalidDescriptor),
+                        "mesh binding resolution requires an initialized owner thread and a positive budget");
+        if (m_impl->gpuPublisher == nullptr)
+            return true;
+        constexpr u32 BatchCapacity = 256;
+        RenderSceneGpuBindingReceipt receipts[BatchCapacity];
+        RenderSceneGpuBindingStatus statuses[BatchCapacity];
+        u32 payloadIndices[BatchCapacity];
+        u32 remaining = maximumChecks < BatchCapacity ? maximumChecks : BatchCapacity;
+        const u32 sceneCount = m_impl->slots.Size();
+        if (sceneCount == 0)
+            return true;
+        u32 sceneIndex = m_impl->nextMeshBindingScene < sceneCount ? m_impl->nextMeshBindingScene : 0;
+        for (u32 visited = 0; visited < sceneCount && remaining != 0; ++visited)
         {
-            if (resourcesChanged)
-                static_cast<void>(m_impl->gpuPublisher->ClearMeshBinding(proxy));
-            if (submeshesChanged || flagsChanged)
-                static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties));
+            Impl::SceneSlot& scene = m_impl->slots[sceneIndex];
+            if (scene.state == RenderSceneState::Alive && scene.pendingMeshBindingCount != 0)
+            {
+                const u32 count = scene.pendingMeshBindingCount < remaining ? scene.pendingMeshBindingCount : remaining;
+                u32 payloadIndex = scene.firstPendingMeshBinding;
+                for (u32 index = 0; index < count; ++index)
+                {
+                    Impl::MeshPayloadSlot& payload = scene.meshPayloads[payloadIndex];
+                    payloadIndices[index] = payloadIndex;
+                    receipts[index] = payload.bindingReceipt;
+                    payloadIndex = payload.nextBinding;
+                }
+                const RenderSceneHandle sceneHandle{sceneIndex, scene.generation};
+                if (!m_impl->gpuPublisher->PollBindings(sceneHandle, {receipts, count}, {statuses, count}))
+                    return Fail(failure, RenderSceneFailureCode::InvalidState, "mesh binding acceptance could not be read", sceneHandle);
+                for (u32 index = 0; index < count; ++index)
+                {
+                    Impl::MeshPayloadSlot& payload = scene.meshPayloads[payloadIndices[index]];
+                    if (statuses[index] == RenderSceneGpuBindingStatus::Accepted)
+                    {
+                        if (payload.clearingBinding)
+                            payload.activeDrawable.Reset();
+                        else
+                            payload.activeDrawable = static_cast<MeshDrawableBinding&&>(payload.candidateDrawable);
+                        payload.candidateDrawable.Reset();
+                        payload.bindingReceipt = {};
+                        payload.clearingBinding = false;
+                        Impl::RemoveMeshBinding(scene, payloadIndices[index]);
+                    }
+                    else if (statuses[index] == RenderSceneGpuBindingStatus::Stale)
+                        return Fail(failure, RenderSceneFailureCode::InvalidState, "mesh binding receipt was superseded before acceptance", sceneHandle, payload.proxy);
+                    else
+                    {
+                        Impl::RemoveMeshBinding(scene, payloadIndices[index]);
+                        Impl::QueueMeshBinding(scene, payloadIndices[index]);
+                    }
+                }
+                remaining -= count;
+            }
+            sceneIndex = sceneIndex + 1u < sceneCount ? sceneIndex + 1u : 0u;
         }
+        m_impl->nextMeshBindingScene = sceneIndex;
+        return true;
+    }
+
+    bool RenderSceneManager::RetainMeshDrawable(const RenderProxyHandle proxy, MeshDrawableBinding& output, RenderSceneFailure* const failure) const noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr || !concurrency::IsMainThread())
+            return Fail(failure, m_impl == nullptr ? RenderSceneFailureCode::NotInitialized : RenderSceneFailureCode::WrongThread,
+                        "accepted mesh binding retention requires the owner thread", proxy.scene, proxy);
+        if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Mesh))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "accepted mesh binding requires a live mesh proxy", proxy.scene, proxy);
+        const Impl::SceneSlot& scene = m_impl->slots[proxy.scene.index];
+        const Impl::ProxySlot& base = scene.proxies[proxy.index];
+        const Impl::MeshPayloadSlot& payload = scene.meshPayloads[base.payloadIndex];
+        if (!payload.activeDrawable.Retain(output))
+            return Fail(failure, RenderSceneFailureCode::Busy, "mesh proxy has no accepted drawable binding", proxy.scene, proxy);
         return true;
     }
 
@@ -1989,19 +2183,60 @@ namespace vanguard::rendering
         }
 
         const bool kindChanged = HasField(update.fields, LightProxyUpdateFields::Kind) && payload.kind != update.kind;
-        const bool colorChanged = HasField(update.fields, LightProxyUpdateFields::Color) &&
-                                  (payload.color[0] != update.color[0] || payload.color[1] != update.color[1] || payload.color[2] != update.color[2]);
-        const bool photometryChanged =
-            HasField(update.fields, LightProxyUpdateFields::Photometry) && (payload.intensity != update.intensity || payload.range != update.range);
-        const bool conesChanged = HasField(update.fields, LightProxyUpdateFields::Cones) &&
-                                  (payload.innerConeRadians != update.innerConeRadians || payload.outerConeRadians != update.outerConeRadians);
+        const bool colorChanged = HasField(update.fields, LightProxyUpdateFields::Color) && (payload.color[0] != update.color[0] || payload.color[1] != update.color[1] || payload.color[2] != update.color[2]);
+        const bool photometryChanged = HasField(update.fields, LightProxyUpdateFields::Photometry) && (payload.intensity != update.intensity || payload.range != update.range);
+        const bool conesChanged = HasField(update.fields, LightProxyUpdateFields::Cones) && (payload.innerConeRadians != update.innerConeRadians || payload.outerConeRadians != update.outerConeRadians);
         const bool shadowChanged = HasField(update.fields, LightProxyUpdateFields::Shadow) && payload.castsShadow != update.castsShadow;
-        if (!kindChanged && !colorChanged && !photometryChanged && !conesChanged && !shadowChanged)
+        const bool filteringChanged = update.updateFiltering &&
+            (base.visibility != update.visibility || base.visibilityMask != update.visibilityMask || base.layerMask != update.layerMask);
+        const bool influenceChanged = kindChanged || range != payload.range;
+        const RenderProxyBounds bounds = influenceChanged ? LightBounds(base.transform, kind, range) : base.bounds;
+        const RenderProxySpatialMode spatialMode = kindChanged
+            ? (kind == RenderLightKind::Directional ? RenderProxySpatialMode::Global
+                                                   : (base.spatialMode == RenderProxySpatialMode::Global ? RenderProxySpatialMode::Bounds : base.spatialMode))
+            : base.spatialMode;
+        if (!ValidBounds(bounds) || (spatialMode == RenderProxySpatialMode::Bounds && !m_impl->SpatialBoundsAccepted(scene, bounds)))
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "local light bounds are outside the scene spatial extent", proxy.scene, proxy);
+        auto* const relinks = m_impl->relinkStates[proxy.scene.index];
+        if (influenceChanged)
+        {
+            // Use the existing per-proxy admission gate: a load/check alone
+            // races a worker acquiring a relink with the old influence shape.
+            if (relinks == nullptr || relinks->CloseProxy(proxy) != Impl::RelinkState::CloseProxyResult::Closed)
+                return Fail(failure, RenderSceneFailureCode::Busy, "light influence update waits for outstanding transform relinks", proxy.scene, proxy);
+        }
+
+        if (!kindChanged && !colorChanged && !photometryChanged && !conesChanged && !shadowChanged && !filteringChanged)
             return true;
         if (!m_impl->RegisterMutation(proxy.scene, scene))
         {
+            if (influenceChanged)
+                relinks->ReopenProxy(proxy);
             ++m_impl->stats.failedProxyMutations;
             return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "LightProxy payload mutation budget exceeded", proxy.scene, proxy);
+        }
+        const RenderSceneGpuDirtyFlags dirty = RenderSceneGpuDirtyFlags::Properties |
+            (influenceChanged ? RenderSceneGpuDirtyFlags::Transform : RenderSceneGpuDirtyFlags::None) |
+            (filteringChanged ? RenderSceneGpuDirtyFlags::Visibility : RenderSceneGpuDirtyFlags::None);
+        if (m_impl->gpuPublisher != nullptr && !m_impl->gpuPublisher->MarkProxyDirty(proxy, dirty))
+        {
+            m_impl->RollbackMutation(scene);
+            if (influenceChanged)
+                relinks->ReopenProxy(proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "light update GPU journal admission failed", proxy.scene, proxy);
+        }
+        if (influenceChanged)
+        {
+            const RenderProxyBounds oldBounds = base.bounds;
+            base.bounds = bounds;
+            base.spatialMode = spatialMode;
+            m_impl->MoveSpatialEntry(scene, proxy, base, oldBounds);
+        }
+        if (filteringChanged)
+        {
+            base.visibility = update.visibility;
+            base.visibilityMask = update.visibilityMask;
+            base.layerMask = update.layerMask;
         }
         if (kindChanged)
             payload.kind = update.kind;
@@ -2025,8 +2260,8 @@ namespace vanguard::rendering
             payload.castsShadow = update.castsShadow;
         ++base.lifecycleRevision;
         ++scene.lifecycleRevision;
-        if (m_impl->gpuPublisher != nullptr)
-            static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties));
+        if (influenceChanged)
+            relinks->ReopenProxy(proxy);
         return true;
     }
 
@@ -2042,8 +2277,7 @@ namespace vanguard::rendering
         }
         if (!ValidFields(update.fields) || (HasField(update.fields, DecalProxyUpdateFields::Material) && !update.material.IsValid()) ||
             (HasField(update.fields, DecalProxyUpdateFields::Extents) &&
-             (!std::isfinite(update.extents[0]) || !std::isfinite(update.extents[1]) || !std::isfinite(update.extents[2]) || update.extents[0] < 0.0f ||
-              update.extents[1] < 0.0f || update.extents[2] < 0.0f)) ||
+             (!std::isfinite(update.extents[0]) || !std::isfinite(update.extents[1]) || !std::isfinite(update.extents[2]) || update.extents[0] < 0.0f || update.extents[1] < 0.0f || update.extents[2] < 0.0f)) ||
             (HasField(update.fields, DecalProxyUpdateFields::FadeDistance) && (!std::isfinite(update.fadeDistance) || update.fadeDistance < 0.0f)))
         {
             ++m_impl->stats.failedProxyMutations;
@@ -2066,11 +2300,9 @@ namespace vanguard::rendering
 
         Impl::ProxySlot& base = scene.proxies[proxy.index];
         Impl::DecalPayloadSlot& payload = scene.decalPayloads[base.payloadIndex];
-        const bool materialChanged = HasField(update.fields, DecalProxyUpdateFields::Material) &&
-                                     (payload.material != update.material || !SameResourceHandle(payload.materialHandle, update.materialHandle));
+        const bool materialChanged = HasField(update.fields, DecalProxyUpdateFields::Material) && (payload.material != update.material || !SameResourceHandle(payload.materialHandle, update.materialHandle));
         const bool extentsChanged =
-            HasField(update.fields, DecalProxyUpdateFields::Extents) &&
-            (payload.extents[0] != update.extents[0] || payload.extents[1] != update.extents[1] || payload.extents[2] != update.extents[2]);
+            HasField(update.fields, DecalProxyUpdateFields::Extents) && (payload.extents[0] != update.extents[0] || payload.extents[1] != update.extents[1] || payload.extents[2] != update.extents[2]);
         const bool fadeChanged = HasField(update.fields, DecalProxyUpdateFields::FadeDistance) && payload.fadeDistance != update.fadeDistance;
         const bool sortChanged = HasField(update.fields, DecalProxyUpdateFields::SortKey) && payload.sortKey != update.sortKey;
         if (!materialChanged && !extentsChanged && !fadeChanged && !sortChanged)
@@ -2099,16 +2331,15 @@ namespace vanguard::rendering
         ++scene.lifecycleRevision;
         if (m_impl->gpuPublisher != nullptr)
         {
-            if (materialChanged)
-                static_cast<void>(m_impl->gpuPublisher->ClearDecalMaterialBinding(proxy));
             if (extentsChanged || fadeChanged || sortChanged)
                 static_cast<void>(m_impl->gpuPublisher->MarkProxyDirty(proxy, RenderSceneGpuDirtyFlags::Properties));
         }
         return true;
     }
 
-    bool RenderSceneManager::ScheduleRelink(const RenderProxyRelinkRequest& request, RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::ScheduleRelink(const RenderProxyRelinkRequest& input, RenderSceneFailure* const failure) noexcept
     {
+        RenderProxyRelinkRequest request = input;
         ClearFailure(failure);
         if (m_impl == nullptr)
             return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.proxy.scene, request.proxy);
@@ -2117,8 +2348,7 @@ namespace vanguard::rendering
 
         concurrency::ScopedSharedLock<concurrency::RWLock> sceneGuard(m_impl->publicationLock);
         if (!m_impl->ValidAliveScene(request.proxy.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for relink admission", request.proxy.scene,
-                        request.proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for relink admission", request.proxy.scene, request.proxy);
         Impl::RelinkState* const relinks = m_impl->relinkStates[request.proxy.scene.index];
         if (relinks == nullptr)
             return Fail(failure, RenderSceneFailureCode::InvalidState, "RenderScene relink state is unavailable", request.proxy.scene, request.proxy);
@@ -2127,10 +2357,9 @@ namespace vanguard::rendering
         if (admission == Impl::RelinkState::AcquireProxyResult::Stale)
             return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid, stale, or non-alive RenderProxy handle", request.proxy.scene, request.proxy);
         if (admission == Impl::RelinkState::AcquireProxyResult::Closed)
-            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy relink admission is closed for destruction", request.proxy.scene, request.proxy);
+            return Fail(failure, RenderSceneFailureCode::Busy, "RenderProxy relink admission is closed for a structural mutation", request.proxy.scene, request.proxy);
         if (admission == Impl::RelinkState::AcquireProxyResult::CapacityExceeded)
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy outstanding relink capacity exceeded", request.proxy.scene,
-                        request.proxy);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "RenderProxy outstanding relink capacity exceeded", request.proxy.scene, request.proxy);
 
         if (!m_impl->ValidAliveProxy(request.proxy))
         {
@@ -2139,14 +2368,17 @@ namespace vanguard::rendering
         }
         Impl::SceneSlot& scene = m_impl->slots[request.proxy.scene.index];
         const Impl::ProxySlot& proxy = scene.proxies[request.proxy.index];
-        if (proxy.spatialMode == RenderProxySpatialMode::Bounds && !m_impl->SpatialBoundsAccepted(scene, request.bounds))
+        if (proxy.payloadKind == RenderProxyPayloadKind::Light)
+        {
+            const auto& light = scene.lightPayloads[proxy.payloadIndex];
+            request.bounds = LightBounds(request.transform, light.kind, light.range);
+        }
+        if (!ValidBounds(request.bounds) || (proxy.spatialMode == RenderProxySpatialMode::Bounds && !m_impl->SpatialBoundsAccepted(scene, request.bounds)))
         {
             relinks->ReleaseOutstanding(request.proxy);
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderProxy relink moves bounds outside the configured spatial extent",
-                        request.proxy.scene, request.proxy);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "RenderProxy relink moves bounds outside the configured spatial extent", request.proxy.scene, request.proxy);
         }
-        if (!alreadyOutstanding && !relinks->dispatched.GetValue() && !request.teleport && SameTransform(proxy.transform, request.transform) &&
-            SameBounds(proxy.bounds, request.bounds))
+        if (!alreadyOutstanding && !relinks->dispatched.GetValue() && !request.teleport && SameTransform(proxy.transform, request.transform) && SameBounds(proxy.bounds, request.bounds))
         {
             relinks->ReleaseOutstanding(request.proxy);
             return true;
@@ -2169,8 +2401,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::PrepareSceneUpdate(const RenderSceneHandle scene, const u64 tickCounter, RenderSceneFramePrepareResult& result,
-                                                RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::PrepareSceneUpdate(const RenderSceneHandle scene, const u64 tickCounter, RenderSceneFramePrepareResult& result, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         result = {};
@@ -2223,8 +2454,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::ExecuteSceneUpdate(const RenderSceneHandle scene, jobs::Builder& builder, RenderSceneUpdateResult& result,
-                                                RenderSceneFailure* const failure) noexcept
+    bool RenderSceneManager::ExecuteSceneUpdate(const RenderSceneHandle scene, jobs::Builder& builder, RenderSceneUpdateResult& result, RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         result = {};
@@ -2275,8 +2505,7 @@ namespace vanguard::rendering
         static jobs::JobName updateName{"RenderScene.UpdateState"};
         static jobs::JobName relinkName{"RenderScene.UpdateState.Relink"};
         jobs::Task updateTask = jobs::Task::Create(
-            [impl, relinks, scene, processIndex, processCount, duplicateStamp, groupCount, batchSize, completedMutationEpoch,
-             gpuDirtyBatch](const jobs::JobContext& context) noexcept
+            [impl, relinks, scene, processIndex, processCount, duplicateStamp, groupCount, batchSize, completedMutationEpoch, gpuDirtyBatch](const jobs::JobContext& context) noexcept
             {
                 containers::DynamicArray<Impl::PendingRelinkRequest>& requests = relinks->Queue(processIndex);
                 u32 unique = 0;
@@ -2323,12 +2552,10 @@ namespace vanguard::rendering
                             proxy.producerGeneration = request.input.producerGeneration;
                         if (request.input.teleport)
                             ++proxy.teleportRevision;
-                        request.structuralMove =
-                            proxy.spatialMode == RenderProxySpatialMode::Bounds && spatial::QuickConditionalMove(slot.spatial, proxy.spatial, proxy.bounds);
+                        request.structuralMove = proxy.spatialMode == RenderProxySpatialMode::Bounds && spatial::QuickConditionalMove(slot.spatial, proxy.spatial, proxy.bounds);
                         ++proxy.lifecycleRevision;
                         if (impl->gpuPublisher != nullptr)
-                            static_cast<void>(
-                                impl->gpuPublisher->MarkProxyDirty(gpuDirtyBatch, group, request.input.proxy, RenderSceneGpuDirtyFlags::Transform));
+                            static_cast<void>(impl->gpuPublisher->MarkProxyDirty(gpuDirtyBatch, group, request.input.proxy, RenderSceneGpuDirtyFlags::Transform));
                     }
                 };
                 const auto Finish = [impl, relinks, scene, processIndex, processCount, completedMutationEpoch, gpuDirtyBatch]() noexcept
@@ -2362,12 +2589,10 @@ namespace vanguard::rendering
                     relinks->dispatched.SetValue(false);
                 };
 
-                jobs::ParallelTask relinkTask =
-                    jobs::ParallelTask::Create([ApplyGroup](const u32 group, const jobs::JobContext&) noexcept { ApplyGroup(group); });
+                jobs::ParallelTask relinkTask = jobs::ParallelTask::Create([ApplyGroup](const u32 group, const jobs::JobContext&) noexcept { ApplyGroup(group); });
                 jobs::Task epilogue = jobs::Task::Create([Finish](const jobs::JobContext&) noexcept { Finish(); });
                 jobs::Builder childBuilder(context);
-                if (relinkTask && epilogue && childBuilder.IsValid() &&
-                    childBuilder.DispatchParallel(relinkName, groupCount, std::move(relinkTask), std::move(epilogue), 1u))
+                if (relinkTask && epilogue && childBuilder.IsValid() && childBuilder.DispatchParallel(relinkName, groupCount, std::move(relinkTask), std::move(epilogue), 1u))
                     return;
 
                 // Allocation/dispatch failure inside the owned root cannot reopen the scene. Complete the bounded work serially
@@ -2389,8 +2614,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::CollectVisibleProxies(const VisibilityQueryRequest& request, containers::DynamicArray<RenderProxyHandle>& proxies,
-                                                   VisibilityQueryResult& result, RenderSceneFailure* const failure) const noexcept
+    bool RenderSceneManager::CollectVisibleProxies(const VisibilityQueryRequest& request, containers::DynamicArray<RenderProxyHandle>& proxies, VisibilityQueryResult& result,
+                                                   RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         proxies.Clear();
@@ -2418,9 +2643,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::BuildVisibilityQueryPlan(const RenderSceneHandle scene, const u64 mutationEpoch, const u32 targetCellsPerBatch,
-                                                      containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan,
-                                                      RenderSceneFailure* const failure) const noexcept
+    bool RenderSceneManager::BuildVisibilityQueryPlan(const RenderSceneHandle scene, const u64 mutationEpoch, const u32 targetCellsPerBatch, containers::DynamicArray<VisibilityQueryBatch>& batches,
+                                                      VisibilityQueryPlan& plan, RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         batches.Clear();
@@ -2444,9 +2668,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::CollectVisibleProxyBatch(const VisibilityQueryRequest& request, const VisibilityQueryBatch& batch,
-                                                      containers::DynamicArray<RenderProxyHandle>& proxies, VisibilityQueryResult& result,
-                                                      RenderSceneFailure* const failure) const noexcept
+    bool RenderSceneManager::CollectVisibleProxyBatch(const VisibilityQueryRequest& request, const VisibilityQueryBatch& batch, containers::DynamicArray<RenderProxyHandle>& proxies,
+                                                      VisibilityQueryResult& result, RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         proxies.Clear();
@@ -2456,11 +2679,9 @@ namespace vanguard::rendering
         if (!request.scene.IsValid())
             return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene handle for visibility query batch", request.scene);
         if (!batch.IsValid() || !(batch.scene == request.scene) || batch.mutationEpoch != request.mutationEpoch)
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "visibility query batch does not belong to the requested scene-update epoch",
-                        request.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "visibility query batch does not belong to the requested scene-update epoch", request.scene);
         if (request.maximumResults != ~u32{0})
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor,
-                        "per-batch visibility collection requires an unbounded local result; apply limits during reduction", request.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "per-batch visibility collection requires an unbounded local result; apply limits during reduction", request.scene);
         if (request.useBounds && !ValidBounds(request.bounds))
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid visibility query batch bounds", request.scene);
         if (request.useFrustum && !ValidFrustum(request.frustum))
@@ -2475,7 +2696,7 @@ namespace vanguard::rendering
         const Impl::SceneSlot& scene = m_impl->slots[request.scene.index];
         if ((relinks != nullptr && relinks->dispatched.GetValue()) || scene.framePrepared || scene.completedMutationEpoch != request.mutationEpoch)
             return Fail(failure, RenderSceneFailureCode::Busy, "visibility query batch does not reference the completed scene-update epoch", request.scene);
-        const u32 traversalSlots = scene.spatial.activeCellIndices.Size() + (scene.spatial.unindexedProxies.Size() != 0 ? 1u : 0u);
+        const u32 traversalSlots = spatial::TraversalCount(scene.spatial);
         if (batch.firstCell >= traversalSlots)
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "visibility query batch is outside the completed spatial state", request.scene);
 
@@ -2483,30 +2704,47 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::PrepareGpuVisibilityCandidates(const VisibilityQueryRequest& request, const u32 targetCandidatesPerBatch,
-                                                            const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
+    bool RenderSceneManager::PrepareGpuVisibilityCandidates(const VisibilityQueryRequest& request, const u32 targetCandidatesPerBatch, const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
                                                             RenderSceneGpuCandidatePlan& plan, RenderSceneFailure* const failure) noexcept
+    {
+        if (!PrepareGpuVisibilityCandidatePlan(request, targetCandidatesPerBatch, {}, plan, failure))
+            return false;
+        if (!BuildGpuVisibilityCandidateBatches(plan, batchStorage, failure))
+        {
+            RenderSceneFailure completionFailure;
+            static_cast<void>(CompleteGpuVisibilityCandidates(plan, &completionFailure));
+            plan.serial = 0;
+            return false;
+        }
+        return true;
+    }
+
+    bool RenderSceneManager::PrepareGpuVisibilityCandidatePlan(const VisibilityQueryRequest& request, const u32 targetCandidatesPerBatch,
+                                                               const containers::ArraySpan<const RenderView> views, RenderSceneGpuCandidatePlan& plan,
+                                                               RenderSceneFailure* const failure) noexcept
     {
         ClearFailure(failure);
         plan = {};
         if (m_impl == nullptr)
             return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
-        if (!concurrency::IsMainThread())
-            return Fail(failure, RenderSceneFailureCode::WrongThread, "GPU visibility candidate planning must run on the main thread", request.scene);
         if (!request.scene.IsValid())
             return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid RenderScene handle for GPU visibility candidate planning", request.scene);
         if (targetCandidatesPerBatch == 0 || request.payloadFilter != VisibilityQueryPayloadFilter::Mesh || request.maximumResults != ~u32{0} ||
             (request.useBounds && !ValidBounds(request.bounds)) || (request.useFrustum && !ValidFrustum(request.frustum)))
             return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid GPU visibility candidate planning request", request.scene);
 
+        // Validate each family query once before sealing, not in each batch or
+        // proxy visit. The spatial layout itself is independent of view filters.
+        for (const RenderView& view : views)
+            if (!ValidFrustum(view.frustum))
+                return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid GPU visibility view-family frustum", request.scene);
+
         concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
         if (!m_impl->ValidAliveScene(request.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate planning",
-                        request.scene);
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate planning", request.scene);
         Impl::RelinkState* const relinks = m_impl->relinkStates[request.scene.index];
         Impl::SceneSlot& scene = m_impl->slots[request.scene.index];
-        if (relinks == nullptr || relinks->dispatched.GetValue() || scene.framePrepared || scene.completedMutationEpoch != request.mutationEpoch ||
-            scene.pendingMutationCount != 0)
+        if (relinks == nullptr || relinks->dispatched.GetValue() || scene.framePrepared || scene.completedMutationEpoch != request.mutationEpoch || scene.pendingMutationCount != 0)
             return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidates require the exact sealed scene-update epoch", request.scene);
         if (relinks->candidateProduction.CompareExchange(true, false))
             return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidate production is already active", request.scene);
@@ -2514,45 +2752,70 @@ namespace vanguard::rendering
         u64 serial = ++relinks->candidateSerial;
         if (serial == 0)
             serial = ++relinks->candidateSerial;
-        if (!spatial::BuildGpuCandidateBatches(scene.spatial, request.scene, request.mutationEpoch, serial, targetCandidatesPerBatch, batchStorage, plan))
+        if (!spatial::PrepareGpuCandidatePlan(scene.spatial, request.scene, request.mutationEpoch, serial, targetCandidatesPerBatch, plan))
         {
             relinks->candidateProduction.SetValue(false);
             plan.serial = 0;
-            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "GPU visibility candidate batch storage capacity was exceeded", request.scene);
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "GPU visibility candidate capacity calculation overflowed", request.scene);
         }
         plan.request = request;
         return true;
     }
 
-    bool RenderSceneManager::WriteGpuVisibilityCandidateBatch(const RenderSceneGpuCandidatePlan& plan, const RenderSceneGpuCandidateBatch& batch,
-                                                              const GpuVisibilityCandidateReservation& reservation, GpuVisibilityCandidateRange& range,
-                                                              RenderSceneGpuCandidateBatchResult& result, RenderSceneFailure* const failure) const noexcept
+    bool RenderSceneManager::BuildGpuVisibilityCandidateBatches(const RenderSceneGpuCandidatePlan& plan,
+                                                                const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
+                                                                RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
-        result = {};
-        range = {};
-        const VisibilityQueryRequest& request = plan.request;
         if (m_impl == nullptr)
-            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
-        if (!plan.IsValid() || !batch.IsValid() || !reservation.IsValid() || request.scene != plan.scene || batch.scene != plan.scene ||
-            request.mutationEpoch != plan.mutationEpoch || batch.mutationEpoch != plan.mutationEpoch || batch.planSerial != plan.serial ||
-            plan.requiredCandidateCapacity > reservation.capacity || plan.requiredWorkRangeCapacity > reservation.workRangeCapacity ||
-            batch.destinationOffset > plan.requiredCandidateCapacity ||
-            batch.traversalCandidateCount > plan.requiredCandidateCapacity - batch.destinationOffset || batch.destinationOffset > reservation.capacity ||
-            batch.traversalCandidateCount > reservation.capacity - batch.destinationOffset)
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid GPU visibility candidate batch or reservation", request.scene);
-        if (!m_impl->ValidAliveScene(plan.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate production",
-                        plan.scene);
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", plan.scene);
+        if (!plan.IsValid() || plan.batchCount > batchStorage.Size())
+            return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "GPU visibility candidate batch storage capacity was exceeded", plan.scene);
 
+        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
+        if (!m_impl->ValidAliveScene(plan.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate batching", plan.scene);
         const Impl::RelinkState* const relinks = m_impl->relinkStates[plan.scene.index];
         const Impl::SceneSlot& scene = m_impl->slots[plan.scene.index];
         if (relinks == nullptr || !relinks->candidateProduction.GetValue() || relinks->candidateSerial != plan.serial ||
             scene.completedMutationEpoch != plan.mutationEpoch)
             return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidate plan is not the active sealed scene epoch", plan.scene);
+        if (!spatial::BuildGpuCandidateBatches(scene.spatial, plan, batchStorage))
+            return Fail(failure, RenderSceneFailureCode::InvalidState, "GPU visibility candidate batches do not match their sealed plan", plan.scene);
+        return true;
+    }
 
-        spatial::WriteGpuCandidateRange(scene.spatial, request, batch, m_impl, Impl::ResolveLiveVisibilityProxyThunk,
-                                        reservation.destination + batch.destinationOffset, range, result);
+    bool RenderSceneManager::WriteGpuVisibilityCandidateBatch(const RenderSceneGpuCandidatePlan& plan, const RenderSceneGpuCandidateBatch& batch, const GpuVisibilityCandidateReservation& reservation,
+                                                              GpuVisibilityCandidateRange& range, RenderSceneGpuCandidateBatchResult& result, RenderSceneFailure* const failure) const noexcept
+    {
+        return WriteGpuVisibilityCandidateBatch(plan, plan.request, batch, reservation, range, result, failure);
+    }
+
+    bool RenderSceneManager::WriteGpuVisibilityCandidateBatch(const RenderSceneGpuCandidatePlan& plan, const VisibilityQueryRequest& request,
+                                                              const RenderSceneGpuCandidateBatch& batch, const GpuVisibilityCandidateReservation& reservation,
+                                                              GpuVisibilityCandidateRange& range, RenderSceneGpuCandidateBatchResult& result,
+                                                              RenderSceneFailure* const failure) const noexcept
+    {
+        ClearFailure(failure);
+        result = {};
+        range = {};
+        if (m_impl == nullptr)
+            return Fail(failure, RenderSceneFailureCode::NotInitialized, "RenderSceneManager is not initialized", request.scene);
+        if (!plan.IsValid() || !batch.IsValid() || !reservation.IsValid() || request.scene != plan.scene || batch.scene != plan.scene || request.mutationEpoch != plan.mutationEpoch ||
+            batch.mutationEpoch != plan.mutationEpoch || batch.planSerial != plan.serial || plan.requiredCandidateCapacity > reservation.capacity ||
+            plan.requiredWorkRangeCapacity > reservation.workRangeCapacity || batch.destinationOffset > plan.requiredCandidateCapacity ||
+            batch.traversalCandidateCount > plan.requiredCandidateCapacity - batch.destinationOffset || batch.destinationOffset > reservation.capacity ||
+            batch.traversalCandidateCount > reservation.capacity - batch.destinationOffset)
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "invalid GPU visibility candidate batch or reservation", request.scene);
+        if (!m_impl->ValidAliveScene(plan.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "invalid or stale RenderScene handle for GPU visibility candidate production", plan.scene);
+
+        const Impl::RelinkState* const relinks = m_impl->relinkStates[plan.scene.index];
+        const Impl::SceneSlot& scene = m_impl->slots[plan.scene.index];
+        if (relinks == nullptr || !relinks->candidateProduction.GetValue() || relinks->candidateSerial != plan.serial || scene.completedMutationEpoch != plan.mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "GPU visibility candidate plan is not the active sealed scene epoch", plan.scene);
+
+        spatial::WriteGpuCandidateRange(scene.spatial, request, batch, m_impl, Impl::ResolveLiveVisibilityProxyThunk, reservation.destination + batch.destinationOffset, range, result);
         if (!result.completed)
             return Fail(failure, RenderSceneFailureCode::InvalidState,
                         result.unresolvedGpuIdentities != 0 ? "GPU visibility candidate encountered a mesh proxy without a stable GPU identity"
@@ -2574,6 +2837,46 @@ namespace vanguard::rendering
         return true;
     }
 
+    bool RenderSceneManager::CollectDirectionalLights(const RenderSceneGpuCandidatePlan& plan, const containers::ArraySpan<const RenderView> views,
+                                                       containers::ArraySpan<GpuDirectionalLightSelection> selections, RenderSceneFailure* const failure) const noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr || !plan.IsValid() || views.Empty() || views.Size() > MaximumRenderViewsPerFamily || views.Size() != selections.Size())
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "directional selection requires a sealed family and matching storage", plan.scene);
+        concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
+        if (!m_impl->ValidAliveScene(plan.scene))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "directional selection scene is unavailable", plan.scene);
+        const auto* relinks = m_impl->relinkStates[plan.scene.index];
+        const auto& scene = m_impl->slots[plan.scene.index];
+        if (relinks == nullptr || !relinks->candidateProduction.GetValue() || relinks->candidateSerial != plan.serial || scene.completedMutationEpoch != plan.mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "directional selection requires the active scene epoch seal", plan.scene);
+        for (auto& selection : selections)
+            selection = {};
+        for (const RenderProxyHandle proxy : scene.spatial.globalProxies)
+        {
+            if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Light))
+                continue;
+            const auto& base = scene.proxies[proxy.index];
+            const auto& light = scene.lightPayloads[base.payloadIndex];
+            if (light.kind != RenderLightKind::Directional || (base.visibility & RenderProxyVisibilityFlags::Visible) != RenderProxyVisibilityFlags::Visible ||
+                (base.visibility & RenderProxyVisibilityFlags::QueryOnly) != RenderProxyVisibilityFlags::None || light.intensity <= 0.0f ||
+                (light.color[0] == 0.0f && light.color[1] == 0.0f && light.color[2] == 0.0f))
+                continue;
+            for (u32 viewIndex = 0; viewIndex < views.Size(); ++viewIndex)
+            {
+                if ((base.layerMask & views[viewIndex].layerMask) == 0 || (base.visibilityMask & views[viewIndex].visibilityMask) == 0)
+                    continue;
+                if (!light.gpuIdentity.IsValid())
+                    return Fail(failure, RenderSceneFailureCode::InvalidState, "selected directional light has no GPU identity", plan.scene);
+                auto& selection = selections[viewIndex];
+                if (selection.count == MaximumDirectionalLightsPerView)
+                    return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "directional lights exceed the per-view lighting budget", plan.scene);
+                selection.lights[selection.count++] = light.gpuIdentity;
+            }
+        }
+        return true;
+    }
+
     bool RenderSceneManager::IsAlive(const RenderSceneHandle scene) const noexcept
     {
         return m_impl != nullptr && m_impl->ValidHandle(scene) && m_impl->slots[scene.index].state == RenderSceneState::Alive;
@@ -2584,8 +2887,7 @@ namespace vanguard::rendering
         return m_impl != nullptr && m_impl->ValidAliveProxy(proxy);
     }
 
-    bool RenderSceneManager::FindProducerProxy(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer, const RenderContributorId contributor,
-                                               RenderProxyHandle& proxy) const noexcept
+    bool RenderSceneManager::FindProducerProxy(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer, const RenderContributorId contributor, RenderProxyHandle& proxy) const noexcept
     {
         proxy = {};
         if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
@@ -2606,8 +2908,7 @@ namespace vanguard::rendering
         return owner != nullptr ? owner->proxyCount : 0;
     }
 
-    bool RenderSceneManager::GetProducerProxies(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer,
-                                                containers::ArraySpan<RenderProducerProxy> proxies, u32& count) const noexcept
+    bool RenderSceneManager::GetProducerProxies(const RenderSceneHandle sceneHandle, const RenderProducerHandle producer, containers::ArraySpan<RenderProducerProxy> proxies, u32& count) const noexcept
     {
         count = 0;
         if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
@@ -2634,8 +2935,7 @@ namespace vanguard::rendering
 
     containers::ArraySpan<const RenderSceneHandle> RenderSceneManager::GetFramePipelineScenes() const noexcept
     {
-        return m_impl != nullptr ? containers::ArraySpan<const RenderSceneHandle>(m_impl->framePipelineScenes, m_impl->framePipelineSceneCount)
-                                 : containers::ArraySpan<const RenderSceneHandle>{};
+        return m_impl != nullptr ? containers::ArraySpan<const RenderSceneHandle>(m_impl->framePipelineScenes, m_impl->framePipelineSceneCount) : containers::ArraySpan<const RenderSceneHandle>{};
     }
 
     bool RenderSceneManager::GetSnapshot(const RenderSceneHandle scene, RenderSceneSnapshot& snapshot) const noexcept
@@ -2654,6 +2954,7 @@ namespace vanguard::rendering
         snapshot.maximumViews = slot.maximumViews;
         snapshot.activeProxies = slot.activeProxies;
         snapshot.pendingProxyMutations = slot.pendingMutationCount;
+        snapshot.pendingMeshBindings = slot.pendingMeshBindingCount;
         snapshot.createdSerial = slot.createdSerial;
         snapshot.lifecycleRevision = slot.lifecycleRevision;
         snapshot.currentMutationEpoch = slot.currentMutationEpoch;
@@ -2669,8 +2970,7 @@ namespace vanguard::rendering
     {
         if (m_impl == nullptr || !m_impl->ValidAliveScene(scene))
             return "RenderScene is unavailable";
-        return m_impl->cameraStorage != nullptr ? m_impl->cameraStorage->GetRenderingBlockReason(scene)
-                                                : "RenderScene camera storage is unavailable";
+        return m_impl->cameraStorage != nullptr ? m_impl->cameraStorage->GetRenderingBlockReason(scene) : "RenderScene camera storage is unavailable";
     }
 
     void RenderSceneManager::TickWhileLoading(const RenderSceneHandle scene, const bool isFirstFrame) noexcept

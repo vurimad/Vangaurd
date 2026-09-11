@@ -155,7 +155,7 @@ namespace vanguard::assets
         {
             for (const BuildDependency& dependency : plan.GetDependencies())
             {
-                if (dependency.role != DependencyRole::Generated)
+                if (dependency.role != DependencyRole::Generated || dependency.requirement == DependencyRequirement::Soft)
                 {
                     continue;
                 }

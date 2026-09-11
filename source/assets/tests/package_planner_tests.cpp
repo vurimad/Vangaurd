@@ -23,6 +23,7 @@ namespace
         resources::ResourceReference world;
         resources::ResourceReference material;
         resources::ResourceReference decal;
+        resources::ResourceReference soft;
         resources::ResourceReference worldEditor;
         resources::ResourceReference mixedSource;
         resources::ResourceReference mixed;
@@ -62,6 +63,7 @@ namespace
         const assets::BuildFingerprint sourceFingerprint = crypto::Sha256("world-source-sidecar", 20);
         return collector.Add({fixture.material, {}, assets::DependencyRole::Generated, assets::DependencyRequirement::Required}) == assets::Result::Success &&
                collector.Add({fixture.decal, {}, assets::DependencyRole::Generated, assets::DependencyRequirement::Optional}) == assets::Result::Success &&
+               collector.Add({fixture.soft, {}, assets::DependencyRole::Generated, assets::DependencyRequirement::Soft}) == assets::Result::Success &&
                collector.Add({Reference("source/package/world.sidecar", SourceType), sourceFingerprint, assets::DependencyRole::Source,
                               assets::DependencyRequirement::Required}) == assets::Result::Success;
     }
@@ -180,7 +182,7 @@ namespace
         else if (artifact.resource == fixture.world)
         {
             bytes.PushBack(fixture.worldByte);
-            bytes.PushBack(3);
+            bytes.PushBack(4);
         }
         else if (artifact.resource == fixture.material)
         {
@@ -288,6 +290,7 @@ int main()
     fixture.world = Reference("cooked/package/world.vworld", RuntimeType);
     fixture.material = Reference("cooked/package/material.vmat", RuntimeType);
     fixture.decal = Reference("cooked/package/decal.vtex", RuntimeType);
+    fixture.soft = Reference("cooked/package/preview.vtex", RuntimeType);
     fixture.worldEditor = Reference("cooked/package/world.editor", RuntimeType);
     fixture.mixedSource = Reference("source/package/mixed.asset", SourceType);
     fixture.mixed = Reference("cooked/package/mixed.vbin", RuntimeType);
@@ -350,12 +353,27 @@ int main()
     {
         const assets::PlannedPackageResource* worldPlan =
             runtimePlan.resources[0].resource == fixture.world ? &runtimePlan.resources[0] : &runtimePlan.resources[1];
+        bool foundRequired = false;
+        bool foundOptional = false;
+        bool foundSoft = false;
+        for (const assets::PlannedPackageDependency& dependency : worldPlan->dependencies)
+        {
+            foundRequired = foundRequired || (dependency.resource == fixture.material && dependency.kind == resources::DependencyKind::Required);
+            foundOptional = foundOptional || (dependency.resource == fixture.decal && dependency.kind == resources::DependencyKind::Optional);
+            foundSoft = foundSoft || (dependency.resource == fixture.soft && dependency.kind == resources::DependencyKind::Soft);
+        }
         Check(worldPlan->resource == fixture.world && worldPlan->origin == assets::ArtifactSetKey{worldRecord.buildFingerprint, worldRecord.contentFingerprint} &&
-                  worldPlan->segments.Size() == 2 && worldPlan->dependencies.Size() == 2 &&
-                  (static_cast<u32>(worldPlan->flags) & static_cast<u32>(packages::ResourceFlags::Startup)) != 0 &&
-                  (static_cast<u32>(worldPlan->flags) & static_cast<u32>(packages::ResourceFlags::Streamable)) != 0,
-              "runtime artifact origin, filtering, and dependency metadata");
+                   worldPlan->segments.Size() == 2 && worldPlan->dependencies.Size() == 3 && foundRequired && foundOptional && foundSoft &&
+                   (static_cast<u32>(worldPlan->flags) & static_cast<u32>(packages::ResourceFlags::Startup)) != 0 &&
+                   (static_cast<u32>(worldPlan->flags) & static_cast<u32>(packages::ResourceFlags::Streamable)) != 0,
+              "runtime artifact origin, filtering, and exact dependency metadata");
     }
+    bool runtimeContainsSoft = false;
+    for (const assets::PlannedPackageResource& resource : runtimePlan.resources)
+    {
+        runtimeContainsSoft = runtimeContainsSoft || resource.resource == fixture.soft;
+    }
+    Check(!runtimeContainsSoft, "soft dependency does not enter default package closure");
 
     assets::DerivedDataArtifactSource artifactSource;
     Check(artifactSource.Initialize({root.AsChar(), {}}), "package artifact source initialization");
@@ -373,8 +391,23 @@ int main()
               packageReader.GetHeader().buildId == runtimePlan.buildId && packageReader.GetHeader().resourceCount == 2,
           "assembled package validation");
     const packages::Resource* packagedWorld = packageReader.Find("cooked/package/world.vworld");
-    Check(packagedWorld != nullptr && packageReader.GetSegments(*packagedWorld).Count() == 2 && packageReader.GetDependencies(*packagedWorld).Count() == 2,
-          "assembled world metadata");
+    bool packagedRequired = false;
+    bool packagedOptional = false;
+    bool packagedSoft = false;
+    if (packagedWorld != nullptr)
+    {
+        for (const packages::Dependency& dependency : packageReader.GetDependencies(*packagedWorld))
+        {
+            packagedRequired = packagedRequired ||
+                               (dependency.id == fixture.material.GetPath().Id() && dependency.kind == resources::DependencyKind::Required);
+            packagedOptional = packagedOptional ||
+                               (dependency.id == fixture.decal.GetPath().Id() && dependency.kind == resources::DependencyKind::Optional);
+            packagedSoft = packagedSoft || (dependency.id == fixture.soft.GetPath().Id() && dependency.kind == resources::DependencyKind::Soft);
+        }
+    }
+    Check(packagedWorld != nullptr && packageReader.GetSegments(*packagedWorld).Count() == 2 &&
+              packageReader.GetDependencies(*packagedWorld).Count() == 3 && packagedRequired && packagedOptional && packagedSoft,
+          "assembled world preserves required, optional, and soft edges");
 
     containers::DynamicArray<u8> cachedWorld(memory::pools::Assets::GetInstance());
     assets::ArtifactSetReader worldArtifacts;
@@ -467,8 +500,10 @@ int main()
     if (editorPlan.resources.Size() == 4)
     {
         const assets::PlannedPackageResource* worldPlan = nullptr;
+        bool containsSoft = false;
         for (const assets::PlannedPackageResource& resource : editorPlan.resources)
         {
+            containsSoft = containsSoft || resource.resource == fixture.soft;
             if (resource.resource == fixture.world)
             {
                 worldPlan = &resource;
@@ -482,9 +517,9 @@ int main()
                 editorResource = &resource;
             }
         }
-        Check(worldPlan != nullptr && worldPlan->segments.Size() == 2 && editorResource != nullptr && editorResource->segments.Size() == 1 &&
-                  (static_cast<u32>(editorResource->flags) & static_cast<u32>(packages::ResourceFlags::EditorOnly)) != 0,
-              "editor output remains a separate logical resource");
+        Check(!containsSoft && worldPlan != nullptr && worldPlan->segments.Size() == 2 && editorResource != nullptr && editorResource->segments.Size() == 1 &&
+                   (static_cast<u32>(editorResource->flags) & static_cast<u32>(packages::ResourceFlags::EditorOnly)) != 0,
+              "editor output remains separate and soft dependency still does not enter optional closure");
     }
 
     assets::PackageManifest mixedManifest;
@@ -500,6 +535,12 @@ int main()
     assets::PackageBuildPlan packageSetSourcePlan;
     Check(planner.Prepare(packageSetManifest, index, packageSetSourcePlan) == assets::PackagingResult::Success && packageSetSourcePlan.resources.Size() == 3,
           "package-set runtime-only source plan");
+    bool packageSetContainsSoft = false;
+    for (const assets::PlannedPackageResource& resource : packageSetSourcePlan.resources)
+    {
+        packageSetContainsSoft = packageSetContainsSoft || resource.resource == fixture.soft;
+    }
+    Check(!packageSetContainsSoft, "soft dependency never expands package-set closure");
 
     assets::PackageSetPlanOptions setOptions;
     setOptions.gameId = 0x56414e4755415244ull;

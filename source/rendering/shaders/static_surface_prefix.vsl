@@ -1,0 +1,143 @@
+#include "gpu_scene_types.hlsli"
+
+// Trusted static-surface ABI. Geometry is ordinary vertex input. Binding 15 is
+// a GPU-written, 16-byte per-instance record: instance/primitive, geometry/material.
+// Indirect firstInstance addresses that input stream, not SV_InstanceID.
+struct StaticSurfaceDrawContext
+{
+    uint tableDirectoryDescriptor;
+    uint pageDirectoryDescriptor;
+    uint viewDescriptor;
+    uint viewIndex;
+    float worldCellSize;
+    uint reserved;
+};
+[[vk::push_constant]] ConstantBuffer<StaticSurfaceDrawContext> surfaceDraw : register(b0);
+
+struct StaticSurfaceInput
+{
+    float2 uv;
+    float3 worldNormal;
+    float3 viewRelativePosition;
+};
+struct StaticSurfaceOutput
+{
+    float4 baseColor;
+    float3 normalTS;
+    float roughness;
+    float metallic;
+    float3 emissive;
+    float opacityCutoff;
+};
+
+// Invocation-private evaluation context, set by each pixel entry before calling
+// the generated evaluator. No CPU state or per-material binding is involved.
+static GpuMaterial surfaceMaterial;
+
+uint VanguardLoadMaterialParameterWord(uint byteOffset)
+{
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[surfaceDraw.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[surfaceDraw.pageDirectoryDescriptor];
+    return LoadGpuMaterialParameterWord(surfaceMaterial, byteOffset, tables, pages);
+}
+
+uint VanguardLoadMaterialResourceDescriptor(uint roleSlot)
+{
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[surfaceDraw.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[surfaceDraw.pageDirectoryDescriptor];
+    GpuMaterialResource role = LoadGpuMaterialResource(surfaceMaterial, roleSlot, tables, pages);
+    if (role.type != VG_GPU_MATERIAL_RESOURCE_TEXTURE || role.resource == VG_GPU_SCENE_INVALID_INDEX)
+        return role.resource;
+    GpuSceneTableDirectory table = tables[VG_GPU_SCENE_TABLE_TEXTURE_RESIDENCY];
+    uint2 address = DecodeGpuSceneIndex(role.resource, table);
+    StructuredBuffer<GpuTextureResidency> textures = ResourceDescriptorHeap[NonUniformResourceIndex(pages[table.firstPageEntry + address.x].shaderResourceDescriptor)];
+    return textures[address.y].descriptor;
+}
+
+uint VanguardLoadMaterialSamplerDescriptor(uint roleSlot)
+{
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[surfaceDraw.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[surfaceDraw.pageDirectoryDescriptor];
+    return LoadGpuMaterialResource(surfaceMaterial, roleSlot, tables, pages).samplerDescriptor;
+}
+
+struct StaticSurfaceVertex
+{
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
+    float2 uv : TEXCOORD0;
+    uint2 instancePrimitive : VG_DRAW0;
+    uint2 geometryMaterial : VG_DRAW1;
+};
+struct StaticSurfaceVarying
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float3 normal : TEXCOORD1;
+    float4 tangent : TEXCOORD2;
+    float3 viewRelativePosition : TEXCOORD3;
+    nointerpolation uint2 instancePrimitive : TEXCOORD4;
+    nointerpolation uint material : TEXCOORD5;
+};
+
+float3 RotateSurfaceVector(float4 rotation, float3 value)
+{
+    return value + 2.0 * cross(rotation.xyz, cross(rotation.xyz, value) + rotation.w * value);
+}
+
+[shader("vertex")]
+StaticSurfaceVarying StaticSurfaceVertexMain(StaticSurfaceVertex input)
+{
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[surfaceDraw.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[surfaceDraw.pageDirectoryDescriptor];
+    GpuSceneTableDirectory table = tables[VG_GPU_SCENE_TABLE_INSTANCE];
+    uint2 address = DecodeGpuSceneIndex(input.instancePrimitive.x, table);
+    StructuredBuffer<GpuInstance> instances = ResourceDescriptorHeap[NonUniformResourceIndex(pages[table.firstPageEntry + address.x].shaderResourceDescriptor)];
+    GpuInstance instance = instances[address.y];
+
+    table = tables[VG_GPU_SCENE_TABLE_GEOMETRY_RANGE];
+    address = DecodeGpuSceneIndex(input.geometryMaterial.x, table);
+    StructuredBuffer<GpuGeometryRange> geometries = ResourceDescriptorHeap[NonUniformResourceIndex(pages[table.firstPageEntry + address.x].shaderResourceDescriptor)];
+    GpuGeometryRange geometry = geometries[address.y];
+    // Input fetch performs UNORM/SNORM/half conversion, not the cooker's
+    // semantic remapping. Flags come from this geometry's stored VMESH layout.
+    // Float and SNORM layouts already supply signed directions and handedness.
+    float3 localNormal = input.normal;
+    float4 localTangent = input.tangent;
+    if ((geometry.flags & VG_GPU_GEOMETRY_NORMAL_PACKED_UNORM10) != 0u)
+        localNormal = localNormal * 2.0 - 1.0;
+    if ((geometry.flags & VG_GPU_GEOMETRY_TANGENT_PACKED_UNORM10) != 0u)
+    {
+        localTangent.xyz = localTangent.xyz * 2.0 - 1.0;
+        localTangent.w = localTangent.w < 0.5 ? -1.0 : 1.0;
+    }
+    float3 position = input.position;
+    if (geometry.positionDecode != VG_GPU_SCENE_INVALID_INDEX)
+    {
+        table = tables[VG_GPU_SCENE_TABLE_POSITION_DECODE];
+        address = DecodeGpuSceneIndex(geometry.positionDecode, table);
+        StructuredBuffer<GpuPositionDecode> decodes = ResourceDescriptorHeap[NonUniformResourceIndex(pages[table.firstPageEntry + address.x].shaderResourceDescriptor)];
+        GpuPositionDecode decode = decodes[address.y];
+        position = position * decode.scale + decode.bias;
+    }
+    StructuredBuffer<GpuView> views = ResourceDescriptorHeap[surfaceDraw.viewDescriptor];
+    GpuView view = views[surfaceDraw.viewIndex];
+    float3 relative = float3(instance.worldCell - view.worldCell) * surfaceDraw.worldCellSize + (instance.localPosition - view.localPosition);
+    relative += RotateSurfaceVector(instance.rotation, position * instance.scale);
+    StaticSurfaceVarying output;
+    // RenderCamera stores row-major matrices for row-vector multiplication;
+    // its view matrix excludes the camera translation applied above.
+    output.position = relative.x * view.worldToClip[0] + relative.y * view.worldToClip[1] + relative.z * view.worldToClip[2] + view.worldToClip[3];
+    output.uv = input.uv;
+    output.normal = normalize(RotateSurfaceVector(instance.rotation, localNormal / instance.scale));
+    float3 tangent = RotateSurfaceVector(instance.rotation, localTangent.xyz * instance.scale);
+    tangent = normalize(tangent - output.normal * dot(output.normal, tangent));
+    // Use the same published orientation as mirrored shell/bin selection.
+    float handedness = (instance.flags & VG_GPU_INSTANCE_NEGATIVE_SCALE) != 0u ? -1.0 : 1.0;
+    output.tangent = float4(tangent, localTangent.w * handedness);
+    output.viewRelativePosition = relative;
+    output.instancePrimitive = input.instancePrimitive;
+    output.material = input.geometryMaterial.y;
+    return output;
+}

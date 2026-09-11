@@ -798,6 +798,11 @@ namespace vanguard::entities
         return const_cast<TransformRuntime*>(this)->GetRoot(entity);
     }
 
+    bool TransformRuntime::IsProcessing() const noexcept
+    {
+        return m_impl != nullptr && m_impl->transforms.IsProcessing();
+    }
+
     TransformRuntimeStats TransformRuntime::GetStats() const noexcept
     {
         TransformRuntimeStats result;

@@ -20,22 +20,9 @@ namespace vanguard::rendering
         High
     };
 
-    /// Immutable frame data supplied while renderer-owned custom data is prepared. It deliberately
-    /// provides no dispatch, synchronization, or preparation operations.
-    struct CustomDataPrepareInfo
-    {
-        u64 frameSerial = 0;
-        RenderSceneHandle scene;
-        const RenderViewFamily* family = nullptr;
-        const RenderView* view = nullptr;
-
-        [[nodiscard]] bool IsValid() const noexcept
-        {
-            return frameSerial != 0 && scene.IsValid() && family != nullptr;
-        }
-    };
-
     class RenderCameraStorage;
+    struct RenderCameraFailure;
+    struct RenderNodeImplContext;
 
     /// Common persistent state shared by camera and scene custom data. Instances are prepared on the
     /// serialized renderer CPU chain and remain alive until that chain no longer references their owner.
@@ -97,7 +84,7 @@ namespace vanguard::rendering
         ~CameraCustomData() override = default;
 
         virtual void Initialize() noexcept = 0;
-        virtual void Prepare(const CustomDataPrepareInfo& info) noexcept = 0;
+        [[nodiscard]] virtual bool Prepare(RenderNodeImplContext& context, const RenderView& view, RenderCameraFailure* failure) noexcept = 0;
         virtual void Evict() noexcept = 0;
     };
 
@@ -107,7 +94,7 @@ namespace vanguard::rendering
         ~SceneCustomData() override = default;
 
         virtual void Initialize() noexcept = 0;
-        virtual void Prepare(const CustomDataPrepareInfo& info) noexcept = 0;
+        [[nodiscard]] virtual bool Prepare(RenderNodeImplContext& context, RenderCameraFailure* failure) noexcept = 0;
         virtual void Evict() noexcept = 0;
     };
 

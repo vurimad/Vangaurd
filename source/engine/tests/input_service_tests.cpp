@@ -118,7 +118,8 @@ int main()
     constexpr vanguard::game_input::ContextId gameplay = vanguard::game_input::MakeId("test.gameplay");
     constexpr vanguard::game_input::ActionId moveForward = vanguard::game_input::MakeId("test.moveForward");
     Check(gameInput != nullptr, "game input capability");
-    Check(resourceStreaming != nullptr && resourceStreaming->GetStreamer().GetStats().registeredDecoders == 1, "cooked game input resource decoder registration");
+    Check(resourceStreaming != nullptr && resourceStreaming->GetStreamer().GetStats().registeredDecoders == 4,
+          "cooked game input decoder composes with the three core material artifact decoders");
     Check(gameInput->GetMappings().RegisterContext({gameplay, "gameplay"}) == vanguard::game_input::Result::Success, "game input context");
     Check(gameInput->GetMappings().RegisterAction({moveForward, "moveForward"}) == vanguard::game_input::Result::Success, "game input action");
     Check(gameInput->GetMappings().RegisterBinding({vanguard::game_input::MakeId("test.moveForward.w"), gameplay, moveForward,

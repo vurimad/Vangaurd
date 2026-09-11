@@ -252,6 +252,7 @@ namespace vanguard::entities
     }
 
     void VisualComponent::OnProxyAdmissionFailed(const rendering::RenderSceneFailure&) noexcept {}
+    bool VisualComponent::OnVisualProxyAdmitted() noexcept { return true; }
 
     void VisualComponent::OnVisualUninitialize(const ComponentContext&) noexcept {}
 
@@ -273,8 +274,10 @@ namespace vanguard::entities
         }
 
         VisualProxyBinding binding;
-        if (!component->m_runtime->GetVisualProxyBinding(proxy, component->m_admissionProducerGeneration, binding) || !component->BindProxy(binding))
+        if (!component->m_runtime->GetVisualProxyBinding(proxy, component->m_admissionProducerGeneration, binding) ||
+            !component->BindProxy(binding) || !component->OnVisualProxyAdmitted())
         {
+            static_cast<void>(component->UnbindProxy());
             const rendering::RenderSceneFailure admissionFailure{rendering::RenderSceneFailureCode::InvalidState, proxy.scene, proxy,
                                                                   "visual component rejected an admitted RenderProxy"};
             component->m_runtime = nullptr;

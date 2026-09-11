@@ -15,7 +15,9 @@ workspace "REDVanguard"
     filter "system:windows"
         systemversion "latest"
         buildoptions {
-            "/MP"
+            "/MP",
+            "/FS",
+            "/volatile:ms"
         }
         defines {
             "NOMINMAX",
@@ -70,6 +72,7 @@ runtime_output_root = path.getabsolute("bin/Runtime/%{cfg.buildcfg}")
 editor_output_root = path.getabsolute("bin/Editor/%{cfg.buildcfg}")
 tools_output_root = path.getabsolute("bin/Tools/%{prj.name}/%{cfg.buildcfg}")
 external_root = path.getabsolute("external")
+imgui_root = path.join(external_root, "imgui/upstream")
 nvrhi_root = path.join(external_root, "nvrhi/upstream")
 directx_headers_root = path.join(external_root, "directXHeaders/upstream")
 flecs_root = path.join(external_root, "flecs/upstream")
@@ -126,6 +129,7 @@ include "external/bcCodecs"
 include "external/compressonatorCore"
 include "external/imageCodecs"
 include "external/flecs"
+include "external/imgui"
 include "external/sdl3"
 include "external/nvrhi"
 include "tools/bootstrapImage"
@@ -170,6 +174,7 @@ include "source/meshTools"
 include "source/pipelines"
 include "source/pipelineCache"
 include "source/materials"
+include "source/materialTools"
 include "source/prefabs"
 include "source/ecs"
 include "source/gameWorld"

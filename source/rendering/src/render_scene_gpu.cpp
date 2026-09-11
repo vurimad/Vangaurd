@@ -24,8 +24,8 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(RenderSceneGpuFailure* const failure, const RenderSceneGpuFailureCode code, const char* const message,
-                                const RenderSceneHandle scene = {}, const RenderProxyHandle proxy = {}) noexcept
+        [[nodiscard]] bool Fail(RenderSceneGpuFailure* const failure, const RenderSceneGpuFailureCode code, const char* const message, const RenderSceneHandle scene = {},
+                                const RenderProxyHandle proxy = {}) noexcept
         {
             if (failure != nullptr)
             {
@@ -68,8 +68,7 @@ namespace vanguard::rendering
                 matrix[row][2] = rows[row][2] * inverse;
             }
 
-            const f32 determinant = matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1]) -
-                                    matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0]) +
+            const f32 determinant = matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1]) - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0]) +
                                     matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
             if (determinant < 0.0f)
             {
@@ -81,14 +80,16 @@ namespace vanguard::rendering
                 matrix[axis][2] = -matrix[axis][2];
             }
 
+            // XYZ rows are transformed basis vectors, matching Matrix::ToQuat.
+            // Extract the forward rotation consumed by the surface shader.
             const f32 trace = matrix[0][0] + matrix[1][1] + matrix[2][2];
             if (trace > 0.0f)
             {
                 const f32 root = std::sqrt(trace + 1.0f) * 2.0f;
                 rotation[3] = 0.25f * root;
-                rotation[0] = (matrix[2][1] - matrix[1][2]) / root;
-                rotation[1] = (matrix[0][2] - matrix[2][0]) / root;
-                rotation[2] = (matrix[1][0] - matrix[0][1]) / root;
+                rotation[0] = (matrix[1][2] - matrix[2][1]) / root;
+                rotation[1] = (matrix[2][0] - matrix[0][2]) / root;
+                rotation[2] = (matrix[0][1] - matrix[1][0]) / root;
             }
             else
             {
@@ -97,7 +98,7 @@ namespace vanguard::rendering
                 const u32 last = (axis + 2u) % 3u;
                 const f32 root = std::sqrt(1.0f + matrix[axis][axis] - matrix[next][next] - matrix[last][last]) * 2.0f;
                 rotation[axis] = 0.25f * root;
-                rotation[3] = (matrix[last][next] - matrix[next][last]) / root;
+                rotation[3] = (matrix[next][last] - matrix[last][next]) / root;
                 rotation[next] = (matrix[next][axis] + matrix[axis][next]) / root;
                 rotation[last] = (matrix[last][axis] + matrix[axis][last]) / root;
             }
@@ -119,6 +120,8 @@ namespace vanguard::rendering
             RenderSceneGpuIdentity identity;
             RenderSceneGpuMeshBinding meshBinding;
             GpuMaterialHandle decalMaterial;
+            u64 bindingRevision = 0;
+            u64 acceptedBindingRevision = 0;
             RenderSceneGpuDirtyFlags dirty = RenderSceneGpuDirtyFlags::None;
             u64 queuedEpoch = 0;
             bool queuedActive = false;
@@ -156,9 +159,8 @@ namespace vanguard::rendering
             VANGUARD_USE_MEMORY_POOL(memory::pools::Rendering);
 
             SceneState() noexcept
-                : trackedPages(memory::pools::Rendering::GetInstance()), serialDirtyIndices(memory::pools::Rendering::GetInstance()),
-                  serialRangeOffsets(memory::pools::Rendering::GetInstance()), serialRangeWritten(memory::pools::Rendering::GetInstance()),
-                  parallelSlices(memory::pools::Rendering::GetInstance()), retirements(memory::pools::Rendering::GetInstance())
+                : trackedPages(memory::pools::Rendering::GetInstance()), serialDirtyIndices(memory::pools::Rendering::GetInstance()), serialRangeOffsets(memory::pools::Rendering::GetInstance()),
+                  serialRangeWritten(memory::pools::Rendering::GetInstance()), parallelSlices(memory::pools::Rendering::GetInstance()), retirements(memory::pools::Rendering::GetInstance())
             {
             }
 
@@ -197,6 +199,13 @@ namespace vanguard::rendering
         SceneState* sceneStates[MaximumRenderScenes]{};
         concurrency::Atomic<u64> rejectedOperations{0};
         u64 nextPublicationSerial = 1;
+
+        static void AdvanceBindingRevision(TrackedProxy& tracked) noexcept
+        {
+            ++tracked.bindingRevision;
+            if (tracked.bindingRevision == 0)
+                ++tracked.bindingRevision;
+        }
 
         [[nodiscard]] SceneState* FindScene(const RenderSceneHandle scene) noexcept
         {
@@ -263,8 +272,7 @@ namespace vanguard::rendering
             return true;
         }
 
-        [[nodiscard]] bool QueueParallelDirty(SceneState& scene, const RenderSceneGpuDirtyBatch& batch, const u32 group, const RenderProxyHandle proxy,
-                                              const RenderSceneGpuDirtyFlags dirty) noexcept
+        [[nodiscard]] bool QueueParallelDirty(SceneState& scene, const RenderSceneGpuDirtyBatch& batch, const u32 group, const RenderProxyHandle proxy, const RenderSceneGpuDirtyFlags dirty) noexcept
         {
             if (scene.phase != MutationPhase::Parallel || scene.parallelSerial != batch.serial || group >= scene.parallelSlices.Size())
                 return false;
@@ -298,8 +306,7 @@ namespace vanguard::rendering
                 if (pageIndex >= scene.trackedPages.Size() || scene.trackedPages[pageIndex] == nullptr)
                     continue;
                 TrackedProxy& tracked = scene.trackedPages[pageIndex]->slots[proxyIndex & TrackedPageMask];
-                if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None &&
-                    !visitor(publicationIndex++, tracked))
+                if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None && !visitor(publicationIndex++, tracked))
                     return false;
             }
             for (u32 sliceIndex = 0; sliceIndex < scene.parallelSlices.Size(); ++sliceIndex)
@@ -312,8 +319,7 @@ namespace vanguard::rendering
                     if (pageIndex >= scene.trackedPages.Size() || scene.trackedPages[pageIndex] == nullptr)
                         continue;
                     TrackedProxy& tracked = scene.trackedPages[pageIndex]->slots[proxyIndex & TrackedPageMask];
-                    if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None &&
-                        !visitor(publicationIndex++, tracked))
+                    if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None && !visitor(publicationIndex++, tracked))
                         return false;
                 }
             }
@@ -330,8 +336,7 @@ namespace vanguard::rendering
                 if (pageIndex >= scene.trackedPages.Size() || scene.trackedPages[pageIndex] == nullptr)
                     continue;
                 const TrackedProxy& tracked = scene.trackedPages[pageIndex]->slots[proxyIndex & TrackedPageMask];
-                if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None &&
-                    !visitor(publicationIndex++, tracked))
+                if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None && !visitor(publicationIndex++, tracked))
                     return false;
             }
             for (u32 sliceIndex = 0; sliceIndex < scene.parallelSlices.Size(); ++sliceIndex)
@@ -344,8 +349,7 @@ namespace vanguard::rendering
                     if (pageIndex >= scene.trackedPages.Size() || scene.trackedPages[pageIndex] == nullptr)
                         continue;
                     const TrackedProxy& tracked = scene.trackedPages[pageIndex]->slots[proxyIndex & TrackedPageMask];
-                    if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None &&
-                        !visitor(publicationIndex++, tracked))
+                    if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None && !visitor(publicationIndex++, tracked))
                         return false;
                 }
             }
@@ -408,8 +412,7 @@ namespace vanguard::rendering
                     if (pageIndex >= scene.trackedPages.Size() || scene.trackedPages[pageIndex] == nullptr)
                         continue;
                     TrackedProxy& tracked = scene.trackedPages[pageIndex]->slots[proxyIndex & TrackedPageMask];
-                    if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None &&
-                        !visitor(reservationIndex++, tracked))
+                    if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None && !visitor(reservationIndex++, tracked))
                         return false;
                 }
                 return reservationIndex == scene.serialRangeOffsets[rangeIndex + 1u];
@@ -424,8 +427,7 @@ namespace vanguard::rendering
                 if (pageIndex >= scene.trackedPages.Size() || scene.trackedPages[pageIndex] == nullptr)
                     continue;
                 TrackedProxy& tracked = scene.trackedPages[pageIndex]->slots[proxyIndex & TrackedPageMask];
-                if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None &&
-                    !visitor(reservationIndex++, tracked))
+                if (tracked.tracked && tracked.queuedEpoch == scene.dirtyEpoch && tracked.dirty != RenderSceneGpuDirtyFlags::None && !visitor(reservationIndex++, tracked))
                     return false;
             }
             return reservationIndex == slice.publishedOffset + slice.publishedCount;
@@ -436,6 +438,7 @@ namespace vanguard::rendering
             static_cast<void>(VisitPublished(scene,
                                              [](const u32, TrackedProxy& tracked) noexcept
                                              {
+                                                 tracked.acceptedBindingRevision = tracked.bindingRevision;
                                                  tracked.dirty = RenderSceneGpuDirtyFlags::None;
                                                  tracked.queuedEpoch = 0;
                                                  tracked.queuedActive = false;
@@ -468,18 +471,16 @@ namespace vanguard::rendering
         }
     }
 
-    bool RenderSceneGpuPublisher::Initialize(RenderSceneManager& scenes, GpuSceneLifetime& lifetime, const RenderSceneGpuConfig& config,
-                                             RenderSceneGpuFailure* const failure) noexcept
+    bool RenderSceneGpuPublisher::Initialize(RenderSceneManager& scenes, GpuSceneLifetime& lifetime, const RenderSceneGpuConfig& config, RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl != nullptr)
             return Fail(failure, RenderSceneGpuFailureCode::AlreadyInitialized, "RenderScene GPU publisher is already initialized");
         if (!concurrency::IsMainThread())
             return Fail(failure, RenderSceneGpuFailureCode::WrongThread, "RenderScene GPU publisher initialization must run on the main thread");
-        if (!scenes.IsInitialized() || !lifetime.IsInitialized() || !std::isfinite(config.worldCellSize) || config.worldCellSize <= 0.0f ||
-            config.maximumObjectsPerWriteRange < 64u || config.maximumObjectsPerWriteRange > 65'536u)
-            return Fail(failure, RenderSceneGpuFailureCode::InvalidConfiguration,
-                        "RenderScene GPU publisher requires initialized owners, a positive world-cell size, and bounded write ranges");
+        if (!scenes.IsInitialized() || !lifetime.IsInitialized() || !std::isfinite(config.worldCellSize) || config.worldCellSize <= 0.0f || config.maximumObjectsPerWriteRange < 64u ||
+            config.maximumObjectsPerWriteRange > 65'536u)
+            return Fail(failure, RenderSceneGpuFailureCode::InvalidConfiguration, "RenderScene GPU publisher requires initialized owners, a positive world-cell size, and bounded write ranges");
 
         m_impl = VANGUARD_NEW(Impl);
         if (m_impl == nullptr)
@@ -513,6 +514,25 @@ namespace vanguard::rendering
         return true;
     }
 
+    void RenderSceneGpuPublisher::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        for (u32 index = 0; index < MaximumRenderScenes; ++index)
+        {
+            VANGUARD_DELETE(m_impl->sceneStates[index]);
+            m_impl->sceneStates[index] = nullptr;
+        }
+        static_cast<void>(m_impl->scenes->DetachGpuPublisher(*this));
+        VANGUARD_DELETE(m_impl);
+        m_impl = nullptr;
+    }
+
+    f32 RenderSceneGpuPublisher::GetWorldCellSize() const noexcept
+    {
+        return m_impl != nullptr ? m_impl->config.worldCellSize : 0.0f;
+    }
+
     bool RenderSceneGpuPublisher::IsInitialized() const noexcept
     {
         return m_impl != nullptr;
@@ -520,8 +540,7 @@ namespace vanguard::rendering
 
     bool RenderSceneGpuPublisher::AttachScene(const RenderSceneHandle scene, const u32 maximumProxies, const u32 maximumParallelChanges) noexcept
     {
-        if (m_impl == nullptr || !scene.IsValid() || scene.index >= MaximumRenderScenes || maximumProxies == 0 || maximumParallelChanges == 0 ||
-            m_impl->sceneStates[scene.index] != nullptr)
+        if (m_impl == nullptr || !scene.IsValid() || scene.index >= MaximumRenderScenes || maximumProxies == 0 || maximumParallelChanges == 0 || m_impl->sceneStates[scene.index] != nullptr)
             return false;
         Impl::SceneState* const state = VANGUARD_NEW(Impl::SceneState);
         if (state == nullptr)
@@ -565,8 +584,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneGpuPublisher::ReserveIdentity(const RenderSceneGpuObjectKind kind, RenderSceneGpuIdentity& identity,
-                                                  RenderSceneGpuFailure* const failure) noexcept
+    bool RenderSceneGpuPublisher::ReserveIdentity(const RenderSceneGpuObjectKind kind, RenderSceneGpuIdentity& identity, RenderSceneGpuFailure* const failure) noexcept
     {
         identity = {};
         if (m_impl == nullptr)
@@ -632,8 +650,8 @@ namespace vanguard::rendering
         else
             ++scene->stats.trackedDecals;
         if (m_impl->QueueDirty(*scene, *tracked,
-                               RenderSceneGpuDirtyFlags::Initial | RenderSceneGpuDirtyFlags::Transform | RenderSceneGpuDirtyFlags::Visibility |
-                                   RenderSceneGpuDirtyFlags::Resources | RenderSceneGpuDirtyFlags::Properties))
+                               RenderSceneGpuDirtyFlags::Initial | RenderSceneGpuDirtyFlags::Transform | RenderSceneGpuDirtyFlags::Visibility | RenderSceneGpuDirtyFlags::Resources |
+                                   RenderSceneGpuDirtyFlags::Properties))
             return true;
 
         if (identity.kind == RenderSceneGpuObjectKind::Instance)
@@ -661,8 +679,7 @@ namespace vanguard::rendering
         return scene->phase == Impl::MutationPhase::Serial && tracked != nullptr && m_impl->QueueDirty(*scene, *tracked, dirty);
     }
 
-    bool RenderSceneGpuPublisher::BeginParallelDirty(const RenderSceneHandle sceneHandle, const u32 groupCount, const u32 entryCount,
-                                                     RenderSceneGpuDirtyBatch& batch) noexcept
+    bool RenderSceneGpuPublisher::BeginParallelDirty(const RenderSceneHandle sceneHandle, const u32 groupCount, const u32 entryCount, RenderSceneGpuDirtyBatch& batch) noexcept
     {
         batch = {};
         Impl::SceneState* const scene = m_impl != nullptr ? m_impl->FindScene(sceneHandle) : nullptr;
@@ -689,8 +706,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneGpuPublisher::MarkProxyDirty(const RenderSceneGpuDirtyBatch& batch, const u32 group, const RenderProxyHandle proxy,
-                                                 const RenderSceneGpuDirtyFlags dirty) noexcept
+    bool RenderSceneGpuPublisher::MarkProxyDirty(const RenderSceneGpuDirtyBatch& batch, const u32 group, const RenderProxyHandle proxy, const RenderSceneGpuDirtyFlags dirty) noexcept
     {
         Impl::SceneState* const scene = m_impl != nullptr ? m_impl->FindScene(batch.scene) : nullptr;
         return scene != nullptr && proxy.scene == batch.scene && group < batch.groupCount && m_impl->QueueParallelDirty(*scene, batch, group, proxy, dirty);
@@ -787,9 +803,10 @@ namespace vanguard::rendering
     }
 
     bool RenderSceneGpuPublisher::BindMesh(const RenderProxyHandle proxy, const RenderSceneGpuMeshBinding& binding,
-                                           RenderSceneGpuFailure* const failure) noexcept
+                                           RenderSceneGpuBindingReceipt& receipt, RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
+        receipt = {};
         if (m_impl == nullptr)
             return Fail(failure, RenderSceneGpuFailureCode::NotInitialized, "RenderScene GPU publisher is not initialized", proxy.scene, proxy);
         if (!binding.renderable.IsValid())
@@ -802,13 +819,25 @@ namespace vanguard::rendering
         if (scene->phase != Impl::MutationPhase::Serial || tracked == nullptr || tracked->identity.kind != RenderSceneGpuObjectKind::Instance)
             return Fail(failure, scene->phase != Impl::MutationPhase::Serial ? RenderSceneGpuFailureCode::Busy : RenderSceneGpuFailureCode::InvalidHandle,
                         "mesh GPU binding requires a tracked instance outside an open publication", proxy.scene, proxy);
+        const RenderSceneGpuMeshBinding previous = tracked->meshBinding;
+        const u64 previousRevision = tracked->bindingRevision;
         tracked->meshBinding = binding;
-        return m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources);
+        Impl::AdvanceBindingRevision(*tracked);
+        if (!m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources))
+        {
+            tracked->meshBinding = previous;
+            tracked->bindingRevision = previousRevision;
+            return false;
+        }
+        receipt = {proxy, tracked->bindingRevision};
+        return true;
     }
 
-    bool RenderSceneGpuPublisher::ClearMeshBinding(const RenderProxyHandle proxy, RenderSceneGpuFailure* const failure) noexcept
+    bool RenderSceneGpuPublisher::ClearMeshBinding(const RenderProxyHandle proxy, RenderSceneGpuBindingReceipt& receipt,
+                                                   RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
+        receipt = {};
         if (m_impl == nullptr)
             return Fail(failure, RenderSceneGpuFailureCode::NotInitialized, "RenderScene GPU publisher is not initialized", proxy.scene, proxy);
         Impl::SceneState* const scene = m_impl->FindScene(proxy.scene);
@@ -819,14 +848,24 @@ namespace vanguard::rendering
         if (scene->phase != Impl::MutationPhase::Serial || tracked == nullptr || tracked->identity.kind != RenderSceneGpuObjectKind::Instance)
             return Fail(failure, scene->phase != Impl::MutationPhase::Serial ? RenderSceneGpuFailureCode::Busy : RenderSceneGpuFailureCode::InvalidHandle,
                         "mesh GPU binding clear requires a tracked instance outside an open publication", proxy.scene, proxy);
+        const RenderSceneGpuMeshBinding previous = tracked->meshBinding;
+        const u64 previousRevision = tracked->bindingRevision;
         tracked->meshBinding = {};
-        return m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources);
+        Impl::AdvanceBindingRevision(*tracked);
+        if (!m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources))
+        {
+            tracked->meshBinding = previous;
+            tracked->bindingRevision = previousRevision;
+            return false;
+        }
+        receipt = {proxy, tracked->bindingRevision};
+        return true;
     }
 
-    bool RenderSceneGpuPublisher::BindDecalMaterial(const RenderProxyHandle proxy, const GpuMaterialHandle material,
-                                                    RenderSceneGpuFailure* const failure) noexcept
+    bool RenderSceneGpuPublisher::BindDecalMaterial(const RenderProxyHandle proxy, const GpuMaterialHandle material, RenderSceneGpuBindingReceipt& receipt, RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
+        receipt = {};
         if (m_impl == nullptr || !material.IsValid())
             return Fail(failure, m_impl == nullptr ? RenderSceneGpuFailureCode::NotInitialized : RenderSceneGpuFailureCode::InvalidHandle,
                         "decal GPU binding requires an initialized publisher and valid material", proxy.scene, proxy);
@@ -839,12 +878,18 @@ namespace vanguard::rendering
             return Fail(failure, scene->phase != Impl::MutationPhase::Serial ? RenderSceneGpuFailureCode::Busy : RenderSceneGpuFailureCode::InvalidHandle,
                         "decal GPU binding requires a tracked decal outside an open publication", proxy.scene, proxy);
         tracked->decalMaterial = material;
-        return m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources);
+        Impl::AdvanceBindingRevision(*tracked);
+        if (!m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources))
+            return false;
+        receipt = {proxy, tracked->bindingRevision};
+        return true;
     }
 
-    bool RenderSceneGpuPublisher::ClearDecalMaterialBinding(const RenderProxyHandle proxy, RenderSceneGpuFailure* const failure) noexcept
+    bool RenderSceneGpuPublisher::ClearDecalMaterialBinding(const RenderProxyHandle proxy, RenderSceneGpuBindingReceipt* const receipt, RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
+        if (receipt != nullptr)
+            *receipt = {};
         if (m_impl == nullptr)
             return Fail(failure, RenderSceneGpuFailureCode::NotInitialized, "RenderScene GPU publisher is not initialized", proxy.scene, proxy);
         Impl::SceneState* const scene = m_impl->FindScene(proxy.scene);
@@ -856,7 +901,50 @@ namespace vanguard::rendering
             return Fail(failure, scene->phase != Impl::MutationPhase::Serial ? RenderSceneGpuFailureCode::Busy : RenderSceneGpuFailureCode::InvalidHandle,
                         "decal GPU binding clear requires a tracked decal outside an open publication", proxy.scene, proxy);
         tracked->decalMaterial = {};
-        return m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources);
+        Impl::AdvanceBindingRevision(*tracked);
+        if (!m_impl->QueueDirty(*scene, *tracked, RenderSceneGpuDirtyFlags::Resources))
+            return false;
+        if (receipt != nullptr)
+            *receipt = {proxy, tracked->bindingRevision};
+        return true;
+    }
+
+    RenderSceneGpuBindingStatus RenderSceneGpuPublisher::PollBinding(const RenderSceneGpuBindingReceipt& receipt) const noexcept
+    {
+        if (!receipt.IsValid() || m_impl == nullptr)
+            return RenderSceneGpuBindingStatus::Stale;
+        const Impl::SceneState* const scene = m_impl->FindScene(receipt.proxy.scene);
+        if (scene == nullptr)
+            return RenderSceneGpuBindingStatus::Stale;
+        concurrency::ScopedSharedLock<concurrency::RWSpinLock> guard(scene->lock);
+        const Impl::TrackedProxy* const tracked = m_impl->FindTracked(*scene, receipt.proxy);
+        if (tracked == nullptr)
+            return RenderSceneGpuBindingStatus::Stale;
+        if (tracked->bindingRevision != receipt.revision)
+            return RenderSceneGpuBindingStatus::Stale;
+        return tracked->acceptedBindingRevision == receipt.revision ? RenderSceneGpuBindingStatus::Accepted : RenderSceneGpuBindingStatus::Pending;
+    }
+
+    bool RenderSceneGpuPublisher::PollBindings(const RenderSceneHandle sceneHandle,
+                                               const containers::ArraySpan<const RenderSceneGpuBindingReceipt> receipts,
+                                               const containers::ArraySpan<RenderSceneGpuBindingStatus> statuses) const noexcept
+    {
+        if (m_impl == nullptr || receipts.Size() != statuses.Size() || (receipts.Size() != 0 && (receipts.Data() == nullptr || statuses.Data() == nullptr)))
+            return false;
+        const Impl::SceneState* const scene = m_impl->FindScene(sceneHandle);
+        if (scene == nullptr)
+            return false;
+        concurrency::ScopedSharedLock<concurrency::RWSpinLock> guard(scene->lock);
+        for (u32 index = 0; index < receipts.Size(); ++index)
+        {
+            const RenderSceneGpuBindingReceipt& receipt = receipts[index];
+            const Impl::TrackedProxy* const tracked = receipt.IsValid() && receipt.proxy.scene == sceneHandle ? m_impl->FindTracked(*scene, receipt.proxy) : nullptr;
+            statuses[index] = tracked == nullptr || tracked->bindingRevision != receipt.revision
+                                  ? RenderSceneGpuBindingStatus::Stale
+                                  : (tracked->acceptedBindingRevision == receipt.revision ? RenderSceneGpuBindingStatus::Accepted
+                                                                                          : RenderSceneGpuBindingStatus::Pending);
+        }
+        return true;
     }
 
     bool RenderSceneGpuPublisher::GetIdentity(const RenderProxyHandle proxy, RenderSceneGpuIdentity& identity) const noexcept
@@ -873,16 +961,14 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneGpuPublisher::Prepare(const RenderSceneHandle sceneHandle, const u64 mutationEpoch, RenderSceneGpuPublication& publication,
-                                          RenderSceneGpuFailure* const failure) noexcept
+    bool RenderSceneGpuPublisher::Prepare(const RenderSceneHandle sceneHandle, const u64 mutationEpoch, RenderSceneGpuPublication& publication, RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
         publication = {};
         if (m_impl == nullptr)
             return Fail(failure, RenderSceneGpuFailureCode::NotInitialized, "RenderScene GPU publisher is not initialized", sceneHandle);
         if (!m_impl->scenes->IsGpuPublicationReady(sceneHandle, mutationEpoch))
-            return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU publication requires the exact completed scene-update epoch",
-                        sceneHandle);
+            return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU publication requires the exact completed scene-update epoch", sceneHandle);
         Impl::SceneState* const scene = m_impl->FindScene(sceneHandle);
         if (scene == nullptr)
             return Fail(failure, RenderSceneGpuFailureCode::InvalidHandle, "invalid RenderScene GPU scene", sceneHandle);
@@ -890,8 +976,7 @@ namespace vanguard::rendering
         concurrency::ScopedLock<concurrency::RWSpinLock> guard(scene->lock);
         if (scene->phase != Impl::MutationPhase::Serial && scene->phase != Impl::MutationPhase::Sealed)
             return Fail(failure, RenderSceneGpuFailureCode::Busy, "RenderScene GPU mutations are not sealed for publication", sceneHandle);
-        const u32 serialRangeCount =
-            (scene->serialDirtyIndices.Size() + m_impl->config.maximumObjectsPerWriteRange - 1u) / m_impl->config.maximumObjectsPerWriteRange;
+        const u32 serialRangeCount = (scene->serialDirtyIndices.Size() + m_impl->config.maximumObjectsPerWriteRange - 1u) / m_impl->config.maximumObjectsPerWriteRange;
         scene->serialRangeOffsets.Resize(serialRangeCount + 1u);
         scene->serialRangeWritten.Resize(serialRangeCount);
         u32 publishedOffset = 0;
@@ -899,8 +984,7 @@ namespace vanguard::rendering
         {
             scene->serialRangeOffsets[index] = publishedOffset;
             scene->serialRangeWritten[index] = 0;
-            publishedOffset +=
-                m_impl->CountPublishedSerial(*scene, index * m_impl->config.maximumObjectsPerWriteRange, m_impl->config.maximumObjectsPerWriteRange);
+            publishedOffset += m_impl->CountPublishedSerial(*scene, index * m_impl->config.maximumObjectsPerWriteRange, m_impl->config.maximumObjectsPerWriteRange);
         }
         scene->serialRangeOffsets[serialRangeCount] = publishedOffset;
         for (u32 index = 0; index < scene->parallelSlices.Size(); ++index)
@@ -952,23 +1036,20 @@ namespace vanguard::rendering
     u32 RenderSceneGpuPublisher::GetWriteRangeCount(const RenderSceneGpuPublication& publication) const noexcept
     {
         const Impl::SceneState* const scene = m_impl != nullptr ? m_impl->FindScene(publication.scene) : nullptr;
-        if (scene == nullptr || scene->phase != Impl::MutationPhase::Publishing || scene->publicationSerial != publication.serial ||
-            scene->publishedChangeCount == 0)
+        if (scene == nullptr || scene->phase != Impl::MutationPhase::Publishing || scene->publicationSerial != publication.serial || scene->publishedChangeCount == 0)
             return 0;
         return scene->serialRangeWritten.Size() + scene->parallelSlices.Size();
     }
 
-    bool RenderSceneGpuPublisher::GetWriteRange(const RenderSceneGpuPublication& publication, const u32 rangeIndex,
-                                                RenderSceneGpuWriteRange& range) const noexcept
+    bool RenderSceneGpuPublisher::GetWriteRange(const RenderSceneGpuPublication& publication, const u32 rangeIndex, RenderSceneGpuWriteRange& range) const noexcept
     {
         range = {};
         const Impl::SceneState* const scene = m_impl != nullptr ? m_impl->FindScene(publication.scene) : nullptr;
-        return scene != nullptr && scene->phase == Impl::MutationPhase::Publishing && scene->publicationSerial == publication.serial &&
-               scene->publishedChangeCount != 0 && m_impl->DescribeWriteRange(*scene, rangeIndex, range);
+        return scene != nullptr && scene->phase == Impl::MutationPhase::Publishing && scene->publicationSerial == publication.serial && scene->publishedChangeCount != 0 &&
+               m_impl->DescribeWriteRange(*scene, rangeIndex, range);
     }
 
-    bool RenderSceneGpuPublisher::WriteRange(const RenderSceneGpuPublication& publication,
-                                             const containers::ArraySpan<const GpuSceneUploadReservation> reservations, const u32 rangeIndex,
+    bool RenderSceneGpuPublisher::WriteRange(const RenderSceneGpuPublication& publication, const containers::ArraySpan<const GpuSceneUploadReservation> reservations, const u32 rangeIndex,
                                              RenderSceneGpuFailure* const failure) noexcept
     {
         ClearFailure(failure);
@@ -976,8 +1057,7 @@ namespace vanguard::rendering
         if (scene == nullptr || scene->phase != Impl::MutationPhase::Publishing || scene->publicationSerial != publication.serial)
             return Fail(failure, RenderSceneGpuFailureCode::InvalidHandle, "invalid or closed RenderScene GPU publication", publication.scene);
         if (reservations.Size() != scene->publishedChangeCount)
-            return Fail(failure, RenderSceneGpuFailureCode::ReservationMismatch, "RenderScene GPU reservation count does not match the publication",
-                        publication.scene);
+            return Fail(failure, RenderSceneGpuFailureCode::ReservationMismatch, "RenderScene GPU reservation count does not match the publication", publication.scene);
 
         RenderSceneGpuWriteRange range;
         if (!m_impl->DescribeWriteRange(*scene, rangeIndex, range))
@@ -985,8 +1065,7 @@ namespace vanguard::rendering
         if (!range.HasWork())
             return true;
         const u32 serialRangeCount = scene->serialRangeWritten.Size();
-        if ((rangeIndex < serialRangeCount && scene->serialRangeWritten[rangeIndex] != 0) ||
-            (rangeIndex >= serialRangeCount && scene->parallelSlices[rangeIndex - serialRangeCount].written))
+        if ((rangeIndex < serialRangeCount && scene->serialRangeWritten[rangeIndex] != 0) || (rangeIndex >= serialRangeCount && scene->parallelSlices[rangeIndex - serialRangeCount].written))
             return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU write range was already consumed", publication.scene);
 
         const bool succeeded = m_impl->VisitWriteRange(
@@ -995,12 +1074,11 @@ namespace vanguard::rendering
             {
                 const GpuSceneUploadReservation& reservation = reservations[index];
                 if (!reservation.IsValid())
-                    return Fail(failure, RenderSceneGpuFailureCode::ReservationMismatch, "RenderScene GPU publication contains an invalid upload reservation",
-                                publication.scene, tracked.proxy);
+                    return Fail(failure, RenderSceneGpuFailureCode::ReservationMismatch, "RenderScene GPU publication contains an invalid upload reservation", publication.scene, tracked.proxy);
                 RenderSceneGpuReadView source;
-                if (!m_impl->scenes->ReadGpuProxy(tracked.proxy, source) || !source.HasCommonData())
-                    return Fail(failure, RenderSceneGpuFailureCode::SourceUnavailable, "RenderScene proxy is unavailable during its sealed GPU publication",
-                                publication.scene, tracked.proxy);
+                const bool sourceRead = m_impl->scenes->ReadGpuProxy(tracked.proxy, source);
+                if (!sourceRead || !source.HasCommonData())
+                    return Fail(failure, RenderSceneGpuFailureCode::SourceUnavailable, "RenderScene proxy is unavailable during its sealed GPU publication", publication.scene, tracked.proxy);
 
                 const RenderProxyTransform& transform = *source.transform;
                 const RenderProxyBounds& bounds = *source.bounds;
@@ -1009,16 +1087,12 @@ namespace vanguard::rendering
                 if (tracked.identity.kind == RenderSceneGpuObjectKind::Instance)
                 {
                     if (source.payloadKind != RenderProxyPayloadKind::Mesh || reservation.size != sizeof(GpuInstance))
-                        return Fail(failure,
-                                    source.payloadKind != RenderProxyPayloadKind::Mesh ? RenderSceneGpuFailureCode::SourceUnavailable
-                                                                                       : RenderSceneGpuFailureCode::ReservationMismatch,
+                        return Fail(failure, source.payloadKind != RenderProxyPayloadKind::Mesh ? RenderSceneGpuFailureCode::SourceUnavailable : RenderSceneGpuFailureCode::ReservationMismatch,
                                     "GPU instance source or upload reservation is invalid", publication.scene, tracked.proxy);
                     GpuInstance& output = *::new (reservation.destination) GpuInstance{};
                     SplitWorldPosition(position, m_impl->config.worldCellSize, output.worldCell, output.localPosition);
-                    const f32 center[3]{(bounds.minimum[0] + bounds.maximum[0]) * 0.5f, (bounds.minimum[1] + bounds.maximum[1]) * 0.5f,
-                                        (bounds.minimum[2] + bounds.maximum[2]) * 0.5f};
-                    const f32 half[3]{(bounds.maximum[0] - bounds.minimum[0]) * 0.5f, (bounds.maximum[1] - bounds.minimum[1]) * 0.5f,
-                                      (bounds.maximum[2] - bounds.minimum[2]) * 0.5f};
+                    const f32 center[3]{(bounds.minimum[0] + bounds.maximum[0]) * 0.5f, (bounds.minimum[1] + bounds.maximum[1]) * 0.5f, (bounds.minimum[2] + bounds.maximum[2]) * 0.5f};
+                    const f32 half[3]{(bounds.maximum[0] - bounds.minimum[0]) * 0.5f, (bounds.maximum[1] - bounds.minimum[1]) * 0.5f, (bounds.maximum[2] - bounds.minimum[2]) * 0.5f};
                     output.boundsCenterOffset[0] = center[0] - position[0];
                     output.boundsCenterOffset[1] = center[1] - position[1];
                     output.boundsCenterOffset[2] = center[2] - position[2];
@@ -1030,30 +1104,33 @@ namespace vanguard::rendering
                     output.layerMaskLow = static_cast<u32>(*source.layerMask);
                     output.layerMaskHigh = static_cast<u32>(*source.layerMask >> 32u);
                     BuildRotationAndScale(transform, output.rotation, output.scale);
-                    if (tracked.meshBinding.renderable.IsValid() && HasFlag(visibility, RenderProxyVisibilityFlags::Visible))
+                    // A collapsed or nonfinite scale cannot support the inverse
+                    // scale normal transform. Keep its stable slot inactive.
+                    const bool validTransform = std::isfinite(output.scale[0]) && output.scale[0] != 0.0f && std::isfinite(output.scale[1]) && output.scale[1] != 0.0f &&
+                                                std::isfinite(output.scale[2]) && output.scale[2] != 0.0f && std::isfinite(output.rotation[0]) && std::isfinite(output.rotation[1]) &&
+                                                std::isfinite(output.rotation[2]) && std::isfinite(output.rotation[3]);
+                    if (validTransform && tracked.meshBinding.renderable.IsValid() && HasFlag(visibility, RenderProxyVisibilityFlags::Visible))
                         AddInstanceFlag(output.flags, GpuInstanceFlags::Active);
                     if (HasFlag(visibility, RenderProxyVisibilityFlags::CastsShadow))
                         AddInstanceFlag(output.flags, GpuInstanceFlags::CastsShadow);
                     if (HasFlag(visibility, RenderProxyVisibilityFlags::ReceivesDecals))
                         AddInstanceFlag(output.flags, GpuInstanceFlags::ReceivesDecals);
-                    if (output.scale[0] * output.scale[1] * output.scale[2] < 0.0f)
+                    // Sign parity avoids overflowing/underflowing a scale product.
+                    const bool mirrored = ((output.scale[0] < 0.0f) != (output.scale[1] < 0.0f)) != (output.scale[2] < 0.0f);
+                    if (mirrored)
                         AddInstanceFlag(output.flags, GpuInstanceFlags::NegativeScale);
                 }
                 else if (tracked.identity.kind == RenderSceneGpuObjectKind::Light)
                 {
-                    if (source.payloadKind != RenderProxyPayloadKind::Light || source.lightKind == nullptr || source.lightColor == nullptr ||
-                        source.lightIntensity == nullptr || source.lightRange == nullptr || source.lightInnerConeRadians == nullptr ||
-                        source.lightOuterConeRadians == nullptr || source.lightCastsShadow == nullptr || reservation.size != sizeof(GpuLight))
-                        return Fail(failure,
-                                    reservation.size != sizeof(GpuLight) ? RenderSceneGpuFailureCode::ReservationMismatch
-                                                                         : RenderSceneGpuFailureCode::SourceUnavailable,
+                    if (source.payloadKind != RenderProxyPayloadKind::Light || source.lightKind == nullptr || source.lightColor == nullptr || source.lightIntensity == nullptr || source.lightRange == nullptr ||
+                        source.lightInnerConeRadians == nullptr || source.lightOuterConeRadians == nullptr || source.lightCastsShadow == nullptr || reservation.size != sizeof(GpuLight))
+                        return Fail(failure, reservation.size != sizeof(GpuLight) ? RenderSceneGpuFailureCode::ReservationMismatch : RenderSceneGpuFailureCode::SourceUnavailable,
                                     "GPU light source or upload reservation is invalid", publication.scene, tracked.proxy);
                     GpuLight& output = *::new (reservation.destination) GpuLight{};
                     SplitWorldPosition(position, m_impl->config.worldCellSize, output.worldCell, output.localPosition);
                     output.type = static_cast<u32>(*source.lightKind);
                     output.range = *source.lightRange;
-                    const f32 directionLength =
-                        std::sqrt(transform.row2[0] * transform.row2[0] + transform.row2[1] * transform.row2[1] + transform.row2[2] * transform.row2[2]);
+                    const f32 directionLength = std::sqrt(transform.row2[0] * transform.row2[0] + transform.row2[1] * transform.row2[1] + transform.row2[2] * transform.row2[2]);
                     const f32 inverseDirection = directionLength > 1.0e-8f ? 1.0f / directionLength : 0.0f;
                     output.direction[0] = transform.row2[0] * inverseDirection;
                     output.direction[1] = transform.row2[1] * inverseDirection;
@@ -1064,17 +1141,18 @@ namespace vanguard::rendering
                     output.color[1] = source.lightColor[1];
                     output.color[2] = source.lightColor[2];
                     output.intensity = *source.lightIntensity;
-                    output.flags = *source.lightCastsShadow ? 1u : 0u;
+                    output.flags = *source.lightCastsShadow ? GpuLightFlagCastsShadow : 0u;
+                    if (HasFlag(visibility, RenderProxyVisibilityFlags::Visible) && *source.visibilityMask != 0 &&
+                        output.intensity > 0.0f && (output.color[0] > 0.0f || output.color[1] > 0.0f || output.color[2] > 0.0f))
+                        output.flags |= GpuLightFlagActive;
                     output.generation = tracked.identity.allocation.generation;
                     output.visibilityMask = *source.visibilityMask;
                 }
                 else
                 {
-                    if (source.payloadKind != RenderProxyPayloadKind::Decal || source.decalExtents == nullptr || source.decalFadeDistance == nullptr ||
-                        source.decalSortKey == nullptr || reservation.size != sizeof(GpuDecal))
-                        return Fail(failure,
-                                    reservation.size != sizeof(GpuDecal) ? RenderSceneGpuFailureCode::ReservationMismatch
-                                                                         : RenderSceneGpuFailureCode::SourceUnavailable,
+                    if (source.payloadKind != RenderProxyPayloadKind::Decal || source.decalExtents == nullptr || source.decalFadeDistance == nullptr || source.decalSortKey == nullptr ||
+                        reservation.size != sizeof(GpuDecal))
+                        return Fail(failure, reservation.size != sizeof(GpuDecal) ? RenderSceneGpuFailureCode::ReservationMismatch : RenderSceneGpuFailureCode::SourceUnavailable,
                                     "GPU decal source or upload reservation is invalid", publication.scene, tracked.proxy);
                     GpuDecal& output = *::new (reservation.destination) GpuDecal{};
                     SplitWorldPosition(position, m_impl->config.worldCellSize, output.worldCell, output.localPosition);
@@ -1129,8 +1207,7 @@ namespace vanguard::rendering
         if (scene == nullptr || scene->phase != Impl::MutationPhase::Publishing || scene->publicationSerial != publication.serial)
             return Fail(failure, RenderSceneGpuFailureCode::InvalidHandle, "invalid or closed RenderScene GPU publication", publication.scene);
         if (scene->publishedChangeCount != 0 && !scene->written)
-            return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU publication cannot complete before all changed objects are staged",
-                        publication.scene);
+            return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU publication cannot complete before all changed objects are staged", publication.scene);
         for (u32 index = 0; index < scene->retirements.Size(); ++index)
         {
             const GpuSceneAllocation allocation = scene->retirements[index].identity.allocation;
@@ -1138,8 +1215,7 @@ namespace vanguard::rendering
             if (state == GpuSceneAllocationState::Invalid || state == GpuSceneAllocationState::Retiring)
                 continue;
             GpuSceneLifetimeFailure lifetimeFailure;
-            const bool succeeded = state == GpuSceneAllocationState::Allocated ? m_impl->lifetime->Cancel(allocation, &lifetimeFailure)
-                                                                               : m_impl->lifetime->Retire(allocation, &lifetimeFailure);
+            const bool succeeded = state == GpuSceneAllocationState::Allocated ? m_impl->lifetime->Cancel(allocation, &lifetimeFailure) : m_impl->lifetime->Retire(allocation, &lifetimeFailure);
             if (!succeeded)
             {
                 if (failure != nullptr)
@@ -1156,8 +1232,7 @@ namespace vanguard::rendering
         {
             concurrency::ScopedLock<concurrency::RWSpinLock> guard(scene->lock);
             if (scene->phase != Impl::MutationPhase::Publishing || scene->publicationSerial != publication.serial)
-                return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU publication changed while retirements were being closed",
-                            publication.scene);
+                return Fail(failure, RenderSceneGpuFailureCode::InvalidState, "RenderScene GPU publication changed while retirements were being closed", publication.scene);
             m_impl->CompletePublished(*scene);
         }
         return true;

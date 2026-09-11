@@ -91,6 +91,8 @@ namespace vanguard::rendering
         RenderPhaseSet phases;
         u64 layerMask = ~0ull;
         u32 visibilityMask = ~0u;
+        /// Positive values bias toward coarser LODs; one unit halves projected
+        /// coverage for threshold selection. Negative values bias toward finer LODs.
         f32 lodBias = 0.0f;
         bool temporalHistory = true;
         bool temporalJitter = true;
@@ -156,6 +158,14 @@ namespace vanguard::rendering
         }
     };
 
+    struct RenderCameraOutputRegion
+    {
+        RenderCameraHandle camera;
+        /// Destination in output pixels. Array order defines overwrite order.
+        /// Camera targets remain local to (0, 0), at their own render resolution.
+        RenderViewRect rect;
+    };
+
     struct RenderViewFamilyPrepareRequest
     {
         RenderSceneHandle scene;
@@ -165,6 +175,8 @@ namespace vanguard::rendering
         u32 jitterIndex = 0;
         bool enableTemporalJitter = true;
         bool forceCameraCut = false;
+        containers::ArraySpan<const RenderCameraOutputRegion> outputRegions;
+        RenderCameraExtent outputExtent;
     };
 
     class RenderCameraStorage;
@@ -256,6 +268,7 @@ namespace vanguard::rendering
         Busy,
         InvalidCameraState,
         PreparedFamilyUnavailable,
+        CustomDataPreparationFailed,
         CustomDataNotReady
     };
 
@@ -339,7 +352,7 @@ namespace vanguard::rendering
                                                RenderCameraFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool PrepareViewFamily(const RenderViewFamilyPrepareRequest& request, PreparedRenderViewFamily& family,
                                              RenderCameraFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool PrepareCustomData(const PreparedRenderViewFamily& family, RenderCameraFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool PrepareCustomData(RenderNodeImplContext& context, RenderCameraFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool CheckCustomDataReadiness(const PreparedRenderViewFamily& family,
                                                     RenderCameraFailure* failure = nullptr) const noexcept;
         [[nodiscard]] const char* GetRenderingBlockReason(RenderSceneHandle scene) const noexcept;

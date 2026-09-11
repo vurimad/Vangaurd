@@ -81,6 +81,7 @@ namespace vanguard::window
     {
         WindowStateField fields = WindowStateField::None;
         BackendWindowPlacement placement;
+        bool activateWhenShown = true;
     };
 
     enum class BackendEventType : u8
@@ -173,6 +174,30 @@ namespace vanguard::window
         [[nodiscard]] virtual BackendStatus ApplyWindowState(BackendWindowId window, const BackendWindowRequest& request,
                                                              BackendWindowState& state) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetWindowTitle(BackendWindowId window, const char* title) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus SetWindowOpacity(BackendWindowId, f32) noexcept
+        {
+            return BackendStatus::Failure(-1, "window opacity is unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus RequestWindowFocus(BackendWindowId) noexcept
+        {
+            return BackendStatus::Failure(-1, "window focus requests are unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus SetCursor(CursorShape, bool) noexcept
+        {
+            return BackendStatus::Failure(-1, "cursor changes are unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus ReadClipboardText(char*, u32, u32&) noexcept
+        {
+            return BackendStatus::Failure(-1, "clipboard text is unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus WriteClipboardText(const char*) noexcept
+        {
+            return BackendStatus::Failure(-1, "clipboard text is unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus SetTextInput(BackendWindowId, const TextInputRequest&) noexcept
+        {
+            return BackendStatus::Failure(-1, "text input is unsupported by this backend");
+        }
         [[nodiscard]] virtual BackendStatus ResolvePresentationSurface(BackendWindowId window, NativePresentationSurface& surface) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DestroyWindow(BackendWindowId window) noexcept = 0;
 

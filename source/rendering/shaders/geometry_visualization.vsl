@@ -1,0 +1,32 @@
+struct GeometryVisualizationConstants
+{
+    uint sourceDescriptor;
+    uint3 reserved;
+};
+[[push_constant]] ConstantBuffer<GeometryVisualizationConstants> visualization;
+
+struct GeometryVisualizationVertex
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+GeometryVisualizationVertex GeometryVisualizationVertexMain(uint vertex : SV_VertexID)
+{
+    float2 uv = float2((vertex << 1u) & 2u, vertex & 2u);
+    GeometryVisualizationVertex output;
+    output.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0, 1);
+    output.uv = uv;
+    return output;
+}
+
+[shader("fragment")]
+float4 GeometryVisualizationFragmentMain(GeometryVisualizationVertex input) : SV_Target0
+{
+    Texture2D<float4> source = ResourceDescriptorHeap[visualization.sourceDescriptor];
+    uint width, height;
+    source.GetDimensions(width, height);
+    uint2 pixel = min(uint2(saturate(input.uv) * float2(width, height)), uint2(width - 1u, height - 1u));
+    return float4(source.Load(int3(pixel, 0)).rgb, 1.0);
+}

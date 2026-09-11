@@ -46,6 +46,7 @@ namespace vanguard::assets
         u64 gameId = 0;
         resources::ResourceReference startupWorld;
         resources::ResourceReference defaultInput;
+        resources::ResourceReference rendererBootstrap;
         u64 targetPackageBytes = 8ull * 1024ull * 1024ull * 1024ull;
         u64 maximumPackageBytes = 16ull * 1024ull * 1024ull * 1024ull;
         u64 maximumBootstrapBytes = 1024ull * 1024ull * 1024ull;
@@ -80,6 +81,7 @@ namespace vanguard::assets
         u32 targetPlatformId = 0;
         resources::ResourceReference startupWorld;
         resources::ResourceReference defaultInput;
+        resources::ResourceReference rendererBootstrap;
         u64 maximumPackageBytes = 0;
         containers::DynamicArray<PlannedDataPackage> packages;
     };

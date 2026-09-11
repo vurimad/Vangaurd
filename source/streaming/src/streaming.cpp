@@ -332,7 +332,7 @@ namespace vanguard::streaming
         concurrency::RWLock lock;
         containers::HashMap<resources::ResourceTypeId, DecoderDescriptor> decoders;
         containers::DynamicArray<resources::ResourceTypeId> decoderTypes;
-        containers::DynamicArray<LooseEntry*> looseEntries;
+        containers::HashMap<resources::ResourceId, LooseEntry*> looseEntries;
         containers::DynamicArray<PackageMount*> packageMounts;
         containers::HashMap<resources::ResourceId, StreamLoad*> activeLoads;
         u64 nextSequence = 1;
@@ -346,17 +346,11 @@ namespace vanguard::streaming
         {
             ResolvedSource best;
             bool found = false;
-            for (LooseEntry* const loose : looseEntries)
+            if (LooseEntry* const* const entry = looseEntries.FindPtr(id))
             {
-                if (loose->reference.GetPath().Id() != id)
-                {
-                    continue;
-                }
-                if (!found || loose->priority > best.priority || (loose->priority == best.priority && loose->sequence > best.sequence))
-                {
-                    best = {SourceKind::LooseFile, loose, nullptr, nullptr, loose->priority, loose->sequence};
-                    found = true;
-                }
+                LooseEntry* const loose = *entry;
+                best = {SourceKind::LooseFile, loose, nullptr, nullptr, loose->priority, loose->sequence};
+                found = true;
             }
             for (PackageMount* const mount : packageMounts)
             {
@@ -754,9 +748,9 @@ resources::Failure failure = ToFailure(result);
                 return false;
             }
         }
-        for (LooseEntry* const loose : m_impl->looseEntries)
+        for (auto entry = m_impl->looseEntries.Begin(); entry != m_impl->looseEntries.End(); ++entry)
         {
-            DeleteStreamingObject(loose);
+            DeleteStreamingObject(entry.Value());
         }
         for (PackageMount* const mount : m_impl->packageMounts)
         {
@@ -857,17 +851,14 @@ resources::Failure failure = ToFailure(result);
         }
 
         m_impl->lock.Acquire();
-        for (const LooseEntry* const existing : m_impl->looseEntries)
+        const auto inserted = m_impl->looseEntries.Insert(entry->reference.GetPath().Id(), entry);
+        if (!inserted.IsSuccessful())
         {
-            if (existing->reference.GetPath() == entry->reference.GetPath())
-            {
-                m_impl->lock.Release();
-                DeleteStreamingObject(entry);
-                return false;
-            }
+            m_impl->lock.Release();
+            DeleteStreamingObject(entry);
+            return false;
         }
         entry->sequence = m_impl->nextSequence++;
-        m_impl->looseEntries.PushBack(entry);
         m_impl->lock.Release();
         return true;
     }
@@ -885,19 +876,15 @@ resources::Failure failure = ToFailure(result);
             m_impl->lock.Release();
             return false;
         }
-        for (u32 index = 0; index < m_impl->looseEntries.Size(); ++index)
+        LooseEntry* entry = nullptr;
+        const bool found = m_impl->looseEntries.Find(path.Id(), entry);
+        if (found)
         {
-            LooseEntry* const entry = m_impl->looseEntries[index];
-            if (entry->reference.GetPath() == path)
-            {
-                static_cast<void>(m_impl->looseEntries.RemoveAt(index));
-                m_impl->lock.Release();
-                DeleteStreamingObject(entry);
-                return true;
-            }
+            static_cast<void>(m_impl->looseEntries.Remove(path.Id()));
         }
         m_impl->lock.Release();
-        return false;
+        DeleteStreamingObject(entry);
+        return found;
     }
 
     bool ResourceStreamer::MountPackage(const packages::PackageReader& reader, const filesystem::AbsolutePath& physicalPath, const i32 priority) noexcept
@@ -1235,6 +1222,7 @@ resources::Failure failure = ToFailure(result);
         u32 targetPlatformId = 0;
         resources::ResourceReference startupWorld;
         resources::ResourceReference defaultInput;
+        resources::ResourceReference rendererBootstrap;
         bool mounted = false;
     };
 
@@ -1425,6 +1413,7 @@ resources::Failure failure = ToFailure(result);
         impl->targetPlatformId = packageSet->targetPlatformId;
         impl->startupWorld = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->startupWorld), packageSet->startupWorldType);
         impl->defaultInput = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->defaultInput), packageSet->defaultInputType);
+        impl->rendererBootstrap = resources::ResourceReference(resources::ResourcePath::FromId(packageSet->rendererBootstrap), packageSet->rendererBootstrapType);
         root->info = {&root->reader, rootPath, 0, packages::PackageSetEntryFlags::Required, config.rootPriority};
         if (!AddOwnedPackage(*impl, root))
         {
@@ -1585,6 +1574,11 @@ resources::Failure failure = ToFailure(result);
     resources::ResourceReference PackageSetMount::GetDefaultInput() const noexcept
     {
         return m_impl != nullptr ? m_impl->defaultInput : resources::ResourceReference{};
+    }
+
+    resources::ResourceReference PackageSetMount::RendererBootstrap() const noexcept
+    {
+        return m_impl != nullptr ? m_impl->rendererBootstrap : resources::ResourceReference{};
     }
 
     u32 PackageSetMount::PackageCount() const noexcept

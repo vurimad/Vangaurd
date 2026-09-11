@@ -5,6 +5,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <cstring>
 #include <new>
 
 namespace
@@ -127,6 +128,8 @@ namespace vanguard::window::sdl
         };
 
         Record records[MaximumWindows]{};
+        SDL_Cursor* cursors[static_cast<u32>(CursorShape::Count)]{};
+        SDL_Window* textInputWindow = nullptr;
         u32 windowCount = 0;
 
         [[nodiscard]] Record* Find(const BackendWindowId id) noexcept
@@ -220,6 +223,33 @@ namespace vanguard::window::sdl
             record.mode = placement.mode;
             return BackendStatus::Success();
         }
+
+        [[nodiscard]] SDL_Cursor* ResolveCursor(const CursorShape shape) noexcept
+        {
+            const u32 index = static_cast<u32>(shape);
+            if (index >= static_cast<u32>(CursorShape::Count))
+                return nullptr;
+            if (cursors[index] != nullptr)
+                return cursors[index];
+            SDL_SystemCursor systemCursor = SDL_SYSTEM_CURSOR_DEFAULT;
+            switch (shape)
+            {
+            case CursorShape::Arrow: systemCursor = SDL_SYSTEM_CURSOR_DEFAULT; break;
+            case CursorShape::TextInput: systemCursor = SDL_SYSTEM_CURSOR_TEXT; break;
+            case CursorShape::Move: systemCursor = SDL_SYSTEM_CURSOR_MOVE; break;
+            case CursorShape::ResizeNorthSouth: systemCursor = SDL_SYSTEM_CURSOR_NS_RESIZE; break;
+            case CursorShape::ResizeEastWest: systemCursor = SDL_SYSTEM_CURSOR_EW_RESIZE; break;
+            case CursorShape::ResizeNorthEastSouthWest: systemCursor = SDL_SYSTEM_CURSOR_NESW_RESIZE; break;
+            case CursorShape::ResizeNorthWestSouthEast: systemCursor = SDL_SYSTEM_CURSOR_NWSE_RESIZE; break;
+            case CursorShape::Pointer: systemCursor = SDL_SYSTEM_CURSOR_POINTER; break;
+            case CursorShape::Wait: systemCursor = SDL_SYSTEM_CURSOR_WAIT; break;
+            case CursorShape::Progress: systemCursor = SDL_SYSTEM_CURSOR_PROGRESS; break;
+            case CursorShape::NotAllowed: systemCursor = SDL_SYSTEM_CURSOR_NOT_ALLOWED; break;
+            default: return nullptr;
+            }
+            cursors[index] = SDL_CreateSystemCursor(systemCursor);
+            return cursors[index];
+        }
     };
 
     SdlWindowBackend::~SdlWindowBackend()
@@ -230,6 +260,9 @@ namespace vanguard::window::sdl
         for (Impl::Record& record : m_impl->records)
             if (record.native != nullptr)
                 SDL_DestroyWindow(record.native);
+        for (SDL_Cursor* const cursor : m_impl->cursors)
+            if (cursor != nullptr)
+                SDL_DestroyCursor(cursor);
         m_impl->~Impl();
         memory::MemoryBlock block{m_impl, sizeof(Impl), memory::PoolId::Window};
         memory::Free(block);
@@ -259,6 +292,9 @@ namespace vanguard::window::sdl
             return BackendStatus::Success();
         if (m_impl->windowCount != 0)
             return BackendStatus::Failure(-1, "SDL window backend still owns live windows");
+        for (SDL_Cursor* const cursor : m_impl->cursors)
+            if (cursor != nullptr)
+                SDL_DestroyCursor(cursor);
         m_impl->~Impl();
         memory::MemoryBlock block{m_impl, sizeof(Impl), memory::PoolId::Window};
         memory::Free(block);
@@ -476,7 +512,14 @@ namespace vanguard::window::sdl
         }
         if (HasField(request.fields, WindowStateField::Visibility))
         {
+            // Showing a drag-created window must not take focus away from its capture owner.
+            const bool suppressActivation = request.placement.visible && !request.activateWhenShown;
+            const bool previousActivation = SDL_GetHintBoolean(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, true);
+            if (suppressActivation && !SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0"))
+                return BackendStatus::Failure(-1, "SDL rejected showing the window without activation");
             const bool changed = request.placement.visible ? SDL_ShowWindow(record->native) : SDL_HideWindow(record->native);
+            if (suppressActivation)
+                static_cast<void>(SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, previousActivation ? "1" : "0"));
             if (!changed)
                 return SdlFailure("failed to change SDL window visibility");
         }
@@ -491,6 +534,104 @@ namespace vanguard::window::sdl
         if (record == nullptr)
             return BackendStatus::Failure(-1, "SDL window handle is invalid");
         return SDL_SetWindowTitle(record->native, title) ? BackendStatus::Success() : SdlFailure("failed to set SDL window title");
+    }
+
+    BackendStatus SdlWindowBackend::SetWindowOpacity(const BackendWindowId window, const f32 opacity) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (!(opacity >= 0.0f && opacity <= 1.0f))
+            return BackendStatus::Failure(-1, "window opacity must be finite and between zero and one");
+        Impl::Record* const record = m_impl->Find(window);
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window is unavailable");
+        return SDL_SetWindowOpacity(record->native, opacity) ? BackendStatus::Success() : SdlFailure("failed to set SDL window opacity");
+    }
+
+    BackendStatus SdlWindowBackend::RequestWindowFocus(const BackendWindowId window) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        Impl::Record* const record = m_impl->Find(window);
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        return SDL_RaiseWindow(record->native) ? BackendStatus::Success() : SdlFailure("failed to focus SDL window");
+    }
+
+    BackendStatus SdlWindowBackend::SetCursor(const CursorShape shape, const bool visible) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        if (!visible)
+            return SDL_HideCursor() ? BackendStatus::Success() : SdlFailure("failed to hide SDL cursor");
+        SDL_Cursor* const cursor = m_impl->ResolveCursor(shape);
+        if (cursor == nullptr || !SDL_SetCursor(cursor) || !SDL_ShowCursor())
+            return SdlFailure("failed to set SDL cursor");
+        return BackendStatus::Success();
+    }
+
+    BackendStatus SdlWindowBackend::ReadClipboardText(char* const destination, const u32 capacity, u32& requiredCapacity) noexcept
+    {
+        requiredCapacity = 0;
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        char* const text = SDL_GetClipboardText();
+        if (text == nullptr)
+            return SdlFailure("failed to read SDL clipboard text");
+        const size_t size = std::strlen(text) + 1u;
+        if (size > static_cast<size_t>(~u32{0}))
+        {
+            SDL_free(text);
+            return BackendStatus::Failure(-1, "SDL clipboard text exceeds Vanguard capacity");
+        }
+        requiredCapacity = static_cast<u32>(size);
+        if (destination == nullptr)
+        {
+            SDL_free(text);
+            return BackendStatus::Success();
+        }
+        if (capacity < requiredCapacity)
+        {
+            SDL_free(text);
+            return BackendStatus::Failure(-1, "clipboard destination is too small");
+        }
+        std::memcpy(destination, text, size);
+        SDL_free(text);
+        return BackendStatus::Success();
+    }
+
+    BackendStatus SdlWindowBackend::WriteClipboardText(const char* const text) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        return SDL_SetClipboardText(text) ? BackendStatus::Success() : SdlFailure("failed to write SDL clipboard text");
+    }
+
+    BackendStatus SdlWindowBackend::SetTextInput(const BackendWindowId window, const TextInputRequest& request) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        Impl::Record* const record = m_impl->Find(window);
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (m_impl->textInputWindow != nullptr && (m_impl->textInputWindow != record->native || !request.enabled))
+        {
+            if (!SDL_StopTextInput(m_impl->textInputWindow))
+                return SdlFailure("failed to stop SDL text input");
+            m_impl->textInputWindow = nullptr;
+        }
+        if (!request.enabled)
+            return BackendStatus::Success();
+        if (request.showIme)
+        {
+            const SDL_Rect area{request.position.x, request.position.y, 1, static_cast<int>(request.lineHeight)};
+            if (!SDL_SetTextInputArea(record->native, &area, 0))
+                return SdlFailure("failed to set SDL text-input area");
+        }
+        if (!SDL_TextInputActive(record->native) && !SDL_StartTextInput(record->native))
+            return SdlFailure("failed to start SDL text input");
+        m_impl->textInputWindow = record->native;
+        return BackendStatus::Success();
     }
 
     BackendStatus SdlWindowBackend::ResolvePresentationSurface(const BackendWindowId window, NativePresentationSurface& surface) noexcept
@@ -519,6 +660,11 @@ namespace vanguard::window::sdl
         Impl::Record* const record = m_impl->Find(window);
         if (record == nullptr)
             return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (m_impl->textInputWindow == record->native)
+        {
+            static_cast<void>(SDL_StopTextInput(record->native));
+            m_impl->textInputWindow = nullptr;
+        }
         SDL_DestroyWindow(record->native);
         *record = {};
         --m_impl->windowCount;

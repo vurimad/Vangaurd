@@ -1,4 +1,7 @@
 #include <vanguard/rendering/render_flow_resource_execution.hpp>
+#include <vanguard/rhi/rhi.hpp>
+
+#include "../private/vanguard/rendering/render_flow_resource_placed.hpp"
 
 namespace
 {
@@ -16,6 +19,13 @@ namespace
         u32 temporaryAllocation = rendering::InvalidRenderFlowResourceIndex;
         u32 postSwapAllocation = rendering::InvalidRenderFlowResourceIndex;
     };
+
+    [[nodiscard]] rendering::RenderFlowResourceAllocatorConfig MakeLogicalOnlyConfig() noexcept
+    {
+        rendering::RenderFlowResourceAllocatorConfig result;
+        result.allowLogicalOnlyValidation = true;
+        return result;
+    }
 
     [[nodiscard]] rendering::FrameBufferDesc MakeBufferDesc(const vanguard::u64 size = 4096) noexcept
     {
@@ -86,11 +96,10 @@ namespace
     {
         rendering::RenderFlowResourceFailure failure;
         rendering::RenderFlowResourceAllocator allocator;
-        if (!allocator.Initialize({}, &failure))
+        if (!allocator.Initialize(MakeLogicalOnlyConfig(), &failure))
             return false;
 
-        rendering::FrameResourceSession session;
-        if (!allocator.BeginFrame(reverseWriterClose ? 2 : 1, {}, session, &failure))
+        if (!allocator.BeginFrame(reverseWriterClose ? 2 : 1, {}, &failure))
             return false;
 
         constexpr rendering::RenderFlowNodeId nodeA{1};
@@ -108,8 +117,8 @@ namespace
         rendering::ResourcePlanningWriter writerA;
         rendering::ResourcePlanningWriter writerB;
         rendering::ResourcePlanningWriter writerC;
-        if (!session.CreatePlanningWriter(nodeA, flowA, scopeA, writerA, &failure) || !session.CreatePlanningWriter(nodeB, flowB, scopeB, writerB, &failure) ||
-            !session.CreatePlanningWriter(nodeC, flowC, scopeC, writerC, &failure))
+        if (!allocator.CreatePlanningWriter(nodeA, flowA, scopeA, writerA, &failure) || !allocator.CreatePlanningWriter(nodeB, flowB, scopeB, writerB, &failure) ||
+            !allocator.CreatePlanningWriter(nodeC, flowC, scopeC, writerC, &failure))
             return false;
 
         const rendering::LogicalResourceKey colorKey{cameraSpace, "frame.color"};
@@ -140,28 +149,25 @@ namespace
 
         const bool closed = reverseWriterClose ? writerC.Close(&failure) && writerB.Close(&failure) && writerA.Close(&failure)
                                                : writerA.Close(&failure) && writerB.Close(&failure) && writerC.Close(&failure);
-        if (!closed || !session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+        if (!closed || !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
             return false;
 
-        const rendering::CompiledCommandScope scopes[] = {{scopeC, rhi::QueueType::Graphics, 2}, {scopeA, rhi::QueueType::Graphics, 0}, {scopeB, rhi::QueueType::Graphics, 1}};
-        const rendering::CompiledQueueSchedule schedule{containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)};
-        const rendering::SurvivingGraphOverlay surviving{{}, true};
-        rendering::ExecutionGenerationRef generation;
-        if (!session.Resolve(surviving, schedule, generation, nullptr, &failure))
+        if (!allocator.Resolve(nullptr, &failure))
             return false;
-        session.CancelBeforePublication();
-        check(session.GetState() == rendering::RenderFlowResourceSessionState::Ready && generation.IsValid(), "pre-publication cancellation cannot detach a published execution generation");
+        const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+        allocator.CancelBeforePublication();
+        check(allocator.GetState() == rendering::RenderFlowResourceSessionState::Ready && generation.IsValid(), "pre-publication cancellation cannot detach a published execution generation");
 
         rendering::CompiledExecutionPacketView packetA;
         rendering::CompiledExecutionPacketView packetB;
         rendering::CompiledExecutionPacketView packetC;
-        check(!session.PacketFor(nodeA, packetA, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase,
+        check(!allocator.PacketFor(nodeA, packetA, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase,
               "packet lookup requires an explicit execution transition");
-        if (!session.BeginExecution(&failure))
+        if (!allocator.BeginExecution(&failure))
             return false;
-        check(!session.BeginExecution(&failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase,
+        check(!allocator.BeginExecution(&failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase,
               "execution transition is coordinator-owned and occurs exactly once");
-        if (!session.PacketFor(nodeA, packetA, &failure) || !session.PacketFor(nodeB, packetB, &failure) || !session.PacketFor(nodeC, packetC, &failure))
+        if (!allocator.PacketFor(nodeA, packetA, &failure) || !allocator.PacketFor(nodeB, packetB, &failure) || !allocator.PacketFor(nodeC, packetC, &failure))
             return false;
 
         rendering::ExecutionPacketCursor cursorA;
@@ -179,6 +185,10 @@ namespace
         rendering::ResolvedBufferUse resolvedSecondWriteB;
         rendering::ResolvedBufferUse resolvedC;
         rendering::ResolvedTextureUse wrongKind;
+        rendering::ExecutionPacketCursor duplicateCursor;
+        check(!packetA.OpenCursor(scopeA, rhi::QueueType::Graphics, duplicateCursor, &failure) &&
+                  failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase && !duplicateCursor.IsValid() && cursorA.IsValid(),
+              "sequential duplicate packet claim fails without disturbing its recording owner");
         check(!cursorB.BeginTextureUse(readB, wrongKind, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompleteExecution,
               "execution cursor rejects the wrong resource kind");
         check(!cursorB.BeginBufferUse(writeB, resolvedWriteB, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompleteExecution,
@@ -188,6 +198,10 @@ namespace
             return false;
         result.firstAllocation = resolvedA.GetPhysicalResource().index;
         check(resolvedA.IsValid(), "resolved buffer use is valid only inside its compiled scope");
+        rendering::ExecutionPacketCursor movedCursorA(static_cast<rendering::ExecutionPacketCursor&&>(cursorA));
+        check(!cursorA.IsValid() && movedCursorA.IsValid() && resolvedA.IsValid(), "cursor move construction transfers its active use without invalidation");
+        cursorA = static_cast<rendering::ExecutionPacketCursor&&>(movedCursorA);
+        check(cursorA.IsValid() && !movedCursorA.IsValid() && resolvedA.IsValid(), "cursor move assignment to an empty owner preserves packet execution");
         if (!cursorA.EndUse(writeA, &failure))
             return false;
         check(!resolvedA.IsValid(), "resolved buffer use expires at matching EndUse");
@@ -220,17 +234,17 @@ namespace
         const rendering::CommandScopeExecutionReceipt receipts[] = {{scopeB, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Graphics, {}},
                                                                     {scopeC, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Graphics, {}},
                                                                     {scopeA, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Graphics, {}}};
-        const rendering::ExecutionGenerationId wrongGeneration{generation.GetId().index, generation.GetId().generation + 1u};
-        const rendering::TerminalExecutionReceipt wrongTerminal{generation.GetId(), rendering::TerminalExecutionCompletionKind::Completed,
-                                                                containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
-                                                                rendering::TerminalJoinToken::CompletedSynchronously(wrongGeneration)};
-        check(!session.Finish(wrongTerminal, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompleteExecution &&
-                  session.GetState() == rendering::RenderFlowResourceSessionState::Executing,
+        const rendering::ExecutionGenerationId wrongGeneration{generation.index, generation.generation + 1u};
+        const rendering::TerminalExecutionReceipt wrongTerminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                                 containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                                 rendering::TerminalJoinToken::CompletedSynchronously(wrongGeneration)};
+        check(!allocator.Finish(wrongTerminal, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompleteExecution &&
+                  allocator.GetState() == rendering::RenderFlowResourceSessionState::Executing,
               "terminal join proof is generation-bound and invalid proof does not mutate execution state");
-        const rendering::TerminalExecutionReceipt terminal{generation.GetId(), rendering::TerminalExecutionCompletionKind::Completed,
-                                                           containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
-                                                           rendering::TerminalJoinToken::CompletedSynchronously(generation.GetId())};
-        if (!session.Finish(terminal, &failure))
+        const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                            containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                            rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+        if (!allocator.Finish(terminal, &failure))
             return false;
         rendering::ExecutionPacketCursor staleCursor;
         check(!packetA.OpenCursor(scopeA, rhi::QueueType::Graphics, staleCursor, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase,
@@ -241,7 +255,6 @@ namespace
         packetA = {};
         packetB = {};
         packetC = {};
-        generation.Reset();
         resolvedReadB = {};
         resolvedWriteB = {};
         resolvedSecondWriteB = {};
@@ -249,7 +262,7 @@ namespace
         check(!resolvedA.IsValid(), "expired resolved use retains only a packet-local liveness witness for a memory-safe stale check");
         resolvedA = {};
         const rendering::RenderFlowResourceAllocatorStats stats = allocator.GetStats();
-        check(stats.state == rendering::RenderFlowResourceSessionState::Idle && stats.completedFrames == 1 && stats.compiledPackets == 3,
+        check(stats.state == rendering::RenderFlowResourceSessionState::Idle && stats.completedFrames == 1 && stats.compiledPackets == 3 && stats.compiledResourceActions != 0,
               "successful terminal receipt returns the allocator to Idle");
         return allocator.Shutdown(&failure);
     }
@@ -268,32 +281,77 @@ namespace
               "planning writer close order does not affect deterministic physical assignment");
     }
 
-    void TestCulledScopeFailure(CheckFunction check) noexcept
+    void TestDedicatedResourceLifetimePlanning(CheckFunction check) noexcept
     {
         rendering::RenderFlowResourceAllocator allocator;
         rendering::RenderFlowResourceFailure failure;
-        rendering::FrameResourceSession session;
-        check(allocator.Initialize({}, &failure) && allocator.BeginFrame(10, {}, session, &failure), "broken-scope test starts a planning session");
-        rendering::ResourcePlanningWriter openWriter;
+        rendering::ResourcePlanningWriter writer;
+        constexpr rendering::RenderFlowNodeId node{10};
+        constexpr rendering::GpuFlowGroupId flow{10};
+        constexpr rendering::CommandScopeId scope{10};
+        constexpr rendering::FlowSpaceId space{10};
+        rendering::LogicalResourceId resources[3];
+        rendering::ResourceUseId uses[3];
+        const rendering::FrameBufferDesc desc = MakeBufferDesc();
+        const bool planned = allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(3, {}, &failure) &&
+                             allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) &&
+                             writer.DeclareBuffer({space, "lifetime.a"}, desc, resources[0], &failure) &&
+                             writer.DeclareBuffer({space, "lifetime.b"}, desc, resources[1], &failure) &&
+                             writer.DeclareBuffer({space, "lifetime.c"}, desc, resources[2], &failure) &&
+                             writer.BeginBufferUse(resources[0], WriteUse(), uses[0], &failure) &&
+                             writer.BeginBufferUse(resources[1], WriteUse(), uses[1], &failure) &&
+                             writer.EndUse(uses[0], &failure) && writer.EndUse(uses[1], &failure) &&
+                             writer.BeginBufferUse(resources[2], WriteUse(), uses[2], &failure) && writer.EndUse(uses[2], &failure) &&
+                             writer.Close(&failure) && allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
+        check(planned, "dedicated-resource lifetime test seals overlapping and sequential logical uses");
+        if (planned)
+        {
+            rendering::CompiledExecutionPacketView packet;
+            rendering::ExecutionPacketCursor cursor;
+            rendering::ResolvedBufferUse resolved[3];
+            const bool resolvedPlan = allocator.Resolve(nullptr, &failure);
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            const bool opened = resolvedPlan && allocator.BeginExecution(&failure) && allocator.PacketFor(node, packet, &failure) &&
+                                packet.OpenCursor(scope, rhi::QueueType::Graphics, cursor, &failure);
+            bool executed = opened && cursor.BeginBufferUse(uses[0], resolved[0], &failure) &&
+                            cursor.BeginBufferUse(uses[1], resolved[1], &failure);
+            if (executed)
+            {
+                const rendering::PhysicalResourceId first = resolved[0].GetPhysicalResource();
+                const rendering::PhysicalResourceId overlapping = resolved[1].GetPhysicalResource();
+                executed = cursor.EndUse(uses[0], &failure) && cursor.EndUse(uses[1], &failure) &&
+                           cursor.BeginBufferUse(uses[2], resolved[2], &failure);
+                const rendering::PhysicalResourceId sequential = executed ? resolved[2].GetPhysicalResource() : rendering::PhysicalResourceId{};
+                check(first.IsValid() && overlapping.IsValid() && sequential.IsValid() && first != overlapping && sequential == first,
+                      "overlapping lifetimes stay distinct while a strictly later compatible lifetime reuses the first dedicated resource");
+                executed = executed && cursor.EndUse(uses[2], &failure) && cursor.FinalizePacket(&failure);
+            }
+            const rendering::CommandScopeExecutionReceipt receipts[] = {
+                {scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Graphics, {}}};
+            const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                               containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                               rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+            check(executed && allocator.Finish(terminal, &failure), "dedicated-resource lifetime plan executes and joins exactly once");
+        }
+        check(allocator.Shutdown(&failure), "dedicated-resource lifetime planning is cleanup-safe");
+    }
+
+    void TestMissingScopeBeginFailure(CheckFunction check) noexcept
+    {
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(10, {}, &failure), "broken-scope test starts allocator planning");
         rendering::ResourcePlanningWriter closeWriter;
-        const rendering::RenderFlowNodeId openNode{20};
         const rendering::RenderFlowNodeId closeNode{21};
-        check(session.CreatePlanningWriter(openNode, {20}, {20}, openWriter, &failure) && session.CreatePlanningWriter(closeNode, {21}, {21}, closeWriter, &failure),
-              "broken-scope test creates writers");
-        rendering::LogicalResourceId resource;
+        check(allocator.CreatePlanningWriter(closeNode, {21}, {21}, closeWriter, &failure), "broken-scope test creates the surviving node writer");
         const rendering::ResourceScopeId scope{77};
-        check(openWriter.DeclareBuffer({{1}, "culled.resource"}, MakeBufferDesc(), resource, &failure) && openWriter.OpenResourceScope(resource, scope, &failure) &&
-                  closeWriter.CloseResourceScope(scope, &failure) && openWriter.Close(&failure) && closeWriter.Close(&failure) &&
-                  session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
-              "broken-scope candidates seal before culling");
-        const rendering::RenderFlowNodeId survivors[] = {closeNode};
-        const rendering::CompiledCommandScope scopes[] = {{{21}, rhi::QueueType::Graphics, 0}};
-        rendering::ExecutionGenerationRef generation;
-        const bool resolved = session.Resolve({containers::ArraySpan<const rendering::RenderFlowNodeId>(survivors), false},
-                                              {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure);
+        check(closeWriter.CloseResourceScope(scope, &failure) && closeWriter.Close(&failure) &&
+                  allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
+              "broken-scope declaration stream seals with only the surviving node");
+        const bool resolved = allocator.Resolve(nullptr, &failure);
         check(!resolved && failure.code == rendering::RenderFlowResourceFailureCode::InvalidUseOrScope && allocator.GetStats().state == rendering::RenderFlowResourceSessionState::Idle &&
-                  !generation.IsValid(),
-              "culling one cross-node scope endpoint aborts scratch Resolve without publication");
+                  !allocator.GetExecutionGeneration().IsValid(),
+              "a surviving scope close without its culled begin aborts Resolve without publication");
         check(allocator.Shutdown(&failure), "failed Resolve leaves allocator shutdown-safe");
     }
 
@@ -301,11 +359,10 @@ namespace
     {
         rendering::RenderFlowResourceAllocator allocator;
         rendering::RenderFlowResourceFailure failure;
-        rendering::FrameResourceSession session;
-        check(allocator.Initialize({}, &failure) && allocator.BeginFrame(11, {}, session, &failure), "writer-poison test starts a planning session");
+        check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(11, {}, &failure), "writer-poison test starts allocator planning");
         rendering::ResourcePlanningWriter writerA;
         rendering::ResourcePlanningWriter writerB;
-        check(session.CreatePlanningWriter({30}, {30}, {30}, writerA, &failure) && session.CreatePlanningWriter({31}, {31}, {31}, writerB, &failure), "writer-poison test creates writers");
+        check(allocator.CreatePlanningWriter({30}, {30}, {30}, writerA, &failure) && allocator.CreatePlanningWriter({31}, {31}, {31}, writerB, &failure), "writer-poison test creates writers");
         rendering::LogicalResourceId resourceA;
         rendering::LogicalResourceId resourceB;
         rendering::ResourceUseId forgedUse;
@@ -314,10 +371,10 @@ namespace
               "writer-local logical ids cannot be used by another flow group");
         check(!writerB.DeclareBuffer({{2}, "later.resource"}, MakeBufferDesc(), resourceB, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompletePlanning,
               "a rejected operation poisons its writer instead of publishing a partial tape");
-        check(writerA.Close(&failure) && !writerB.Close(&failure) && !session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) &&
+        check(writerA.Close(&failure) && !writerB.Close(&failure) && !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) &&
                   failure.code == rendering::RenderFlowResourceFailureCode::IncompletePlanning,
               "a poisoned writer prevents candidate publication");
-        session.CancelBeforePublication();
+        allocator.CancelBeforePublication();
         check(allocator.GetStats().rejectedOperations >= 2 && allocator.Shutdown(&failure), "writer rejection accounting is merged safely at writer close");
     }
 
@@ -325,22 +382,19 @@ namespace
     {
         rendering::RenderFlowResourceAllocator allocator;
         rendering::RenderFlowResourceFailure failure;
-        rendering::FrameResourceSession session;
-        check(allocator.Initialize({}, &failure) && allocator.BeginFrame(12, {}, session, &failure), "duplicate-declaration test starts a planning session");
+        check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(12, {}, &failure), "duplicate-declaration test starts allocator planning");
         rendering::ResourcePlanningWriter writerA;
         rendering::ResourcePlanningWriter writerB;
-        check(session.CreatePlanningWriter({30}, {30}, {30}, writerA, &failure) && session.CreatePlanningWriter({31}, {31}, {31}, writerB, &failure),
+        check(allocator.CreatePlanningWriter({30}, {30}, {30}, writerA, &failure) && allocator.CreatePlanningWriter({31}, {31}, {31}, writerB, &failure),
               "duplicate-declaration test creates writers");
         const rendering::LogicalResourceKey key{{2}, "duplicate.resource"};
         rendering::LogicalResourceId resourceA;
         rendering::LogicalResourceId resourceB;
         check(writerA.DeclareBuffer(key, MakeBufferDesc(), resourceA, &failure) && writerB.DeclareBuffer(key, MakeBufferDesc(), resourceB, &failure) && writerA.Close(&failure) &&
-                  writerB.Close(&failure) && session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
+                   writerB.Close(&failure) && allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
               "duplicate declaration reaches deterministic Resolve validation");
-        const rendering::CompiledCommandScope scopes[] = {{{30}, rhi::QueueType::Graphics, 0}, {{31}, rhi::QueueType::Graphics, 1}};
-        rendering::ExecutionGenerationRef generation;
-        check(!session.Resolve({{}, true}, {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure) &&
-                  failure.code == rendering::RenderFlowResourceFailureCode::DescriptorConflict && !generation.IsValid(),
+        check(!allocator.Resolve(nullptr, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::DescriptorConflict &&
+                  !allocator.GetExecutionGeneration().IsValid(),
               "duplicate named declaration fails atomically even when descriptors match");
         check(allocator.Shutdown(&failure), "duplicate declaration failure leaves allocator shutdown-safe");
     }
@@ -350,27 +404,27 @@ namespace
         rendering::RenderFlowResourceFailure failure;
         {
             rendering::RenderFlowResourceAllocatorConfig config;
+            config.allowLogicalOnlyValidation = true;
             config.maximumLogicalResources = 1;
             rendering::RenderFlowResourceAllocator allocator;
-            rendering::FrameResourceSession session;
             rendering::ResourcePlanningWriter first;
             rendering::ResourcePlanningWriter second;
             rendering::LogicalResourceId firstResource;
             rendering::LogicalResourceId secondResource;
-            check(allocator.Initialize(config, &failure) && allocator.BeginFrame(13, {}, session, &failure) && session.CreatePlanningWriter({50}, {50}, {50}, first, &failure) &&
-                      session.CreatePlanningWriter({51}, {51}, {51}, second, &failure) && first.ReferenceResource({{5}, "first"}, firstResource, &failure) &&
+            check(allocator.Initialize(config, &failure) && allocator.BeginFrame(13, {}, &failure) && allocator.CreatePlanningWriter({50}, {50}, {50}, first, &failure) &&
+                      allocator.CreatePlanningWriter({51}, {51}, {51}, second, &failure) && first.ReferenceResource({{5}, "first"}, firstResource, &failure) &&
                       second.ReferenceResource({{5}, "second"}, secondResource, &failure) && first.Close(&failure) && second.Close(&failure) &&
-                      !session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) && failure.code == rendering::RenderFlowResourceFailureCode::CapacityExceeded,
+                      !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) && failure.code == rendering::RenderFlowResourceFailureCode::CapacityExceeded,
                   "logical-resource capacity is an aggregate frame limit independent of writer close order");
-            session.CancelBeforePublication();
+            allocator.CancelBeforePublication();
             check(allocator.Shutdown(&failure), "aggregate resource-cap failure remains cancellation-safe");
         }
         {
             rendering::RenderFlowResourceAllocatorConfig config;
+            config.allowLogicalOnlyValidation = true;
             config.maximumLogicalResources = 2;
             config.maximumViews = 1;
             rendering::RenderFlowResourceAllocator allocator;
-            rendering::FrameResourceSession session;
             rendering::ResourcePlanningWriter first;
             rendering::ResourcePlanningWriter second;
             rendering::LogicalResourceId firstResource;
@@ -378,32 +432,15 @@ namespace
             rendering::LogicalBufferViewId firstView;
             rendering::LogicalBufferViewId secondView;
             const rendering::FrameBufferDesc desc = MakeBufferDesc();
-            check(allocator.Initialize(config, &failure) && allocator.BeginFrame(14, {}, session, &failure) && session.CreatePlanningWriter({52}, {52}, {52}, first, &failure) &&
-                      session.CreatePlanningWriter({53}, {53}, {53}, second, &failure) && first.DeclareBuffer({{5}, "first.view"}, desc, firstResource, &failure) &&
+            check(allocator.Initialize(config, &failure) && allocator.BeginFrame(14, {}, &failure) && allocator.CreatePlanningWriter({52}, {52}, {52}, first, &failure) &&
+                      allocator.CreatePlanningWriter({53}, {53}, {53}, second, &failure) && first.DeclareBuffer({{5}, "first.view"}, desc, firstResource, &failure) &&
                       first.CreateBufferView(firstResource, {}, firstView, &failure) && second.DeclareBuffer({{5}, "second.view"}, desc, secondResource, &failure) &&
                       second.CreateBufferView(secondResource, {}, secondView, &failure) && first.Close(&failure) && second.Close(&failure) &&
-                      !session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) && failure.code == rendering::RenderFlowResourceFailureCode::CapacityExceeded,
+                      !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) && failure.code == rendering::RenderFlowResourceFailureCode::CapacityExceeded,
                   "texture and buffer views share one deterministic aggregate frame capacity");
-            session.CancelBeforePublication();
+            allocator.CancelBeforePublication();
             check(allocator.Shutdown(&failure), "aggregate view-cap failure remains cancellation-safe");
         }
-    }
-
-    void TestDuplicateScheduleOrder(CheckFunction check) noexcept
-    {
-        rendering::RenderFlowResourceAllocator allocator;
-        rendering::RenderFlowResourceFailure failure;
-        rendering::FrameResourceSession session;
-        rendering::ResourcePlanningWriter writer;
-        check(allocator.Initialize({}, &failure) && allocator.BeginFrame(15, {}, session, &failure) && session.CreatePlanningWriter({60}, {60}, {60}, writer, &failure) &&
-                  writer.Close(&failure) && session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
-              "duplicate schedule-order test seals a minimal plan");
-        const rendering::CompiledCommandScope scopes[] = {{{60}, rhi::QueueType::Graphics, 4}, {{61}, rhi::QueueType::Compute, 4}};
-        rendering::ExecutionGenerationRef generation;
-        check(!session.Resolve({{}, true}, {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure) &&
-                  failure.code == rendering::RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch && !generation.IsValid(),
-              "queue schedule stable-order positions are authoritative and unique");
-        check(allocator.Shutdown(&failure), "invalid queue schedule fails before generation publication");
     }
 
     void TestRangeAndSubresourceValidation(CheckFunction check) noexcept
@@ -411,58 +448,49 @@ namespace
         rendering::RenderFlowResourceFailure failure;
         {
             rendering::RenderFlowResourceAllocator allocator;
-            rendering::FrameResourceSession session;
             rendering::ResourcePlanningWriter writer;
             rendering::LogicalResourceId texture;
             rendering::ResourceUseId writeMip;
             rendering::ResourceUseId readOtherMip;
-            check(allocator.Initialize({}, &failure) && allocator.BeginFrame(17, {}, session, &failure) && session.CreatePlanningWriter({70}, {70}, {70}, writer, &failure) &&
+            check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(17, {}, &failure) && allocator.CreatePlanningWriter({70}, {70}, {70}, writer, &failure) &&
                       writer.DeclareTexture({{7}, "mipped.texture"}, MakeTextureDesc(), texture, &failure) && writer.BeginTextureUse(texture, TextureWriteUse(0), writeMip, &failure) &&
                       writer.EndUse(writeMip, &failure) && writer.BeginTextureUse(texture, TextureReadUse(1), readOtherMip, &failure) && writer.EndUse(readOtherMip, &failure) &&
-                      writer.Close(&failure) && session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
+                      writer.Close(&failure) && allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
                   "subresource-content test seals its candidate tape");
-            const rendering::CompiledCommandScope scopes[] = {{{70}, rhi::QueueType::Graphics, 0}};
-            rendering::ExecutionGenerationRef generation;
-            check(!session.Resolve({{}, true}, {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure) &&
-                      failure.code == rendering::RenderFlowResourceFailureCode::InvalidUseOrScope && !generation.IsValid(),
+            check(!allocator.Resolve(nullptr, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidUseOrScope &&
+                      !allocator.GetExecutionGeneration().IsValid(),
                   "writing one mip does not make a different mip's contents defined");
             check(allocator.Shutdown(&failure), "subresource-content failure leaves no published generation");
         }
         {
             rendering::RenderFlowResourceAllocator allocator;
-            rendering::FrameResourceSession session;
             rendering::ResourcePlanningWriter writer;
             rendering::LogicalResourceId texture;
             rendering::LogicalTextureViewId view;
             rhi::TextureViewDesc invalidView;
             invalidView.subresources = {2, 1, 0, 1};
-            check(allocator.Initialize({}, &failure) && allocator.BeginFrame(18, {}, session, &failure) && session.CreatePlanningWriter({71}, {71}, {71}, writer, &failure) &&
+            check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(18, {}, &failure) && allocator.CreatePlanningWriter({71}, {71}, {71}, writer, &failure) &&
                       writer.DeclareTexture({{7}, "invalid.view.texture"}, MakeTextureDesc(), texture, &failure) && writer.CreateTextureView(texture, invalidView, view, &failure) &&
-                      writer.Close(&failure) && session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
+                      writer.Close(&failure) && allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
                   "invalid texture-view test reaches Resolve validation");
-            const rendering::CompiledCommandScope scopes[] = {{{71}, rhi::QueueType::Graphics, 0}};
-            rendering::ExecutionGenerationRef generation;
-            check(!session.Resolve({{}, true}, {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure) &&
-                      failure.code == rendering::RenderFlowResourceFailureCode::DescriptorConflict,
+            check(!allocator.Resolve(nullptr, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::DescriptorConflict &&
+                      !allocator.GetExecutionGeneration().IsValid(),
                   "out-of-range texture views fail before execution generation publication");
             check(allocator.Shutdown(&failure), "invalid texture-view failure is cleanup-safe");
         }
         {
             rendering::RenderFlowResourceAllocator allocator;
-            rendering::FrameResourceSession session;
             rendering::ResourcePlanningWriter writer;
             rendering::LogicalResourceId buffer;
             rendering::LogicalBufferViewId view;
             const rendering::FrameBufferDesc desc = MakeBufferDesc();
-            check(allocator.Initialize({}, &failure) && allocator.BeginFrame(19, {}, session, &failure) && session.CreatePlanningWriter({72}, {72}, {72}, writer, &failure) &&
+            check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(19, {}, &failure) && allocator.CreatePlanningWriter({72}, {72}, {72}, writer, &failure) &&
                       writer.DeclareBuffer({{7}, "invalid.view.buffer"}, desc, buffer, &failure) &&
                       writer.CreateBufferView(buffer, {rhi::Format::Unknown, desc.active.size - 8, 32, 0}, view, &failure) && writer.Close(&failure) &&
-                      session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
+                      allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure),
                   "invalid buffer-view test reaches Resolve validation");
-            const rendering::CompiledCommandScope scopes[] = {{{72}, rhi::QueueType::Graphics, 0}};
-            rendering::ExecutionGenerationRef generation;
-            check(!session.Resolve({{}, true}, {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure) &&
-                      failure.code == rendering::RenderFlowResourceFailureCode::DescriptorConflict,
+            check(!allocator.Resolve(nullptr, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::DescriptorConflict &&
+                      !allocator.GetExecutionGeneration().IsValid(),
                   "overflowing buffer views fail before execution generation publication");
             check(allocator.Shutdown(&failure), "invalid buffer-view failure is cleanup-safe");
         }
@@ -474,34 +502,34 @@ namespace
         {
             rendering::RenderFlowResourceAllocator allocator;
             rendering::RenderFlowResourceFailure failure;
-            rendering::FrameResourceSession session;
             rendering::ResourcePlanningWriter writer;
             constexpr rendering::RenderFlowNodeId node{80};
             constexpr rendering::GpuFlowGroupId flow{80};
             constexpr rendering::CommandScopeId scope{80};
-            const bool planned = allocator.Initialize({}, &failure) && allocator.BeginFrame(frameSerial, {}, session, &failure) &&
-                                 session.CreatePlanningWriter(node, flow, scope, writer, &failure) && record(writer, failure) && writer.Close(&failure) &&
-                                 session.SealCandidates(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
+            bool planned = allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(frameSerial, {}, &failure);
+            if (planned && queue != rhi::QueueType::Graphics)
+                planned = allocator.RequestBeginQueue(queue, flow, &failure) && allocator.RequestEndQueue(flow, &failure);
+            planned = planned && allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) && record(writer, failure) && writer.Close(&failure) &&
+                      allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
             check(planned, message);
             if (!planned)
             {
                 writer.Abandon();
-                session.CancelBeforePublication();
+                allocator.CancelBeforePublication();
                 check(allocator.Shutdown(&failure), "failed state-validation setup remains shutdown-safe");
                 return;
             }
 
-            const rendering::CompiledCommandScope scopes[] = {{scope, queue, 0}};
-            rendering::ExecutionGenerationRef generation;
-            const bool resolved = session.Resolve({{}, true}, {containers::ArraySpan<const rendering::CompiledCommandScope>(scopes)}, generation, nullptr, &failure);
+            const bool resolved = allocator.Resolve(nullptr, &failure);
             check(expectSuccess ? resolved : !resolved && failure.code == rendering::RenderFlowResourceFailureCode::InvalidUseOrScope, message);
             if (resolved)
             {
+                const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
                 const rendering::CommandScopeExecutionReceipt receipts[] = {{scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, queue, {}}};
-                const rendering::TerminalExecutionReceipt terminal{generation.GetId(), rendering::TerminalExecutionCompletionKind::Aborted,
+                const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Aborted,
                                                                    containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
-                                                                   rendering::TerminalJoinToken::CompletedSynchronously(generation.GetId())};
-                check(session.Finish(terminal, &failure), "valid logical state plan can be abandoned before command submission");
+                                                                   rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+                check(allocator.Finish(terminal, &failure), "valid logical state plan can be abandoned before command submission");
             }
             check(allocator.Shutdown(&failure), "state-validation case leaves the allocator shutdown-safe");
         };
@@ -616,36 +644,609 @@ namespace
                            writer.BeginTextureUse(texture, uavRead, secondRead, &failure) && writer.EndUse(firstRead, &failure) && writer.EndUse(nestedRead, &failure) &&
                            writer.EndUse(secondRead, &failure);
                 });
+
+        runCase(29, rhi::QueueType::Graphics, false, "clear intent without a typed clear value is rejected",
+                [](rendering::ResourcePlanningWriter& writer, rendering::RenderFlowResourceFailure& failure) noexcept
+                {
+                    rendering::LogicalResourceId buffer;
+                    rendering::ResourceUseId use;
+                    rendering::BufferUseDesc clear = WriteUse();
+                    clear.content = rendering::ResourceContentIntent::Clear;
+                    return writer.DeclareBuffer({{8}, "missing.clear.value"}, MakeBufferDesc(), buffer, &failure) &&
+                           writer.BeginBufferUse(buffer, clear, use, &failure) && writer.EndUse(use, &failure);
+                });
+
+        runCase(30, rhi::QueueType::Graphics, false, "clear values cannot be attached to non-clear uses",
+                [](rendering::ResourcePlanningWriter& writer, rendering::RenderFlowResourceFailure& failure) noexcept
+                {
+                    rendering::LogicalResourceId buffer;
+                    rendering::ResourceUseId use;
+                    rendering::BufferUseDesc write = WriteUse();
+                    write.clearValue = rendering::BufferClearValue::Uint(1);
+                    return writer.DeclareBuffer({{8}, "stray.clear.value"}, MakeBufferDesc(), buffer, &failure) &&
+                           writer.BeginBufferUse(buffer, write, use, &failure) && writer.EndUse(use, &failure);
+                });
+
+        runCase(31, rhi::QueueType::Graphics, false, "buffer clear requires unordered-access state",
+                [](rendering::ResourcePlanningWriter& writer, rendering::RenderFlowResourceFailure& failure) noexcept
+                {
+                    rendering::LogicalResourceId buffer;
+                    rendering::ResourceUseId use;
+                    rendering::BufferUseDesc clear = WriteUse();
+                    clear.requiredState = rhi::ResourceState::CopyDestination;
+                    clear.content = rendering::ResourceContentIntent::Clear;
+                    clear.clearValue = rendering::BufferClearValue::Uint(2);
+                    rendering::FrameBufferDesc desc = MakeBufferDesc();
+                    desc.active.usage = desc.active.usage | rhi::BufferUsage::CopyDestination;
+                    return writer.DeclareBuffer({{8}, "clear.wrong.state"}, desc, buffer, &failure) &&
+                           writer.BeginBufferUse(buffer, clear, use, &failure) && writer.EndUse(use, &failure);
+                });
+
+        runCase(32, rhi::QueueType::Graphics, false, "unsigned texture clear requires an unsigned-integer format",
+                [](rendering::ResourcePlanningWriter& writer, rendering::RenderFlowResourceFailure& failure) noexcept
+                {
+                    rendering::LogicalResourceId texture;
+                    rendering::ResourceUseId use;
+                    rendering::TextureUseDesc clear = TextureWriteUse(0);
+                    clear.content = rendering::ResourceContentIntent::Clear;
+                    clear.clearValue = rendering::TextureClearValue::Uint(3);
+                    return writer.DeclareTexture({{8}, "clear.wrong.format"}, MakeTextureDesc(), texture, &failure) &&
+                           writer.BeginTextureUse(texture, clear, use, &failure) && writer.EndUse(use, &failure);
+                });
+
+        runCase(33, rhi::QueueType::Graphics, false, "declaration-time texture clear requires a full-resource first use",
+                [](rendering::ResourcePlanningWriter& writer, rendering::RenderFlowResourceFailure& failure) noexcept
+                {
+                    rendering::FrameTextureDesc desc = MakeTextureDesc();
+                    desc.initialization = rendering::FrameResourceInitialization::Clear;
+                    desc.clearValue = rendering::TextureClearValue::Color({0.0f, 0.0f, 0.0f, 0.0f});
+                    rendering::LogicalResourceId texture;
+                    rendering::ResourceUseId use;
+                    return writer.DeclareTexture({{8}, "partial.initial.clear"}, desc, texture, &failure) &&
+                           writer.BeginTextureUse(texture, TextureWriteUse(0), use, &failure) && writer.EndUse(use, &failure);
+                });
+
+        runCase(34, rhi::QueueType::Graphics, false, "declaration and first-use clear values must agree",
+                [](rendering::ResourcePlanningWriter& writer, rendering::RenderFlowResourceFailure& failure) noexcept
+                {
+                    rendering::FrameBufferDesc desc = MakeBufferDesc();
+                    desc.initialization = rendering::FrameResourceInitialization::Clear;
+                    desc.clearValue = rendering::BufferClearValue::Uint(4);
+                    rendering::BufferUseDesc clear = WriteUse();
+                    clear.content = rendering::ResourceContentIntent::Clear;
+                    clear.clearValue = rendering::BufferClearValue::Uint(5);
+                    rendering::LogicalResourceId buffer;
+                    rendering::ResourceUseId use;
+                    return writer.DeclareBuffer({{8}, "conflicting.clear.values"}, desc, buffer, &failure) &&
+                           writer.BeginBufferUse(buffer, clear, use, &failure) && writer.EndUse(use, &failure);
+                });
+    }
+
+    void TestTypedClearActions(CheckFunction check) noexcept
+    {
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        rendering::ResourcePlanningWriter writer;
+        constexpr rendering::RenderFlowNodeId node{93};
+        constexpr rendering::GpuFlowGroupId flow{93};
+        constexpr rendering::CommandScopeId scope{93};
+        rendering::LogicalResourceId buffer;
+        rendering::LogicalResourceId floatTexture;
+        rendering::LogicalResourceId uintTexture;
+        rendering::LogicalResourceId colorTarget;
+        rendering::LogicalResourceId depthTarget;
+        rendering::ResourceUseId uses[7];
+
+        rendering::FrameBufferDesc bufferDesc = MakeBufferDesc();
+        bufferDesc.initialization = rendering::FrameResourceInitialization::Clear;
+        bufferDesc.clearValue = rendering::BufferClearValue::Uint(0x11223344u);
+
+        rendering::TextureUseDesc floatClear = TextureWriteUse(0);
+        floatClear.content = rendering::ResourceContentIntent::Clear;
+        floatClear.clearValue = rendering::TextureClearValue::Color({0.25f, 0.5f, 0.75f, 1.0f});
+
+        rendering::FrameTextureDesc uintDesc = MakeTextureDesc();
+        uintDesc.active.format = rhi::Format::R32UInt;
+        uintDesc.active.mipCount = 1;
+        uintDesc.maximumMipCount = 1;
+        rendering::TextureUseDesc uintClear = TextureWriteUse(0);
+        uintClear.content = rendering::ResourceContentIntent::Clear;
+        uintClear.clearValue = rendering::TextureClearValue::Uint(0xa5a5a5a5u);
+
+        rendering::FrameTextureDesc colorDesc = MakeTextureDesc();
+        colorDesc.active.mipCount = 1;
+        colorDesc.maximumMipCount = 1;
+        colorDesc.active.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        colorDesc.initialization = rendering::FrameResourceInitialization::Clear;
+        colorDesc.clearValue = rendering::TextureClearValue::Color({0.1f, 0.2f, 0.3f, 1.0f});
+        rendering::TextureUseDesc colorWrite;
+        colorWrite.requiredState = rhi::ResourceState::RenderTarget;
+        colorWrite.subresources = {0, 1, 0, 1};
+        colorWrite.access = rendering::LogicalAccessIntent::Write;
+        colorWrite.content = rendering::ResourceContentIntent::Discard;
+
+        rendering::FrameTextureDesc depthDesc = MakeTextureDesc();
+        depthDesc.active.format = rhi::Format::D32FloatS8UInt;
+        depthDesc.active.mipCount = 1;
+        depthDesc.maximumMipCount = 1;
+        depthDesc.active.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        rendering::TextureUseDesc depthClear;
+        depthClear.requiredState = rhi::ResourceState::DepthWrite;
+        depthClear.subresources = {0, 1, 0, 1};
+        depthClear.access = rendering::LogicalAccessIntent::Write;
+        depthClear.content = rendering::ResourceContentIntent::Clear;
+        depthClear.clearValue = rendering::TextureClearValue::DepthStencil(0.0f, 7);
+
+        const bool planned = allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(35, {}, &failure) &&
+                             allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) &&
+                             writer.DeclareBuffer({{9}, "typed.clear.buffer"}, bufferDesc, buffer, &failure) &&
+                             writer.BeginBufferUse(buffer, WriteUse(), uses[0], &failure) && writer.EndUse(uses[0], &failure) &&
+                             writer.BeginBufferUse(buffer, ReadUse(), uses[1], &failure) && writer.EndUse(uses[1], &failure) &&
+                             writer.DeclareTexture({{9}, "typed.clear.float"}, MakeTextureDesc(), floatTexture, &failure) &&
+                             writer.BeginTextureUse(floatTexture, floatClear, uses[2], &failure) && writer.EndUse(uses[2], &failure) &&
+                             writer.BeginTextureUse(floatTexture, TextureReadUse(0), uses[3], &failure) && writer.EndUse(uses[3], &failure) &&
+                             writer.DeclareTexture({{9}, "typed.clear.uint"}, uintDesc, uintTexture, &failure) &&
+                             writer.BeginTextureUse(uintTexture, uintClear, uses[4], &failure) && writer.EndUse(uses[4], &failure) &&
+                             writer.DeclareTexture({{9}, "typed.clear.target"}, colorDesc, colorTarget, &failure) &&
+                             writer.BeginTextureUse(colorTarget, colorWrite, uses[5], &failure) && writer.EndUse(uses[5], &failure) &&
+                             writer.DeclareTexture({{9}, "typed.clear.depth"}, depthDesc, depthTarget, &failure) &&
+                             writer.BeginTextureUse(depthTarget, depthClear, uses[6], &failure) && writer.EndUse(uses[6], &failure) &&
+                             writer.Close(&failure) && allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
+        check(planned, "typed clear test seals declaration-time and per-use clear intents");
+        if (planned)
+        {
+            const bool resolved = allocator.Resolve(nullptr, &failure);
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            check(resolved && generation.IsValid() && allocator.GetStats().compiledResourceActions == 12,
+                  "typed clears compile after their transitions and participate in the bounded action ledger");
+            if (resolved)
+            {
+                bool executed = allocator.BeginExecution(&failure);
+                rendering::CompiledExecutionPacketView packet;
+                rendering::ExecutionPacketCursor cursor;
+                executed = executed && allocator.PacketFor(node, packet, &failure) && packet.GetStepCount() == 14 &&
+                           packet.OpenCursor(scope, rhi::QueueType::Graphics, cursor, &failure);
+                for (u32 index = 0; index < 7 && executed; ++index)
+                {
+                    if (index < 2)
+                    {
+                        rendering::ResolvedBufferUse resolvedUse;
+                        executed = cursor.BeginBufferUse(uses[index], resolvedUse, &failure) && cursor.EndUse(uses[index], &failure) && !resolvedUse.IsValid();
+                    }
+                    else
+                    {
+                        rendering::ResolvedTextureUse resolvedUse;
+                        executed = cursor.BeginTextureUse(uses[index], resolvedUse, &failure) && cursor.EndUse(uses[index], &failure) && !resolvedUse.IsValid();
+                    }
+                }
+                executed = executed && cursor.FinalizePacket(&failure);
+                check(executed, "typed clear packet exhausts in exact compiled use order");
+                const rendering::CommandScopeExecutionReceipt receipts[] = {
+                    {scope, rendering::CommandScopeCompletionKind::Submitted, rhi::QueueType::Graphics, {rhi::QueueType::Graphics, 1}}};
+                const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                                   containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                                   rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+                check(executed && allocator.Finish(terminal, &failure), "typed clear generation reaches terminal completion");
+            }
+        }
+        check(allocator.Shutdown(&failure), "typed clear execution is cleanup-safe");
+    }
+
+    void TestCrossQueueWaitProofRequired(CheckFunction check) noexcept
+    {
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        rendering::ResourcePlanningWriter graphicsWriter;
+        rendering::ResourcePlanningWriter computeWriter;
+        constexpr rendering::RenderFlowNodeId graphicsNode{90};
+        constexpr rendering::RenderFlowNodeId computeNode{91};
+        constexpr rendering::GpuFlowGroupId graphicsFlow{90};
+        constexpr rendering::GpuFlowGroupId computeFlow{91};
+        constexpr rendering::CommandScopeId graphicsScope{90};
+        constexpr rendering::CommandScopeId computeScope{91};
+        constexpr rendering::LogicalResourceKey key{{9}, "cross.queue.requires.wait"};
+        rendering::LogicalResourceId graphicsResource;
+        rendering::LogicalResourceId computeResource;
+        rendering::ResourceUseId write;
+        rendering::ResourceUseId read;
+        rendering::BufferUseDesc computeRead = ReadUse();
+        computeRead.requiredState = rhi::ResourceState::ShaderResourceCompute;
+        const bool planned = allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(30, {}, &failure) &&
+                             allocator.RequestBeginQueue(rhi::QueueType::Compute, computeFlow, &failure) && allocator.RequestEndQueue(computeFlow, &failure) &&
+                             allocator.CreatePlanningWriter(graphicsNode, graphicsFlow, graphicsScope, graphicsWriter, &failure) &&
+                             allocator.CreatePlanningWriter(computeNode, computeFlow, computeScope, computeWriter, &failure) &&
+                             graphicsWriter.DeclareBuffer(key, MakeBufferDesc(), graphicsResource, &failure) &&
+                             graphicsWriter.BeginBufferUse(graphicsResource, WriteUse(), write, &failure) && graphicsWriter.EndUse(write, &failure) &&
+                             computeWriter.ReferenceResource(key, computeResource, &failure) && computeWriter.BeginBufferUse(computeResource, computeRead, read, &failure) &&
+                             computeWriter.EndUse(read, &failure) && graphicsWriter.Close(&failure) && computeWriter.Close(&failure) &&
+                             allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
+        check(planned, "cross-queue wait-proof test seals its candidate plan");
+        if (planned)
+        {
+            check(!allocator.Resolve(nullptr, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch &&
+                      !allocator.GetExecutionGeneration().IsValid(),
+                  "cross-queue use is rejected while the compiled schedule has no real wait dependency");
+        }
+        check(allocator.Shutdown(&failure), "cross-queue wait-proof rejection is cleanup-safe");
+    }
+
+    void TestCrossQueueForkJoinSchedule(CheckFunction check) noexcept
+    {
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        rendering::ResourcePlanningWriter graphicsProducer;
+        rendering::ResourcePlanningWriter computeConsumer;
+        rendering::ResourcePlanningWriter graphicsJoin;
+        constexpr rendering::RenderFlowNodeId nodes[] = {{100}, {101}, {102}};
+        constexpr rendering::GpuFlowGroupId flows[] = {{100}, {102}, {104}};
+        constexpr rendering::GpuFlowGroupId forkFlow{101};
+        constexpr rendering::GpuFlowGroupId joinFlow{103};
+        constexpr rendering::CommandScopeId scopes[] = {{100}, {101}, {102}};
+        constexpr rendering::LogicalResourceKey key{{10}, "cross.queue.fork.join"};
+        rendering::LogicalResourceId resources[3];
+        rendering::ResourceUseId uses[3];
+        rendering::LogicalResourceId scratchResources[3];
+        rendering::ResourceUseId scratchUses[3];
+        rendering::BufferUseDesc computeRead = ReadUse();
+        computeRead.requiredState = rhi::ResourceState::ShaderResourceCompute;
+
+        const bool planned = allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(32, {}, &failure) &&
+                             allocator.RequestQueueSync(forkFlow, rhi::CommandListSyncType::ForkAsyncCompute, &failure) &&
+                             allocator.RequestBeginQueue(rhi::QueueType::Compute, flows[1], &failure) && allocator.RequestEndQueue(flows[1], &failure) &&
+                             allocator.RequestQueueSync(joinFlow, rhi::CommandListSyncType::JoinAsyncCompute, &failure) &&
+                             allocator.CreatePlanningWriter(nodes[0], flows[0], scopes[0], graphicsProducer, &failure) &&
+                             allocator.CreatePlanningWriter(nodes[1], flows[1], scopes[1], computeConsumer, &failure) &&
+                             allocator.CreatePlanningWriter(nodes[2], flows[2], scopes[2], graphicsJoin, &failure) &&
+                             graphicsProducer.DeclareBuffer(key, MakeBufferDesc(), resources[0], &failure) &&
+                             graphicsProducer.BeginBufferUse(resources[0], WriteUse(), uses[0], &failure) && graphicsProducer.EndUse(uses[0], &failure) &&
+                             graphicsProducer.DeclareTemporaryBuffer("fork scratch", MakeBufferDesc(8192), scratchResources[0], &failure) &&
+                             graphicsProducer.BeginBufferUse(scratchResources[0], WriteUse(), scratchUses[0], &failure) && graphicsProducer.EndUse(scratchUses[0], &failure) &&
+                             computeConsumer.ReferenceResource(key, resources[1], &failure) &&
+                             computeConsumer.BeginBufferUse(resources[1], computeRead, uses[1], &failure) && computeConsumer.EndUse(uses[1], &failure) &&
+                             computeConsumer.DeclareTemporaryBuffer("compute scratch", MakeBufferDesc(8192), scratchResources[1], &failure) &&
+                             computeConsumer.BeginBufferUse(scratchResources[1], WriteUse(), scratchUses[1], &failure) && computeConsumer.EndUse(scratchUses[1], &failure) &&
+                             graphicsJoin.ReferenceResource(key, resources[2], &failure) &&
+                             graphicsJoin.BeginBufferUse(resources[2], ReadUse(), uses[2], &failure) && graphicsJoin.EndUse(uses[2], &failure) &&
+                             graphicsJoin.DeclareTemporaryBuffer("join scratch", MakeBufferDesc(8192), scratchResources[2], &failure) &&
+                             graphicsJoin.BeginBufferUse(scratchResources[2], WriteUse(), scratchUses[2], &failure) && graphicsJoin.EndUse(scratchUses[2], &failure) &&
+                             graphicsProducer.Close(&failure) && computeConsumer.Close(&failure) && graphicsJoin.Close(&failure) &&
+                             allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
+        check(planned, "cross-queue fork/join test seals its candidate plan");
+        if (planned)
+        {
+            const bool resolved = allocator.Resolve(nullptr, &failure);
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            check(resolved && generation.IsValid(), "balanced Graphics/Compute requests publish an execution generation");
+            if (resolved)
+            {
+                check(allocator.BeginExecution(&failure), "cross-queue fork/join generation enters execution");
+                bool executed = true;
+                rendering::PhysicalResourceId scratchPhysical;
+                for (u32 index = 0; index < 3; ++index)
+                {
+                    rendering::CompiledExecutionPacketView packet;
+                    rendering::ExecutionPacketCursor cursor;
+                    rendering::ResolvedBufferUse resolvedUse;
+                    rendering::ResolvedBufferUse resolvedScratch;
+                    const rhi::QueueType queue = index == 1 ? rhi::QueueType::Compute : rhi::QueueType::Graphics;
+                    executed = executed && allocator.PacketFor(nodes[index], packet, &failure) && packet.OpenCursor(scopes[index], queue, cursor, &failure) &&
+                               cursor.BeginBufferUse(uses[index], resolvedUse, &failure) && cursor.EndUse(uses[index], &failure) && !resolvedUse.IsValid() &&
+                               cursor.BeginBufferUse(scratchUses[index], resolvedScratch, &failure);
+                    if (executed)
+                    {
+                        const rendering::PhysicalResourceId current = resolvedScratch.GetPhysicalResource();
+                        executed = current.IsValid() && (index == 0 || current == scratchPhysical);
+                        scratchPhysical = index == 0 ? current : scratchPhysical;
+                    }
+                    executed = executed && cursor.EndUse(scratchUses[index], &failure) && !resolvedScratch.IsValid() &&
+                               cursor.FinalizePacket(&failure);
+                }
+                check(executed, "cross-queue fork/join packets exhaust in their compiled queue scopes");
+                check(executed && scratchPhysical.IsValid(),
+                      "distinct dedicated-resource lifetimes reuse one object across exact Graphics/Compute fork and join dependencies");
+                const rendering::CommandScopeExecutionReceipt receipts[] = {
+                    {scopes[0], rendering::CommandScopeCompletionKind::Submitted, rhi::QueueType::Graphics, {rhi::QueueType::Graphics, 1}},
+                    {scopes[1], rendering::CommandScopeCompletionKind::Submitted, rhi::QueueType::Compute, {rhi::QueueType::Compute, 1}},
+                    {scopes[2], rendering::CommandScopeCompletionKind::Submitted, rhi::QueueType::Graphics, {rhi::QueueType::Graphics, 2}}};
+                const rendering::QueueDependencyExecutionReceipt dependencyReceipts[] = {
+                    {scopes[0], scopes[1], rhi::CommandListSyncType::ForkAsyncCompute, rendering::QueueDependencyCompletionKind::Submitted},
+                    {scopes[1], scopes[2], rhi::CommandListSyncType::JoinAsyncCompute, rendering::QueueDependencyCompletionKind::Submitted}};
+                const rendering::TerminalExecutionReceipt missingDependencies{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                                               containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                                               rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+                check(executed && !allocator.Finish(missingDependencies, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompleteExecution,
+                      "terminal completion rejects omitted fork/join execution evidence without mutating the generation");
+                const rendering::CommandScopeExecutionReceipt abortedScopes[] = {
+                    {scopes[0], rendering::CommandScopeCompletionKind::Submitted, rhi::QueueType::Graphics, {rhi::QueueType::Graphics, 1}},
+                    {scopes[1], rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Compute, {}},
+                    {scopes[2], rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Graphics, {}}};
+                const rendering::QueueDependencyExecutionReceipt contradictoryAbortDependencies[] = {
+                    {scopes[0], scopes[1], rhi::CommandListSyncType::ForkAsyncCompute, rendering::QueueDependencyCompletionKind::DiscardedBeforeSubmission},
+                    {scopes[1], scopes[2], rhi::CommandListSyncType::JoinAsyncCompute, rendering::QueueDependencyCompletionKind::DiscardedBeforeSubmission}};
+                const rendering::TerminalExecutionReceipt contradictoryAbort{
+                    generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                    containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(abortedScopes),
+                    rendering::TerminalJoinToken::CompletedSynchronously(generation),
+                    containers::ArraySpan<const rendering::QueueDependencyExecutionReceipt>(contradictoryAbortDependencies)};
+                check(executed && !allocator.Finish(contradictoryAbort, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::IncompleteExecution,
+                      "terminal abort rejects a discarded dependency whose lowering scope was submitted");
+                const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                                     containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                                     rendering::TerminalJoinToken::CompletedSynchronously(generation),
+                                                                     containers::ArraySpan<const rendering::QueueDependencyExecutionReceipt>(dependencyReceipts)};
+                check(executed && allocator.Finish(terminal, &failure), "cross-queue fork/join generation reaches one terminal join");
+            }
+        }
+        check(allocator.Shutdown(&failure), "cross-queue fork/join execution is cleanup-safe");
+    }
+
+    void TestCompiledActionCapacity(CheckFunction check) noexcept
+    {
+        rendering::RenderFlowResourceAllocatorConfig config = MakeLogicalOnlyConfig();
+        config.maximumCompiledResourceActions = 1;
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        rendering::ResourcePlanningWriter writer;
+        rendering::LogicalResourceId texture;
+        rendering::ResourceUseId use;
+        rendering::TextureUseDesc write = TextureWriteUse(0);
+        write.subresources = {0, 2, 0, 1};
+        const bool planned = allocator.Initialize(config, &failure) && allocator.BeginFrame(31, {}, &failure) &&
+                             allocator.CreatePlanningWriter({92}, {92}, {92}, writer, &failure) &&
+                             writer.DeclareTexture({{9}, "action.capacity"}, MakeTextureDesc(), texture, &failure) &&
+                             writer.BeginTextureUse(texture, write, use, &failure) && writer.EndUse(use, &failure) && writer.Close(&failure) &&
+                             allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure);
+        check(planned, "compiled-action capacity test seals its candidate plan");
+        if (planned)
+        {
+            check(!allocator.Resolve(nullptr, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::CapacityExceeded &&
+                      !allocator.GetExecutionGeneration().IsValid(),
+                  "compiled physical-action growth is bounded and fails before publication");
+        }
+        check(allocator.Shutdown(&failure), "compiled-action capacity failure is cleanup-safe");
     }
 
     void TestPrePublicationAbort(CheckFunction check) noexcept
     {
         rendering::RenderFlowResourceAllocator allocator;
         rendering::RenderFlowResourceFailure failure;
-        rendering::FrameResourceSession session;
-        check(allocator.Initialize({}, &failure) && allocator.BeginFrame(16, {}, session, &failure), "pre-publication abort test starts a session");
+        check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(16, {}, &failure), "pre-publication abort test starts allocator planning");
         rendering::ResourcePlanningWriter writer;
-        check(session.CreatePlanningWriter({40}, {40}, {40}, writer, &failure), "pre-publication abort test creates a writer");
+        check(allocator.CreatePlanningWriter({40}, {40}, {40}, writer, &failure), "pre-publication abort test creates a writer");
         writer.Abandon();
-        session.CancelBeforePublication();
+        allocator.CancelBeforePublication();
         const rendering::RenderFlowResourceAllocatorStats once = allocator.GetStats();
-        session.CancelBeforePublication();
+        allocator.CancelBeforePublication();
         const rendering::RenderFlowResourceAllocatorStats twice = allocator.GetStats();
         check(once.state == rendering::RenderFlowResourceSessionState::Idle && once.abortedFrames == 1 && twice.abortedFrames == once.abortedFrames,
               "pre-publication abort returns to Idle exactly once");
         check(allocator.Shutdown(&failure), "pre-publication abort leaves allocator shutdown-safe");
+    }
+
+    void TestTerminalLifecycleRecovery(CheckFunction check) noexcept
+    {
+        const auto publish = [](rendering::RenderFlowResourceAllocator& allocator, rendering::RenderFlowResourceFailure& failure, const vanguard::u64 serial) noexcept
+        {
+            rendering::ResourcePlanningWriter writer;
+            rendering::LogicalResourceId resource;
+            rendering::ResourceUseId use;
+            constexpr rendering::RenderFlowNodeId node{140};
+            constexpr rendering::GpuFlowGroupId flow{140};
+            constexpr rendering::CommandScopeId scope{140};
+            return allocator.BeginFrame(serial, {}, &failure) && allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) &&
+                   writer.DeclareBuffer({{14}, "lifecycle.recovery"}, MakeBufferDesc(), resource, &failure) &&
+                   writer.BeginBufferUse(resource, WriteUse(), use, &failure) && writer.EndUse(use, &failure) && writer.Close(&failure) &&
+                   allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) && allocator.Resolve(nullptr, &failure);
+        };
+
+        {
+            rendering::RenderFlowResourceAllocator allocator;
+            rendering::RenderFlowResourceFailure failure;
+            check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && publish(allocator, failure, 140), "terminal lifecycle test publishes a generation");
+            check(!allocator.Shutdown(&failure) && failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase &&
+                      allocator.GetState() == rendering::RenderFlowResourceSessionState::Ready,
+                  "explicit shutdown refuses to discard a published execution generation");
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            constexpr rendering::CommandScopeId scope{140};
+            const rendering::CommandScopeExecutionReceipt receipts[] = {
+                {scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, rhi::QueueType::Graphics, {}}};
+            const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                                                               containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                               rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+            check(allocator.Finish(terminal, &failure) && allocator.Shutdown(&failure), "published execution joins before explicit allocator shutdown");
+        }
+
+        {
+            rendering::CompiledExecutionPacketView packet;
+            rendering::RenderFlowResourceFailure failure;
+            {
+                rendering::RenderFlowResourceAllocator allocator;
+                check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && publish(allocator, failure, 141) && allocator.BeginExecution(&failure) &&
+                          allocator.PacketFor({140}, packet, &failure),
+                      "allocator-destruction test retains a published packet view");
+            }
+            rendering::ExecutionPacketCursor cursor;
+            check(packet.IsValid() && !packet.OpenCursor({140}, rhi::QueueType::Graphics, cursor, &failure) &&
+                      failure.code == rendering::RenderFlowResourceFailureCode::InvalidPhase,
+                  "allocator destruction makes a retained execution generation terminal before releasing its last reference");
+        }
+
+        {
+            rendering::ResourcePlanningWriter writer;
+            rendering::RenderFlowResourceFailure failure;
+            {
+                rendering::RenderFlowResourceAllocator allocator;
+                check(allocator.Initialize(MakeLogicalOnlyConfig(), &failure) && allocator.BeginFrame(142, {}, &failure) &&
+                          allocator.CreatePlanningWriter({142}, {142}, {142}, writer, &failure),
+                      "writer-first lifetime test creates an outstanding writer");
+            }
+            check(!writer.IsValid(), "outstanding writer observes allocator abandonment without dereferencing freed control state");
+            writer.Abandon();
+        }
+    }
+
+    void TestPhysicalProviderRequirement(CheckFunction check) noexcept
+    {
+        if (rhi::IsInitialized())
+            return;
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        check(allocator.Initialize({}, &failure), "native-provider requirement test initializes allocator metadata without an RHI");
+        check(!allocator.BeginFrame(28, {}, &failure) && failure.code == rendering::RenderFlowResourceFailureCode::NotInitialized &&
+                  allocator.GetState() == rendering::RenderFlowResourceSessionState::Idle && !allocator.GetExecutionGeneration().IsValid(),
+              "production allocator mode rejects a frame when physical assignment has no initialized RHI");
+        check(allocator.Shutdown(&failure), "native-provider requirement failure leaves allocator shutdown-safe");
+    }
+
+    void TestPlacedRangePlanner(CheckFunction check) noexcept
+    {
+        const auto request = [](const u32 allocation, const rendering::FrameResourceKind kind, const rhi::QueueType queue,
+                                const u32 first, const u32 last, const vanguard::u64 size, const vanguard::u64 alignment,
+                                const vanguard::u64 compatibilityClass = 1u) noexcept
+        {
+            rendering::detail::PlacedRangeRequest value;
+            value.allocation = allocation;
+            value.kind = kind;
+            value.queue = queue;
+            value.firstAcquire = {{first + 1u}, first};
+            value.lastRelease = {{last + 1u}, last};
+            value.requirements.size = size;
+            value.requirements.alignment = alignment;
+            value.requirements.compatibilityClass = compatibilityClass;
+            value.requirements.memoryType = rhi::MemoryType::DeviceLocal;
+            value.requirements.heapCategory = kind == rendering::FrameResourceKind::Texture
+                                                    ? rhi::PlacedHeapCategory::Texture
+                                                    : rhi::PlacedHeapCategory::Buffer;
+            return value;
+        };
+
+        rendering::RenderFlowResourceFailure failure;
+        rendering::detail::PlacedRangePlan plan;
+        rendering::detail::PlacedRangePlannerConfig config;
+        config.minimumHeapBytes = 128;
+        config.heapAlignment = 64;
+        const auto find = [&plan](const u32 allocation) noexcept -> const rendering::detail::PlacedRangeAssignment* {
+            for (const rendering::detail::PlacedRangeAssignment& assignment : plan.assignments)
+                if (assignment.allocation == allocation)
+                    return &assignment;
+            return nullptr;
+        };
+
+        {
+            const rendering::detail::PlacedRangeRequest requests[] = {
+                request(0, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 128, 64),
+                request(1, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 2, 3, 128, 64)};
+            const bool built = rendering::detail::BuildPlacedRangePlan(requests, config, plan, &failure);
+            const rendering::detail::PlacedRangeAssignment* first = find(0);
+            const rendering::detail::PlacedRangeAssignment* second = find(1);
+            check(built && plan.heaps.Size() == 1 && first != nullptr && second != nullptr && first->offset == 0 && second->offset == 0 &&
+                      second->predecessorCount == 1 && plan.predecessors[second->predecessorOffset].allocation == 0 &&
+                      plan.predecessors[second->predecessorOffset].offset == 0 && plan.predecessors[second->predecessorOffset].size == 128,
+                  "placed planner reuses an exact-fit range with exact predecessor provenance");
+        }
+
+        {
+            const rendering::detail::PlacedRangeRequest requests[] = {
+                request(10, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 2, 32, 32),
+                request(11, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 2, 96, 64)};
+            const bool built = rendering::detail::BuildPlacedRangePlan(requests, config, plan, &failure);
+            const rendering::detail::PlacedRangeAssignment* small = find(10);
+            const rendering::detail::PlacedRangeAssignment* large = find(11);
+            check(built && plan.heaps.Size() == 1 && small != nullptr && large != nullptr && large->offset == 0 && small->offset == 96,
+                  "same-event placed acquisitions use descending bytes and alignment before stable allocation id");
+        }
+
+        {
+            const rendering::detail::PlacedRangeRequest requests[] = {
+                request(20, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 64, 64),
+                request(21, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 64, 64),
+                request(22, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 2, 3, 128, 64)};
+            const bool built = rendering::detail::BuildPlacedRangePlan(requests, config, plan, &failure);
+            const rendering::detail::PlacedRangeAssignment* combined = find(22);
+            const bool predecessors = combined != nullptr && combined->predecessorCount == 2 &&
+                                      plan.predecessors[combined->predecessorOffset].allocation == 20 &&
+                                      plan.predecessors[combined->predecessorOffset].offset == 0 &&
+                                      plan.predecessors[combined->predecessorOffset + 1u].allocation == 21 &&
+                                      plan.predecessors[combined->predecessorOffset + 1u].offset == 64;
+            check(built && plan.heaps.Size() == 1 && combined != nullptr && combined->offset == 0 && predecessors,
+                  "adjacent released ranges coalesce for first-fit without losing multi-owner provenance");
+        }
+
+        {
+            const rendering::detail::PlacedRangeRequest touching[] = {
+                request(30, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 128, 64),
+                request(31, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 1, 2, 128, 64)};
+            check(rendering::detail::BuildPlacedRangePlan(touching, config, plan, &failure) && plan.heaps.Size() == 2,
+                  "equal-position release and acquisition remain overlapping and cannot alias");
+
+            const rendering::detail::PlacedRangeRequest partiallyVirgin[] = {
+                request(32, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 64, 64),
+                request(33, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 2, 3, 128, 64)};
+            check(rendering::detail::BuildPlacedRangePlan(partiallyVirgin, config, plan, &failure) && plan.heaps.Size() == 2,
+                  "a range mixing predecessor-owned and virgin bytes is not emitted as an incomplete alias activation");
+        }
+
+        {
+            rendering::detail::PlacedRangePlannerConfig fragmentedConfig = config;
+            fragmentedConfig.minimumHeapBytes = 192;
+            const rendering::detail::PlacedRangeRequest fragmented[] = {
+                request(40, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 3, 64, 64),
+                request(41, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 64, 64),
+                request(42, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 3, 64, 64),
+                request(43, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 2, 4, 128, 64)};
+            check(rendering::detail::BuildPlacedRangePlan(fragmented, fragmentedConfig, plan, &failure) && plan.heaps.Size() == 2,
+                  "fragmentation grows a stable new heap instead of overlapping live neighbors");
+        }
+
+        {
+            const rendering::detail::PlacedRangeRequest classes[] = {
+                request(50, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 2, 64, 64),
+                request(51, rendering::FrameResourceKind::Buffer, rhi::QueueType::Compute, 0, 2, 64, 64),
+                request(52, rendering::FrameResourceKind::Texture, rhi::QueueType::Graphics, 0, 2, 64, 64)};
+            check(rendering::detail::BuildPlacedRangePlan(classes, config, plan, &failure) && plan.heaps.Size() == 3,
+                  "placed heaps remain separated by resource kind and command queue");
+
+            rendering::detail::PlacedRangeRequest copy = request(53, rendering::FrameResourceKind::Buffer, rhi::QueueType::Copy, 0, 1, 64, 64);
+            check(!rendering::detail::BuildPlacedRangePlan({&copy, 1}, config, plan, &failure) &&
+                      failure.code == rendering::RenderFlowResourceFailureCode::UnsupportedCapability && plan.heaps.Empty() && plan.assignments.Empty(),
+                  "initial placed planning rejects copy-queue ownership without publishing a partial plan");
+        }
+
+        {
+            rendering::detail::PlacedRangePlannerConfig overflow = config;
+            overflow.minimumHeapBytes = ~vanguard::u64{0} - 31u;
+            rendering::detail::PlacedRangeRequest value = request(60, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 1, 64, 64);
+            check(!rendering::detail::BuildPlacedRangePlan({&value, 1}, overflow, plan, &failure) &&
+                      failure.code == rendering::RenderFlowResourceFailureCode::ArithmeticOverflow && plan.heaps.Empty(),
+                  "placed heap growth rejects checked u64 alignment overflow transactionally");
+
+            const rendering::detail::PlacedRangeRequest lateOverflow[] = {
+                request(61, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 0, 3, 64, 64),
+                request(62, rendering::FrameResourceKind::Buffer, rhi::QueueType::Graphics, 1, 2, ~vanguard::u64{0} - 31u, 64)};
+            check(!rendering::detail::BuildPlacedRangePlan(lateOverflow, config, plan, &failure) &&
+                      failure.code == rendering::RenderFlowResourceFailureCode::ArithmeticOverflow && plan.heaps.Empty() &&
+                      plan.assignments.Empty() && plan.predecessors.Empty(),
+                  "a late placed-planning failure discards every earlier scratch assignment");
+        }
     }
 } // namespace
 
 void RunRenderFlowResourceAllocatorTests(void (*check)(bool condition, const char* message) noexcept) noexcept
 {
     TestDeterministicMergeAndExecution(check);
-    TestCulledScopeFailure(check);
+    TestDedicatedResourceLifetimePlanning(check);
+    TestMissingScopeBeginFailure(check);
     TestPoisonedWriterBlocksSeal(check);
     TestDuplicateDeclaration(check);
     TestAggregatePlanningCaps(check);
-    TestDuplicateScheduleOrder(check);
     TestRangeAndSubresourceValidation(check);
     TestStateAndActiveUseValidation(check);
+    TestTypedClearActions(check);
+    TestCrossQueueWaitProofRequired(check);
+    TestCrossQueueForkJoinSchedule(check);
+    TestCompiledActionCapacity(check);
     TestPrePublicationAbort(check);
+    TestTerminalLifecycleRecovery(check);
+    TestPhysicalProviderRequirement(check);
+    TestPlacedRangePlanner(check);
 }

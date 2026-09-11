@@ -49,6 +49,9 @@ namespace vanguard::rendering
         u32 affectedPages = 0;
         u64 uploadedBytes = 0;
         u64 supersededBytes = 0;
+        // Preserved even on failure after native execution. Such a failure may
+        // not return producer ownership to an unpublished cancellation path.
+        bool workSubmitted = false;
     };
 
     enum class GpuSceneUploadFailureCode : u8
@@ -105,16 +108,15 @@ namespace vanguard::rendering
         GpuSceneUploader(const GpuSceneUploader&) = delete;
         GpuSceneUploader& operator=(const GpuSceneUploader&) = delete;
 
-        [[nodiscard]] bool Initialize(GpuSceneTables& tables, GpuSceneLifetime& lifetime, const GpuSceneUploadConfig& config = {},
-                                      GpuSceneUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(GpuSceneTables& tables, GpuSceneLifetime& lifetime, const GpuSceneUploadConfig& config = {}, GpuSceneUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GpuSceneUploadFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Plans one batch in destination order. Exact duplicate ranges use last-request-wins semantics;
         /// the superseded request receives an invalid reservation. Other overlaps are rejected. Runtime initialization
         /// and shutdown remain main-thread operations; the batch lifecycle may run on the serialized renderer Jobs chain.
-        [[nodiscard]] bool Begin(containers::ArraySpan<const GpuSceneUploadRequest> requests, containers::ArraySpan<GpuSceneUploadReservation> reservations,
-                                 GpuSceneUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Begin(containers::ArraySpan<const GpuSceneUploadRequest> requests, containers::ArraySpan<GpuSceneUploadReservation> reservations, GpuSceneUploadFailure* failure = nullptr) noexcept;
 
         /// May be called by producer jobs after they finish writing their reservation.
         [[nodiscard]] bool Complete(GpuSceneUploadReservation reservation, GpuSceneUploadFailure* failure = nullptr) noexcept;

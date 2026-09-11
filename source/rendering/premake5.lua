@@ -12,18 +12,18 @@ project "rendering"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
-    files { "include/**.hpp", "private/**.hpp", "src/**.cpp", "shaders/**.hlsli", "shaders/**.slang", "README.md", "docs/**.md" }
+    files { "include/**.hpp", "private/**.hpp", "src/**.cpp", "shaders/**.hlsli", "shaders/**.vsl", "README.md", "docs/**.md" }
     includedirs {
         "include", "private", "../rhi/include", "../pipelineCache/include", "../pipelines/include", "../shaders/include",
         "../crypto/include", "../serialization/include", "../resources/include", "../filesystem/include", "../io/include",
         "../jobs/include", "../window/include", "../containers/include", "../concurrency/include", "../memory/include",
-        "../system/include", "../meshes/include", "../textures/include", "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include"
+        "../system/include", "../meshes/include", "../textures/include", "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../materials/include"
     }
     links { "pipelineCache", "pipelines", "shaders", "rhi", "crypto", "serialization", "resources", "filesystem", "io",
-            "jobs", "window", "containers", "concurrency", "memory", "system", "meshes", "textures", "streaming" }
+            "jobs", "window", "containers", "concurrency", "memory", "system", "meshes", "textures", "streaming", "materials" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" }, ["Private API/*"] = { "private/**.hpp" },
-        ["Source/*"] = { "src/**.cpp" }, ["Shaders/*"] = { "shaders/**.hlsli", "shaders/**.slang" },
+        ["Source/*"] = { "src/**.cpp" }, ["Shaders/*"] = { "shaders/**.hlsli", "shaders/**.vsl" },
         ["Documentation"] = { "README.md", "docs/**.md" }
     }
 
@@ -39,7 +39,7 @@ project "renderingTests"
     targetdir(output_root)
     objdir(object_root)
     files { "tests/**.cpp" }
-    removefiles { "tests/geometry_allocator_tests.cpp" }
+    removefiles { "tests/geometry_allocator_tests.cpp", "tests/material_residency_runtime_tests.cpp", "tests/material_resource_resolver_tests.cpp", "tests/mesh_draw_layout_tests.cpp" }
     includedirs {
         "include", "../rhi/include", "../resources/include", "../filesystem/include", "../io/include", "../jobs/include",
         "../window/include", "../system/include", "../memory/include", "../containers/include", "../concurrency/include", "../crypto/include",
@@ -65,17 +65,17 @@ project "geometryAllocatorTests"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
-    files { "tests/geometry_allocator_tests.cpp" }
+    files { "tests/geometry_allocator_tests.cpp", "tests/material_residency_runtime_tests.cpp", "tests/material_resource_resolver_tests.cpp", "tests/mesh_draw_layout_tests.cpp" }
     includedirs {
-        "include", "../rhi/include", "../rhi/nvrhi/include", "../rhi/nvrhi/private", "../jobs/include",
+        "include", "private", "../rhi/include", "../rhi/nvrhi/include", "../rhi/nvrhi/private", "../pipelineCache/include", "../jobs/include",
         "../memory/include", "../containers/include", "../concurrency/include", "../diagnostics/include", "../system/include", "../window/include",
         "../crypto/include", "../meshes/include", "../textures/include", "../serialization/include", "../resources/include", "../filesystem/include", "../io/include", "../streaming/include",
-        "../packages/include", "../schemas/include", "../reflection/include",
+        "../packages/include", "../schemas/include", "../reflection/include", "../shaders/include", "../pipelines/include", "../materials/include",
         path.join(directx_headers_root, "include"), path.join(nvrhi_root, "include"), path.join(nvrhi_root, "src")
     }
     links {
         "rendering", "meshes", "textures", "streaming", "packages", "schemas", "reflection", "rhiNvrhi", "rhi", "nvrhiD3D12", "nvrhiCore", "directXGuids", "crypto", "serialization", "resources", "filesystem", "jobs", "diagnostics",
         "concurrency", "containers", "containersCompat", "memory", "redSystemCompat", "system", "d3d12", "dxgi",
-        "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Version"
+        "Advapi32", "D3DCompiler", "Dbghelp", "Psapi", "Shlwapi", "Version"
     }
-    vpaths { ["Tests/*"] = { "tests/geometry_allocator_tests.cpp" } }
+    vpaths { ["Tests/*"] = { "tests/geometry_allocator_tests.cpp", "tests/material_residency_runtime_tests.cpp", "tests/material_resource_resolver_tests.cpp" } }

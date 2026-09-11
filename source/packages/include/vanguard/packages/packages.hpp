@@ -139,6 +139,8 @@ namespace vanguard::packages
         ResourceTypeId startupWorldType = resources::InvalidResourceTypeId;
         ResourceId defaultInput = InvalidResourceId;
         ResourceTypeId defaultInputType = resources::InvalidResourceTypeId;
+        ResourceId rendererBootstrap = InvalidResourceId;
+        ResourceTypeId rendererBootstrapType = resources::InvalidResourceTypeId;
         containers::ArraySpan<const PackageSetEntry> packages;
     };
 
@@ -158,6 +160,7 @@ namespace vanguard::packages
     {
     public:
         static constexpr u16 HeaderWireSize = 96;
+        static constexpr u16 BootstrapReferenceWireSize = 16;
 
         PackageSet() noexcept;
 
@@ -172,10 +175,12 @@ namespace vanguard::packages
         u64 buildId = 0;
         ResourceId startupWorld = InvalidResourceId;
         ResourceId defaultInput = InvalidResourceId;
-        serialization::Version version{1, 1};
+        serialization::Version version{1, 2};
         u32 targetPlatformId = 0;
         ResourceTypeId startupWorldType = resources::InvalidResourceTypeId;
         ResourceTypeId defaultInputType = resources::InvalidResourceTypeId;
+        ResourceId rendererBootstrap = InvalidResourceId;
+        ResourceTypeId rendererBootstrapType = resources::InvalidResourceTypeId;
 
     private:
         u32 m_alignmentPadding[3]{};

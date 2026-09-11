@@ -75,13 +75,34 @@ namespace vanguard::rendering
         }
     } // namespace
 
+    void PresentationOutput::Reset() noexcept
+    {
+        m_handle = {};
+        m_state = PresentationOutputState::Vacant;
+        m_window = {};
+        m_attachment = {};
+        m_renderViewport = nullptr;
+        m_swapChainPolicy = {};
+        m_activeFormat = rhi::Format::Unknown;
+        m_activeColorSpace = rhi::ColorSpace::Srgb;
+        m_displayColor = {};
+        m_sdrWhiteLevel = 1.0f;
+        m_hdrHeadroom = 1.0f;
+        m_reconciliations = 0;
+        m_swapChainCreations = 0;
+        m_resizeApplications = 0;
+        m_surfaceReplacements = 0;
+        m_colorFallbacks = 0;
+        m_failures = 0;
+        m_active = false;
+    }
+
     struct PresentationService::Impl
     {
         struct Record
         {
-            PresentationOutputSnapshot snapshot;
+            PresentationOutput output;
             u32 generation = 1;
-            bool occupied = false;
         };
 
         window::WindowManager* windows = nullptr;
@@ -94,7 +115,7 @@ namespace vanguard::rendering
             if (!handle.IsValid())
                 return nullptr;
             Record& record = records[handle.index];
-            return record.occupied && record.generation == handle.generation ? &record : nullptr;
+            return record.output.IsValid() && record.generation == handle.generation ? &record : nullptr;
         }
 
         [[nodiscard]] const Record* Find(const PresentationOutputHandle handle) const noexcept
@@ -102,7 +123,7 @@ namespace vanguard::rendering
             if (!handle.IsValid())
                 return nullptr;
             const Record& record = records[handle.index];
-            return record.occupied && record.generation == handle.generation ? &record : nullptr;
+            return record.output.IsValid() && record.generation == handle.generation ? &record : nullptr;
         }
 
         void Reject() noexcept
@@ -116,19 +137,13 @@ namespace vanguard::rendering
             stats.suspendedOutputs = 0;
             for (const Record& record : records)
             {
-                if (!record.occupied)
+                if (!record.output.IsValid())
                     continue;
-                if (record.snapshot.state == PresentationOutputState::Ready)
+                if (record.output.GetState() == PresentationOutputState::Ready)
                     ++stats.readyOutputs;
-                if (record.snapshot.state == PresentationOutputState::Suspended)
+                if (record.output.GetState() == PresentationOutputState::Suspended)
                     ++stats.suspendedOutputs;
             }
-        }
-
-        void RecordFailure(Record& record) noexcept
-        {
-            ++record.snapshot.failures;
-            ++stats.failures;
         }
     };
 
@@ -201,7 +216,7 @@ namespace vanguard::rendering
         }
         Impl::Record* record = nullptr;
         for (Impl::Record& candidate : m_impl->records)
-            if (!candidate.occupied)
+            if (!candidate.output.IsValid())
             {
                 record = &candidate;
                 break;
@@ -232,15 +247,22 @@ namespace vanguard::rendering
         }
 
         const u32 index = static_cast<u32>(record - m_impl->records);
-        record->occupied = true;
-        record->snapshot = {};
-        record->snapshot.handle = {index, record->generation};
-        record->snapshot.state = PresentationOutputState::AwaitingSurface;
-        record->snapshot.window = desc.window;
-        record->snapshot.attachment = attachment;
-        record->snapshot.renderViewport = renderViewport;
-        record->snapshot.swapChain = desc.swapChain;
-        output = record->snapshot.handle;
+        PresentationOutput& created = record->output;
+        created.m_handle = {index, record->generation};
+        created.m_state = PresentationOutputState::AwaitingSurface;
+        created.m_window = desc.window;
+        created.m_attachment = attachment;
+        created.m_renderViewport = m_impl->viewports->Resolve(renderViewport);
+        created.m_swapChainPolicy = desc.swapChain;
+        created.m_active = created.m_renderViewport != nullptr;
+        if (!created.m_active)
+        {
+            static_cast<void>(m_impl->viewports->DestroyRenderViewport(renderViewport, &viewportFailure));
+            static_cast<void>(m_impl->windows->DetachPresentation(attachment, &windowFailure));
+            created.Reset();
+            return Fail(failure, PresentationFailureCode::ViewportFailure, "presentation render viewport resolution failed");
+        }
+        output = created.m_handle;
         ++m_impl->stats.activeOutputs;
         m_impl->RefreshStateCounts();
         return true;
@@ -259,36 +281,36 @@ namespace vanguard::rendering
             m_impl->Reject();
             return Fail(failure, PresentationFailureCode::InvalidHandle, "presentation output handle is stale or invalid", output);
         }
-        RenderViewportSnapshot viewportSnapshot;
-        if (!m_impl->viewports->GetSnapshot(record->snapshot.renderViewport, viewportSnapshot))
+        RenderViewport* const viewport = record->output.m_renderViewport;
+        if (viewport == nullptr || !viewport->IsValid())
         {
-            m_impl->RecordFailure(*record);
+            ++record->output.m_failures;
+            ++m_impl->stats.failures;
             return Fail(failure, PresentationFailureCode::ViewportFailure, "presentation render viewport is unavailable", output);
         }
-        if (viewportSnapshot.engineViewportReferences != 0)
+        if (viewport->GetEngineViewportReferenceCount() != 0)
         {
             m_impl->Reject();
             return Fail(failure, PresentationFailureCode::Busy, "engine viewports must be destroyed before their presentation output", output);
         }
-        if (viewportSnapshot.swapChain.IsValid())
+        if (viewport->GetSwapChain().IsValid())
         {
             ViewportFailure viewportFailure;
-            if (!m_impl->viewports->UnbindSwapChain(record->snapshot.renderViewport, &viewportFailure))
+            if (!viewport->UnbindSwapChain(&viewportFailure))
                 return Fail(failure,
                             viewportFailure.code == ViewportFailureCode::Busy ? PresentationFailureCode::Busy : PresentationFailureCode::ViewportFailure,
                             "presentation swap chain could not be unbound", output, nullptr, &viewportFailure);
         }
         ViewportFailure viewportFailure;
-        if (!m_impl->viewports->DestroyRenderViewport(record->snapshot.renderViewport, &viewportFailure))
+        if (!m_impl->viewports->DestroyRenderViewport(viewport->GetHandle(), &viewportFailure))
             return Fail(failure, PresentationFailureCode::ViewportFailure, "presentation render viewport destruction failed", output, nullptr,
                         &viewportFailure);
         window::Failure windowFailure;
-        if (!m_impl->windows->DetachPresentation(record->snapshot.attachment, &windowFailure))
+        if (!m_impl->windows->DetachPresentation(record->output.m_attachment, &windowFailure))
             return Fail(failure, PresentationFailureCode::WindowFailure, "window presentation detachment failed after viewport destruction", output,
                         &windowFailure);
 
-        record->occupied = false;
-        record->snapshot = {};
+        record->output.Reset();
         ++record->generation;
         if (record->generation == 0)
             record->generation = 1;
@@ -309,212 +331,223 @@ namespace vanguard::rendering
         bool success = true;
         for (Impl::Record& record : m_impl->records)
         {
-            if (!record.occupied)
+            if (!record.output.IsValid())
                 continue;
-            ++record.snapshot.reconciliations;
+            PresentationOutput& output = record.output;
+            ++output.m_reconciliations;
             ++m_impl->stats.reconciliations;
 
             window::PresentationAttachmentSnapshot attachment;
-            if (!m_impl->windows->GetSnapshot(record.snapshot.attachment, attachment))
+            if (!m_impl->windows->GetSnapshot(output.m_attachment, attachment))
             {
-                record.snapshot.state = PresentationOutputState::Failed;
-                m_impl->RecordFailure(record);
+                output.m_state = PresentationOutputState::Failed;
+                ++output.m_failures;
+                ++m_impl->stats.failures;
                 if (success)
-                    Fail(failure, PresentationFailureCode::WindowFailure, "presentation attachment disappeared during reconciliation", record.snapshot.handle);
+                    Fail(failure, PresentationFailureCode::WindowFailure, "presentation attachment disappeared during reconciliation", output.m_handle);
                 success = false;
                 continue;
             }
-            record.snapshot.sdrWhiteLevel = attachment.sdrWhiteLevel;
-            record.snapshot.hdrHeadroom = attachment.hdrHeadroom;
+            output.m_sdrWhiteLevel = attachment.sdrWhiteLevel;
+            output.m_hdrHeadroom = attachment.hdrHeadroom;
 
-            RenderViewportSnapshot before;
-            static_cast<void>(m_impl->viewports->GetSnapshot(record.snapshot.renderViewport, before));
+            RenderViewport* const viewport = output.m_renderViewport;
+            if (viewport == nullptr || !viewport->IsValid())
+            {
+                output.m_state = PresentationOutputState::Failed;
+                ++output.m_failures;
+                ++m_impl->stats.failures;
+                if (success)
+                    Fail(failure, PresentationFailureCode::ViewportFailure, "presentation viewport disappeared during reconciliation", output.m_handle);
+                success = false;
+                continue;
+            }
+            RenderViewportPresentationUpdate update;
+            update.attachment = attachment.handle;
+            update.pixelExtent = {attachment.pixelExtent.width, attachment.pixelExtent.height};
+            update.requiredPixelExtentRevision = attachment.requiredPixelExtentRevision;
+            update.requiredSurfaceRevision = attachment.requiredSurfaceRevision;
+            update.acknowledgedPixelExtentRevision = attachment.acknowledgedPixelExtentRevision;
+            update.acknowledgedSurfaceRevision = attachment.acknowledgedSurfaceRevision;
+            update.visible = attachment.visible;
+            update.occluded = attachment.occluded;
+            update.minimized = attachment.minimized;
+            update.suspended = window::HasRequirement(attachment.requirements, window::PresentationRequirement::Suspended);
+            RenderViewportPresentationResult updateResult;
             ViewportFailure viewportFailure;
-            if (!m_impl->viewports->UpdatePresentation(record.snapshot.renderViewport, attachment, &viewportFailure))
+            if (!viewport->UpdatePresentation(update, updateResult, &viewportFailure))
             {
-                if (viewportFailure.code != ViewportFailureCode::Busy)
-                {
-                    record.snapshot.state = PresentationOutputState::Failed;
-                    m_impl->RecordFailure(record);
-                }
+                output.m_state = PresentationOutputState::Failed;
+                ++output.m_failures;
+                ++m_impl->stats.failures;
                 if (success)
-                    Fail(failure, viewportFailure.code == ViewportFailureCode::Busy ? PresentationFailureCode::Busy : PresentationFailureCode::ViewportFailure,
-                         "presentation viewport reconciliation failed", record.snapshot.handle, nullptr, &viewportFailure);
+                    Fail(failure, PresentationFailureCode::ViewportFailure, "presentation viewport reconciliation failed", output.m_handle, nullptr, &viewportFailure);
                 success = false;
                 continue;
             }
-
-            RenderViewportSnapshot current;
-            if (!m_impl->viewports->GetSnapshot(record.snapshot.renderViewport, current))
+            if (updateResult.resizeApplied)
             {
-                record.snapshot.state = PresentationOutputState::Failed;
-                m_impl->RecordFailure(record);
-                if (success)
-                    Fail(failure, PresentationFailureCode::ViewportFailure, "presentation viewport disappeared during reconciliation", record.snapshot.handle);
-                success = false;
-                continue;
-            }
-            if (current.appliedPixelExtentRevision > before.appliedPixelExtentRevision && before.swapChain.IsValid())
-            {
-                ++record.snapshot.resizeApplications;
+                ++output.m_resizeApplications;
                 ++m_impl->stats.resizeApplications;
             }
-            if (current.requiredSurfaceRevision > before.appliedSurfaceRevision && before.swapChain.IsValid() && !current.swapChain.IsValid())
+            if (updateResult.surfaceReplaced)
             {
-                ++record.snapshot.surfaceReplacements;
+                ++output.m_surfaceReplacements;
                 ++m_impl->stats.surfaceReplacements;
             }
 
-            if (current.state == RenderViewportState::Suspended)
+            if (viewport->GetState() == RenderViewportState::Suspended)
             {
-                record.snapshot.state = PresentationOutputState::Suspended;
+                output.m_state = PresentationOutputState::Suspended;
                 continue;
             }
-            if (!current.swapChain.IsValid())
+            if (!viewport->GetSwapChain().IsValid())
             {
-                if (before.swapChain.IsValid())
+                if (updateResult.surfaceReplaced)
                 {
                     rhi::Failure rhiFailure;
                     if (!rhi::FlushRetiredResources(&rhiFailure))
                     {
-                        record.snapshot.state = PresentationOutputState::Failed;
-                        m_impl->RecordFailure(record);
+                        output.m_state = PresentationOutputState::Failed;
+                        ++output.m_failures;
+                        ++m_impl->stats.failures;
                         if (success)
                             Fail(failure, PresentationFailureCode::RhiFailure, "retired swap-chain destruction failed before surface replacement",
-                                 record.snapshot.handle, nullptr, nullptr, &rhiFailure);
+                                 output.m_handle, nullptr, nullptr, &rhiFailure);
                         success = false;
                         continue;
                     }
                 }
                 window::NativePresentationSurface nativeSurface;
                 window::Failure windowFailure;
-                if (!m_impl->windows->ResolvePresentationSurface(record.snapshot.attachment, nativeSurface, &windowFailure))
+                if (!m_impl->windows->ResolvePresentationSurface(output.m_attachment, nativeSurface, &windowFailure))
                 {
-                    record.snapshot.state = PresentationOutputState::AwaitingSurface;
-                    m_impl->RecordFailure(record);
+                    output.m_state = PresentationOutputState::AwaitingSurface;
+                    ++output.m_failures;
+                    ++m_impl->stats.failures;
                     if (success)
-                        Fail(failure, PresentationFailureCode::WindowFailure, "native presentation surface resolution failed", record.snapshot.handle,
-                             &windowFailure);
+                        Fail(failure, PresentationFailureCode::WindowFailure, "native presentation surface resolution failed", output.m_handle, &windowFailure);
                     success = false;
                     continue;
                 }
                 rhi::PresentationSurface surface;
                 if (!ConvertSurface(nativeSurface, surface))
                 {
-                    record.snapshot.state = PresentationOutputState::Failed;
-                    m_impl->RecordFailure(record);
+                    output.m_state = PresentationOutputState::Failed;
+                    ++output.m_failures;
+                    ++m_impl->stats.failures;
                     if (success)
                         Fail(failure, PresentationFailureCode::UnsupportedSurface, "native presentation surface is unsupported by the active RHI",
-                             record.snapshot.handle);
+                             output.m_handle);
                     success = false;
                     continue;
                 }
 
+                const SwapChainPolicy& policy = output.m_swapChainPolicy;
                 rhi::SwapChainDesc swapChainDesc;
                 swapChainDesc.surface = surface;
                 swapChainDesc.width = attachment.pixelExtent.width;
                 swapChainDesc.height = attachment.pixelExtent.height;
-                swapChainDesc.bufferCount = record.snapshot.swapChain.bufferCount;
-                swapChainDesc.presentMode = record.snapshot.swapChain.presentMode;
-                ResolveColorConfiguration(record.snapshot.swapChain, attachment.hdrCapable, swapChainDesc.format, swapChainDesc.colorSpace);
-                swapChainDesc.hdr10Metadata = record.snapshot.swapChain.hdr10Metadata;
-                swapChainDesc.frameLatency.enabled = record.snapshot.swapChain.enableFrameLatencyPacing;
-                swapChainDesc.frameLatency.maximumFramesInFlight = record.snapshot.swapChain.maximumFramesInFlight;
-                swapChainDesc.frameLatency.waitTimeoutMilliseconds = record.snapshot.swapChain.frameLatencyWaitTimeoutMilliseconds;
-                swapChainDesc.allowTearing = record.snapshot.swapChain.allowTearing;
-                if (!attachment.hdrCapable && IsRequiredHdr(record.snapshot.swapChain.colorPreference) && !record.snapshot.swapChain.allowSdrFallback)
+                swapChainDesc.bufferCount = policy.bufferCount;
+                swapChainDesc.presentMode = policy.presentMode;
+                ResolveColorConfiguration(policy, attachment.hdrCapable, swapChainDesc.format, swapChainDesc.colorSpace);
+                swapChainDesc.hdr10Metadata = policy.hdr10Metadata;
+                swapChainDesc.frameLatency.enabled = policy.enableFrameLatencyPacing;
+                swapChainDesc.frameLatency.maximumFramesInFlight = policy.maximumFramesInFlight;
+                swapChainDesc.frameLatency.waitTimeoutMilliseconds = policy.frameLatencyWaitTimeoutMilliseconds;
+                swapChainDesc.allowTearing = policy.allowTearing;
+                if (!attachment.hdrCapable && IsRequiredHdr(policy.colorPreference) && !policy.allowSdrFallback)
                 {
-                    record.snapshot.state = PresentationOutputState::AwaitingSurface;
-                    m_impl->RecordFailure(record);
+                    output.m_state = PresentationOutputState::AwaitingSurface;
+                    ++output.m_failures;
+                    ++m_impl->stats.failures;
                     if (success)
                         Fail(failure, PresentationFailureCode::RhiFailure, "the presentation policy requires HDR but the active window output is SDR",
-                             record.snapshot.handle);
+                             output.m_handle);
                     success = false;
                     continue;
                 }
                 rhi::Failure rhiFailure;
                 rhi::SwapChainRef swapChain = rhi::CreateSwapChainWithBackBuffer(swapChainDesc, &rhiFailure);
-                if (!swapChain.IsValid() && swapChainDesc.colorSpace != rhi::ColorSpace::Srgb && record.snapshot.swapChain.allowSdrFallback)
+                if (!swapChain.IsValid() && swapChainDesc.colorSpace != rhi::ColorSpace::Srgb && policy.allowSdrFallback)
                 {
                     swapChainDesc.format = rhi::Format::B8G8R8A8UNorm;
                     swapChainDesc.colorSpace = rhi::ColorSpace::Srgb;
                     swapChain = rhi::CreateSwapChainWithBackBuffer(swapChainDesc, &rhiFailure);
                     if (swapChain.IsValid())
                     {
-                        ++record.snapshot.colorFallbacks;
+                        ++output.m_colorFallbacks;
                         ++m_impl->stats.colorFallbacks;
                     }
                 }
                 if (!swapChain.IsValid())
                 {
-                    record.snapshot.state = PresentationOutputState::AwaitingSurface;
-                    m_impl->RecordFailure(record);
+                    output.m_state = PresentationOutputState::AwaitingSurface;
+                    ++output.m_failures;
+                    ++m_impl->stats.failures;
                     if (success)
-                        Fail(failure, PresentationFailureCode::RhiFailure, "swap-chain creation failed", record.snapshot.handle, nullptr, nullptr, &rhiFailure);
+                        Fail(failure, PresentationFailureCode::RhiFailure, "swap-chain creation failed", output.m_handle, nullptr, nullptr, &rhiFailure);
                     success = false;
                     continue;
                 }
-                if (!m_impl->viewports->BindSwapChain(record.snapshot.renderViewport, swapChain, &viewportFailure))
+                if (!viewport->BindSwapChain(swapChain, &viewportFailure))
                 {
                     static_cast<void>(rhi::SafeRelease(swapChain));
-                    record.snapshot.state = PresentationOutputState::AwaitingSurface;
-                    m_impl->RecordFailure(record);
+                    output.m_state = PresentationOutputState::AwaitingSurface;
+                    ++output.m_failures;
+                    ++m_impl->stats.failures;
                     if (success)
-                        Fail(failure, PresentationFailureCode::ViewportFailure, "swap-chain binding failed", record.snapshot.handle, nullptr, &viewportFailure);
+                        Fail(failure, PresentationFailureCode::ViewportFailure, "swap-chain binding failed", output.m_handle, nullptr, &viewportFailure);
                     success = false;
                     continue;
                 }
                 static_cast<void>(rhi::SafeRelease(swapChain));
-                record.snapshot.activeFormat = swapChainDesc.format;
-                record.snapshot.activeColorSpace = swapChainDesc.colorSpace;
-                ++record.snapshot.swapChainCreations;
+                output.m_activeFormat = swapChainDesc.format;
+                output.m_activeColorSpace = swapChainDesc.colorSpace;
+                ++output.m_swapChainCreations;
                 ++m_impl->stats.swapChainCreations;
-                static_cast<void>(m_impl->viewports->GetSnapshot(record.snapshot.renderViewport, current));
             }
 
-            if (current.swapChain.IsValid())
-                record.snapshot.displayColor = rhi::GetSwapChainStats(current.swapChain).displayColor;
+            if (viewport->GetSwapChain().IsValid())
+                output.m_displayColor = rhi::GetSwapChainStats(viewport->GetSwapChain()).displayColor;
 
             window::PresentationAcknowledgement acknowledgement;
-            if (m_impl->viewports->GetPresentationAcknowledgement(record.snapshot.renderViewport, acknowledgement) &&
+            if (viewport->GetPresentationAcknowledgement(acknowledgement) &&
                 (acknowledgement.pixelExtentRevision > attachment.acknowledgedPixelExtentRevision ||
                  acknowledgement.surfaceRevision > attachment.acknowledgedSurfaceRevision))
             {
                 window::Failure windowFailure;
-                if (!m_impl->windows->AcknowledgePresentation(record.snapshot.attachment, acknowledgement, &windowFailure))
+                if (!m_impl->windows->AcknowledgePresentation(output.m_attachment, acknowledgement, &windowFailure))
                 {
-                    record.snapshot.state = PresentationOutputState::Failed;
-                    m_impl->RecordFailure(record);
+                    output.m_state = PresentationOutputState::Failed;
+                    ++output.m_failures;
+                    ++m_impl->stats.failures;
                     if (success)
-                        Fail(failure, PresentationFailureCode::WindowFailure, "presentation acknowledgement failed", record.snapshot.handle, &windowFailure);
+                        Fail(failure, PresentationFailureCode::WindowFailure, "presentation acknowledgement failed", output.m_handle, &windowFailure);
                     success = false;
                     continue;
                 }
             }
-            record.snapshot.state = PresentationOutputState::Ready;
+            output.m_state = PresentationOutputState::Ready;
         }
         m_impl->RefreshStateCounts();
         return success;
     }
 
-    bool PresentationService::GetSnapshot(const PresentationOutputHandle output, PresentationOutputSnapshot& snapshot) const noexcept
+    PresentationOutput* PresentationService::Resolve(const PresentationOutputHandle output) noexcept
     {
-        snapshot = {};
         if (m_impl == nullptr)
-            return false;
-        const Impl::Record* const record = m_impl->Find(output);
-        if (record == nullptr)
-            return false;
-        snapshot = record->snapshot;
-        return true;
+            return nullptr;
+        Impl::Record* const record = m_impl->Find(output);
+        return record != nullptr ? &record->output : nullptr;
     }
 
-    RenderViewportHandle PresentationService::ResolveRenderViewport(const PresentationOutputHandle output) const noexcept
+    const PresentationOutput* PresentationService::Resolve(const PresentationOutputHandle output) const noexcept
     {
         if (m_impl == nullptr)
-            return {};
+            return nullptr;
         const Impl::Record* const record = m_impl->Find(output);
-        return record != nullptr ? record->snapshot.renderViewport : RenderViewportHandle{};
+        return record != nullptr ? &record->output : nullptr;
     }
 
     PresentationServiceStats PresentationService::GetStats() const noexcept

@@ -24,6 +24,13 @@ namespace vanguard::window
         [[nodiscard]] bool Create(const WindowDescriptor& descriptor, WindowHandle& window, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool RequestState(WindowHandle window, const WindowStateRequest& request, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool SetTitle(WindowHandle window, const char* title, Failure* failure = nullptr) noexcept;
+        // Whole-window opacity, from transparent (0) to opaque (1); owner-thread only.
+        [[nodiscard]] bool SetOpacity(WindowHandle window, f32 opacity, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestFocus(WindowHandle window, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool SetCursor(CursorShape shape, bool visible, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ReadClipboardText(char* destination, u32 capacity, u32& requiredCapacity, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool WriteClipboardText(const char* text, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool SetTextInput(WindowHandle window, const TextInputRequest& request, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool ResolveCloseRequest(WindowHandle window, u64 closeRequestSerial, CloseDecision decision, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool DestroyWindow(WindowHandle window, Failure* failure = nullptr) noexcept;
 

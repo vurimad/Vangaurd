@@ -29,7 +29,10 @@ namespace vanguard::assets
     enum class DependencyRequirement : u8
     {
         Required,
-        Optional
+        Optional,
+        /// Records a logical cooked-resource reference without resolving or
+        /// building it as part of the requesting operation.
+        Soft
     };
 
     enum class ArtifactFlags : u16
@@ -107,8 +110,15 @@ namespace vanguard::assets
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return identity.IsValid() && identity.IsTyped() && role <= DependencyRole::Tool && requirement <= DependencyRequirement::Optional &&
-                   (requirement == DependencyRequirement::Optional || role == DependencyRole::Generated || !content.IsEmpty());
+            if (!identity.IsValid() || !identity.IsTyped() || role > DependencyRole::Tool || requirement > DependencyRequirement::Soft)
+            {
+                return false;
+            }
+            if (requirement == DependencyRequirement::Soft)
+            {
+                return role == DependencyRole::Generated && content.IsEmpty();
+            }
+            return requirement == DependencyRequirement::Optional || role == DependencyRole::Generated || !content.IsEmpty();
         }
     };
 
@@ -136,6 +146,107 @@ namespace vanguard::assets
         ArtifactFlags flags = ArtifactFlags::None;
         u8 alignmentLog2 = 4;
         containers::DynamicArray<u8> bytes;
+    };
+
+    struct ArtifactView
+    {
+        resources::ResourceReference resource;
+        u32 segment = 0;
+        ArtifactFlags flags = ArtifactFlags::None;
+        u8 alignmentLog2 = 4;
+        containers::ArraySpan<const u8> bytes;
+    };
+
+    struct GeneratedDependencyView
+    {
+        BuildDependency dependency;
+        BuildFingerprint buildFingerprint;
+        BuildFingerprint contentFingerprint;
+        containers::ArraySpan<const ArtifactView> artifacts;
+
+        [[nodiscard]] const ArtifactView* Find(resources::ResourceReference resource, u32 segment = 0) const noexcept;
+    };
+
+    enum class BuildDiagnosticSeverity : u8
+    {
+        Information,
+        Warning,
+        Error
+    };
+
+    struct BuildDiagnosticLocation
+    {
+        resources::ResourceReference resource;
+        u64 subject = 0;
+        u32 detail = 0;
+        u32 line = 0;
+        u32 column = 0;
+        u32 byteOffset = 0;
+        u32 byteLength = 0;
+    };
+
+    struct BuildDiagnosticDescription
+    {
+        BuildDiagnosticSeverity severity = BuildDiagnosticSeverity::Error;
+        u32 code = 0;
+        containers::ArraySpan<const BuildDiagnosticLocation> locations;
+        containers::StringView message;
+    };
+
+    struct BuildDiagnostic
+    {
+        BuildDiagnosticSeverity severity = BuildDiagnosticSeverity::Error;
+        u32 code = 0;
+        u32 firstLocation = 0;
+        u32 locationCount = 0;
+        u32 messageOffset = 0;
+        u32 messageLength = 0;
+    };
+
+    struct BuildReportLimits
+    {
+        u32 maximumDiagnostics = 1024;
+        u32 maximumLocations = 8192;
+        u32 maximumMessageBytes = 1024u * 1024u;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return maximumDiagnostics != 0 && maximumLocations != 0 && maximumMessageBytes != 0;
+        }
+    };
+
+    class BuildReport final
+    {
+    public:
+        BuildReport() noexcept;
+
+        void Reset() noexcept;
+        [[nodiscard]] bool CopyFrom(const BuildReport& report) noexcept;
+        [[nodiscard]] containers::ArraySpan<const BuildDiagnostic> GetDiagnostics() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const BuildDiagnosticLocation> GetLocations(const BuildDiagnostic& diagnostic) const noexcept;
+        [[nodiscard]] containers::StringView GetMessage(const BuildDiagnostic& diagnostic) const noexcept;
+
+    private:
+        containers::DynamicArray<BuildDiagnostic> m_diagnostics;
+        containers::DynamicArray<BuildDiagnosticLocation> m_locations;
+        containers::DynamicArray<char> m_messages;
+
+        friend class BuildReportWriter;
+        friend class BuildGraph;
+    };
+
+    class BuildReportWriter final
+    {
+    public:
+        BuildReportWriter(BuildReport& report, const BuildReportLimits& limits) noexcept;
+
+        [[nodiscard]] Result Add(const BuildDiagnosticDescription& diagnostic) noexcept;
+        [[nodiscard]] Result GetStatus() const noexcept;
+
+    private:
+        BuildReport* m_report = nullptr;
+        BuildReportLimits m_limits;
+        Result m_status = Result::Success;
     };
 
     class ArtifactWriter final
@@ -173,7 +284,9 @@ namespace vanguard::assets
     {
         const BuildRequest& request;
         containers::ArraySpan<const BuildDependency> dependencies;
+        containers::ArraySpan<const GeneratedDependencyView> generatedDependencies;
         BuildFingerprint buildFingerprint;
+        BuildReportWriter* report = nullptr;
         IsCancellationRequestedFunction cancellation = nullptr;
         void* cancellationUserData = nullptr;
 
@@ -181,6 +294,8 @@ namespace vanguard::assets
         {
             return cancellation != nullptr && cancellation(cancellationUserData);
         }
+
+        [[nodiscard]] const GeneratedDependencyView* FindGeneratedDependency(resources::ResourceReference dependency) const noexcept;
     };
 
     struct BuildResourceEstimate
@@ -229,6 +344,9 @@ namespace vanguard::assets
     using EstimateBuildResourcesFunction = bool (*)(const BuildRequest& request, containers::ArraySpan<const BuildDependency> dependencies,
                                                     BuildResourceEstimate& estimate, void* userData) noexcept;
     using CompileFunction = bool (*)(const CompileContext& context, ArtifactWriter& artifacts, void* userData) noexcept;
+    // Optional cheap source-name routing hint. No I/O or decoding; true means
+    // candidate, not a successful import. The tool owns format knowledge.
+    using RecognizeSourceFunction = bool (*)(containers::StringView sourcePath, void* userData) noexcept;
 
     struct CompilerDescriptor
     {
@@ -243,6 +361,7 @@ namespace vanguard::assets
         /// Optional for direct synchronous BuildSystem use. BuildGraph rejects plans without
         /// an estimate so asynchronous work can never bypass its byte admission limit.
         EstimateBuildResourcesFunction estimateResources = nullptr;
+        RecognizeSourceFunction recognizeSource = nullptr;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
@@ -278,6 +397,7 @@ namespace vanguard::assets
         u32 maximumDependenciesPerBuild = 4096;
         u32 maximumArtifactsPerBuild = 4096;
         u64 maximumArtifactBytesPerBuild = 2ull * 1024ull * 1024ull * 1024ull;
+        BuildReportLimits reportLimits;
         u32 maximumCacheEntries = 1024;
         u64 maximumCacheBytes = 4ull * 1024ull * 1024ull * 1024ull;
 
@@ -326,7 +446,7 @@ namespace vanguard::assets
         [[nodiscard]] Result RegisterCompiler(const CompilerDescriptor& compiler) noexcept;
         [[nodiscard]] Result UnregisterCompiler(CompilerId compiler) noexcept;
 
-        [[nodiscard]] Result Build(const BuildRequest& request, BuildOutput& output) noexcept;
+        [[nodiscard]] Result Build(const BuildRequest& request, BuildOutput& output, BuildReport* report = nullptr) noexcept;
 
         // Two-stage cooking. Prepare performs lightweight
         // dependency discovery. Execute verifies the compiler generation,
@@ -334,7 +454,8 @@ namespace vanguard::assets
         // final fingerprint, then performs cache lookup or compilation.
         [[nodiscard]] Result Prepare(const BuildRequest& request, BuildPlan& plan) noexcept;
         [[nodiscard]] Result Execute(const BuildRequest& request, const BuildPlan& plan, BuildOutput& output,
-                                     IsCancellationRequestedFunction cancellation = nullptr, void* cancellationUserData = nullptr) noexcept;
+                                     IsCancellationRequestedFunction cancellation = nullptr, void* cancellationUserData = nullptr,
+                                     containers::ArraySpan<const GeneratedDependencyView> generatedDependencies = {}, BuildReport* report = nullptr) noexcept;
 
         void ClearCache() noexcept;
         [[nodiscard]] Stats GetStats() const noexcept;

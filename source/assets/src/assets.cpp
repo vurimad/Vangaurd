@@ -295,6 +295,10 @@ namespace vanguard::assets
         {
             if (existing.role == DependencyRole::Generated && existing.identity == dependency)
             {
+                if (existing.requirement == DependencyRequirement::Soft)
+                {
+                    return Result::InvalidArgument;
+                }
                 existing.content = content;
                 return Result::Success;
             }
@@ -348,6 +352,167 @@ namespace vanguard::assets
     }
 
     Artifact::Artifact() noexcept : bytes(memory::pools::Assets::GetInstance()) {}
+
+    const ArtifactView* GeneratedDependencyView::Find(const resources::ResourceReference resource, const u32 segment) const noexcept
+    {
+        for (const ArtifactView& artifact : artifacts)
+        {
+            if (artifact.resource == resource && artifact.segment == segment)
+            {
+                return &artifact;
+            }
+        }
+        return nullptr;
+    }
+
+    BuildReport::BuildReport() noexcept
+        : m_diagnostics(memory::pools::Assets::GetInstance()), m_locations(memory::pools::Assets::GetInstance()),
+          m_messages(memory::pools::Assets::GetInstance())
+    {
+    }
+
+    void BuildReport::Reset() noexcept
+    {
+        m_diagnostics.Clear();
+        m_locations.Clear();
+        m_messages.Clear();
+    }
+
+    bool BuildReport::CopyFrom(const BuildReport& report) noexcept
+    {
+        if (this == &report)
+        {
+            return true;
+        }
+        Reset();
+        m_diagnostics.Resize(report.m_diagnostics.Size());
+        m_locations.Resize(report.m_locations.Size());
+        m_messages.Resize(report.m_messages.Size());
+        if (m_diagnostics.Size() != report.m_diagnostics.Size() || m_locations.Size() != report.m_locations.Size() ||
+            m_messages.Size() != report.m_messages.Size())
+        {
+            Reset();
+            return false;
+        }
+        for (u32 index = 0; index < m_diagnostics.Size(); ++index)
+        {
+            m_diagnostics[index] = report.m_diagnostics[index];
+        }
+        for (u32 index = 0; index < m_locations.Size(); ++index)
+        {
+            m_locations[index] = report.m_locations[index];
+        }
+        for (u32 index = 0; index < m_messages.Size(); ++index)
+        {
+            m_messages[index] = report.m_messages[index];
+        }
+        return true;
+    }
+
+    containers::ArraySpan<const BuildDiagnostic> BuildReport::GetDiagnostics() const noexcept
+    {
+        return {m_diagnostics.TypedData(), m_diagnostics.Size()};
+    }
+
+    containers::ArraySpan<const BuildDiagnosticLocation> BuildReport::GetLocations(const BuildDiagnostic& diagnostic) const noexcept
+    {
+        if (diagnostic.firstLocation > m_locations.Size() || diagnostic.locationCount > m_locations.Size() - diagnostic.firstLocation)
+        {
+            return {};
+        }
+        if (diagnostic.locationCount == 0)
+        {
+            return {};
+        }
+        return {m_locations.TypedData() + diagnostic.firstLocation, diagnostic.locationCount};
+    }
+
+    containers::StringView BuildReport::GetMessage(const BuildDiagnostic& diagnostic) const noexcept
+    {
+        if (diagnostic.messageOffset > m_messages.Size() || diagnostic.messageLength > m_messages.Size() - diagnostic.messageOffset)
+        {
+            return {};
+        }
+        if (diagnostic.messageLength == 0)
+        {
+            return {};
+        }
+        return {m_messages.TypedData() + diagnostic.messageOffset, diagnostic.messageLength};
+    }
+
+    BuildReportWriter::BuildReportWriter(BuildReport& report, const BuildReportLimits& limits) noexcept : m_report(&report), m_limits(limits)
+    {
+        report.Reset();
+        if (!limits.IsValid())
+        {
+            m_status = Result::InvalidArgument;
+        }
+    }
+
+    Result BuildReportWriter::Add(const BuildDiagnosticDescription& diagnostic) noexcept
+    {
+        if (m_status != Result::Success)
+        {
+            return m_status;
+        }
+        if (diagnostic.severity > BuildDiagnosticSeverity::Error || diagnostic.code == 0 || diagnostic.message.Empty())
+        {
+            m_status = Result::InvalidArgument;
+            return m_status;
+        }
+        const u32 messageLength = diagnostic.message.Length();
+        if (m_report->m_diagnostics.Size() >= m_limits.maximumDiagnostics ||
+            diagnostic.locations.Count() > m_limits.maximumLocations - m_report->m_locations.Size() ||
+            messageLength > m_limits.maximumMessageBytes - m_report->m_messages.Size())
+        {
+            m_status = Result::LimitExceeded;
+            return m_status;
+        }
+
+        const u32 firstLocation = m_report->m_locations.Size();
+        const u32 firstMessage = m_report->m_messages.Size();
+        m_report->m_locations.Resize(firstLocation + diagnostic.locations.Count());
+        m_report->m_messages.Resize(firstMessage + messageLength);
+        const u32 diagnosticIndex = m_report->m_diagnostics.Size();
+        m_report->m_diagnostics.Resize(diagnosticIndex + 1u);
+        if (m_report->m_locations.Size() != firstLocation + diagnostic.locations.Count() ||
+            m_report->m_messages.Size() != firstMessage + messageLength || m_report->m_diagnostics.Size() != diagnosticIndex + 1u)
+        {
+            m_report->m_locations.Resize(firstLocation);
+            m_report->m_messages.Resize(firstMessage);
+            m_report->m_diagnostics.Resize(diagnosticIndex);
+            m_status = Result::OutOfMemory;
+            return m_status;
+        }
+        for (u32 index = 0; index < diagnostic.locations.Count(); ++index)
+        {
+            m_report->m_locations[firstLocation + index] = diagnostic.locations[index];
+        }
+        for (u32 index = 0; index < messageLength; ++index)
+        {
+            m_report->m_messages[firstMessage + index] = diagnostic.message.Data()[index];
+        }
+        m_report->m_diagnostics[diagnosticIndex] =
+            {diagnostic.severity, diagnostic.code, firstLocation, diagnostic.locations.Count(), firstMessage, messageLength};
+        return Result::Success;
+    }
+
+    Result BuildReportWriter::GetStatus() const noexcept
+    {
+        return m_status;
+    }
+
+    const GeneratedDependencyView* CompileContext::FindGeneratedDependency(const resources::ResourceReference dependency) const noexcept
+    {
+        for (const GeneratedDependencyView& resolved : generatedDependencies)
+        {
+            if (resolved.dependency.identity == dependency)
+            {
+                return &resolved;
+            }
+        }
+        return nullptr;
+    }
 
     ArtifactWriter::ArtifactWriter(const resources::ResourceReference primaryOutput, const u32 maximumArtifacts, const u64 maximumBytes) noexcept
         : m_primaryOutput(primaryOutput), m_artifacts(memory::pools::Assets::GetInstance()), m_maximumArtifacts(maximumArtifacts), m_maximumBytes(maximumBytes)
@@ -874,7 +1039,7 @@ namespace vanguard::assets
             return true;
         }
         if (!memory::IsInitialized() || config.maximumCompilers == 0 || config.maximumDependenciesPerBuild == 0 || config.maximumArtifactsPerBuild == 0 ||
-            config.maximumArtifactBytesPerBuild == 0 || (config.maximumCacheEntries != 0 && config.maximumCacheBytes == 0) ||
+            config.maximumArtifactBytesPerBuild == 0 || !config.reportLimits.IsValid() || (config.maximumCacheEntries != 0 && config.maximumCacheBytes == 0) ||
             (config.persistentCacheRoot != nullptr &&
              (!filesystem::IsInitialized() || config.persistentCacheRoot[0] == '\0' || !filesystem::AbsolutePath::IsValidPath(config.persistentCacheRoot) ||
               !filesystem::paths::IsAbsolutePath(config.persistentCacheRoot))))
@@ -983,9 +1148,13 @@ namespace vanguard::assets
         return Result::CompilerNotFound;
     }
 
-    Result BuildSystem::Build(const BuildRequest& request, BuildOutput& output) noexcept
+    Result BuildSystem::Build(const BuildRequest& request, BuildOutput& output, BuildReport* const report) noexcept
     {
         output.Reset();
+        if (report != nullptr)
+        {
+            report->Reset();
+        }
         BuildPlan plan;
         const Result prepared = Prepare(request, plan);
         if (prepared != Result::Success)
@@ -996,7 +1165,7 @@ namespace vanguard::assets
             }
             return prepared;
         }
-        return Execute(request, plan, output);
+        return Execute(request, plan, output, nullptr, nullptr, {}, report);
     }
 
     Result BuildSystem::Prepare(const BuildRequest& request, BuildPlan& plan) noexcept
@@ -1063,9 +1232,14 @@ namespace vanguard::assets
     }
 
     Result BuildSystem::Execute(const BuildRequest& request, const BuildPlan& plan, BuildOutput& output, const IsCancellationRequestedFunction cancellation,
-                                void* const cancellationUserData) noexcept
+                                void* const cancellationUserData, const containers::ArraySpan<const GeneratedDependencyView> generatedDependencies,
+                                BuildReport* const report) noexcept
     {
         output.Reset();
+        if (report != nullptr)
+        {
+            report->Reset();
+        }
         if (m_impl == nullptr)
         {
             return Result::InvalidState;
@@ -1083,6 +1257,48 @@ namespace vanguard::assets
             {
                 m_impl->RecordResult(false, false);
                 return Result::InvalidState;
+            }
+        }
+
+        for (u32 viewIndex = 0; viewIndex < generatedDependencies.Size(); ++viewIndex)
+        {
+            const GeneratedDependencyView& view = generatedDependencies[viewIndex];
+            if (!view.dependency.IsValid() || view.dependency.role != DependencyRole::Generated || view.buildFingerprint.IsEmpty() ||
+                view.contentFingerprint.IsEmpty() || view.artifacts.Empty())
+            {
+                m_impl->RecordResult(false, false);
+                return Result::InvalidArgument;
+            }
+            bool matchesPlan = false;
+            for (const BuildDependency& dependency : plan.m_dependencies)
+            {
+                if (dependency.role == DependencyRole::Generated && dependency.identity == view.dependency.identity)
+                {
+                    matchesPlan = dependency.content == view.contentFingerprint;
+                    break;
+                }
+            }
+            if (!matchesPlan)
+            {
+                m_impl->RecordResult(false, false);
+                return Result::InvalidState;
+            }
+            for (u32 previous = 0; previous < viewIndex; ++previous)
+            {
+                if (generatedDependencies[previous].dependency.identity == view.dependency.identity)
+                {
+                    m_impl->RecordResult(false, false);
+                    return Result::InvalidArgument;
+                }
+            }
+            for (const ArtifactView& artifact : view.artifacts)
+            {
+                if (!artifact.resource.IsValid() || !artifact.resource.IsTyped() || artifact.bytes.Empty() || artifact.alignmentLog2 > 20 ||
+                    (static_cast<u16>(artifact.flags) & ~KnownArtifactFlags) != 0)
+                {
+                    m_impl->RecordResult(false, false);
+                    return Result::InvalidArtifact;
+                }
             }
         }
 
@@ -1121,13 +1337,21 @@ namespace vanguard::assets
         }
 
         ArtifactWriter writer(request.output, m_impl->config.maximumArtifactsPerBuild, m_impl->config.maximumArtifactBytesPerBuild);
-        const CompileContext context{request, sortedDependencies, output.buildFingerprint, cancellation, cancellationUserData};
+        BuildReport discardedReport;
+        BuildReportWriter reportWriterStorage{report != nullptr ? *report : discardedReport, m_impl->config.reportLimits};
+        BuildReportWriter* const reportWriter = report != nullptr ? &reportWriterStorage : nullptr;
+        const CompileContext context{request, sortedDependencies, generatedDependencies, output.buildFingerprint, reportWriter, cancellation,
+                                     cancellationUserData};
         if (!compiler.compile(context, writer, compiler.userData))
         {
             m_impl->RecordResult(false, false);
             if (writer.GetStatus() != Result::Success)
             {
                 return writer.GetStatus();
+            }
+            if (reportWriter != nullptr && reportWriter->GetStatus() != Result::Success)
+            {
+                return reportWriter->GetStatus();
             }
             return cancellation != nullptr && cancellation(cancellationUserData) ? Result::Cancelled : Result::CompileFailed;
         }
@@ -1140,6 +1364,11 @@ namespace vanguard::assets
         {
             m_impl->RecordResult(false, false);
             return writer.GetStatus();
+        }
+        if (reportWriter != nullptr && reportWriter->GetStatus() != Result::Success)
+        {
+            m_impl->RecordResult(false, false);
+            return reportWriter->GetStatus();
         }
         if (writer.Count() == 0 || !writer.HasPrimaryOutput())
         {

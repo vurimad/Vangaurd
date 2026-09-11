@@ -1,0 +1,82 @@
+/**
+* Copyright (c) 2016 CD Projekt Red. All Rights Reserved.
+*/
+#pragma once
+
+#include "renderNodeGraph.h"
+#include "renderNodeImplContext.h"
+#include "renderNodeGraphFactory.h"
+
+//***************************************************************************************************************//
+//***************************************************************************************************************//
+
+class CRenderGraphCache
+{
+	RED_USE_MEMORY_POOL( rend::PoolRenderGraph );
+
+public:
+
+	// Generating camera hash from multiple informations. This is needed to cache graphs when nothing changed
+	struct SCameraHash
+	{
+		red::THash64					m_hash;
+
+		// - - - - - - - - - - - - - - - - - - - - - -
+
+		RED_INLINE SCameraHash() : m_hash( RED_FNV_OFFSET_BASIS64 ) {}
+
+		template <typename Type>
+		RED_INLINE void Append( const Type& numCameras ) { m_hash = red::CalculateHash64( &numCameras, sizeof(Type), m_hash ); }
+
+		// - - - - - - - - - - - - - - - - - - - - - -
+
+		RED_INLINE Bool operator==( const SCameraHash& other ) const { return m_hash == other.m_hash; }
+		RED_INLINE Bool operator!=( const SCameraHash& other ) const { return !operator==( other ); }
+		RED_INLINE Bool IsValid() const { return m_hash != RED_FNV_OFFSET_BASIS64; }
+	};
+
+
+	// Per-camera data needed to be kept during graph building
+	struct SCameraSetupData
+	{
+		RED_USE_MEMORY_POOL( rend::PoolRenderGraph );
+
+		CRenderNodeGraph m_graph;
+		rend::NodesContainer m_nodes;
+		SCameraHash m_cameraSetupHash;
+
+		RED_INLINE Bool DoNeedRebuild( const SCameraHash& other )   
+		{
+			const Bool ret = m_cameraSetupHash != other;
+			m_cameraSetupHash = other;
+			return ret;
+		}
+	};
+
+	using CameraSetupDataPtr = red::UniquePtr< SCameraSetupData >;
+
+
+	struct CacheEntry
+	{
+		Uint32									m_lastUsedFrame = 0;
+		SCameraHash								m_cameraHash;
+		CRenderNodeGraph						m_graph;
+		red::DynArray<CameraSetupDataPtr>		m_cameraBuildData{ rend::PoolRenderGraph() };
+
+		//!< Clears unused data after final graph building
+		void PostBuildClear();
+
+		SCameraSetupData* FindCameraSetup( const SCameraHash& cameraHash ) const;
+	};
+
+	CacheEntry& GetGraph( Uint32 frameTick, SCameraHash cameraHash, Uint32 numCameraSetups, Bool& outNeedsRebuild, bool forceClear = false );
+
+private:
+
+	static const Uint32 MaxCacheEntries = 4;
+	red::FixedArray< CacheEntry, MaxCacheEntries > m_cacheEntries;
+
+};
+
+//***************************************************************************************************************//
+//***************************************************************************************************************//

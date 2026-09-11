@@ -17,9 +17,13 @@
 #include <vanguard/game_input/mapping_resource.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/jobs/jobs.hpp>
+#include <vanguard/materials/materials.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/packages/packages.hpp>
+#include <vanguard/pipelines/pipelines.hpp>
+#include <vanguard/rendering/material_program_layout.hpp>
+#include <vanguard/shaders/shaders.hpp>
 #include <vanguard/world/worlds.hpp>
 
 #include <cstdio>
@@ -108,8 +112,7 @@ namespace
             return false;
 
         constexpr vanguard::u8 InvalidWorldPayload[16]{};
-        const vanguard::packages::BuildSegment segment{InvalidWorldPayload, sizeof(InvalidWorldPayload), vanguard::packages::Codec::None, 4,
-                                                       vanguard::packages::SegmentFlags::MemoryResident};
+        const vanguard::packages::BuildSegment segment{InvalidWorldPayload, sizeof(InvalidWorldPayload), vanguard::packages::Codec::None, 4, vanguard::packages::SegmentFlags::MemoryResident};
         vanguard::packages::BuildResource world;
         world.path = "world/session_test.vworld";
         world.type = vanguard::world::WorldResourceType;
@@ -120,15 +123,13 @@ namespace
         const vanguard::game_input::MappingBuildDescription mapping;
         if (vanguard::game_input::CookMapping(mapping, mappingFile) != vanguard::game_input::MappingResult::Success)
             return false;
-        const vanguard::packages::BuildSegment inputSegment{mappingBytes.Data(), mappingBytes.Size(), vanguard::packages::Codec::None, 4,
-                                                            vanguard::packages::SegmentFlags::MemoryResident};
+        const vanguard::packages::BuildSegment inputSegment{mappingBytes.Data(), mappingBytes.Size(), vanguard::packages::Codec::None, 4, vanguard::packages::SegmentFlags::MemoryResident};
         vanguard::packages::BuildResource input;
         input.path = "input/default.vinput";
         input.type = vanguard::game_input::MappingResourceType;
         input.flags = vanguard::packages::ResourceFlags::Startup;
         input.segments = {&inputSegment, 1};
-        return writer.Add(world) == vanguard::packages::Result::Success && writer.Add(input) == vanguard::packages::Result::Success &&
-               writer.Finalize() == vanguard::packages::Result::Success;
+        return writer.Add(world) == vanguard::packages::Result::Success && writer.Add(input) == vanguard::packages::Result::Success && writer.Finalize() == vanguard::packages::Result::Success;
     }
 
     [[nodiscard]] bool SaveBytes(const vanguard::filesystem::AbsolutePath& path, const void* const data, const vanguard::usize size) noexcept
@@ -142,8 +143,7 @@ namespace
         return writer->GetSize() == size;
     }
 
-    [[nodiscard]] vanguard::engine::WorldSessionStatus PollSessionUntil(vanguard::engine::WorldSessionService& session,
-                                                                        const vanguard::engine::WorldSessionStatus target) noexcept
+    [[nodiscard]] vanguard::engine::WorldSessionStatus PollSessionUntil(vanguard::engine::WorldSessionService& session, const vanguard::engine::WorldSessionStatus target) noexcept
     {
         vanguard::engine::WorldSessionFailure failure;
         for (vanguard::u32 attempt = 0; attempt < 10'000; ++attempt)
@@ -171,8 +171,7 @@ namespace
             trace.events[trace.count++] = event;
     }
 
-    [[nodiscard]] vanguard::u32 FindLifecycleEvent(const LifecycleTrace& trace, const vanguard::application::ServiceId service,
-                                                   const vanguard::application::LifecycleStage stage) noexcept
+    [[nodiscard]] vanguard::u32 FindLifecycleEvent(const LifecycleTrace& trace, const vanguard::application::ServiceId service, const vanguard::application::LifecycleStage stage) noexcept
     {
         for (vanguard::u32 index = 0; index < trace.count; ++index)
             if (trace.events[index].service == service && trace.events[index].stage == stage)
@@ -192,8 +191,7 @@ int main()
         vanguard::application::HostFailure incompleteFailure;
         Check(vanguard::engine::RegisterEngineModule(incompleteHost, &incompleteFailure), "incomplete engine module registration");
         Check(vanguard::engine::RegisterJobsService(incompleteHost, &incompleteFailure), "incomplete Jobs service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::JobsServiceId && incompleteFailure.relatedService == vanguard::engine::IoServiceId,
               "Jobs graph rejects a missing I/O dependency");
     }
@@ -203,8 +201,7 @@ int main()
         vanguard::application::HostFailure incompleteFailure;
         Check(vanguard::engine::RegisterEngineModule(incompleteHost, &incompleteFailure), "incomplete filesystem engine module registration");
         Check(vanguard::engine::RegisterFilesystemService(incompleteHost, &incompleteFailure), "incomplete Filesystem service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::FilesystemServiceId && incompleteFailure.relatedService == vanguard::engine::IoServiceId,
               "Filesystem graph rejects a missing I/O dependency");
     }
@@ -216,8 +213,7 @@ int main()
         Check(vanguard::engine::RegisterIoService(incompleteHost, &incompleteFailure), "incomplete resources I/O service registration");
         Check(vanguard::engine::RegisterFilesystemService(incompleteHost, &incompleteFailure), "incomplete resources Filesystem service registration");
         Check(vanguard::engine::RegisterResourcesService(incompleteHost, &incompleteFailure), "incomplete Resources service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::ResourcesServiceId && incompleteFailure.relatedService == vanguard::engine::JobsServiceId,
               "Resources graph rejects a missing Jobs dependency");
     }
@@ -230,10 +226,8 @@ int main()
         Check(vanguard::engine::RegisterFilesystemService(incompleteHost, &incompleteFailure), "incomplete Resource Streaming Filesystem service registration");
         Check(vanguard::engine::RegisterJobsService(incompleteHost, &incompleteFailure), "incomplete Resource Streaming Jobs service registration");
         Check(vanguard::engine::RegisterResourceStreamingService(incompleteHost, &incompleteFailure), "incomplete Resource Streaming service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
-                  incompleteFailure.service == vanguard::engine::ResourceStreamingServiceId &&
-                  incompleteFailure.relatedService == vanguard::engine::ResourcesServiceId,
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+                  incompleteFailure.service == vanguard::engine::ResourceStreamingServiceId && incompleteFailure.relatedService == vanguard::engine::ResourcesServiceId,
               "Resource Streaming graph rejects a missing Resources dependency");
     }
 
@@ -242,11 +236,9 @@ int main()
         vanguard::application::HostFailure incompleteFailure;
         Check(vanguard::engine::RegisterEngineModule(incompleteHost, &incompleteFailure), "incomplete World engine module registration");
         Check(vanguard::engine::RegisterWorldService(incompleteHost, &incompleteFailure), "incomplete World service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::WorldServiceId &&
-                  (incompleteFailure.relatedService == vanguard::engine::ResourceStreamingServiceId ||
-                   incompleteFailure.relatedService == vanguard::engine::ResourcesServiceId),
+                  (incompleteFailure.relatedService == vanguard::engine::ResourceStreamingServiceId || incompleteFailure.relatedService == vanguard::engine::ResourcesServiceId),
               "World graph rejects missing resource dependencies");
     }
 
@@ -255,8 +247,7 @@ int main()
         vanguard::application::HostFailure incompleteFailure;
         Check(vanguard::engine::RegisterEngineModule(incompleteHost, &incompleteFailure), "incomplete Game World engine module registration");
         Check(vanguard::engine::RegisterGameWorldService(incompleteHost, &incompleteFailure), "incomplete Game World service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::GameWorldServiceId,
               "Game World graph rejects missing World dependencies");
     }
@@ -266,8 +257,7 @@ int main()
         vanguard::application::HostFailure incompleteFailure;
         Check(vanguard::engine::RegisterEngineModule(incompleteHost, &incompleteFailure), "incomplete World Session engine module registration");
         Check(vanguard::engine::RegisterWorldSessionService(incompleteHost, &incompleteFailure), "incomplete World Session service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::WorldSessionServiceId,
               "World Session graph rejects missing runtime dependencies");
     }
@@ -277,8 +267,7 @@ int main()
         vanguard::application::HostFailure incompleteFailure;
         Check(vanguard::engine::RegisterEngineModule(incompleteHost, &incompleteFailure), "incomplete Rendering engine module registration");
         Check(vanguard::engine::RegisterRenderingService(incompleteHost, &incompleteFailure), "incomplete Rendering service registration");
-        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) &&
-                  incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
+        Check(!incompleteHost.Compile(vanguard::application::ApplicationProfile::Runtime, &incompleteFailure) && incompleteFailure.code == vanguard::application::HostFailureCode::MissingDependency &&
                   incompleteFailure.service == vanguard::engine::RenderingServiceId,
               "Rendering graph rejects missing Jobs, Frame Pipeline, and Render Scene dependencies");
     }
@@ -304,18 +293,20 @@ int main()
     Check(vanguard::engine::RegisterWorldSessionService(host, &failure), "World Session service registration");
     Check(vanguard::engine::RegisterRenderingService(host, &failure), "Rendering service registration");
     Check(host.Compile(vanguard::application::ApplicationProfile::Runtime, &failure), "engine graph compilation");
-    Check(host.Start(&failure), "engine graph startup");
+    const bool hostStarted = host.Start(&failure);
+    if (!hostStarted)
+        std::fprintf(stderr, "[engineServicesTests] startup failure: code=%u service=%llu message=%s\n", static_cast<vanguard::u32>(failure.code), static_cast<unsigned long long>(failure.service),
+                     failure.message != nullptr ? failure.message : "unspecified");
+    Check(hostStarted, "engine graph startup");
     Check(host.GetStateOf(vanguard::engine::JobsServiceId) == vanguard::application::ServiceState::Running, "Jobs service running state");
     Check(host.GetStateOf(vanguard::engine::FramePipelineServiceId) == vanguard::application::ServiceState::Running, "Frame Pipeline service running state");
     Check(host.GetStateOf(vanguard::engine::IoServiceId) == vanguard::application::ServiceState::Running, "I/O service running state");
     Check(host.GetStateOf(vanguard::engine::FilesystemServiceId) == vanguard::application::ServiceState::Running, "Filesystem service running state");
     Check(host.GetStateOf(vanguard::engine::ResourcesServiceId) == vanguard::application::ServiceState::Running, "Resources service running state");
-    Check(host.GetStateOf(vanguard::engine::ResourceStreamingServiceId) == vanguard::application::ServiceState::Running,
-          "Resource Streaming service running state");
+    Check(host.GetStateOf(vanguard::engine::ResourceStreamingServiceId) == vanguard::application::ServiceState::Running, "Resource Streaming service running state");
     Check(host.GetStateOf(vanguard::engine::WorldServiceId) == vanguard::application::ServiceState::Running, "World service running state");
     Check(host.GetStateOf(vanguard::engine::GameWorldServiceId) == vanguard::application::ServiceState::Running, "Game World service running state");
-    Check(host.GetStateOf(vanguard::engine::StreamingObserverServiceId) == vanguard::application::ServiceState::Running,
-          "Streaming Observer service running state");
+    Check(host.GetStateOf(vanguard::engine::StreamingObserverServiceId) == vanguard::application::ServiceState::Running, "Streaming Observer service running state");
     Check(host.GetStateOf(vanguard::engine::WorldSessionServiceId) == vanguard::application::ServiceState::Running, "World Session service running state");
     Check(host.GetStateOf(vanguard::engine::RenderingServiceId) == vanguard::application::ServiceState::Running, "Rendering service running state");
     Check(host.FindCapability(vanguard::engine::IoCapabilityId) != nullptr, "I/O capability publication");
@@ -329,20 +320,22 @@ int main()
               host.FindCapability(vanguard::engine::ResourceRegistryCapabilityId) == host.FindCapability(vanguard::engine::ResourcePipelineCapabilityId),
           "Resources registry and pipeline capability publication");
     vanguard::engine::ResourcesService* const resourcesService = vanguard::engine::FindResourcesService(host);
-    Check(resourcesService != nullptr && resourcesService->GetRegistry().IsInitialized() && resourcesService->GetPipeline().IsInitialized(),
-          "typed Resources service access");
+    Check(resourcesService != nullptr && resourcesService->GetRegistry().IsInitialized() && resourcesService->GetPipeline().IsInitialized(), "typed Resources service access");
     vanguard::engine::ResourceStreamingService* const resourceStreamingService = vanguard::engine::FindResourceStreamingService(host);
-    const vanguard::streaming::Stats resourceStreamingStats =
-        resourceStreamingService != nullptr ? resourceStreamingService->GetStreamer().GetStats() : vanguard::streaming::Stats{};
+    const vanguard::streaming::Stats resourceStreamingStats = resourceStreamingService != nullptr ? resourceStreamingService->GetStreamer().GetStats() : vanguard::streaming::Stats{};
     Check(resourceStreamingService != nullptr && resourceStreamingService->GetStreamer().IsInitialized() && !resourceStreamingService->GetPackageSet().IsMounted() &&
-              resourceStreamingStats.stagingBudgetBytes == 512ull * 1024ull * 1024ull && resourceStreamingStats.activeLoads == 0 &&
-              resourceStreamingStats.activeReads == 0,
-          "typed Resource Streaming service access and default budget");
+              resourceStreamingStats.registeredDecoders >= 3 && resourcesService->GetPipeline().GetStats().registeredLoaders >= 5 &&
+              resourcesService->GetPipeline().HasLoader(vanguard::shaders::ShaderResourceType) && resourcesService->GetPipeline().HasLoader(vanguard::pipelines::PipelineResourceType) &&
+              resourcesService->GetPipeline().HasLoader(vanguard::materials::MaterialResourceType) && resourceStreamingStats.stagingBudgetBytes == 512ull * 1024ull * 1024ull &&
+              resourceStreamingStats.activeLoads == 0 && resourceStreamingStats.activeReads == 0,
+          "Resource Streaming owns VSHADER, VPPL, and VMAT decoders plus lower metadata loaders");
     vanguard::engine::RenderingService* const renderingService = vanguard::engine::FindRenderingService(host);
-    Check(renderingService != nullptr && renderingService->GetScenes().IsInitialized() && renderingService->GetScenes().GetStats().activeScenes == 0 &&
-               renderingService->GetCommands().IsInitialized() && renderingService->GetViewports().IsInitialized() &&
-               !renderingService->GetMeshResidency().IsInitialized() &&
-               !renderingService->GetTextureResidency().IsInitialized(),
+    const vanguard::engine::RenderingResourceAllocatorDiagnostics frameResourceDiagnostics =
+        renderingService != nullptr ? renderingService->GetResourceAllocatorDiagnostics() : vanguard::engine::RenderingResourceAllocatorDiagnostics{};
+    Check(renderingService != nullptr && renderingService->GetScenes().IsInitialized() && renderingService->GetScenes().GetStats().activeScenes == 0 && renderingService->GetCommands().IsInitialized() &&
+              renderingService->GetViewports().IsInitialized() && !renderingService->GetMaterialProgramLayouts().IsInitialized() && !renderingService->GetMeshResidency().IsInitialized() &&
+              !renderingService->GetTextureResidency().IsInitialized() && !renderingService->GetMaterialResources().IsInitialized() && !renderingService->GetMaterialMaterializer().IsInitialized() &&
+              !renderingService->GetMaterialResidency().IsInitialized() && !renderingService->GetMaterialBindings().IsInitialized() && !frameResourceDiagnostics.initialized,
           "typed Rendering service access and device-disabled residency lifecycle");
     vanguard::rendering::RenderSceneDesc coordinatedSceneDesc;
     coordinatedSceneDesc.name = "Engine frame coordinated scene";
@@ -351,19 +344,16 @@ int main()
     coordinatedSceneDesc.maximumViews = 1;
     vanguard::rendering::RenderSceneHandle coordinatedScene;
     vanguard::rendering::RenderSceneFailure coordinatedSceneFailure;
-    Check(renderingService != nullptr && renderingService->GetScenes().CreateScene(coordinatedSceneDesc, coordinatedScene, &coordinatedSceneFailure),
-          "engine frame coordinated RenderScene creation");
+    Check(renderingService != nullptr && renderingService->GetScenes().CreateScene(coordinatedSceneDesc, coordinatedScene, &coordinatedSceneFailure), "engine frame coordinated RenderScene creation");
     vanguard::engine::WorldService* const worldService = vanguard::engine::FindWorldService(host);
-    Check(worldService != nullptr && worldService->GetStatus() == vanguard::engine::WorldResourceStatus::Idle && worldService->GetResource() == nullptr &&
-              worldService->GetGrid() == nullptr && worldService->GetExecutor() == nullptr,
+    Check(worldService != nullptr && worldService->GetStatus() == vanguard::engine::WorldResourceStatus::Idle && worldService->GetResource() == nullptr && worldService->GetGrid() == nullptr &&
+              worldService->GetExecutor() == nullptr,
           "typed World service access and empty startup state");
     vanguard::engine::GameWorldService* const gameWorldService = vanguard::engine::FindGameWorldService(host);
-    Check(gameWorldService != nullptr && gameWorldService->GetStatus() == vanguard::engine::GameWorldStatus::Idle && gameWorldService->GetWorld() == nullptr &&
-              gameWorldService->GetCellStreaming() == nullptr,
+    Check(gameWorldService != nullptr && gameWorldService->GetStatus() == vanguard::engine::GameWorldStatus::Idle && gameWorldService->GetWorld() == nullptr && gameWorldService->GetCellStreaming() == nullptr,
           "typed Game World service access and empty session state");
     vanguard::engine::StreamingObserverService* const streamingObservers = vanguard::engine::FindStreamingObserverService(host);
-    Check(streamingObservers != nullptr && streamingObservers->GetStats().registeredObservers == 0,
-          "typed Streaming Observer service access and empty startup state");
+    Check(streamingObservers != nullptr && streamingObservers->GetStats().registeredObservers == 0, "typed Streaming Observer service access and empty startup state");
 
     vanguard::engine::StreamingObserverDescriptor cameraDescriptor;
     cameraDescriptor.name = "gameCamera";
@@ -373,8 +363,7 @@ int main()
     vehicleDescriptor.name = "playerVehicle";
     vehicleDescriptor.velocityClass = vanguard::engine::StreamingObserverVelocityClass::GroundVehicle;
     vanguard::engine::StreamingObserverHandle vehicleObserver;
-    Check(streamingObservers != nullptr && streamingObservers->RegisterObserver(cameraDescriptor, cameraObserver) &&
-              streamingObservers->RegisterObserver(vehicleDescriptor, vehicleObserver),
+    Check(streamingObservers != nullptr && streamingObservers->RegisterObserver(cameraDescriptor, cameraObserver) && streamingObservers->RegisterObserver(vehicleDescriptor, vehicleObserver),
           "Streaming Observer fixed-capacity registrations");
     vanguard::engine::StreamingObserverUpdate cameraUpdate;
     cameraUpdate.position[0] = 100.0;
@@ -384,57 +373,59 @@ int main()
     vanguard::engine::StreamingObserverUpdate vehicleUpdate;
     vehicleUpdate.velocity[0] = 30.0;
     vehicleUpdate.velocity[1] = 40.0;
-    Check(streamingObservers != nullptr && streamingObservers->UpdateObserver(cameraObserver, cameraUpdate) &&
-              streamingObservers->UpdateObserver(vehicleObserver, vehicleUpdate) && streamingObservers->SetPrimaryObserver(cameraObserver) &&
-              streamingObservers->SetGlobalDistanceScale(1.5f),
+    Check(streamingObservers != nullptr && streamingObservers->UpdateObserver(cameraObserver, cameraUpdate) && streamingObservers->UpdateObserver(vehicleObserver, vehicleUpdate) &&
+              streamingObservers->SetPrimaryObserver(cameraObserver) && streamingObservers->SetGlobalDistanceScale(1.5f),
           "Streaming Observer producer updates and primary-camera selection");
     vanguard::engine::WorldSessionService* const worldSessionService = vanguard::engine::FindWorldSessionService(host);
+    vanguard::engine::GameInputService* const gameInputService = vanguard::engine::FindGameInputService(host);
     Check(worldSessionService != nullptr && worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::Idle &&
-              worldSessionService->RequestStop(vanguard::engine::WorldSessionStopMode::ReleaseEverything) &&
-              worldSessionService->Poll() == vanguard::engine::WorldSessionStatus::Idle,
+              worldSessionService->RequestStop() && worldSessionService->Poll() == vanguard::engine::WorldSessionStatus::Idle,
           "typed World Session access and idempotent empty-session stop");
-    vanguard::engine::WorldSessionStartRequest invalidRetainedStart;
-    invalidRetainedStart.mountPackages = false;
+    vanguard::engine::WorldSessionStartRequest invalidStart;
     vanguard::engine::WorldSessionFailure worldSessionFailure;
-    const bool invalidBeginRejected = worldSessionService != nullptr && !worldSessionService->Begin(invalidRetainedStart, &worldSessionFailure);
-    const bool invalidFailureReported = worldSessionFailure.code == vanguard::engine::WorldSessionFailureCode::InvalidState &&
-                                        worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::Failed;
-    const bool invalidStopAccepted = worldSessionService->RequestStop(vanguard::engine::WorldSessionStopMode::ReleaseEverything, &worldSessionFailure);
+    const bool invalidBeginAccepted = worldSessionService->Begin(invalidStart, &worldSessionFailure);
+    const bool invalidFailureReported = worldSessionFailure.code == vanguard::engine::WorldSessionFailureCode::InvalidRequest && worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::Failed;
+    const bool invalidStopAccepted = worldSessionService->RequestStop(&worldSessionFailure);
     const vanguard::engine::WorldSessionStatus invalidStopStatus = worldSessionService->Poll(&worldSessionFailure);
-    Check(invalidBeginRejected && invalidFailureReported && invalidStopAccepted && invalidStopStatus == vanguard::engine::WorldSessionStatus::Idle,
-          "World Session reports invalid retained starts and recovers through explicit cleanup");
+    Check(!invalidBeginAccepted && invalidFailureReported && invalidStopAccepted && invalidStopStatus == vanguard::engine::WorldSessionStatus::Idle,
+          "World Session requires explicit resources and recovers through cleanup");
 
     vanguard::filesystem::Manager& files = vanguard::filesystem::GetManager();
-    const vanguard::filesystem::AbsolutePath sessionDirectory =
-        vanguard::filesystem::paths::GetCurrentWorkingDirectory().AddDirPath("vanguard_world_session_conformance");
+    const vanguard::filesystem::AbsolutePath sessionDirectory = vanguard::filesystem::paths::GetCurrentWorkingDirectory().AddDirPath("vanguard_world_session_conformance");
     const vanguard::filesystem::AbsolutePath sessionPackage = sessionDirectory.AddFilePath("DATA000.vpak");
     static_cast<void>(files.DeleteFile(sessionPackage));
     static_cast<void>(files.DeletePath(sessionDirectory));
     Check(files.CreatePath(sessionDirectory), "World Session fixture directory creation");
     vanguard::containers::DynamicArray<vanguard::u8> sessionPackageBytes(vanguard::memory::pools::Resources::GetInstance());
-    Check(BuildWorldSessionPackage(sessionPackageBytes) && SaveBytes(sessionPackage, sessionPackageBytes.Data(), sessionPackageBytes.Size()),
-          "World Session DATA000 fixture publication");
+    Check(BuildWorldSessionPackage(sessionPackageBytes) && SaveBytes(sessionPackage, sessionPackageBytes.Data(), sessionPackageBytes.Size()), "World Session DATA000 fixture publication");
 
     vanguard::engine::WorldSessionStartRequest initialSessionStart;
-    initialSessionStart.gameDirectory = sessionDirectory;
-    Check(worldSessionService->Begin(initialSessionStart, &worldSessionFailure) &&
-              worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::LoadingWorld && resourceStreamingService->GetPackageSet().IsMounted(),
-          "World Session mounts packages and begins the catalog startup world");
-    Check(worldSessionService->RequestStop(vanguard::engine::WorldSessionStopMode::ReleaseWorld, &worldSessionFailure) &&
-              PollSessionUntil(*worldSessionService, vanguard::engine::WorldSessionStatus::Mounted) == vanguard::engine::WorldSessionStatus::Mounted &&
+    const auto packageMounted = resourceStreamingService->GetPackageSet().Mount(resourceStreamingService->GetStreamer(), sessionDirectory);
+    Check(packageMounted == vanguard::streaming::PackageSetMountResult::Success, "source owner mounts the session fixture");
+    initialSessionStart.world = resourceStreamingService->GetPackageSet().StartupWorld();
+    initialSessionStart.input = resourceStreamingService->GetPackageSet().GetDefaultInput();
+    initialSessionStart.inputMode = vanguard::engine::WorldSessionInputMode::Mapping;
+    const bool initialSessionStarted = worldSessionService->Begin(initialSessionStart, &worldSessionFailure);
+    Check(initialSessionStarted && worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::LoadingWorld &&
               resourceStreamingService->GetPackageSet().IsMounted(),
-          "World Session world-only release retains the package set");
+          "World Session begins from explicit resources in an existing source");
+    const bool firstStopAccepted = worldSessionService->RequestStop(&worldSessionFailure);
+    const auto firstStopStatus = PollSessionUntil(*worldSessionService, vanguard::engine::WorldSessionStatus::Idle);
+    Check(firstStopAccepted && firstStopStatus == vanguard::engine::WorldSessionStatus::Idle && resourceStreamingService->GetPackageSet().IsMounted(),
+          "World Session release preserves the process source");
 
     vanguard::engine::WorldSessionStartRequest retainedSessionStart;
-    retainedSessionStart.mountPackages = false;
     retainedSessionStart.world = resourceStreamingService->GetPackageSet().StartupWorld();
-    Check(worldSessionService->Begin(retainedSessionStart, &worldSessionFailure) &&
-              worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::LoadingWorld,
-          "World Session begins another world from retained packages");
-    const bool fullStopAccepted = worldSessionService->RequestStop(vanguard::engine::WorldSessionStopMode::ReleaseEverything, &worldSessionFailure);
+    retainedSessionStart.inputMode = vanguard::engine::WorldSessionInputMode::None;
+    const bool retainedSessionStarted = worldSessionService->Begin(retainedSessionStart, &worldSessionFailure);
+    Check(retainedSessionStarted && worldSessionService->GetStatus() == vanguard::engine::WorldSessionStatus::LoadingWorld &&
+              gameInputService->GetMappings().GetStats().contexts == 0,
+          "edit-only session begins without inherited input mappings");
+    const bool fullStopAccepted = worldSessionService->RequestStop(&worldSessionFailure);
     const vanguard::engine::WorldSessionStatus fullStopStatus = PollSessionUntil(*worldSessionService, vanguard::engine::WorldSessionStatus::Idle);
-    Check(fullStopAccepted && fullStopStatus == vanguard::engine::WorldSessionStatus::Idle && !resourceStreamingService->GetPackageSet().IsMounted(),
-          "World Session full release unmounts retained packages");
+    Check(fullStopAccepted && fullStopStatus == vanguard::engine::WorldSessionStatus::Idle && resourceStreamingService->GetPackageSet().IsMounted(), "World Session stop never unmounts shared sources");
+    const auto packageUnmounted = resourceStreamingService->GetPackageSet().Unmount();
+    Check(packageUnmounted == vanguard::streaming::PackageSetMountResult::Success, "source owner releases the fixture after sessions stop");
     static_cast<void>(files.DeleteFile(sessionPackage));
     static_cast<void>(files.DeletePath(sessionDirectory));
     vanguard::engine::FramePipelineService* const framePipeline = vanguard::engine::FindFramePipelineService(host);
@@ -464,8 +455,7 @@ int main()
     FrameParticipantFixture renderUpdateProducerFixture{&frameTrace, RenderUpdateProducerParticipant};
     FrameParticipantFixture renderFrameSourceFixture{&frameTrace, RenderFrameSourceParticipant};
 
-    auto RegisterFrameFixture = [&](FrameParticipantFixture& fixture, const vanguard::engine::FramePhase phase,
-                                    const vanguard::containers::ArraySpan<const vanguard::engine::FrameParticipantId> after = {})
+    auto RegisterFrameFixture = [&](FrameParticipantFixture& fixture, const vanguard::engine::FramePhase phase, const vanguard::containers::ArraySpan<const vanguard::engine::FrameParticipantId> after = {})
     {
         vanguard::engine::FrameParticipantDescriptor descriptor;
         descriptor.id = fixture.id;
@@ -482,14 +472,11 @@ int main()
     Check(RegisterFrameFixture(fixedFixture, vanguard::engine::FramePhase::FixedSimulation), "fixed phase participant registration");
     Check(RegisterFrameFixture(simulationBeforeFixture, vanguard::engine::FramePhase::Simulation), "first Simulation participant registration");
     const vanguard::engine::FrameParticipantId simulationDependencies[]{SimulationBeforeParticipant};
-    Check(RegisterFrameFixture(simulationAfterFixture, vanguard::engine::FramePhase::Simulation, {simulationDependencies, 1}),
-          "dependent Simulation participant registration");
+    Check(RegisterFrameFixture(simulationAfterFixture, vanguard::engine::FramePhase::Simulation, {simulationDependencies, 1}), "dependent Simulation participant registration");
     const vanguard::engine::FrameParticipantId renderUpdateDependencies[]{vanguard::engine::RenderingUpdateFrameParticipantId};
-    Check(RegisterFrameFixture(renderUpdateProducerFixture, vanguard::engine::FramePhase::RenderUpdate, {renderUpdateDependencies, 1}),
-          "render producer registration behind the Rendering update boundary");
+    Check(RegisterFrameFixture(renderUpdateProducerFixture, vanguard::engine::FramePhase::RenderUpdate, {renderUpdateDependencies, 1}), "render producer registration behind the Rendering update boundary");
     const vanguard::engine::FrameParticipantId renderFrameDependencies[]{vanguard::engine::RenderingFrameTickParticipantId};
-    Check(RegisterFrameFixture(renderFrameSourceFixture, vanguard::engine::FramePhase::Render, {renderFrameDependencies, 1}),
-          "render frame source registration behind Rendering FrameTick");
+    Check(RegisterFrameFixture(renderFrameSourceFixture, vanguard::engine::FramePhase::Render, {renderFrameDependencies, 1}), "render frame source registration behind Rendering FrameTick");
     Check(RegisterFrameFixture(failureFixture, vanguard::engine::FramePhase::EndFrame), "End Frame participant registration");
 
     vanguard::engine::FrameParticipantDescriptor unsupportedParticipant;
@@ -497,68 +484,58 @@ int main()
     unsupportedParticipant.name = "unsupportedWorkerParticipant";
     unsupportedParticipant.affinity = vanguard::application::ThreadAffinity::AnyWorker;
     unsupportedParticipant.execute = &RecordFrameParticipant;
-    Check(!framePipeline->RegisterParticipant(unsupportedParticipant, &frameFailure) &&
-              frameFailure.code == vanguard::engine::FrameFailureCode::UnsupportedAffinity,
+    Check(!framePipeline->RegisterParticipant(unsupportedParticipant, &frameFailure) && frameFailure.code == vanguard::engine::FrameFailureCode::UnsupportedAffinity,
           "unsupported worker affinity is rejected explicitly");
-    Check(framePipeline->Compile(&frameFailure) && framePipeline->GetState() == vanguard::engine::FramePipelineState::Compiled &&
-              framePipeline->GetStats().scheduledParticipants == 14,
+    Check(framePipeline->Compile(&frameFailure) && framePipeline->GetState() == vanguard::engine::FramePipelineState::Compiled && framePipeline->GetStats().scheduledParticipants == 14,
           "compiled Frame Pipeline contains deterministic service and test participants");
 
     frameClock.ticks += 90;
     Check(framePipeline->RunFrame(&frameFailure), "deterministic frame execution");
     vanguard::engine::FramePipelineStats frameStats = framePipeline->GetStats();
-    Check(frameTrace.count == 8 && frameTrace.participants[0] == InputParticipant && frameTrace.participants[1] == FixedParticipant &&
-              frameTrace.participants[2] == FixedParticipant && frameTrace.participants[3] == SimulationBeforeParticipant &&
-              frameTrace.participants[4] == SimulationAfterParticipant && frameTrace.participants[5] == RenderUpdateProducerParticipant &&
+    Check(frameTrace.count == 8 && frameTrace.participants[0] == InputParticipant && frameTrace.participants[1] == FixedParticipant && frameTrace.participants[2] == FixedParticipant &&
+              frameTrace.participants[3] == SimulationBeforeParticipant && frameTrace.participants[4] == SimulationAfterParticipant && frameTrace.participants[5] == RenderUpdateProducerParticipant &&
               frameTrace.participants[6] == RenderFrameSourceParticipant && frameTrace.participants[7] == FailureParticipant,
           "global phases, rendering extension points, repeated fixed steps, and same-phase dependencies execute deterministically");
     Check(frameStats.frames == 1 && frameStats.lastFixedSteps == 2 && frameStats.fixedSteps == 2 && std::fabs(frameStats.fixedTimeSeconds - 0.04) < 0.0001 &&
-              std::fabs(frameStats.lastRawDeltaSeconds - 0.09f) < 0.0001f && std::fabs(frameStats.lastRealDeltaSeconds - 0.09f) < 0.0001f &&
-              frameStats.droppedSimulationSeconds > 0.039 && frameStats.droppedSimulationSeconds < 0.041,
+              std::fabs(frameStats.lastRawDeltaSeconds - 0.09f) < 0.0001f && std::fabs(frameStats.lastRealDeltaSeconds - 0.09f) < 0.0001f && frameStats.droppedSimulationSeconds > 0.039 &&
+              frameStats.droppedSimulationSeconds < 0.041,
           "fixed-step catch-up is bounded and dropped time is reported");
     vanguard::engine::StreamingObserverSnapshot observerSnapshot;
-    const vanguard::engine::StreamingObserverServiceStats observerStats =
-        streamingObservers != nullptr ? streamingObservers->GetStats() : vanguard::engine::StreamingObserverServiceStats{};
-    Check(
-        streamingObservers != nullptr && streamingObservers->GetSnapshot(observerSnapshot) && observerSnapshot.observerCount == 2 &&
-            observerSnapshot.sequence == 1 && !observerSnapshot.usingWorldOriginFallback && std::fabs(observerSnapshot.cameraPosition[0] - 100.0) < 0.0001 &&
-            std::fabs(observerSnapshot.cameraPosition[1] - 200.0) < 0.0001 && std::fabs(observerSnapshot.observers[0].predictedPosition[0] - 105.0) < 0.0001 &&
-            std::fabs(observerSnapshot.observers[1].predictedPosition[0] - 12.0) < 0.0001 &&
-            std::fabs(observerSnapshot.observers[1].predictedPosition[1] - 16.0) < 0.0001 && std::fabs(observerSnapshot.globalDistanceScale - 1.5f) < 0.0001f &&
-            observerStats.registeredObservers == 2 && observerStats.validObservers == 2 && observerStats.submittedSnapshots == 0,
-        "Streaming Observer snapshot applies velocity-class prediction caps without mutating source positions");
-    Check(streamingObservers != nullptr && streamingObservers->UnregisterObserver(cameraObserver) &&
-              !streamingObservers->UpdateObserver(cameraObserver, cameraUpdate) && streamingObservers->UnregisterObserver(vehicleObserver) &&
-              streamingObservers->GetStats().registeredObservers == 0 && streamingObservers->GetStats().rejectedUpdates == 1,
+    const vanguard::engine::StreamingObserverServiceStats observerStats = streamingObservers != nullptr ? streamingObservers->GetStats() : vanguard::engine::StreamingObserverServiceStats{};
+    Check(streamingObservers != nullptr && streamingObservers->GetSnapshot(observerSnapshot) && observerSnapshot.observerCount == 2 && observerSnapshot.sequence == 1 &&
+              !observerSnapshot.usingWorldOriginFallback && std::fabs(observerSnapshot.cameraPosition[0] - 100.0) < 0.0001 && std::fabs(observerSnapshot.cameraPosition[1] - 200.0) < 0.0001 &&
+              std::fabs(observerSnapshot.observers[0].predictedPosition[0] - 105.0) < 0.0001 && std::fabs(observerSnapshot.observers[1].predictedPosition[0] - 12.0) < 0.0001 &&
+              std::fabs(observerSnapshot.observers[1].predictedPosition[1] - 16.0) < 0.0001 && std::fabs(observerSnapshot.globalDistanceScale - 1.5f) < 0.0001f && observerStats.registeredObservers == 2 &&
+              observerStats.validObservers == 2 && observerStats.submittedSnapshots == 0,
+          "Streaming Observer snapshot applies velocity-class prediction caps without mutating source positions");
+    Check(streamingObservers != nullptr && streamingObservers->UnregisterObserver(cameraObserver) && !streamingObservers->UpdateObserver(cameraObserver, cameraUpdate) &&
+              streamingObservers->UnregisterObserver(vehicleObserver) && streamingObservers->GetStats().registeredObservers == 0 && streamingObservers->GetStats().rejectedUpdates == 1,
           "Streaming Observer generational handles reject stale producer updates");
     Check(frameTrace.contexts[1].fixedStep == 0 && frameTrace.contexts[2].fixedStep == 1 && frameTrace.contexts[1].fixedStepCount == 2 &&
-              std::fabs(frameTrace.contexts[1].simulationDeltaSeconds - 0.02f) < 0.0001f &&
-              std::fabs(frameTrace.contexts[1].fixedTimeSeconds - 0.02) < 0.0001 && std::fabs(frameTrace.contexts[2].fixedTimeSeconds - 0.04) < 0.0001,
+              std::fabs(frameTrace.contexts[1].simulationDeltaSeconds - 0.02f) < 0.0001f && std::fabs(frameTrace.contexts[1].fixedTimeSeconds - 0.02) < 0.0001 &&
+              std::fabs(frameTrace.contexts[2].fixedTimeSeconds - 0.04) < 0.0001,
           "fixed-step contexts expose stable step identity, delta, and absolute time");
 
     Check(framePipeline->SetPaused(true), "pause request at frame boundary");
     frameTrace.count = 0;
     frameClock.ticks += 20;
-    Check(framePipeline->RunFrame(&frameFailure) && frameTrace.count == 6 && frameTrace.contexts[0].paused &&
-              frameTrace.contexts[0].simulationDeltaSeconds == 0.0f && framePipeline->GetStats().lastFixedSteps == 0,
+    Check(framePipeline->RunFrame(&frameFailure) && frameTrace.count == 6 && frameTrace.contexts[0].paused && frameTrace.contexts[0].simulationDeltaSeconds == 0.0f &&
+              framePipeline->GetStats().lastFixedSteps == 0,
           "paused frames continue non-simulation phases without fixed advancement");
     const vanguard::rendering::RenderCommandSystemStats renderingCommandStats = renderingService->GetCommands().GetStats();
     Check(renderingCommandStats.frameTicks == 2 && renderingCommandStats.completedFrameTicks >= 1 && renderingCommandStats.explicitFlushes >= 1,
           "RenderingService automatically flushes the previous CPU tail and dispatches one renderer FrameTick per outer frame");
-    Check(framePipeline->SetPaused(false) && !framePipeline->SetTimeScale(-1.0f) && framePipeline->SetTimeScale(0.5f),
-          "time controls accept only valid boundary changes");
+    Check(framePipeline->SetPaused(false) && !framePipeline->SetTimeScale(-1.0f) && framePipeline->SetTimeScale(0.5f), "time controls accept only valid boundary changes");
     frameTrace.count = 0;
     frameClock.ticks += 40;
-    Check(framePipeline->RunFrame(&frameFailure) && framePipeline->GetStats().lastFixedSteps == 1 &&
-              std::fabs(framePipeline->GetStats().lastSimulationDeltaSeconds - 0.02f) < 0.0001f,
+    Check(framePipeline->RunFrame(&frameFailure) && framePipeline->GetStats().lastFixedSteps == 1 && std::fabs(framePipeline->GetStats().lastSimulationDeltaSeconds - 0.02f) < 0.0001f,
           "scaled time feeds both variable and fixed simulation domains");
 
     failureFixture.fail = true;
     frameTrace.count = 0;
     frameClock.ticks += 20;
-    Check(!framePipeline->RunFrame(&frameFailure) && frameFailure.code == vanguard::engine::FrameFailureCode::ParticipantFailure &&
-              frameFailure.phase == vanguard::engine::FramePhase::EndFrame && frameFailure.participant == FailureParticipant &&
-              framePipeline->GetState() == vanguard::engine::FramePipelineState::Failed,
+    Check(!framePipeline->RunFrame(&frameFailure) && frameFailure.code == vanguard::engine::FrameFailureCode::ParticipantFailure && frameFailure.phase == vanguard::engine::FramePhase::EndFrame &&
+              frameFailure.participant == FailureParticipant && framePipeline->GetState() == vanguard::engine::FramePipelineState::Failed,
           "participant failures preserve phase and participant identity");
     Check(vanguard::jobs::IsInitialized() && vanguard::jobs::GetWorkerCount() != 0, "Jobs scheduler initialization");
     Check(vanguard::io::IsInitialized(), "I/O initialization");
@@ -597,15 +574,12 @@ int main()
                   FindLifecycleEvent(lifecycleTrace, vanguard::engine::WorldSessionServiceId, vanguard::application::LifecycleStage::Initialize),
           "Game World and Streaming Observer initialize before World Session");
     vanguard::rendering::RenderCommandFailure renderingDrainFailure;
-    Check(renderingService != nullptr && renderingService->GetCommands().FlushPreviousFrameProcessing(&renderingDrainFailure),
-          "final engine frame rendering tail drain");
+    Check(renderingService != nullptr && renderingService->GetCommands().FlushPreviousFrameProcessing(&renderingDrainFailure), "final engine frame rendering tail drain");
     const vanguard::rendering::RenderSceneManagerStats coordinatedSceneStats = renderingService->GetScenes().GetStats();
     const vanguard::containers::ArraySpan<const vanguard::rendering::RenderSceneHandle> coordinatedScenes = renderingService->GetScenes().GetFramePipelineScenes();
-    Check(coordinatedSceneStats.preparedFrames == 4 && coordinatedSceneStats.framePipelineScenes == 1 && coordinatedScenes.Count() == 1 &&
-              coordinatedScenes[0] == coordinatedScene,
+    Check(coordinatedSceneStats.preparedFrames == 4 && coordinatedSceneStats.framePipelineScenes == 1 && coordinatedScenes.Count() == 1 && coordinatedScenes[0] == coordinatedScene,
           "RenderingService feeds the dense RenderScene directory into every outer-frame FrameTick");
-    Check(renderingService->GetScenes().DestroyScene(coordinatedScene, &coordinatedSceneFailure),
-          "engine frame coordinated RenderScene retirement after the CPU tail drain");
+    Check(renderingService->GetScenes().DestroyScene(coordinatedScene, &coordinatedSceneFailure), "engine frame coordinated RenderScene retirement after the CPU tail drain");
     Check(host.Shutdown(&failure), "engine graph shutdown");
     Check(FindLifecycleEvent(lifecycleTrace, vanguard::engine::ResourceStreamingServiceId, vanguard::application::LifecycleStage::Shutdown) <
               FindLifecycleEvent(lifecycleTrace, vanguard::engine::ResourcesServiceId, vanguard::application::LifecycleStage::Shutdown),

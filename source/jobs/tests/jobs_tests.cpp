@@ -4,6 +4,12 @@
 #include <vanguard/jobs/jobs.hpp>
 
 #include <cstdio>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace
 {
@@ -21,6 +27,55 @@ namespace
         }
         return condition;
     }
+
+#if defined(_WIN32)
+    LRESULT CALLBACK WaitProbeWindow(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+    {
+        if (message == WM_APP + 41) return 7;
+        return DefWindowProcW(window, message, wparam, lparam);
+    }
+
+    bool CheckNativeMessagesDuringFrameWait()
+    {
+        WNDCLASSW descriptor{};
+        descriptor.lpfnWndProc = WaitProbeWindow;
+        descriptor.hInstance = GetModuleHandleW(nullptr);
+        descriptor.lpszClassName = L"VanguardJobsWaitProbe";
+        if (!RegisterClassW(&descriptor)) return false;
+        HWND window = CreateWindowExW(0, descriptor.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, descriptor.hInstance, nullptr);
+        if (!window) { UnregisterClassW(descriptor.lpszClassName, descriptor.hInstance); return false; }
+        const bool posted = PostMessageW(window, WM_APP + 42, 0, 0) != FALSE;
+        bool sent = false;
+        bool joined = false;
+        {
+            ManualResetEvent started;
+            Builder builder;
+            Task task = Task::Create([window, &started, &sent](const JobContext&) noexcept
+            {
+                started.Signal();
+                sent = true;
+                for (u32 index = 0; index < 3; ++index)
+                {
+                    DWORD_PTR result = 0;
+                    if (!SendMessageTimeoutW(window, WM_APP + 41, 0, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, 500, &result) || result != 7)
+                        sent = false;
+                }
+            });
+            JobName name{"Vanguard.Jobs.NativeFrameWait"};
+            if (builder.Dispatch(name, std::move(task)))
+            {
+                Counter counter = builder.ExtractCounter();
+                started.Wait(); // Ensure the sender is on a worker before the main thread assists the join.
+                joined = counter.WaitOnProcessFrame();
+            }
+        }
+        MSG queued{};
+        const bool retainedPostedMessage = PeekMessageW(&queued, window, WM_APP + 42, WM_APP + 42, PM_REMOVE) != FALSE;
+        DestroyWindow(window);
+        UnregisterClassW(descriptor.lpszClassName, descriptor.hInstance);
+        return Check(posted && joined && sent && retainedPostedMessage, "Frame wait must promptly service consecutive sent messages without consuming posted input");
+    }
+#endif
 } // namespace
 
 int main()
@@ -41,6 +96,9 @@ int main()
     }
     std::puts("[jobsTests] initialized");
     std::fflush(stdout);
+#if defined(_WIN32)
+    if (!CheckNativeMessagesDuringFrameWait()) return 32;
+#endif
 
     JobName bulkName{"Vanguard.Jobs.Bulk"};
     JobName explicitFenceName{"Vanguard.Jobs.ExplicitFence"};

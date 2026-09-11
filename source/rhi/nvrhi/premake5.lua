@@ -27,6 +27,14 @@ project "rhiNvrhi"
 group "Tests/Rendering"
 
 project "rhiNvrhiTests"
+    includedirs { "../../shaderTools/include" }
+    libdirs { path.join(slang_root, "lib") }
+    links { "shaderTools", "slang-compiler" }
+    postbuildcommands {
+        '{COPYFILE} "' .. path.join(slang_root, "bin/slang-compiler.dll") .. '" "%{cfg.targetdir}/slang-compiler.dll"',
+        '{COPYFILE} "' .. path.join(dxc_root, "bin/dxcompiler.dll") .. '" "%{cfg.targetdir}/dxcompiler.dll"',
+        '{COPYFILE} "' .. path.join(dxc_root, "bin/dxil.dll") .. '" "%{cfg.targetdir}/dxil.dll"'
+    }
     kind "ConsoleApp"
     language "C++"
     cppdialect "C++20"

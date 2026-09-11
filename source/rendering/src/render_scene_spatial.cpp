@@ -256,7 +256,7 @@ namespace vanguard::rendering::spatial
     WriteIndex::WriteIndex() noexcept
         : cells(memory::pools::Rendering::GetInstance()), buckets(memory::pools::Rendering::GetInstance()), freeCells(memory::pools::Rendering::GetInstance()),
           activeCellIndices(memory::pools::Rendering::GetInstance()), dirtyCellIndices(memory::pools::Rendering::GetInstance()),
-          unindexedProxies(memory::pools::Rendering::GetInstance())
+          unindexedProxies(memory::pools::Rendering::GetInstance()), globalProxies(memory::pools::Rendering::GetInstance())
     {
     }
 
@@ -276,6 +276,7 @@ namespace vanguard::rendering::spatial
         index.activeCellIndices.Clear();
         index.dirtyCellIndices.Clear();
         index.unindexedProxies.Clear();
+        index.globalProxies.Clear();
         index.buckets.Resize(64);
         for (u32 bucket = 0; bucket < index.buckets.Size(); ++bucket)
             index.buckets[bucket] = -1;
@@ -307,8 +308,21 @@ namespace vanguard::rendering::spatial
     InsertResult Insert(WriteIndex& index, const RenderProxyHandle proxy, const RenderProxyBounds& bounds, const RenderProxySpatialMode mode,
                         EntryHandle& entry, CounterDelta* const delta) noexcept
     {
-        if (mode != RenderProxySpatialMode::Bounds)
+        if (mode == RenderProxySpatialMode::None)
             return InsertResult::KeptUnindexed;
+        if (mode == RenderProxySpatialMode::Global)
+        {
+            entry = {};
+            entry.objectIndex = index.globalProxies.Size();
+            entry.unindexed = true;
+            entry.global = true;
+            index.globalProxies.PushBack(proxy);
+            ++index.stats.activeEntries;
+            ++index.stats.insertedEntries;
+            if (delta != nullptr)
+                ++delta->activeEntries;
+            return InsertResult::KeptUnindexed;
+        }
         if (!BoundsInFiniteExtent(index, bounds) || !CellKeyRepresentable(index, bounds))
         {
             ++index.stats.outOfRangeProxies;
@@ -360,13 +374,14 @@ namespace vanguard::rendering::spatial
             return;
         if (entry.unindexed)
         {
-            if (entry.objectIndex >= index.unindexedProxies.Size())
+            auto& proxies = entry.global ? index.globalProxies : index.unindexedProxies;
+            if (entry.objectIndex >= proxies.Size())
                 return;
             const u32 removedIndex = entry.objectIndex;
-            const u32 lastIndex = index.unindexedProxies.Size() - 1u;
-            const RenderProxyHandle moved = index.unindexedProxies[lastIndex];
-            index.unindexedProxies[removedIndex] = moved;
-            index.unindexedProxies.PopBack();
+            const u32 lastIndex = proxies.Size() - 1u;
+            const RenderProxyHandle moved = proxies[lastIndex];
+            proxies[removedIndex] = moved;
+            proxies.PopBack();
             if (removedIndex != lastIndex && result != nullptr)
             {
                 result->movedProxy = moved;
@@ -419,9 +434,26 @@ namespace vanguard::rendering::spatial
     {
         if (result != nullptr)
             *result = {};
-        if (mode != RenderProxySpatialMode::Bounds)
+        if (mode == RenderProxySpatialMode::None)
         {
             Remove(index, entry, result, delta);
+            return;
+        }
+        if (mode == RenderProxySpatialMode::Global)
+        {
+            if (entry.IsValid() && entry.global)
+            {
+                entry.global = true;
+                return;
+            }
+            Remove(index, entry, result, delta);
+            static_cast<void>(Insert(index, proxy, newBounds, mode, entry, delta));
+            return;
+        }
+        if (entry.global)
+        {
+            Remove(index, entry, result, delta);
+            static_cast<void>(Insert(index, proxy, newBounds, mode, entry, delta));
             return;
         }
         if (!BoundsInFiniteExtent(index, newBounds) || !CellKeyRepresentable(index, newBounds))
@@ -586,17 +618,21 @@ namespace vanguard::rendering::spatial
                 ++countedEntries;
             }
         }
-        countedEntries += index.unindexedProxies.Size();
-        for (u32 objectIndex = 0; objectIndex < index.unindexedProxies.Size(); ++objectIndex)
+        for (u32 membership = 0; membership < 2; ++membership)
         {
-            EntryHandle entry;
-            RenderProxyBounds bounds;
-            if (!validateProxy(userData, index.unindexedProxies[objectIndex], entry, bounds))
-                return false;
-            if (!entry.unindexed || entry.objectIndex != objectIndex)
-                return false;
-            if (BoundsInFiniteExtent(index, bounds) && CellKeyRepresentable(index, bounds))
-                return false;
+            const bool global = membership != 0;
+            const auto& proxies = global ? index.globalProxies : index.unindexedProxies;
+            countedEntries += proxies.Size();
+            for (u32 objectIndex = 0; objectIndex < proxies.Size(); ++objectIndex)
+            {
+                EntryHandle entry;
+                RenderProxyBounds bounds;
+                const bool resolved = validateProxy(userData, proxies[objectIndex], entry, bounds);
+                if (!resolved || !entry.unindexed || entry.global != global || entry.objectIndex != objectIndex)
+                    return false;
+                if (!global && BoundsInFiniteExtent(index, bounds) && CellKeyRepresentable(index, bounds))
+                    return false;
+            }
         }
         copy.activeEntries = countedEntries;
         copy.cells = index.stats.cells;
@@ -631,54 +667,87 @@ namespace vanguard::rendering::spatial
         plan.batchCount = batches.Size();
     }
 
+    u32 TraversalCount(const WriteIndex& index) noexcept
+    {
+        return index.activeCellIndices.Size() + (index.unindexedProxies.Empty() ? 0u : 1u) + (index.globalProxies.Empty() ? 0u : 1u);
+    }
+
+    static const containers::DynamicArray<RenderProxyHandle>& TraversalProxies(const WriteIndex& index, const u32 traversal) noexcept
+    {
+        if (traversal < index.activeCellIndices.Size())
+            return index.cells[index.activeCellIndices[traversal]].proxies;
+        if (traversal == index.activeCellIndices.Size() && !index.unindexedProxies.Empty())
+            return index.unindexedProxies;
+        return index.globalProxies;
+    }
+
     void BuildLiveBatches(const WriteIndex& index, const RenderSceneHandle scene, const u64 mutationEpoch, const u32 targetCellsPerBatch,
                           containers::DynamicArray<VisibilityQueryBatch>& batches, VisibilityQueryPlan& plan) noexcept
     {
         plan = {};
         plan.scene = scene;
         plan.mutationEpoch = mutationEpoch;
-        const u32 traversalSlots = index.activeCellIndices.Size() + (index.unindexedProxies.Size() != 0 ? 1u : 0u);
+        const u32 traversalSlots = TraversalCount(index);
         BuildBatches(traversalSlots, targetCellsPerBatch, batches, plan);
     }
 
-    bool BuildGpuCandidateBatches(const WriteIndex& index, const RenderSceneHandle scene, const u64 mutationEpoch, const u64 planSerial,
-                                  const u32 targetCandidatesPerBatch, const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
-                                  RenderSceneGpuCandidatePlan& plan) noexcept
+    bool PrepareGpuCandidatePlan(const WriteIndex& index, const RenderSceneHandle scene, const u64 mutationEpoch, const u64 planSerial,
+                                 const u32 targetCandidatesPerBatch, RenderSceneGpuCandidatePlan& plan) noexcept
     {
         plan = {};
         plan.scene = scene;
         plan.mutationEpoch = mutationEpoch;
         plan.serial = planSerial;
+        plan.targetCandidatesPerBatch = targetCandidatesPerBatch;
         if (targetCandidatesPerBatch == 0)
             return false;
 
-        u32 traversalCandidateCount = index.unindexedProxies.Size();
+        if (index.globalProxies.Size() > ~u32{0} - index.unindexedProxies.Size())
+            return false;
+        u32 traversalCandidateCount = index.unindexedProxies.Size() + index.globalProxies.Size();
         for (const u32 cellIndex : index.activeCellIndices)
-            traversalCandidateCount += index.cells[cellIndex].proxies.Size();
+        {
+            const u32 cellCandidates = index.cells[cellIndex].proxies.Size();
+            if (cellCandidates > ~u32{0} - traversalCandidateCount)
+                return false;
+            traversalCandidateCount += cellCandidates;
+        }
         const u32 requiredBatches = traversalCandidateCount / targetCandidatesPerBatch + (traversalCandidateCount % targetCandidatesPerBatch != 0 ? 1u : 0u);
         plan.traversalCandidateCount = traversalCandidateCount;
         plan.requiredCandidateCapacity = traversalCandidateCount;
         plan.batchCount = requiredBatches;
-        if (requiredBatches > batchStorage.Size())
+        const u32 fullBatches = traversalCandidateCount / targetCandidatesPerBatch;
+        const u32 tailCandidates = traversalCandidateCount % targetCandidatesPerBatch;
+        const u32 fullBatchRanges = targetCandidatesPerBatch / GpuVisibilityThreadsPerGroup +
+                                   (targetCandidatesPerBatch % GpuVisibilityThreadsPerGroup != 0 ? 1u : 0u);
+        const u64 workRanges = static_cast<u64>(fullBatches) * fullBatchRanges + tailCandidates / GpuVisibilityThreadsPerGroup +
+                               (tailCandidates % GpuVisibilityThreadsPerGroup != 0 ? 1u : 0u);
+        if (workRanges > ~u32{0})
+            return false;
+        plan.requiredWorkRangeCapacity = static_cast<u32>(workRanges);
+        return true;
+    }
+
+    bool BuildGpuCandidateBatches(const WriteIndex& index, const RenderSceneGpuCandidatePlan& plan,
+                                  const containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage) noexcept
+    {
+        if (!plan.IsValid() || plan.targetCandidatesPerBatch == 0 || plan.batchCount > batchStorage.Size())
             return false;
 
-        const u32 traversalSourceCount = index.activeCellIndices.Size() + (index.unindexedProxies.Empty() ? 0u : 1u);
+        const u32 traversalSourceCount = TraversalCount(index);
         u32 traversal = 0;
         u32 firstProxy = 0;
         u32 destinationOffset = 0;
-        for (u32 batchIndex = 0; batchIndex < requiredBatches; ++batchIndex)
+        for (u32 batchIndex = 0; batchIndex < plan.batchCount; ++batchIndex)
         {
-            const u32 remainingCandidates = traversalCandidateCount - destinationOffset;
-            const u32 batchCandidateCount = remainingCandidates < targetCandidatesPerBatch ? remainingCandidates : targetCandidatesPerBatch;
-            batchStorage[batchIndex] = {scene, mutationEpoch, planSerial, traversal, firstProxy, batchCandidateCount, destinationOffset};
-            plan.requiredWorkRangeCapacity +=
-                batchCandidateCount / GpuVisibilityThreadsPerGroup + (batchCandidateCount % GpuVisibilityThreadsPerGroup != 0 ? 1u : 0u);
+            const u32 remainingCandidates = plan.traversalCandidateCount - destinationOffset;
+            const u32 batchCandidateCount = remainingCandidates < plan.targetCandidatesPerBatch ? remainingCandidates : plan.targetCandidatesPerBatch;
+            batchStorage[batchIndex] = {plan.scene, plan.mutationEpoch, plan.serial, traversal, firstProxy, batchCandidateCount, destinationOffset};
 
             u32 advance = batchCandidateCount;
             while (advance != 0 && traversal < traversalSourceCount)
             {
-                const containers::DynamicArray<RenderProxyHandle>& source =
-                    traversal < index.activeCellIndices.Size() ? index.cells[index.activeCellIndices[traversal]].proxies : index.unindexedProxies;
+                const auto& source = TraversalProxies(index, traversal);
                 const u32 available = source.Size() - firstProxy;
                 const u32 count = advance < available ? advance : available;
                 firstProxy += count;
@@ -691,7 +760,7 @@ namespace vanguard::rendering::spatial
             }
             destinationOffset += batchCandidateCount;
         }
-        return true;
+        return destinationOffset == plan.traversalCandidateCount;
     }
 
     void WriteGpuCandidateRange(const WriteIndex& index, const VisibilityQueryRequest& request, const RenderSceneGpuCandidateBatch& batch, void* const userData,
@@ -706,7 +775,7 @@ namespace vanguard::rendering::spatial
         if (!batch.IsValid() || resolveProxy == nullptr || destination == nullptr)
             return;
 
-        const u32 traversalSourceCount = index.activeCellIndices.Size() + (index.unindexedProxies.Empty() ? 0u : 1u);
+        const u32 traversalSourceCount = TraversalCount(index);
         u32 traversal = batch.firstTraversal;
         u32 firstProxy = batch.firstProxy;
         u32 remaining = batch.traversalCandidateCount;
@@ -721,7 +790,7 @@ namespace vanguard::rendering::spatial
             }
             else
             {
-                source = &index.unindexedProxies;
+                source = &TraversalProxies(index, traversal);
             }
 
             const u32 available = source->Size() - firstProxy;
@@ -751,12 +820,12 @@ namespace vanguard::rendering::spatial
                     VisibilityProxyReadView view;
                     if (!resolveProxy(userData, (*source)[proxyIndex], view) || !view.IsValid())
                         continue;
-                    if (request.useBounds && !BoundsOverlap(*view.bounds, request.bounds))
+                    if (!view.global && request.useBounds && !BoundsOverlap(*view.bounds, request.bounds))
                     {
                         ++result.visibility.rejectedByBounds;
                         continue;
                     }
-                    if (request.useFrustum && !BoundsIntersectsFrustum(*view.bounds, request.frustum))
+                    if (!view.global && request.useFrustum && !BoundsIntersectsFrustum(*view.bounds, request.frustum))
                     {
                         ++result.visibility.rejectedByFrustum;
                         continue;
@@ -809,7 +878,7 @@ namespace vanguard::rendering::spatial
             return;
         }
 
-        const u32 traversalSlots = index.activeCellIndices.Size() + (index.unindexedProxies.Size() != 0 ? 1u : 0u);
+        const u32 traversalSlots = TraversalCount(index);
         if (batch.firstCell >= traversalSlots)
         {
             result.completed = true;
@@ -838,7 +907,7 @@ namespace vanguard::rendering::spatial
             }
             else
             {
-                cellProxies = &index.unindexedProxies;
+                cellProxies = &TraversalProxies(index, traversalIndex);
             }
 
             ++result.visitedCells;
@@ -849,12 +918,12 @@ namespace vanguard::rendering::spatial
                 VisibilityProxyReadView view;
                 if (!resolveProxy(userData, proxy, view) || !view.IsValid())
                     continue;
-                if (request.useBounds && !BoundsOverlap(*view.bounds, request.bounds))
+                if (!view.global && request.useBounds && !BoundsOverlap(*view.bounds, request.bounds))
                 {
                     ++result.rejectedByBounds;
                     continue;
                 }
-                if (request.useFrustum && !BoundsIntersectsFrustum(*view.bounds, request.frustum))
+                if (!view.global && request.useFrustum && !BoundsIntersectsFrustum(*view.bounds, request.frustum))
                 {
                     ++result.rejectedByFrustum;
                     continue;
@@ -894,7 +963,7 @@ namespace vanguard::rendering::spatial
         batch.scene = request.scene;
         batch.mutationEpoch = request.mutationEpoch;
         batch.firstCell = 0;
-        batch.cellCount = index.activeCellIndices.Size() + (index.unindexedProxies.Size() != 0 ? 1u : 0u);
+        batch.cellCount = TraversalCount(index);
         CollectLiveRange(index, request, batch, userData, resolveProxy, proxies, result);
     }
 } // namespace vanguard::rendering::spatial

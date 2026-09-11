@@ -7,7 +7,9 @@ The GPU Scene is the persistent renderer-owned image of renderable state. CPU sc
 ## Invariants
 
 - Ordinary renderable state has one stable `GpuInstance` slot. Per-view buffers never copy complete instances.
-- Candidate, visible, and final draw-instance lists carry 32-bit `GpuInstance` indices.
+- Candidate lists carry 32-bit `GpuInstance` indices. Visibility emits a
+  16-byte instance/renderable/selected-LOD/placement-revision record, and final
+  draw-instance records retain the instance index.
 - Slot reuse is deferred until every GPU submission that could contain the old index has completed.
 - Views and render phases are independent axes. A viewport may create views, but no view is owned by presentation.
 - A view family shares one frame and scene publication. Compatible views may share candidate sets.
@@ -32,15 +34,54 @@ Status: implemented.
 
 `gpu_scene_types.hpp` is the CPU image of the GPU Scene ABI and `gpu_scene_types.hlsli` is its shader image. Every structured-buffer element is composed exclusively of explicit 32-bit lanes, aligned to 16 bytes, and guarded by compile-time size and offset checks. Matrices are represented as four vectors rather than relying on compiler-specific matrix-major packing. Layout changes require advancing `GpuSceneLayoutVersion` and the shader-side version together.
 
-Ordinary renderables occupy one stable `GpuInstance` slot. Its first 64 bytes contain culling and classification data; quaternion and scale occupy the final 32 bytes. Previous transforms are sparse `GpuMotion` entries allocated only when motion history is required. Handles are generational on the CPU, while frame-local candidate, visible, and final instance lists contain only a 32-bit slot index. Slot reuse is a fence-deferred lifetime concern and never requires copying an instance into per-view storage.
+Version 9 assigns geometry flag bits 2 and 3 to packed 10-bit UNORM NORMAL0 and
+TANGENT0 decoding. Vertex fetch supplies normalized unsigned values; the static
+surface vertex shader restores signed XYZ and tangent handedness. The flags are
+derived once from VMESH metadata and included in the existing geometry-definition
+key. Float/SNORM directions require no remapping. Geometry record size stays 64
+bytes, and quantized POSITION0 continues to use its existing scale/bias record.
+
+Instance orientation uses the forward quaternion extracted from proxy basis
+rows and signed scale (orthogonal TRS). The existing `NegativeScale` bit is
+derived by scale-sign parity and shared by visibility placement selection and
+vertex tangent handedness. Collapsed or nonfinite decomposed mesh transforms
+remain inactive until valid publication. These 10.2.2 changes do not alter the
+ABI; shader compilation and executable verification remain deferred to 10.3.
+
+Ordinary renderables occupy one stable `GpuInstance` slot. Its first 64 bytes contain culling and classification data; quaternion and scale occupy the final 32 bytes. Previous transforms are sparse `GpuMotion` entries allocated only when motion history is required. Handles are generational on the CPU, while frame-local candidate lists contain only a 32-bit slot index. Visibility records add the selected LOD and mutable placement revision without copying transforms or renderable payloads. Slot reuse is a fence-deferred lifetime concern.
 
 Shared data is normalized into `GpuRenderable`, `GpuLod`, `GpuPrimitive`, and `GpuPhaseParticipation` tables. A primitive references geometry and material once, then a compact participation range describes its phase and pipeline-bucket membership. `GpuGeometryRange` points into large index arenas and an arbitrary range of `GpuVertexStream` entries, preserving importer-neutral and custom vertex layouts. Position decoding is shared through `GpuPositionDecode` rather than repeated per instance.
 
 `GpuMaterial` is populated by the runtime material resolver. It points to raw parameter bytes and `GpuMaterialResource` entries containing resolved bindless descriptor indices. The cooked material format remains unaware of descriptor heaps, binding slots, or draw submission. An optional `GpuMaterialSet` is a compact primitive-local override span; instances without overrides continue to use primitive defaults without allocating one. Lights and decals have dedicated persistent layouts because they do not share ordinary mesh-instance consumption patterns.
 
-### Provisional material-interface direction
+`MaterialResourceResolver` is the single typed boundary between cooked roles and
+renderer identities. Its bounded registry is keyed by reflected family and
+expected asset type. The built-in VTEX adapter retains a `TextureDemandHandle`
+and exposes only a stable texture-residency index after `BindlessReady`; generic
+providers return retained buffer, sampler, acceleration-structure, or stable
+texture-residency results. Buffer and acceleration-structure views share the
+global Resources descriptor cache, samplers share the global Samplers cache,
+and move-only references retain provider ownership. Provider registrations are
+device-lifetime stable and the descriptor cache uses hashed full-identity lookup
+with exact collision verification. Exact-shape fallbacks are
+registered explicitly. Writable fallbacks must be provider-private, while
+missing capabilities or descriptor capacity fail without publishing a partial
+role. Descriptor generations remain CPU-side and shared reference retirements merge
+their graphics/compute/copy cutover floors before the descriptor is recycled.
 
-This section records a design discussion, not an accepted or implemented contract. `GpuMaterial::materialInterface` currently reserves a stable identity connecting a GPU material instance to some future shader-derived material ABI. The engine does not yet declare, reflect, cook, register, validate, or generate accessors for such an ABI, and the field must not be treated as evidence that those systems already exist.
+### Shader-declared material-layout direction
+
+`GpuMaterial::materialLayout` reserves a compact runtime identity for the exact
+shader-derived material storage layout. The authoritative full domain and layout
+fingerprints are implemented in `VSHADER`, `VPPL`, and `VMAT`; the shader toolchain now
+declares and reflects the contract explicitly. Generated shader accessors are implemented
+by the offline material compiler. Phase 3A.2 now provides the renderer-owned,
+bounded full-fingerprint registry behind that compact id. Phase 3B.2 now owns
+typed role resolution and retained bindless references. Phase 3B.3 now provides the
+bounded `MaterialMaterializer`: it hashes the complete resolved image, prepares
+and stages the existing deferred material-definition batch, exposes handles only
+after shared-runtime acceptance, rolls back prepared cancellation, and retains
+the definition and role references until explicit queue-fenced retirement.
 
 Shader reflection cannot reliably infer which declarations in an arbitrary bindless shader constitute material state. A shader may expose global GPU Scene tables, view data, pass resources, render targets, helper structures, and several entry points alongside actual material parameters. If Vanguard pursues this model, material participation must therefore be explicit rather than guessed. A shader module or entry point would declare or reference a designated material interface, while shaders such as culling, depth-pyramid construction, bloom, or tone mapping may declare none.
 
@@ -74,7 +115,7 @@ Bloom shader                 → no material interface
 Tonemapper                    → no material interface
 GPU culling shader            → no material interface
 
-materialInterface = InvalidMaterialInterface;
+materialLayout = InvalidGpuSceneIndex;
 
 ```text
 GpuPrimitive.material
@@ -86,19 +127,15 @@ GpuPrimitive.material
 
 For example, a reflected `normalTexture` role might become resource slot 1. The shader would read `materialResources[material.firstResource + 1]` and use the resulting descriptor index with the global bindless resource domain. `GpuMaterial` itself remains layout-agnostic and contains no hardcoded normal-map, base-color, or roughness fields.
 
-The primary draw path should not necessarily perform a dynamic `MaterialInterfaces[material.materialInterface]` lookup for every parameter or texture. Pipeline and GPU batching work can already group compatible primitives by pipeline/material-interface bucket, allowing the compiled shader to know its generated layout. A runtime interface table may still be useful for genuinely generic evaluation, validation, editor inspection, debugging, or future ray-tracing paths, but its cost and purpose must be demonstrated before adoption.
+The primary draw path should not perform a dynamic `MaterialLayouts[material.materialLayout]` lookup for every parameter or texture. Pipeline and GPU batching work can group compatible primitives by pipeline/material-layout bucket, allowing the compiled shader to know its generated layout. A runtime layout table may still be useful for validation, editor inspection, debugging, or genuinely generic evaluation, but its cost and purpose must be demonstrated before adoption.
 
-If implemented, the missing work includes:
+Compact-layout registration, parameter-word storage, and resolution of material
+resource roles into retained bindless identities are implemented. The remaining
+runtime work is the atomic transaction that combines those pieces into one
+accepted `GpuMaterial` publication.
 
-- explicit material-interface declarations or metadata in the Slang authoring model;
-- entry-point-specific reflection that filters unrelated shader declarations;
-- stable interface identity, layout hashing, and compatibility rules;
-- generated shader-side material accessors;
-- cooked `vshader` interface metadata and `vmat` validation;
-- runtime interface registration and pipeline compatibility checks;
-- resolution of material resource roles into real bindless descriptor indices.
-
-This direction may be revised or discarded if a simpler pipeline-specialized ABI, a fixed renderer material model, or another measured design provides better scalability. Until that decision is made, Render Scene and GPU Scene code should treat material and interface indices as externally resolved stable identities and must not invent material-layout interpretation locally.
+Render Scene and GPU Scene code must treat material and layout indices as externally
+resolved stable identities and must not invent material-layout interpretation locally.
 
 `GpuView` is frame-scoped rather than persistent scene state. It mirrors the validated CPU view with exact matrices, camera-relative origins, frustum planes, view masks, render-phase bits, temporal identity, and jitter. Views therefore select and classify stable scene indices without duplicating persistent instance, primitive, geometry, or material data.
 
@@ -150,9 +187,9 @@ Status: implemented.
 
 `GpuSceneDefinitions` owns immutable, content-addressed geometry, material, and renderable definitions. A 256-bit `GpuSceneDefinitionKey` is supplied by the resource resolver; equal keys reuse the existing generational GPU handle and must represent identical resolved content. Reloaded content receives a different key, allowing instances to switch definitions before the old version retires.
 
-Geometry publication owns one `GpuGeometryRange`, its complete `GpuVertexStream` span, and optional `GpuPositionDecode`. Material publication owns one `GpuMaterial` and its resolved bindless-resource span. Renderable publication owns `GpuRenderable`, LOD, primitive, and phase-participation ranges. Local authoring offsets are validated and rebased to persistent table indices during direct upload-heap emission. Definitions and their child arrays may cross table-page boundaries without changing their logical ranges.
+Geometry publication owns one `GpuGeometryRange`, its complete `GpuVertexStream` span, and optional `GpuPositionDecode`. Material publication owns one compound `GpuMaterial`, resolved bindless-resource span, and zero-padded `GpuMaterialParameterWord` span whose row retains the exact byte size. Renderable publication owns `GpuRenderable`, LOD, primitive, and phase-participation ranges. Local authoring offsets are validated and rebased to persistent table indices during direct upload-heap emission. Definitions and their child arrays may cross table-page boundaries without changing their logical ranges.
 
-Registration is batch-oriented. Existing keys increment references without allocating or uploading; new compound definitions are allocated transactionally and submitted through one sparse-publication batch. A failed allocation or upload cancels every unpublished range and rolls back references acquired by the transaction. Reused-only batches perform no GPU submission.
+Registration is batch-oriented. Existing keys increment references without allocating or uploading; new compound definitions are allocated transactionally. Geometry and renderable legacy callers still use their immediate sparse batches. Materials use one deferred prepare/stage/consume contract: their ranges enter `GpuSceneRuntime::StageContribution`, share the renderer-wide uploader submission and fence, and expose handles only after the accept callback. The former privately submitting material API was removed. A failed allocation or contribution rolls back unpublished ranges and acquired references; reused-only material batches require no GPU submission.
 
 Renderable primitives retain generational geometry and material handles on the CPU while the GPU image stores their stable 32-bit indices. Acquiring another reference to the same renderable does not duplicate dependency edges. When its final reference is released, the definition owner decrements every primitive edge and atomically places the renderable plus any newly unreferenced geometry and material compounds into the same retirement transaction. Their indices remain unavailable for reuse until the configured graphics, compute, and copy fences complete.
 
@@ -166,7 +203,7 @@ Status: implemented as contracts, planning, and shaders. Production execution in
 
 Every view owns a disjoint visible-index partition and one counter entry. Visibility requests that exceed the partition never write out of bounds: `visibleCount` preserves the requested count, consumers clamp it to the declared capacity, and `overflowCount` records the exact loss. Work, candidate, result, view, visible-index, and counter structures contain explicit 32-bit lanes and have CPU/shader size contracts.
 
-`gpu_scene_visibility.slang` validates instance activation, visibility masks, renderable residency, requested render-phase intersection, and view-relative bounding spheres. Each workgroup performs group-local prefix compaction and reserves its output with one global atomic rather than one atomic per visible instance. Persistent instance and renderable pages are reached through the global bindless table/page directories; frame-local buffers are also named by descriptor indices supplied through a compact push-constant structure.
+`gpu_scene_visibility.vsl` validates instance activation, visibility masks, renderable residency, requested render-phase intersection, and view-relative bounding spheres. Each workgroup performs group-local prefix compaction and reserves its output with one global atomic rather than one atomic per visible instance. Persistent instance and renderable pages are reached through the global bindless table/page directories; frame-local buffers are also named by descriptor indices supplied through a compact push-constant structure.
 
 The shader compiles to DXIL and SPIR-V through the Vanguard Slang toolchain. No rendering service currently binds these resources, records commands, dispatches the kernel, or submits it. The future rendering/GPU-visibility service owns counter clearing, descriptor materialization, constants, and dispatch policy. It contributes opaque passes and their resource accesses to the Render Graph; the graph owns placement, transitions, queue synchronization, and execution ordering without interpreting visibility semantics.
 

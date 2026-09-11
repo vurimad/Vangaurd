@@ -115,7 +115,7 @@ project "redCoreCompat"
 project "redJobsCompat"
     kind "StaticLib"
     applyRedCompatibilitySettings()
-    defines { "RED_MODULE_redJobs2", "RED_EXPORT_redJobs2" }
+    defines { "RED_MODULE_redJobs2", "RED_EXPORT_redJobs2", "VG_INTERACTIVE_DXGI_WAIT" }
     pchheader "build.h"
     pchsource(path.join(redJobsRoot, "src/build.cpp"))
     includedirs {

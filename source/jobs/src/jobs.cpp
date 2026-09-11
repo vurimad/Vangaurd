@@ -247,6 +247,15 @@ namespace vanguard::jobs
         return dispatched;
     }
 
+    void Builder::AddDependency(Builder&& branch) noexcept
+    {
+        if (this == &branch || m_backend == nullptr || branch.m_backend == nullptr || m_hasOpenFenceGroup || branch.m_hasOpenFenceGroup)
+            VG_FATAL("joining a branch requires distinct valid builders with closed fence groups");
+        backend::AddBuilderDependency(m_backend, branch.m_backend);
+        backend::DestroyBuilder(branch.m_backend);
+        branch.m_backend = nullptr;
+    }
+
     void Builder::AddDependency(const Counter& dependency) noexcept
     {
         if (m_backend != nullptr && dependency.IsValid())
@@ -269,5 +278,11 @@ namespace vanguard::jobs
     {
         VG_ASSERT_MSG(!m_hasOpenFenceGroup, "DispatchFence() is required before ExtractCounter().");
         return Counter{m_backend != nullptr ? backend::ExtractCounter(m_backend) : nullptr};
+    }
+
+    bool Builder::WaitForCompletion() noexcept
+    {
+        VG_ASSERT_MSG(!m_hasOpenFenceGroup, "DispatchFence() is required before WaitForCompletion().");
+        return m_backend != nullptr && backend::WaitForBuilder(m_backend);
     }
 } // namespace vanguard::jobs

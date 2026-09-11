@@ -153,22 +153,21 @@ namespace vanguard::rendering
         TextureResidencyManager(const TextureResidencyManager&) = delete;
         TextureResidencyManager& operator=(const TextureResidencyManager&) = delete;
 
-        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, rhi::DescriptorDomainRef resourceDescriptors, const TextureResidencyConfig& config = {},
-                                      TextureResidencyFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, rhi::DescriptorDomainRef resourceDescriptors, const TextureResidencyConfig& config = {}, TextureResidencyFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(TextureResidencyFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Allocates a stable identity. It remains shader-inaccessible until its first installation batch commits.
         [[nodiscard]] bool Allocate(GpuTextureResidencyHandle& handle, TextureResidencyFailure* failure = nullptr) noexcept;
         /// Admits a complete physical texture through a new write-once descriptor without recording or submitting
         /// GPU work. The previous installation remains authoritative until AcceptSubmittedBatch runs.
-        [[nodiscard]] bool Install(GpuTextureResidencyHandle handle, const TextureInstallationDesc& installation, TextureInstallationTicket& ticket,
-                                   TextureResidencyFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Install(GpuTextureResidencyHandle handle, const TextureInstallationDesc& installation, TextureInstallationTicket& ticket, TextureResidencyFailure* failure = nullptr) noexcept;
 
         /// Starts the only active physical transition for a stable texture identity and retains its current
         /// texture as the shared-mip copy source. Initial installations have no current texture.
-        [[nodiscard]] bool BeginTransition(GpuTextureResidencyHandle handle, const resources::WeakResourceHandle& source, const crypto::Digest256& contentFingerprint,
-                                           u32 targetFirstResidentMip, TextureTransitionToken& token, TextureResidencyFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginTransition(GpuTextureResidencyHandle handle, const resources::WeakResourceHandle& source, const crypto::Digest256& contentFingerprint, u32 targetFirstResidentMip,
+                                           TextureTransitionToken& token, TextureResidencyFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool GetTransitionInfo(TextureTransitionToken token, TextureTransitionInfo& info, TextureResidencyFailure* failure = nullptr) const noexcept;
         [[nodiscard]] bool EndTransition(TextureTransitionToken token, TextureResidencyFailure* failure = nullptr) noexcept;
 
@@ -176,12 +175,10 @@ namespace vanguard::rendering
         /// contribution is valid, but maximumInstallations must be non-zero.
         [[nodiscard]] bool PrepareBatch(u32 maximumInstallations, TextureResidencyBatch& batch, TextureResidencyFailure* failure = nullptr) noexcept;
         /// Fills exactly batch.installationCount requests. The caller may place this span inside a larger shared batch.
-        [[nodiscard]] bool BuildUploadRequests(const TextureResidencyBatch& batch, containers::ArraySpan<GpuSceneUploadRequest> requests,
-                                               TextureResidencyFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] bool BuildUploadRequests(const TextureResidencyBatch& batch, containers::ArraySpan<GpuSceneUploadRequest> requests, TextureResidencyFailure* failure = nullptr) const noexcept;
         /// Writes final table values into the exact reservations assigned to this contribution. It never completes
         /// reservations or submits the uploader batch.
-        [[nodiscard]] bool WriteBatch(const TextureResidencyBatch& batch, containers::ArraySpan<const GpuSceneUploadReservation> reservations,
-                                      TextureResidencyFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool WriteBatch(const TextureResidencyBatch& batch, containers::ArraySpan<const GpuSceneUploadReservation> reservations, TextureResidencyFailure* failure = nullptr) noexcept;
         /// Makes the already validated frozen candidates authoritative after renderer-owned submission. This is
         /// deliberately infallible: all caller-correctable validation must happen before GPU Scene submission.
         void AcceptSubmittedBatch(const TextureResidencyBatch& batch, rhi::GpuFence sharedCompletion) noexcept;

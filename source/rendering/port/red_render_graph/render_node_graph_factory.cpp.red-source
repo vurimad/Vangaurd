@@ -1,0 +1,548 @@
+/**
+* Copyright (c) 2018 CD Projekt Red. All Rights Reserved.
+*/
+
+#include "build.h"
+#include "renderNodeGraphFactory.h"
+#include "../../redJobs2/include/jobBuilder.h"
+
+
+#define ENABLE_DEBUG_COMMANDLISTS_EXECUTION		0
+
+namespace rend
+{
+#ifdef USE_PROFILER
+	static red::InstrumentationObject s_RenderGraphInstrumentationObject( "RenderGraph_InstrumentationObjectOverflow" );
+#endif //  USE_PROFILER
+
+	// Special node used by NodeGraphFactory to wrap multiple nodes into one command list.
+	// #TODO: This should be the only place where command list buckets are used. General CRenderNodeBase should not do
+	// any commandlist stuff.
+	class CRenderNodeCommandListGroup final : public CRenderNodeBase
+	{
+	public:
+		CRenderNodeCommandListGroup( const char* name )
+			: m_name( RED_NAME(name) )
+		{
+		}
+
+		CRenderNodeCommandListGroup( const char* name, GpuApi::CommandListType commandListType )
+			: m_name( RED_NAME(name) )
+			, m_commandListType( commandListType )
+		{
+		}
+
+		virtual RenderNodeCommandListUsage GetCommandListUsage() const override
+		{
+			return RenderNodeCommandListUsage::Own;
+		}
+
+		void AddSubnode( red::UniquePtr<CRenderNodeBase>&& subnode )
+		{
+			m_subnodes.PushBack( std::move(subnode) );
+		}
+
+		virtual GpuApi::CommandListRef CreateCommandList() const override
+		{
+			GpuApi::CommandListRef commandList = GpuApi::CreateCommandList( m_commandListType, m_name.GetHash() );
+			GpuApi::SetResourceDebugName( commandList, m_name.AsChar() );
+			return commandList;
+		}
+
+		virtual void Execute( const SRenderNodeImplContext& rctx, job::Builder* builder ) const override
+		{
+			if ( m_subnodes.Empty() )
+			{
+				return;
+			}
+
+			ERenderQueueType renderQueueType = RQT_None;
+			switch ( m_commandListType )
+			{
+			case GpuApi::CommandListType::Default: renderQueueType = RQT_Graphic; break;
+			case GpuApi::CommandListType::Compute: renderQueueType = RQT_Compute; break;
+			default: RED_HALT("Unsupported command list type %d", m_commandListType);
+			}
+
+			rctx.GetResourceAllocator()->RequestBeginQueue( renderQueueType, rctx.GetRenderFlowGroup() );
+
+			// #HACK: Close our active bucket, so if other nodes open it, it's okay.
+			Int32 commandListBucket = rctx.GetRenderFlowGroup();
+			if ( rctx.IsConsumePhase() )
+			{
+				GpuApi::BindCommandList({});
+			}
+
+			Bool isAnyChildNodeUsingJobBuilder = false;
+
+			if ( rctx.IsConsumePhase() )
+			{
+				Bool childJobDispatched = false;
+				Uint32 firstDeferredNodeIndex = 0; // index of a first node that has to be executed on a job
+				for ( Uint32 nodeIndex = 0; nodeIndex < m_subnodes.Size(); ++nodeIndex )
+				{
+					const red::SharedPtr<CRenderNodeBase>& subnode = m_subnodes[ nodeIndex ];
+					
+					const Bool isLastSubNode = ( nodeIndex + 1 == m_subnodes.Size() );
+					const Bool nodeRequiresJobBuilder = subnode->GetJobBuilderUsage();
+
+					if ( nodeRequiresJobBuilder )
+					{
+						isAnyChildNodeUsingJobBuilder = true;
+					}
+
+					// execute job in-place, without additional job
+					if ( !childJobDispatched && !nodeRequiresJobBuilder )
+					{
+						PC_SCOPE_INST_OBJ( *subnode->GetInstrumentationObject(), subnode->GetName().AsChar() );
+						const SRenderNodeImplContext rctxCopy( rctx, job::GetDispatcherThreadIndex() );
+						subnode->Process( rctxCopy, nullptr );
+						firstDeferredNodeIndex = nodeIndex + 1;
+						continue;
+					}
+
+					if ( !isLastSubNode && !nodeRequiresJobBuilder )
+					{
+						continue;
+					}
+
+					if ( firstDeferredNodeIndex <= nodeIndex )
+					{
+#ifdef USE_PROFILER
+						builder->DispatchJob( *GetInstrumentationObject(), [ firstNodeIndex = firstDeferredNodeIndex, lastNodeIndex = nodeIndex, rctx, this ]( const job::RunContext & runContext )
+#else
+						builder->DispatchJob( "RenderNode", [firstNodeIndex = firstDeferredNodeIndex, lastNodeIndex = nodeIndex, rctx, this] ( const job::RunContext & runContext )
+#endif
+						{
+							// update the context with new thread index
+							const SRenderNodeImplContext rctxCopy( rctx, runContext.dispatcherThreadIndex );
+
+							for ( Uint32 nodeIndex = firstNodeIndex; nodeIndex <= lastNodeIndex; ++nodeIndex )
+							{
+								const red::SharedPtr<CRenderNodeBase>& subnode = m_subnodes[ nodeIndex ];
+
+								PC_SCOPE_INST_OBJ( *subnode->GetInstrumentationObject(), subnode->GetName().AsChar() );
+
+								if ( subnode->GetJobBuilderUsage() )
+								{
+									RED_FATAL_ASSERT( nodeIndex == lastNodeIndex, "This should be the last node in the batch" );
+
+									job::Builder depBuilder( runContext );
+									subnode->Process( rctxCopy, &depBuilder );
+								}
+								else
+								{
+									subnode->Process( rctxCopy, nullptr );
+								}
+							}
+						} );
+
+						childJobDispatched = true;
+					}
+
+					firstDeferredNodeIndex = nodeIndex + 1;
+				}
+			}
+			else // !rctx.IsConsumePhase()
+			{
+				for ( const red::SharedPtr<CRenderNodeBase>& subnode : m_subnodes )
+				{
+					subnode->Process( rctx, builder );
+				}
+			}
+
+			if ( isAnyChildNodeUsingJobBuilder )
+			{
+				RED_FATAL_ASSERT( rctx.IsConsumePhase() );
+
+				builder->DispatchJob( "RenderNodeCommandList_Epilogue", [renderQueueType, rctx]( const job::RunContext & runContext )
+				{
+					rctx.GetResourceAllocator()->RequestEndQueue( rctx.GetRenderFlowGroup() );
+				} );
+			}
+			else
+			{
+				PC_SCOPE( RenderNodeCommandList_Epilogue );
+				rctx.GetResourceAllocator()->RequestEndQueue( rctx.GetRenderFlowGroup() );
+			}
+		}
+
+		virtual bool GetJobBuilderUsage() const override
+		{
+			for ( const red::SharedPtr<CRenderNodeBase>& subnode : m_subnodes )
+			{
+				if ( subnode->GetJobBuilderUsage() )
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		virtual CName GetName() const override
+		{
+			return m_name;
+		}
+
+#ifdef USE_PROFILER
+		virtual Bool AllowGpuScope() const override
+		{
+			// Only have a global scope if all subnodes also have a scope. If one doesn't have a scope, then it may be
+			// set up in a way that a scope is not possible. So we shouldn't be trying to open one either.
+			Bool allHaveScope = true;
+			for ( const red::SharedPtr<CRenderNodeBase>& subnode : m_subnodes )
+			{
+				if ( !subnode->AllowGpuScope() )
+				{
+					allHaveScope = false;
+				}
+			}
+			return allHaveScope;
+		}
+
+		virtual red::InstrumentationObject* GetInstrumentationObject() const override final { 
+			
+			return AcquireInstrumentedObject(m_name);
+		}
+
+		red::InstrumentationObject * AcquireInstrumentedObject( const CName& key ) const
+		{
+
+			{
+				red::ScopedSharedLock< red::RWSpinLock > lock( s_instrumentedObjectLock );
+				auto iter = s_instrumentionObjectDictionary.Find( key );
+				if ( iter != s_instrumentionObjectDictionary.End() )
+				{
+					return &s_instrumentedObject[iter.Value()];
+				}
+			}
+
+			if ( !s_instrumentedObject.Full() )
+			{
+				red::ScopedLock< red::RWSpinLock > lock( s_instrumentedObjectLock );
+				auto iter = s_instrumentionObjectDictionary.Find( key );
+				if ( iter == s_instrumentionObjectDictionary.End() )
+				{
+					if ( !s_instrumentedObject.Full() )
+					{
+						s_instrumentedObject.Grow( 1 );
+						red::InstrumentationObject * instrumentedObject = &s_instrumentedObject.Back();
+						instrumentedObject->m_name = key.AsChar();
+						instrumentedObject->m_forceChannel = PBC_RENDER;
+						s_instrumentionObjectDictionary[key] = s_instrumentedObject.Size() - 1;
+
+						return instrumentedObject;
+					}
+				}
+				else
+				{
+					return &s_instrumentedObject[iter.Value()];
+				}
+			}
+
+			return &s_RenderGraphInstrumentationObject;
+		}
+
+		static red::StaticArray< red::InstrumentationObject, 256 > s_instrumentedObject;
+		static red::Map< CName, Uint32 > s_instrumentionObjectDictionary;
+		static red::RWSpinLock s_instrumentedObjectLock;
+#endif //  USE_PROFILER
+
+	private:
+		CName m_name;
+		GpuApi::CommandListType m_commandListType = GpuApi::CommandListType::Default;
+		red::DynArray<red::SharedPtr<CRenderNodeBase>> m_subnodes{rend::PoolRenderGraph()};
+	};
+
+#ifdef USE_PROFILER
+	// Make sure that the instruction object is not destroyed before required by the profiler
+	red::StaticArray< red::InstrumentationObject, 256 > CRenderNodeCommandListGroup::s_instrumentedObject;
+	red::Map< CName, Uint32 > CRenderNodeCommandListGroup::s_instrumentionObjectDictionary{red::PoolDebug()};
+	red::RWSpinLock CRenderNodeCommandListGroup::s_instrumentedObjectLock;
+#endif //  USE_PROFILER
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	NodesContainer::NodesContainer()
+	{
+	}
+
+	NodesContainer::~NodesContainer()
+	{}
+
+	void NodesContainer::Reset()
+	{
+		m_nodes.Clear();
+	}
+
+
+	NodeGraphFactory::NodeGraphFactory( CRenderNodeGraph* graphPtr, NodesContainer *nodes )
+		: m_graphPtr( graphPtr )   
+		, m_nodes ( nodes )
+		, m_currentGroup( nullptr )
+	{
+		if ( graphPtr )
+		{
+			graphPtr->Reset();
+		}
+
+		if ( nodes )
+		{
+			nodes->Reset();
+		}
+	}
+
+	NodeGraphFactory::~NodeGraphFactory()
+	{
+		RED_ASSERT(m_currentGroup == nullptr, "Command List Group is still open.");
+
+		if ( ENABLE_DEBUG_COMMANDLISTS_EXECUTION )
+		{
+			LinkCPU();
+		}
+	}
+
+	Int32 NodeGraphFactory::FindGroupFirstTagIndex( NodeGroupID groupId ) const
+	{
+		return m_groupData[Uint32(groupId)].m_firstGroupTagIndex;
+	}	
+
+	// - - - - - - - - - - - - - - - - - - - - - - -
+
+	CRenderNodeGraph::ItemId NodeGraphFactory::Register( NodeGroupID groupId, const SRenderNodeParameters &nodeParameters )
+	{
+		RED_FATAL_ASSERT( nodeParameters.m_impl, "Note implementation missing" );
+
+		red::UniquePtr<CRenderNodeBase> nodeImpl = red::MakeUniquePtr( nodeParameters.m_impl );
+
+		if ( m_currentGroup != nullptr )
+		{
+			m_currentGroup->AddSubnode( std::move(nodeImpl) );
+			return CRenderNodeGraph::INVALID_ITEM_ID;
+		}
+		
+		m_nodes->m_nodes.PushBack( std::move(nodeImpl) );
+
+		const auto nodeId = m_graphPtr->AddNode( nodeParameters, 0 );
+	
+		SGroupData& groupData = m_groupData[Uint32(groupId)];
+
+		m_groupTags.Grow(1);
+		m_groupTags.Back().m_nodeId = nodeId;
+		m_groupTags.Back().m_nextIndex = groupData.m_firstGroupTagIndex;
+
+		groupData.m_firstGroupTagIndex = (Int32)m_groupTags.Size() - 1;
+
+		m_nodeIds.PushBack(nodeId);
+		RED_ASSERT(m_nodes->m_nodes.Size() == m_nodeIds.Size());
+
+		return nodeId;
+	}
+
+	// - - - - - - - - - - - - - - - - - - - - - - -
+
+	CRenderNodeGraph::ItemId NodeGraphFactory::CreateCustom( NodeGroupID groupId, const SRenderNodeParameters &nodeParameters )
+	{
+		return Register( groupId, nodeParameters );
+	}
+
+	// - - - - - - - - - - - - - - - - - - - - - - -
+
+	CRenderNodeGraph::ItemId NodeGraphFactory::BeginCommandListGroup( NodeGroupID groupId, ERenderNodeType type, RenderNodeSubtype subType, const char *name, GpuApi::CommandListType commandListType )
+	{
+		RED_ASSERT(m_currentGroup == nullptr, "Command List Group is already open. Nesting is not supported.");
+
+		// #HACK: We need to hold on to the group, even though Register will actually be packing it up into a UniquePtr
+		// and passing ownership over to the nodes container.
+		CRenderNodeCommandListGroup* clGroup = RED_NEW(CRenderNodeCommandListGroup)( name, commandListType );
+
+		CRenderNodeGraph::ItemId itemId = Register( groupId, SRenderNodeParameters().Set( type, subType, clGroup ) );
+		m_currentGroup = clGroup;
+		return itemId;
+	}
+
+	void NodeGraphFactory::EndCommandListGroup()
+	{
+		RED_ASSERT(m_currentGroup != nullptr, "Command List Group is not open.");
+		m_currentGroup = nullptr;
+	}
+
+	// - - - - - - - - - - - - - - - - - - - - - - -
+
+	void NodeGraphFactory::LinkImpl( CRenderNodeGraph::ItemId parent, CRenderNodeGraph::ItemId child, ERenderNodeDependencyType depType )
+	{
+		RED_FATAL_ASSERT( parent != CRenderNodeGraph::INVALID_ITEM_ID );
+		RED_FATAL_ASSERT( child != CRenderNodeGraph::INVALID_ITEM_ID );
+
+		if ( !m_graphPtr->HasDependency( parent, child, depType ) )
+		{
+			m_graphPtr->AddDependency( parent, child, depType );
+		}
+	}
+
+	void NodeGraphFactory::Link( CRenderNodeGraph::ItemId parent, CRenderNodeGraph::ItemId child, ERenderNodeDependencyType depType )
+	{
+		// Caller must give a valid pair for the dependency type.
+		LinkImpl( parent, child, depType );
+	}
+
+	void NodeGraphFactory::Link( CRenderNodeGraph::ItemId parent, NodeGroupID childId, ERenderNodeDependencyType depType  )
+	{
+		RED_FATAL_ASSERT( depType == RNDT_Cpu, "Only CPU dependencies are supported when involving groups" );
+
+		CRenderNodeGraph::ItemId groupDummyInputNode = GetDummyInputNodeForGroup( childId );
+
+		LinkImpl( parent, groupDummyInputNode, depType );
+
+	}
+
+	void NodeGraphFactory::Link( NodeGroupID parentId, CRenderNodeGraph::ItemId child, ERenderNodeDependencyType depType )
+	{
+		RED_FATAL_ASSERT( depType == RNDT_Cpu, "Only CPU dependencies are supported when involving groups" );
+
+		CRenderNodeGraph::ItemId groupDummyOutputNode = GetDummyOutputNodeForGroup( parentId );
+
+		LinkImpl( groupDummyOutputNode, child, depType );
+	}
+
+	void NodeGraphFactory::Link( NodeGroupID parentId, NodeGroupID childId, ERenderNodeDependencyType depType )
+	{
+		RED_FATAL_ASSERT( depType == RNDT_Cpu, "Only CPU dependencies are supported when involving groups" );
+
+		CRenderNodeGraph::ItemId groupDummyOutputNode = GetDummyOutputNodeForGroup( parentId );
+		CRenderNodeGraph::ItemId groupDummyInputNode = GetDummyInputNodeForGroup( childId );
+
+		LinkImpl( groupDummyOutputNode, groupDummyInputNode, depType );
+	}
+
+	CRenderNodeGraph::ItemId NodeGraphFactory::GetDummyInputNodeForGroup( NodeGroupID groupID )
+	{
+		SGroupData& groupData = m_groupData[ Uint32( groupID ) ];
+
+		if ( groupData.m_dummyInputNode == CRenderNodeGraph::INVALID_ITEM_ID )
+		{
+			// create dummy node
+			groupData.m_dummyInputNode = m_graphPtr->AddNode( SRenderNodeParameters(), 0 );
+			m_nodes->m_nodes.PushBack( nullptr );
+			m_nodeIds.PushBack( groupData.m_dummyInputNode );
+			RED_ASSERT( m_nodes->m_nodes.Size() == m_nodeIds.Size() );
+
+			// link child nodes
+			for ( Int32 tagIndex = FindGroupFirstTagIndex( groupID ); -1 != tagIndex; tagIndex = m_groupTags[ tagIndex ].m_nextIndex )
+			{
+				// TODO what about GPU deps?
+				LinkImpl( groupData.m_dummyInputNode, m_groupTags[ tagIndex ].m_nodeId, RNDT_Cpu );
+			}
+
+			// make connection to handle empty groups
+			if ( groupData.m_dummyOutputNode != CRenderNodeGraph::INVALID_ITEM_ID )
+			{
+				LinkImpl( groupData.m_dummyInputNode, groupData.m_dummyOutputNode, RNDT_Cpu );
+			}
+		}
+
+		return groupData.m_dummyInputNode;
+	}
+
+	CRenderNodeGraph::ItemId NodeGraphFactory::GetDummyOutputNodeForGroup( NodeGroupID groupID )
+	{
+		SGroupData& groupData = m_groupData[ Uint32( groupID ) ];
+
+		if ( groupData.m_dummyOutputNode == CRenderNodeGraph::INVALID_ITEM_ID )
+		{
+			// create dummy node
+			groupData.m_dummyOutputNode = m_graphPtr->AddNode( SRenderNodeParameters(), 0 );
+			m_nodes->m_nodes.PushBack( nullptr );
+			m_nodeIds.PushBack( groupData.m_dummyOutputNode );
+			RED_ASSERT( m_nodes->m_nodes.Size() == m_nodeIds.Size() );
+
+			// link child nodes
+			for ( Int32 tagIndex = FindGroupFirstTagIndex( groupID ); -1 != tagIndex; tagIndex = m_groupTags[ tagIndex ].m_nextIndex )
+			{
+				// TODO what about GPU deps?
+				LinkImpl( m_groupTags[ tagIndex ].m_nodeId, groupData.m_dummyOutputNode, RNDT_Cpu );
+			}
+
+			// make connection to handle empty groups
+			if ( groupData.m_dummyInputNode != CRenderNodeGraph::INVALID_ITEM_ID )
+			{
+				LinkImpl( groupData.m_dummyInputNode, groupData.m_dummyOutputNode, RNDT_Cpu );
+			}
+		}
+
+		return groupData.m_dummyOutputNode;
+	}
+
+	// - - - - - - - - - - - - - - - - - - - - - - -
+
+	// This is just a temp shit for setting GPU dependencies based on order of adding nodes
+	void NodeGraphFactory::LinkGPU()
+	{
+		for( Uint32 i = 1; i < m_nodeIds.Size(); ++i )
+		{
+			if(!m_graphPtr->HasDependency( m_nodeIds[i - 1], m_nodeIds[i], ERenderNodeDependencyType::RNDT_Gpu, false ))
+			{
+				m_graphPtr->AddDependency( m_nodeIds[i - 1], m_nodeIds[i], ERenderNodeDependencyType::RNDT_Gpu );
+			}
+		}
+	}
+
+	// This is just a temp shit for setting GPU dependencies based on order of adding nodes
+	void NodeGraphFactory::LinkCPU()
+	{
+		for( Uint32 i = 1; i < m_nodeIds.Size(); ++i )
+		{
+			if(!m_graphPtr->HasDependency( m_nodeIds[i - 1], m_nodeIds[i], ERenderNodeDependencyType::RNDT_Cpu, false ))
+			{
+				m_graphPtr->AddDependency( m_nodeIds[i - 1], m_nodeIds[i], ERenderNodeDependencyType::RNDT_Cpu );
+			}
+		}
+	}
+
+	void NodeGraphFactory::LinkCPUToNextGPU( CRenderNodeGraph::ItemId parent )
+	{
+		Bool isAfterParent = false;
+		for ( Uint32 i = 0; i < m_nodeIds.Size(); ++i )
+		{
+			if ( isAfterParent )
+			{
+				// If there's a valid node here, and it's using some command list, then add a dependency.
+				CRenderNodeBase* nextNode = m_nodes->m_nodes[i].Get();
+				if ( nextNode != nullptr && nextNode->GetCommandListUsage() != RenderNodeCommandListUsage::None )
+				{
+					if ( !m_graphPtr->HasDependency( parent, m_nodeIds[i], ERenderNodeDependencyType::RNDT_Cpu, false ) )
+					{
+						m_graphPtr->AddDependency( parent, m_nodeIds[i], ERenderNodeDependencyType::RNDT_Cpu );
+					}
+				}
+			}
+			else if ( m_nodeIds[i] == parent )
+			{
+				isAfterParent = true;
+			}
+		}
+	}
+
+	void NodeGraphFactory::LinkCPUToPreviousGPU( CRenderNodeGraph::ItemId child )
+	{
+		for ( Uint32 i = 0; i < m_nodeIds.Size(); ++i )
+		{
+			if ( m_nodeIds[i] == child )
+			{
+				break;
+			}
+
+			// If there's a valid node here, and it's using some command list, then add a dependency.
+			CRenderNodeBase* previousNode = m_nodes->m_nodes[i].Get();
+			if ( previousNode != nullptr && previousNode->GetCommandListUsage() != RenderNodeCommandListUsage::None )
+			{
+				if ( !m_graphPtr->HasDependency( m_nodeIds[i], child, ERenderNodeDependencyType::RNDT_Cpu, false ) )
+				{
+					m_graphPtr->AddDependency( m_nodeIds[i], child, ERenderNodeDependencyType::RNDT_Cpu );
+				}
+			}
+		}
+	}
+
+}

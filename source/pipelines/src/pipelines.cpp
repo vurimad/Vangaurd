@@ -1,7 +1,11 @@
 #include <vanguard/pipelines/pipelines.hpp>
 
+#include <vanguard/memory/memory.hpp>
+#include <vanguard/resources/resource_pipeline.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <new>
 
 namespace
 {
@@ -9,9 +13,9 @@ namespace
     namespace pipeline = vanguard::pipelines;
     namespace serialization = vanguard::serialization;
 
-    constexpr serialization::Version FileVersion{1, 1};
+    constexpr serialization::Version FileVersion{1, 2};
     constexpr u32 MetadataSection = serialization::MakeFourCC('P', 'I', 'P', 'E');
-    constexpr u32 MetadataWireVersion = 2;
+    constexpr u32 MetadataWireVersion = 3;
     constexpr u64 KnownDynamicStates = static_cast<u64>(pipeline::DynamicState::Viewport) | static_cast<u64>(pipeline::DynamicState::Scissor) |
                                        static_cast<u64>(pipeline::DynamicState::BlendConstants) | static_cast<u64>(pipeline::DynamicState::StencilReference) |
                                        static_cast<u64>(pipeline::DynamicState::DepthBias) | static_cast<u64>(pipeline::DynamicState::DepthBounds) |
@@ -19,6 +23,46 @@ namespace
                                        static_cast<u64>(pipeline::DynamicState::FragmentShadingRate);
 
     using ByteArray = containers::DynamicArray<u8>;
+
+    [[nodiscard]] resources::Failure ToResourceFailure(const pipeline::Result result) noexcept
+    {
+        switch (result)
+        {
+        case pipeline::Result::Success:
+            return resources::Failure::None;
+        case pipeline::Result::UnsupportedVersion:
+            return resources::Failure::UnsupportedVersion;
+        case pipeline::Result::LimitExceeded:
+            return resources::Failure::OutOfMemory;
+        case pipeline::Result::IoFailure:
+            return resources::Failure::IoFailure;
+        case pipeline::Result::InvalidMagic:
+        case pipeline::Result::InvalidLayout:
+        case pipeline::Result::IntegrityFailure:
+        case pipeline::Result::DuplicateShader:
+        case pipeline::Result::DuplicateVertexStream:
+        case pipeline::Result::DuplicateVertexAttribute:
+        case pipeline::Result::DuplicateRayTracingGroup:
+            return resources::Failure::IntegrityFailure;
+        default:
+            return resources::Failure::DeserializationFailure;
+        }
+    }
+
+    template <typename T> [[nodiscard]] T* AllocateResourceObject() noexcept
+    {
+        memory::MemoryBlock block = memory::Allocate(memory::PoolId::Resources, sizeof(T), alignof(T));
+        return block ? new (block.address) T() : nullptr;
+    }
+
+    template <typename T> void DeleteResourceObject(T* const object) noexcept
+    {
+        if (object == nullptr)
+            return;
+        object->~T();
+        memory::MemoryBlock block{object, sizeof(T), memory::PoolId::Resources};
+        memory::Free(block);
+    }
 
     [[nodiscard]] u32 StringLength(const char* const value, const u32 capacity) noexcept
     {
@@ -232,13 +276,21 @@ namespace
         {
             return left.bindingLayout < right.bindingLayout;
         }
-        return left.pipelineInterface < right.pipelineInterface;
+        if (left.pipelineInterface != right.pipelineInterface)
+        {
+            return left.pipelineInterface < right.pipelineInterface;
+        }
+        if (left.materialDomain != right.materialDomain)
+        {
+            return left.materialDomain < right.materialDomain;
+        }
+        return left.materialLayout < right.materialLayout;
     }
 
     [[nodiscard]] bool ShaderReferenceEqual(const pipeline::ShaderReference& left, const pipeline::ShaderReference& right) noexcept
     {
         return left.resource == right.resource && left.permutation == right.permutation && left.bindingLayout == right.bindingLayout &&
-               left.pipelineInterface == right.pipelineInterface;
+               left.pipelineInterface == right.pipelineInterface && left.materialDomain == right.materialDomain && left.materialLayout == right.materialLayout;
     }
 
     [[nodiscard]] pipeline::Result ValidateAttachmentSignature(const pipeline::AttachmentSignature& signature) noexcept
@@ -498,7 +550,7 @@ namespace
             const u32 sourceIndex = shaderOrder[canonicalIndex];
             const pipeline::ShaderReference& shader = description.shaders[sourceIndex];
             if (shader.resource == resources::InvalidResourceId || shader.permutation.IsEmpty() || shader.bindingLayout.IsEmpty() ||
-                shader.pipelineInterface.IsEmpty())
+                shader.pipelineInterface.IsEmpty() || shader.materialDomain.IsEmpty() != shader.materialLayout.IsEmpty())
             {
                 return pipeline::Result::InvalidLayout;
             }
@@ -566,13 +618,13 @@ namespace
     [[nodiscard]] bool WriteShaderReference(serialization::BinaryWriter& writer, const pipeline::ShaderReference& value) noexcept
     {
         return writer.WriteU64(value.resource) && WriteDigest(writer, value.permutation) && WriteDigest(writer, value.bindingLayout) &&
-               WriteDigest(writer, value.pipelineInterface);
+               WriteDigest(writer, value.pipelineInterface) && WriteDigest(writer, value.materialDomain) && WriteDigest(writer, value.materialLayout);
     }
 
     [[nodiscard]] bool ReadShaderReference(serialization::BinaryReader& reader, pipeline::ShaderReference& value) noexcept
     {
         return reader.ReadU64(value.resource) && ReadDigest(reader, value.permutation) && ReadDigest(reader, value.bindingLayout) &&
-               ReadDigest(reader, value.pipelineInterface);
+               ReadDigest(reader, value.pipelineInterface) && ReadDigest(reader, value.materialDomain) && ReadDigest(reader, value.materialLayout);
     }
 
     [[nodiscard]] bool WriteAttachmentSignature(serialization::BinaryWriter& writer, const pipeline::AttachmentSignature& value) noexcept
@@ -1156,7 +1208,7 @@ namespace vanguard::pipelines
         serialization::ReadLimits documentLimits;
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 1;
-        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, PipelineMagic, {1, 1, 1}, documentLimits, header);
+        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, PipelineMagic, {1, 2, 2}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
         {
             return ConvertSerializationResult(headerResult);
@@ -1371,16 +1423,18 @@ namespace vanguard::pipelines
         return Result::Success;
     }
 
-    Result ValidateShaderCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader, const AttachmentSignature* const attachments) noexcept
+    Result ValidateShaderResourceCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader,
+                                               const resources::ResourceId shaderResource,
+                                               const AttachmentSignature* const attachments) noexcept
     {
-        if (!pipeline.IsOpen() || !shader.IsOpen())
+        if (!pipeline.IsOpen() || !shader.IsOpen() || shaderResource == resources::InvalidResourceId)
         {
             return Result::InvalidState;
         }
         const ShaderReference* reference = nullptr;
         for (const ShaderReference& candidate : pipeline.GetShaders())
         {
-            if (candidate.permutation == shader.GetPermutation())
+            if (candidate.resource == shaderResource && candidate.permutation == shader.GetPermutation())
             {
                 reference = &candidate;
                 break;
@@ -1388,6 +1442,13 @@ namespace vanguard::pipelines
         }
         if (reference == nullptr || reference->bindingLayout != shader.BindingLayoutFingerprint() ||
             reference->pipelineInterface != shader.GetPipelineInterfaceFingerprint())
+        {
+            return Result::ShaderMismatch;
+        }
+        const shaders::MaterialContract* const materialContract = shader.GetMaterialContract();
+        if ((materialContract == nullptr && (!reference->materialDomain.IsEmpty() || !reference->materialLayout.IsEmpty())) ||
+            (materialContract != nullptr &&
+             (reference->materialDomain != materialContract->domainFingerprint || reference->materialLayout != materialContract->layoutFingerprint)))
         {
             return Result::ShaderMismatch;
         }
@@ -1404,6 +1465,36 @@ namespace vanguard::pipelines
             {
                 return Result::ShaderMismatch;
             }
+            vertexInputs.Reserve(pipeline.GetVertexAttributes().Size());
+            for (const VertexAttribute& attribute : pipeline.GetVertexAttributes())
+            {
+                shaders::VertexInput fetched{attribute.semantic, attribute.semanticIndex, attribute.location, attribute.numericClass, attribute.componentCount, attribute.componentBits};
+                for (const shaders::VertexInput& input : shader.GetVertexInputs())
+                {
+                    if (input.location != attribute.location)
+                        continue;
+                    // Vertex formats describe stored lanes. Fixed-function fetch
+                    // widens 8/16-bit formats and may discard trailing lanes (for
+                    // example SNORM16x4 positions consumed as float3).
+                    if (input.numericClass != attribute.numericClass || input.componentCount > attribute.componentCount ||
+                        (input.componentBits != attribute.componentBits && !(input.componentBits == 32 && attribute.componentBits < 32)))
+                        return Result::ShaderMismatch;
+                    fetched.componentCount = input.componentCount;
+                    fetched.componentBits = input.componentBits;
+                    break;
+                }
+                vertexInputs.PushBack(fetched);
+            }
+            compatibility.kind = shaders::PipelineKind::Graphics;
+            compatibility.primitiveClass = PrimitiveClassOf(pipeline.GetGraphics().topology);
+            compatibility.vertexLayout = {vertexInputs.TypedData(), vertexInputs.Size()};
+            compatibility.dualSourceBlendEnabled = false;
+            for (u32 index = 0; index < pipeline.GetGraphics().blend.attachmentCount; ++index)
+            {
+                const BlendAttachmentState& blend = pipeline.GetGraphics().blend.attachments[index];
+                compatibility.dualSourceBlendEnabled |= blend.sourceColor >= BlendFactor::SourceOneColor || blend.destinationColor >= BlendFactor::SourceOneColor ||
+                                                        blend.sourceAlpha >= BlendFactor::SourceOneColor || blend.destinationAlpha >= BlendFactor::SourceOneColor;
+            }
             const AttachmentSignature* selected = attachments;
             if (pipeline.GetGraphics().attachmentPolicy == AttachmentPolicy::Exact)
             {
@@ -1415,7 +1506,16 @@ namespace vanguard::pipelines
             }
             if (selected == nullptr)
             {
-                return Result::InvalidArgument;
+                // Deferred attachments are a renderer request-time input. Supply a
+                // hypothetical signature matching reflection so every stable
+                // pipeline-controlled field is still validated at load time.
+                compatibility.renderTargetCount = shader.GetInterface().renderTargetCount;
+                compatibility.sampleCount = pipeline.GetGraphics().multisample.sampleCount;
+                compatibility.depthStencilFormatPresent = shaders::HasFlag(shader.GetInterface().flags, shaders::InterfaceFlags::WritesDepth);
+                for (const shaders::FragmentOutput& output : shader.GetFragmentOutputs())
+                    if (output.location < MaximumColorAttachments)
+                        compatibility.renderTargetClasses[output.location] = output.numericClass;
+                break;
             }
             const Result attachmentResult = ValidateAttachmentSignature(*selected);
             if (attachmentResult != Result::Success)
@@ -1423,27 +1523,13 @@ namespace vanguard::pipelines
                 return attachmentResult;
             }
 
-            vertexInputs.Reserve(pipeline.GetVertexAttributes().Size());
-            for (const VertexAttribute& attribute : pipeline.GetVertexAttributes())
-            {
-                vertexInputs.PushBack({attribute.semantic, attribute.semanticIndex, attribute.location, attribute.numericClass, attribute.componentCount,
-                                       attribute.componentBits});
-            }
-            compatibility.kind = shaders::PipelineKind::Graphics;
-            compatibility.primitiveClass = PrimitiveClassOf(pipeline.GetGraphics().topology);
             compatibility.renderTargetCount = selected->colorCount;
             compatibility.sampleCount = selected->sampleCount;
             compatibility.depthStencilFormatPresent = selected->depthStencilFormat != Format::Unknown;
-            compatibility.dualSourceBlendEnabled = false;
             for (u32 index = 0; index < selected->colorCount; ++index)
             {
                 compatibility.renderTargetClasses[index] = selected->colors[index].numericClass;
-                const BlendAttachmentState& blend = pipeline.GetGraphics().blend.attachments[index];
-                compatibility.dualSourceBlendEnabled |=
-                    blend.sourceColor >= BlendFactor::SourceOneColor || blend.destinationColor >= BlendFactor::SourceOneColor ||
-                    blend.sourceAlpha >= BlendFactor::SourceOneColor || blend.destinationAlpha >= BlendFactor::SourceOneColor;
             }
-            compatibility.vertexLayout = {vertexInputs.TypedData(), vertexInputs.Size()};
             break;
         }
         case PipelineKind::Compute:
@@ -1462,5 +1548,138 @@ namespace vanguard::pipelines
             break;
         }
         return shaders::ValidatePipeline(shader, compatibility) == shaders::Result::Success ? Result::Success : Result::IncompatiblePipeline;
+    }
+
+    Result ValidateShaderCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader,
+                                       const AttachmentSignature* const attachments) noexcept
+    {
+        if (!pipeline.IsOpen() || !shader.IsOpen())
+            return Result::InvalidState;
+        for (const ShaderReference& reference : pipeline.GetShaders())
+            if (reference.permutation == shader.GetPermutation())
+                return ValidateShaderResourceCompatibility(pipeline, shader, reference.resource, attachments);
+        return Result::ShaderMismatch;
+    }
+
+    PipelineResourceObject::PipelineResourceObject() noexcept : m_shaderDependencies(memory::pools::Resources::GetInstance()) {}
+
+    resources::ResourceTypeId PipelineResourceObject::GetType() const noexcept
+    {
+        return PipelineResourceType;
+    }
+
+    bool PipelineResourceObject::IsOpen() const noexcept
+    {
+        return m_file.IsOpen();
+    }
+
+    const PipelineFile& PipelineResourceObject::GetFile() const noexcept
+    {
+        return m_file;
+    }
+
+    containers::ArraySpan<const resources::ResourceHandle> PipelineResourceObject::GetShaderDependencies() const noexcept
+    {
+        return m_shaderDependencies;
+    }
+
+    resources::ResourceObject* DecodePipelineResource(const resources::ResourceReference reference, const void* const data, const usize size,
+                                                      const resources::LoadContext& context, resources::Failure& failure, void* const userData) noexcept
+    {
+        failure = resources::Failure::None;
+        if (context.IsCancellationRequested())
+        {
+            failure = resources::Failure::Cancelled;
+            return nullptr;
+        }
+        if (!reference.IsTyped() || reference.ExpectedType() != PipelineResourceType || context.Reference() != reference || data == nullptr || size == 0 ||
+            size > ~u32{0})
+        {
+            failure = resources::Failure::DeserializationFailure;
+            return nullptr;
+        }
+
+        PipelineResourceObject* const object = AllocateResourceObject<PipelineResourceObject>();
+        if (object == nullptr)
+        {
+            failure = resources::Failure::OutOfMemory;
+            return nullptr;
+        }
+        filesystem::MemoryFileReader reader(static_cast<const u8*>(data), static_cast<u32>(size), 0);
+        const PipelineResourceDecoderConfig defaults;
+        const auto& config = userData != nullptr ? *static_cast<const PipelineResourceDecoderConfig*>(userData) : defaults;
+        const Result result = object->m_file.Open(reader, config.limits);
+        if (result != Result::Success)
+        {
+            failure = ToResourceFailure(result);
+            DeleteResourceObject(object);
+            return nullptr;
+        }
+
+        const containers::ArraySpan<const ShaderReference> expected = object->m_file.GetShaders();
+        if (context.GetDependencyCount() != expected.Size())
+        {
+            failure = resources::Failure::IntegrityFailure;
+            DeleteResourceObject(object);
+            return nullptr;
+        }
+
+        containers::HashMap<resources::ResourceId, u32> contextByPath{memory::pools::Resources::GetInstance()};
+        for (u32 index = 0; index < context.GetDependencyCount(); ++index)
+        {
+            const resources::ResourceReference dependency = context.GetDependencyReference(index);
+            const resources::ResourceHandle& handle = context.GetDependency(index);
+            if (!dependency.IsTyped() || dependency.ExpectedType() != shaders::ShaderResourceType ||
+                context.GetDependencyRequirementAt(index) != resources::DependencyRequirement::Required || !handle.IsValid() ||
+                handle.GetPath() != dependency.GetPath() || handle.GetType() != dependency.ExpectedType() ||
+                !contextByPath.Insert(dependency.GetPath().Id(), index).IsSuccessful())
+            {
+                failure = resources::Failure::IntegrityFailure;
+                DeleteResourceObject(object);
+                return nullptr;
+            }
+        }
+
+        containers::DynamicArray<u8> matched{memory::pools::Resources::GetInstance()};
+        matched.Resize(context.GetDependencyCount());
+        for (u32 index = 0; index < matched.Size(); ++index)
+            matched[index] = 0;
+        object->m_shaderDependencies.Reserve(expected.Size());
+        for (const ShaderReference& shader : expected)
+        {
+            u32 contextIndex = ~u32{0};
+            if (shader.resource == resources::InvalidResourceId || !contextByPath.Find(shader.resource, contextIndex) || contextIndex >= matched.Size() ||
+                matched[contextIndex] != 0)
+            {
+                failure = resources::Failure::IntegrityFailure;
+                DeleteResourceObject(object);
+                return nullptr;
+            }
+            matched[contextIndex] = 1;
+            object->m_shaderDependencies.PushBack(context.GetDependency(contextIndex));
+        }
+        for (const resources::ResourceHandle& shaderHandle : object->m_shaderDependencies)
+        {
+            if (!shaderHandle.IsValid() || shaderHandle.GetType() != shaders::ShaderResourceType)
+            {
+                failure = resources::Failure::IntegrityFailure;
+                DeleteResourceObject(object);
+                return nullptr;
+            }
+            const auto* const shaderObject = static_cast<const shaders::ShaderResourceObject*>(shaderHandle.Get());
+            if (shaderObject == nullptr || !shaderObject->IsOpen() ||
+                ValidateShaderResourceCompatibility(object->m_file, shaderObject->GetFile(), shaderHandle.GetPath().Id(), nullptr) != Result::Success)
+            {
+                failure = resources::Failure::IntegrityFailure;
+                DeleteResourceObject(object);
+                return nullptr;
+            }
+        }
+        return object;
+    }
+
+    void DestroyPipelineResource(resources::ResourceObject* const resource, void*) noexcept
+    {
+        DeleteResourceObject(static_cast<PipelineResourceObject*>(resource));
     }
 } // namespace vanguard::pipelines

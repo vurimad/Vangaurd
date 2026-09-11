@@ -86,7 +86,7 @@ namespace vanguard::rendering
         const u32 ordinal = m_viewCount++;
         m_viewAdmissionStamps[view.viewIndex] = m_viewAdmissionStamp;
         m_storage.views[ordinal] = view;
-        m_storage.results[ordinal] = {m_visibleCapacity, visibleCapacity, ordinal, 0};
+        m_storage.results[ordinal] = {m_visibleCapacity, visibleCapacity, ordinal, ordinal};
         reservation.destination = m_storage.candidates.Data() != nullptr ? m_storage.candidates.Data() + m_candidateCapacity : nullptr;
         reservation.capacity = candidateCapacity;
         reservation.workRangeCapacity = maximumWorkRanges;

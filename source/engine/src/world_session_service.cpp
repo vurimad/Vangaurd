@@ -4,6 +4,7 @@
 #include <vanguard/engine/game_input_service.hpp>
 #include <vanguard/engine/world_service.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/world/worlds.hpp>
 
 #include <new>
 
@@ -12,7 +13,6 @@ namespace
     namespace app = vanguard::application;
     namespace engine = vanguard::engine;
     namespace resources = vanguard::resources;
-    namespace streaming = vanguard::streaming;
 
     class ManagedWorldSessionService final : public engine::WorldSessionService
     {
@@ -20,39 +20,40 @@ namespace
         [[nodiscard]] bool Begin(const engine::WorldSessionStartRequest& request, engine::WorldSessionFailure* const failure) noexcept override
         {
             ClearOutput(failure);
-            if (m_stopRequested || (m_status != engine::WorldSessionStatus::Idle && m_status != engine::WorldSessionStatus::Mounted))
-                return Fail(failure, engine::WorldSessionFailureCode::InvalidState, "world session cannot begin in its current state");
-
-            const bool packagesMounted = m_streaming->GetPackageSet().IsMounted();
-            if (request.mountPackages)
+            if (m_stopRequested || m_status != engine::WorldSessionStatus::Idle)
             {
-                if (m_status != engine::WorldSessionStatus::Idle || packagesMounted)
-                    return Fail(failure, engine::WorldSessionFailureCode::InvalidState, "world session package set is already mounted");
-                const streaming::PackageSetMountResult result =
-                    m_streaming->GetPackageSet().Mount(m_streaming->GetStreamer(), request.gameDirectory, request.packageConfig);
-                if (result != streaming::PackageSetMountResult::Success)
-                    return Fail(failure, engine::WorldSessionFailureCode::PackageMountFailure, "world session package mounting failed", result);
-                m_status = engine::WorldSessionStatus::Mounted;
+                // Rejected commands must not corrupt an already running session.
+                if (failure != nullptr)
+                    *failure = {engine::WorldSessionFailureCode::InvalidState, resources::Failure::None,
+                                "world session cannot begin in its current state"};
+                return false;
             }
-            else if (!packagesMounted || m_status != engine::WorldSessionStatus::Mounted)
-            {
-                return Fail(failure, engine::WorldSessionFailureCode::InvalidState, "world session requires a retained package set");
-            }
+            if (!request.world.IsValid() || request.world.ExpectedType() != vanguard::world::WorldResourceType)
+                return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "world session requires an explicit typed world resource");
+            if (request.inputMode != engine::WorldSessionInputMode::None && request.inputMode != engine::WorldSessionInputMode::Mapping)
+                return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "world session requires an explicit input policy");
+            if (request.inputMode == engine::WorldSessionInputMode::Mapping &&
+                (!request.input.IsValid() || request.input.ExpectedType() != vanguard::game_input::MappingResourceType))
+                return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "world session requires a typed input mapping");
+            if (request.inputMode == engine::WorldSessionInputMode::None && request.input.IsValid())
+                return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "no-input session cannot specify an input resource");
 
-            if (!m_inputInstalled && !m_inputRequest.IsValid())
+            // The prior session is fully detached before replacing its map. This
+            // also prevents edit-only worlds from inheriting gameplay contexts.
+            const bool inputCleared = m_gameInput->Clear();
+            if (!inputCleared)
+                return Fail(failure, engine::WorldSessionFailureCode::InputClearFailure, "world session input clearing failed");
+            m_ownsInput = true;
+            m_inputInstalled = request.inputMode == engine::WorldSessionInputMode::None;
+            if (request.inputMode == engine::WorldSessionInputMode::Mapping)
             {
-                const resources::ResourceReference input = m_streaming->GetPackageSet().GetDefaultInput();
-                if (!input.IsValid() || input.ExpectedType() != vanguard::game_input::MappingResourceType)
-                    return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "world session package set has no valid default input mapping");
-                m_inputRequest = m_streaming->GetStreamer().Request(input, resources::LoadPriority::Critical);
+                m_inputRequest = m_streaming->GetStreamer().Request(request.input, resources::LoadPriority::Critical);
                 if (!m_inputRequest.IsValid())
                     return Fail(failure, engine::WorldSessionFailureCode::InputRequestFailure, "world session default input request was rejected");
             }
 
-            const resources::ResourceReference world = request.world.IsValid() ? request.world : m_streaming->GetPackageSet().StartupWorld();
-            if (!world.IsValid())
-                return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "world session start request has no valid world resource");
-            if (!m_world->BeginWorld(world))
+            const bool worldRequested = m_world->BeginWorld(request.world);
+            if (!worldRequested)
             {
                 static_cast<void>(m_inputRequest.Cancel());
                 m_inputRequest.Reset();
@@ -78,7 +79,7 @@ namespace
             if (worldStatus == engine::WorldResourceStatus::Failed)
             {
                 static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::WorldLoadFailure, "world session resource loading failed",
-                                       streaming::PackageSetMountResult::Success, m_world->GetLastFailure()));
+                                       m_world->GetLastFailure()));
                 return m_status;
             }
             if (worldStatus != engine::WorldResourceStatus::Ready)
@@ -95,7 +96,7 @@ namespace
                     const resources::Failure inputFailure = m_inputRequest.GetError();
                     m_inputRequest.Reset();
                     static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::InputLoadFailure, "world session default input loading failed",
-                                           streaming::PackageSetMountResult::Success, inputFailure));
+                                           inputFailure));
                     return m_status;
                 }
                 resources::ResourceHandle input = m_inputRequest.Acquire();
@@ -103,19 +104,21 @@ namespace
                 if (!input.IsValid() || input.Get()->GetType() != vanguard::game_input::MappingResourceType)
                 {
                     static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::InputLoadFailure,
-                                           "world session default input resource has an invalid type", streaming::PackageSetMountResult::Success,
+                                           "world session input resource has an invalid type",
                                            resources::Failure::InternalError));
                     return m_status;
                 }
                 const auto* const mapping = static_cast<const vanguard::game_input::MappingResource*>(input.Get());
-                if (m_gameInput->Install(mapping->GetFile()) != vanguard::game_input::MappingResult::Success)
+                const vanguard::game_input::MappingResult installed = m_gameInput->Install(mapping->GetFile());
+                if (installed != vanguard::game_input::MappingResult::Success)
                 {
                     static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::InputInstallFailure, "world session default input installation failed"));
                     return m_status;
                 }
                 m_inputInstalled = true;
             }
-            if (!m_gameWorld->BeginWorld())
+            const bool worldStarted = m_gameWorld->BeginWorld();
+            if (!worldStarted)
             {
                 static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::GameWorldStartFailure, "world session game-world initialization failed"));
                 return m_status;
@@ -126,25 +129,15 @@ namespace
             return m_status;
         }
 
-        [[nodiscard]] bool RequestStop(const engine::WorldSessionStopMode mode, engine::WorldSessionFailure* const failure) noexcept override
+        [[nodiscard]] bool RequestStop(engine::WorldSessionFailure* const failure) noexcept override
         {
             ClearOutput(failure);
-            if (static_cast<vanguard::u32>(mode) > static_cast<vanguard::u32>(engine::WorldSessionStopMode::ReleaseEverything))
-                return Fail(failure, engine::WorldSessionFailureCode::InvalidRequest, "invalid world session stop mode");
-
             if (m_stopRequested)
-            {
-                if (mode == engine::WorldSessionStopMode::ReleaseEverything)
-                    m_stopMode = engine::WorldSessionStopMode::ReleaseEverything;
                 return true;
-            }
             if (m_status == engine::WorldSessionStatus::Idle)
-                return true;
-            if (m_status == engine::WorldSessionStatus::Mounted && mode == engine::WorldSessionStopMode::ReleaseWorld)
                 return true;
 
             m_stopRequested = true;
-            m_stopMode = mode;
             m_status = engine::WorldSessionStatus::Stopping;
             return true;
         }
@@ -167,8 +160,6 @@ namespace
             m_gameInput = engine::FindGameInputService(context);
             if (m_streaming == nullptr || m_world == nullptr || m_gameWorld == nullptr || m_gameInput == nullptr)
                 return app::LifecycleStatus::Failure("World Session dependencies are not running");
-            if (m_streaming->GetPackageSet().IsMounted())
-                return app::LifecycleStatus::Failure("World Session requires exclusive package-set ownership");
             return app::LifecycleStatus::Success();
         }
 
@@ -181,7 +172,7 @@ namespace
 
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
         {
-            if (m_status != engine::WorldSessionStatus::Idle || m_stopRequested || m_streaming->GetPackageSet().IsMounted())
+            if (m_status != engine::WorldSessionStatus::Idle || m_stopRequested || m_ownsInput || m_inputRequest.IsValid())
                 return app::LifecycleStatus::Failure("World Session state remains live during shutdown");
             m_streaming = nullptr;
             m_world = nullptr;
@@ -194,7 +185,7 @@ namespace
     private:
         [[nodiscard]] engine::WorldSessionStatus PollStop(engine::WorldSessionFailure* const failure) noexcept
         {
-            if (m_stopMode == engine::WorldSessionStopMode::ReleaseEverything && m_inputRequest.IsValid())
+            if (m_inputRequest.IsValid())
             {
                 static_cast<void>(m_inputRequest.Cancel());
                 m_inputRequest.Reset();
@@ -207,25 +198,24 @@ namespace
                 static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::GameWorldStopFailure, "world session game-world drain failed"));
                 return m_status;
             }
-            if (!m_world->ReleaseWorld())
+            const bool worldReleased = m_world->ReleaseWorld();
+            if (!worldReleased)
                 return m_status;
 
-            if (m_stopMode == engine::WorldSessionStopMode::ReleaseEverything && m_streaming->GetPackageSet().IsMounted())
+            if (m_ownsInput)
             {
-                const streaming::PackageSetMountResult result = m_streaming->GetPackageSet().Unmount();
-                if (result == streaming::PackageSetMountResult::Busy)
-                    return m_status;
-                if (result != streaming::PackageSetMountResult::Success)
+                const bool inputCleared = m_gameInput->Clear();
+                if (!inputCleared)
                 {
-                    static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::PackageUnmountFailure, "world session package unmount failed", result));
+                    static_cast<void>(Fail(failure, engine::WorldSessionFailureCode::InputClearFailure, "world session input clearing failed"));
                     return m_status;
                 }
+                m_ownsInput = false;
             }
 
             m_stopRequested = false;
-            if (m_stopMode == engine::WorldSessionStopMode::ReleaseEverything)
-                m_inputInstalled = false;
-            m_status = m_streaming->GetPackageSet().IsMounted() ? engine::WorldSessionStatus::Mounted : engine::WorldSessionStatus::Idle;
+            m_inputInstalled = false;
+            m_status = engine::WorldSessionStatus::Idle;
             m_lastFailure = {};
             return m_status;
         }
@@ -237,11 +227,10 @@ namespace
         }
 
         [[nodiscard]] bool Fail(engine::WorldSessionFailure* const output, const engine::WorldSessionFailureCode code, const char* const message,
-                                const streaming::PackageSetMountResult packageResult = streaming::PackageSetMountResult::Success,
                                 const resources::Failure resourceFailure = resources::Failure::None) noexcept
         {
             m_status = engine::WorldSessionStatus::Failed;
-            m_lastFailure = {code, packageResult, resourceFailure, message};
+            m_lastFailure = {code, resourceFailure, message};
             if (output != nullptr)
                 *output = m_lastFailure;
             return false;
@@ -254,9 +243,9 @@ namespace
         resources::PipelineRequest m_inputRequest;
         engine::WorldSessionFailure m_lastFailure;
         engine::WorldSessionStatus m_status = engine::WorldSessionStatus::Idle;
-        engine::WorldSessionStopMode m_stopMode = engine::WorldSessionStopMode::ReleaseEverything;
         bool m_stopRequested = false;
         bool m_inputInstalled = false;
+        bool m_ownsInput = false;
     };
 
     app::Service* CreateWorldSessionService(void*) noexcept

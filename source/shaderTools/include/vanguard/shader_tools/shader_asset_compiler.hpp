@@ -7,7 +7,7 @@ namespace vanguard::shader_tools
 {
     inline constexpr resources::ResourceTypeId ShaderSourceResourceType = serialization::MakeFourCC('V', 'S', 'S', 'R');
     inline constexpr resources::ResourceTypeId ShaderCompilerToolResourceType = serialization::MakeFourCC('V', 'S', 'T', 'L');
-    inline constexpr u32 ShaderAssetCompilerVersion = 1;
+    inline constexpr u32 ShaderAssetCompilerVersion = 2;
 
     enum class BuildSettingsResult : u8
     {
@@ -52,6 +52,8 @@ namespace vanguard::shader_tools
         void* loadSourceUserData = nullptr;
         u32 maximumIncludeFiles = 4096;
         u32 maximumIncludeDepth = 64;
+        u64 maximumArtifactBytes = 544ull * 1024ull * 1024ull;
+        u64 estimatedCompilerTransientBytes = 1024ull * 1024ull * 1024ull;
     };
 
     class ShaderAssetCompiler final

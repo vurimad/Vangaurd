@@ -265,6 +265,7 @@ namespace vanguard::streaming
         [[nodiscard]] u32 GetTargetPlatformId() const noexcept;
         [[nodiscard]] resources::ResourceReference StartupWorld() const noexcept;
         [[nodiscard]] resources::ResourceReference GetDefaultInput() const noexcept;
+        [[nodiscard]] resources::ResourceReference RendererBootstrap() const noexcept;
         [[nodiscard]] u32 PackageCount() const noexcept;
         [[nodiscard]] const MountedPackageInfo* FindPackage(u32 packageNumber) const noexcept;
 

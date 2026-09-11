@@ -1,14 +1,18 @@
 #include <vanguard/editor/editor_application.hpp>
+#include <vanguard/editor/editor_ui_stall_probe.hpp>
+#include <vanguard/editor/editor_ui.hpp>
 
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/engine/engine_services.hpp>
 #include <vanguard/engine/frame_pipeline_service.hpp>
 #include <vanguard/engine/window_service.hpp>
 #include <vanguard/engine/world_session_service.hpp>
-#include <vanguard/projects/project.hpp>
+#include <vanguard/projects/project_workspace.hpp>
 #include <vanguard/resources/resources.hpp>
 #include <vanguard/rhi/d3d12/backend.hpp>
 #include <vanguard/world/worlds.hpp>
+
+#include <cstring>
 
 namespace vanguard::editor
 {
@@ -58,7 +62,8 @@ namespace vanguard::editor
                 return application::StateOperationStatus::Complete();
 
             engine::WorldSessionFailure failure;
-            if (!session->RequestStop(engine::WorldSessionStopMode::ReleaseEverything, &failure))
+            const bool stopRequested = session->RequestStop(&failure);
+            if (!stopRequested)
                 return application::StateOperationStatus::Failure(failure.message != nullptr ? failure.message : "editor world session stop request failed");
             const engine::WorldSessionStatus status = session->Poll(&failure);
             if (status == engine::WorldSessionStatus::Idle)
@@ -87,15 +92,15 @@ namespace vanguard::editor
             return application::StateOperationStatus::Failure("startup.editorWorld is not a valid resource identity");
 
         engine::WorldSessionStartRequest request;
-        request.gameDirectory = workspace->GetBuildsRoot().AddDirPath("Windows").AddDirPath("Development");
         request.world = resources::ResourceReference(worldPath, world::WorldResourceType);
+        request.inputMode = engine::WorldSessionInputMode::None;
         engine::WorldSessionFailure failure;
-        if (!session->Begin(request, &failure))
+        const bool sessionStarted = session->Begin(request, &failure);
+        if (!sessionStarted)
         {
             VG_LOG_ERROR(diagnostics::Category::Resources,
-                         "editor world session start failed: packages=%s world=%s code=%u packageResult=%u resourceFailure=%u message=%s",
-                         request.gameDirectory.ToDebugString(), workspace->GetProject().editorWorld.AsChar(), static_cast<u32>(failure.code),
-                         static_cast<u32>(failure.packageResult), static_cast<u32>(failure.resourceFailure),
+                         "editor world session start failed: world=%s code=%u resourceFailure=%u message=%s",
+                         workspace->GetProject().editorWorld.AsChar(), static_cast<u32>(failure.code), static_cast<u32>(failure.resourceFailure),
                          failure.message != nullptr ? failure.message : "<none>");
             return application::StateOperationStatus::Failure(failure.message != nullptr ? failure.message : "editor world session start failed");
         }
@@ -146,6 +151,12 @@ namespace vanguard::editor
 
     application::StateOperationStatus RunningState::OnEnter(application::StateContext& context) noexcept
     {
+        if (m_uiProofEnabled)
+        {
+            auto* ui = FindEditorUiService(context.GetServices());
+            auto* rendering = engine::FindRenderingService(context.GetServices());
+            if (ui == nullptr || rendering == nullptr || !m_uiProof.Start(*ui, *rendering, m_uiProofInteractive)) { m_uiProof.Stop(); return application::StateOperationStatus::Failure("editor UI proof startup failed"); }
+        }
         engine::WindowService* const windows = engine::FindWindowService(context.GetServices());
         if (windows == nullptr || !windows->GetPrimaryWindow().IsValid())
             return application::StateOperationStatus::Failure("Window service has no primary editor window");
@@ -169,6 +180,7 @@ namespace vanguard::editor
 
     application::StateTickStatus RunningState::OnTick(application::StateContext& context) noexcept
     {
+        detail::UiStallProbe probe("entire editor running tick");
         if (m_exitAfterFirstTick)
         {
             static_cast<void>(context.RequestExit());
@@ -185,18 +197,25 @@ namespace vanguard::editor
                          failure.participantName != nullptr ? failure.participantName : "<none>", failure.message != nullptr ? failure.message : "<none>");
             return application::StateTickStatus::Failure(failure.message != nullptr ? failure.message : "editor frame failed");
         }
+        if (m_uiProofEnabled)
+        {
+            bool finished = false;
+            if (!m_uiProof.Tick(finished)) return application::StateTickStatus::Failure("editor UI proof failed");
+            if (finished) static_cast<void>(context.RequestExit());
+        }
         return application::StateTickStatus::Success();
     }
 
     application::StateOperationStatus RunningState::OnExit(application::StateContext& context) noexcept
     {
+        m_uiProof.Stop();
         return StopSession(context);
     }
 
     ApplicationTraits EditorApplication::GetTraits() const noexcept
     {
         return {"editor", application::ApplicationProfile::Runtime | application::ApplicationProfile::Editor | application::ApplicationProfile::Tool, 1200,
-                nullptr};
+                "VanguardEditor.log"};
     }
 
     application::CompositionStatus EditorApplication::Compose(const application::ApplicationStartupContext& startup, application::EngineHost& services,
@@ -225,15 +244,39 @@ namespace vanguard::editor
                                                                                                 : "editor project validation failed");
         }
 
-        m_filesystemConfig = {projectRoot, projectRoot, projectRoot.AddDirPath(project.derivedData)};
+        projects::ProjectWorkspace workspace;
+        if (projects::ResolveWorkspace(projectFile, project, workspace, &projectDiagnostic) != projects::Result::Success)
+            return application::CompositionStatus::Failure(projectDiagnostic.message != nullptr ? projectDiagnostic.message : "editor workspace resolution failed");
+        m_filesystemConfig = {workspace.root, workspace.root, workspace.derivedData};
+        m_streamingConfig = {};
+        // Packaged fallback is explicit. Project-derived providers publish their
+        // committed locations through ResourceStreamer; never infer DDC filenames.
+        for (i32 index = 1; index < startup.commandLine.argumentCount; ++index)
+        {
+            const char* const argument = startup.commandLine[index];
+            if (argument == nullptr || std::strcmp(argument, "--package-root") != 0)
+                continue;
+            const char* const root = startup.commandLine[++index];
+            if (root == nullptr || root[0] == '\0' || root[0] == '-' || !m_streamingConfig.packageDirectory.Empty())
+                return application::CompositionStatus::Failure("--package-root requires one explicit package directory");
+            const containers::StringView path(root);
+            m_streamingConfig.packageDirectory = filesystem::AbsolutePath::IsValidPath(path)
+                ? filesystem::AbsolutePath::CreateDirPath(path)
+                : filesystem::paths::GetCurrentWorkingDirectory().AddDirPath(path);
+            if (m_streamingConfig.packageDirectory.Empty())
+                return application::CompositionStatus::Failure("--package-root is not a valid directory");
+        }
         m_renderingConfig = {};
         m_renderingConfig.deviceMode = engine::RenderingDeviceMode::Required;
         m_renderingConfig.backendFactory = rhi::d3d12::GetBackendFactory();
         m_renderingConfig.device.editor = true;
         m_workspaceConfig.projectFile = projectFile;
+        m_workspaceConfig.project = project;
         m_runningState.SetProjectWindowTitle(project.name, project.technicalName);
         const bool validateBootstrap = startup.commandLine.HasArgument("--validate-bootstrap");
         const bool validateWorkspace = startup.commandLine.HasArgument("--validate-workspace");
+        const bool interactiveUi = startup.commandLine.HasArgument("--inspect-editor-ui");
+        m_runningState.EnableUiProof(interactiveUi || startup.commandLine.HasArgument("--validate-editor-ui"), interactiveUi);
         m_runningState.ExitAfterFirstTick(validateBootstrap || validateWorkspace);
         application::HostFailure failure;
         if (!engine::RegisterEngineModule(services, &failure) || !services.RegisterModule({EditorModuleId, "editor", 1}, &failure) ||
@@ -242,9 +285,10 @@ namespace vanguard::editor
             !engine::RegisterFramePipelineService(services, &failure) || !engine::RegisterReflectionService(services, &failure) ||
             !engine::RegisterRenderingService(services, m_renderingConfig, &failure) || !engine::RegisterWindowService(services, startup.platform, &failure) ||
             !engine::RegisterInputService(services, startup.platform->GetInputBackend(), &failure) || !engine::RegisterGameInputService(services, &failure) ||
-            !engine::RegisterResourcesService(services, &failure) || !engine::RegisterResourceStreamingService(services, &failure) ||
+            !engine::RegisterResourcesService(services, &failure) || !engine::RegisterResourceStreamingService(services, m_streamingConfig, &failure) ||
             !engine::RegisterWorldService(services, &failure) || !engine::RegisterGameWorldService(services, &failure) ||
-            !engine::RegisterStreamingObserverService(services, &failure) || !engine::RegisterWorldSessionService(services, &failure))
+            !engine::RegisterStreamingObserverService(services, &failure) || !engine::RegisterWorldSessionService(services, &failure) ||
+            !RegisterEditorUiService(services, &failure))
             return application::CompositionStatus::Failure(failure.message != nullptr ? failure.message : "editor engine service registration failed");
         if (!states.RegisterState({StartupSessionStateId, "startupSession", &m_startupSessionState}) ||
             !states.RegisterState({RunningStateId, "running", &m_runningState}) ||

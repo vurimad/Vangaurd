@@ -2,6 +2,7 @@
 #include <d3d12/d3d12-backend.h>
 
 #include <vanguard/diagnostics/diagnostics.hpp>
+#include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/rhi/backend/common_backend.hpp>
 #include <vanguard/system/time.hpp>
@@ -108,9 +109,8 @@ namespace vanguard::rhi::d3d12
 
         [[nodiscard]] bool MatchesAcquisition(const SwapChainPayload& payload, const AcquiredBackBuffer& acquisition) noexcept
         {
-            return acquisition.IsValid() && payload.activeAcquisition.IsValid() && acquisition.swapChain == payload.activeAcquisition.swapChain &&
-                   acquisition.texture == payload.activeAcquisition.texture && acquisition.serial == payload.activeAcquisition.serial &&
-                   acquisition.bufferIndex == payload.activeAcquisition.bufferIndex;
+            return acquisition.IsValid() && payload.activeAcquisition.IsValid() && acquisition.swapChain == payload.activeAcquisition.swapChain && acquisition.texture == payload.activeAcquisition.texture &&
+                   acquisition.serial == payload.activeAcquisition.serial && acquisition.bufferIndex == payload.activeAcquisition.bufferIndex;
         }
 
         [[nodiscard]] u64 TicksToNanoseconds(const u64 ticks) noexcept
@@ -142,16 +142,14 @@ namespace vanguard::rhi::d3d12
         {
             const DXGI_COLOR_SPACE_TYPE nativeColorSpace = ToNativeColorSpace(desc.colorSpace);
             UINT support = 0;
-            if (FAILED(swapChain.CheckColorSpaceSupport(nativeColorSpace, &support)) || (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 ||
-                FAILED(swapChain.SetColorSpace1(nativeColorSpace)))
+            if (FAILED(swapChain.CheckColorSpaceSupport(nativeColorSpace, &support)) || (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) == 0 || FAILED(swapChain.SetColorSpace1(nativeColorSpace)))
                 return false;
 
             if (desc.colorSpace != ColorSpace::Hdr10)
                 return SUCCEEDED(swapChain.SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr));
 
             const Hdr10Metadata& source = desc.hdr10Metadata;
-            if (source.maximumMasteringLuminanceNits <= 0.0f || source.minimumMasteringLuminanceNits < 0.0f ||
-                source.minimumMasteringLuminanceNits > source.maximumMasteringLuminanceNits ||
+            if (source.maximumMasteringLuminanceNits <= 0.0f || source.minimumMasteringLuminanceNits < 0.0f || source.minimumMasteringLuminanceNits > source.maximumMasteringLuminanceNits ||
                 source.maximumFrameAverageLightLevelNits > source.maximumContentLightLevelNits)
                 return false;
             DXGI_HDR_METADATA_HDR10 metadata{};
@@ -254,19 +252,18 @@ namespace vanguard::rhi::d3d12
 
         [[nodiscard]] bool IsSwapChainDescriptorSupported(const SwapChainDesc& desc) noexcept
         {
-            if (desc.surface.kind != PresentationSurfaceKind::Win32 || desc.surface.nativeWindow == nullptr || desc.width == 0 || desc.height == 0 ||
-                desc.bufferCount < 2 || desc.bufferCount > MaximumSwapChainBuffers || ToSwapChainFormat(desc.format) == DXGI_FORMAT_UNKNOWN ||
-                ToNativeSwapChainFormat(desc.format) == nvrhi::Format::UNKNOWN || desc.presentMode == PresentMode::Mailbox)
+            if (desc.surface.kind != PresentationSurfaceKind::Win32 || desc.surface.nativeWindow == nullptr || desc.width == 0 || desc.height == 0 || desc.bufferCount < 2 ||
+                desc.bufferCount > MaximumSwapChainBuffers || ToSwapChainFormat(desc.format) == DXGI_FORMAT_UNKNOWN || ToNativeSwapChainFormat(desc.format) == nvrhi::Format::UNKNOWN ||
+                desc.presentMode == PresentMode::Mailbox)
                 return false;
-            if (desc.frameLatency.enabled && (desc.frameLatency.maximumFramesInFlight == 0 || desc.frameLatency.maximumFramesInFlight > desc.bufferCount ||
-                                              desc.frameLatency.waitTimeoutMilliseconds == 0))
+            if (desc.frameLatency.enabled && (desc.frameLatency.maximumFramesInFlight == 0 || desc.frameLatency.maximumFramesInFlight > desc.bufferCount || desc.frameLatency.waitTimeoutMilliseconds == 0))
                 return false;
             if (desc.colorSpace == ColorSpace::Hdr10 && desc.format != Format::R10G10B10A2UNorm)
                 return false;
             if (desc.colorSpace == ColorSpace::ScRgb && desc.format != Format::R16G16B16A16Float)
                 return false;
-            return desc.colorSpace != ColorSpace::Srgb || desc.format == Format::R8G8B8A8UNorm || desc.format == Format::R8G8B8A8UNormSrgb ||
-                   desc.format == Format::B8G8R8A8UNorm || desc.format == Format::B8G8R8A8UNormSrgb;
+            return desc.colorSpace != ColorSpace::Srgb || desc.format == Format::R8G8B8A8UNorm || desc.format == Format::R8G8B8A8UNormSrgb || desc.format == Format::B8G8R8A8UNorm ||
+                   desc.format == Format::B8G8R8A8UNormSrgb;
         }
 
         void CopyDebugName(char* const destination, const u32 capacity, const char* const source) noexcept
@@ -359,7 +356,15 @@ namespace vanguard::rhi::d3d12
             const PresentParameters& parameters = payload.stats.presentParameters;
             const UINT interval = parameters.mode == PresentMode::Fifo ? parameters.synchronizationInterval : 0u;
             const UINT flags = interval == 0 && parameters.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+#if VG_BUILD_DEBUG
+            const u64 presentStart = system::GetMonotonicTicks();
+#endif
             const HRESULT result = payload.native->Present(interval, flags);
+#if VG_BUILD_DEBUG
+            const double presentMilliseconds = 1000.0 * double(system::GetMonotonicTicks() - presentStart) / double(system::GetMonotonicFrequency());
+            if (presentMilliseconds >= 100.0)
+                VG_LOG_WARNING(diagnostics::Category::Rendering, "DXGI Present stall: %.2f ms interval=%u result=%ld mainThread=%u", presentMilliseconds, interval, static_cast<long>(result), u32(concurrency::IsMainThread()));
+#endif
             if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
             {
                 ++payload.stats.presentationFailures;
@@ -374,8 +379,7 @@ namespace vanguard::rhi::d3d12
                 return BackendStatus::Failure(FailureCode::BackendFailure, result, "DXGI present failed");
             }
             const u64 fenceValue = payload.nextPresentFenceValue++;
-            if (payload.presentationQueue == nullptr || payload.presentFence == nullptr ||
-                FAILED(payload.presentationQueue->Signal(payload.presentFence, fenceValue)))
+            if (payload.presentationQueue == nullptr || payload.presentFence == nullptr || FAILED(payload.presentationQueue->Signal(payload.presentFence, fenceValue)))
             {
                 ++payload.stats.presentationFailures;
                 payload.stats.state = SwapChainState::Failed;
@@ -393,7 +397,7 @@ namespace vanguard::rhi::d3d12
         void MarkPresentTransitionSubmitted(void* const context, const GpuFence completion, const u64 acquisitionSerial) noexcept
         {
             auto& payload = *static_cast<SwapChainPayload*>(context);
-            payload.submittedAcquisitionSerial.SetValue(completion.queue == QueueType::Graphics ? acquisitionSerial : 0);
+            payload.submittedAcquisitionSerial.SetValue(completion.IsValid() && completion.queue == QueueType::Graphics ? acquisitionSerial : 0);
         }
 
         [[nodiscard]] bool CreateBackBufferHandles(SwapChainPayload& payload) noexcept
@@ -430,8 +434,7 @@ namespace vanguard::rhi::d3d12
                 nativeDesc.isRenderTarget = true;
                 nativeDesc.initialState = nvrhi::ResourceStates::Present;
                 nativeDesc.keepInitialState = true;
-                nvrhi::TextureHandle native =
-                    payload.common->GetDevice()->createHandleForNativeTexture(nvrhi::ObjectTypes::D3D12_Resource, nvrhi::Object(resource), nativeDesc);
+                nvrhi::TextureHandle native = payload.common->GetDevice()->createHandleForNativeTexture(nvrhi::ObjectTypes::D3D12_Resource, nvrhi::Object(resource), nativeDesc);
                 resource->Release();
                 if (!native)
                 {
@@ -562,8 +565,7 @@ namespace vanguard::rhi::d3d12
             return (value / 100u) * percent + ((value % 100u) * percent) / 100u;
         }
 
-        [[nodiscard]] BackendStatus ResolveResidencyBatch(backend::CommonBackend& common, const containers::ArraySpan<const ResourceRef> resources,
-                                                          ID3D12Pageable** const pageables, u32& count) noexcept
+        [[nodiscard]] BackendStatus ResolveResidencyBatch(backend::CommonBackend& common, const containers::ArraySpan<const ResourceRef> resources, ID3D12Pageable** const pageables, u32& count) noexcept
         {
             count = 0;
             if (resources.Size() == 0 || resources.Size() > MaximumResidencyBatchSize)
@@ -794,8 +796,7 @@ namespace vanguard::rhi::d3d12
             {
                 ++impl.residencyStats.automaticWorkingSetFailures;
                 ++impl.residencyStats.residencyFailures;
-                return BackendStatus::Failure(result == E_OUTOFMEMORY ? FailureCode::OutOfMemory : FailureCode::BackendFailure, result,
-                                              "D3D12 failed to prepare the command-list residency working set");
+                return BackendStatus::Failure(result == E_OUTOFMEMORY ? FailureCode::OutOfMemory : FailureCode::BackendFailure, result, "D3D12 failed to prepare the command-list residency working set");
             }
             ++impl.residencyStats.automaticMakeResidentCalls;
             impl.residencyStats.automaticObjectsMadeResident += evictedCount;
@@ -986,8 +987,7 @@ namespace vanguard::rhi::d3d12
             if (status)
             {
                 const HRESULT evictResult = impl.residencyDevice->Evict(pageableCount, pageables);
-                status = SUCCEEDED(evictResult) ? BackendStatus::Success()
-                                                : BackendStatus::Failure(FailureCode::BackendFailure, evictResult, "D3D12 residency-policy eviction failed");
+                status = SUCCEEDED(evictResult) ? BackendStatus::Success() : BackendStatus::Failure(FailureCode::BackendFailure, evictResult, "D3D12 residency-policy eviction failed");
             }
 
             {
@@ -1044,14 +1044,13 @@ namespace vanguard::rhi::d3d12
             {
                 QueryPoolSlot& slot = queryPools[index];
                 QueryPoolPayload* const payload = slot.payload;
-                if (slot.state != QueryPoolSlotState::Retiring || payload == nullptr)
+                if (payload == nullptr || (!force && slot.state != QueryPoolSlotState::Retiring))
                     continue;
                 if (!force)
                 {
                     const backend::FenceSet& fences = payload->lastUseFences;
                     if (payload->pendingSubmissions != 0 || (fences.graphics != 0 && !common.IsGpuFenceComplete({QueueType::Graphics, fences.graphics})) ||
-                        (fences.compute != 0 && !common.IsGpuFenceComplete({QueueType::Compute, fences.compute})) ||
-                        (fences.copy != 0 && !common.IsGpuFenceComplete({QueueType::Copy, fences.copy})))
+                        (fences.compute != 0 && !common.IsGpuFenceComplete({QueueType::Compute, fences.compute})) || (fences.copy != 0 && !common.IsGpuFenceComplete({QueueType::Copy, fences.copy})))
                         continue;
                 }
                 DestroyQueryPoolPayload(payload);
@@ -1128,11 +1127,20 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] static bool SignalFence(void* const context, const QueueType queue, const u64 value) noexcept
         {
             Impl& impl = *static_cast<Impl*>(context);
-            ID3D12CommandQueue* const nativeQueue = queue == QueueType::Graphics  ? impl.graphicsQueue
-                                                    : queue == QueueType::Compute ? impl.computeQueue
-                                                                                  : impl.copyQueue;
+            ID3D12CommandQueue* const nativeQueue = queue == QueueType::Graphics ? impl.graphicsQueue : queue == QueueType::Compute ? impl.computeQueue : impl.copyQueue;
             ID3D12Fence* const fence = impl.queueFences[static_cast<u32>(queue)];
             return nativeQueue != nullptr && fence != nullptr && SUCCEEDED(nativeQueue->Signal(fence, value));
+        }
+
+        [[nodiscard]] static bool QueueWait(void* const context, const QueueType consumer, const GpuFence producer) noexcept
+        {
+            Impl& impl = *static_cast<Impl*>(context);
+            ID3D12CommandQueue* const nativeQueue = consumer == QueueType::Graphics ? impl.graphicsQueue : consumer == QueueType::Compute ? impl.computeQueue : impl.copyQueue;
+            ID3D12Fence* const fence = impl.queueFences[static_cast<u32>(producer.queue)];
+            if (nativeQueue == nullptr || fence == nullptr)
+                return false;
+            const HRESULT result = nativeQueue->Wait(fence, producer.value);
+            return SUCCEEDED(result);
         }
 
         [[nodiscard]] static bool WaitFence(void* const context, const QueueType queue, const u64 value, const u64 timeoutNanoseconds) noexcept
@@ -1154,35 +1162,30 @@ namespace vanguard::rhi::d3d12
             }
             constexpr u64 NanosecondsPerMillisecond = 1000000u;
             const u64 roundedMilliseconds = timeoutNanoseconds / NanosecondsPerMillisecond + (timeoutNanoseconds % NanosecondsPerMillisecond != 0 ? 1u : 0u);
-            const DWORD timeoutMilliseconds =
-                timeoutNanoseconds == ~u64{0} ? INFINITE : static_cast<DWORD>(roundedMilliseconds > INFINITE - 1u ? INFINITE - 1u : roundedMilliseconds);
+            const DWORD timeoutMilliseconds = timeoutNanoseconds == ~u64{0} ? INFINITE : static_cast<DWORD>(roundedMilliseconds > INFINITE - 1u ? INFINITE - 1u : roundedMilliseconds);
             const DWORD waitResult = WaitForSingleObject(eventHandle, timeoutMilliseconds);
             CloseHandle(eventHandle);
             return waitResult == WAIT_OBJECT_0;
         }
 
-        [[nodiscard]] static bool AliasingBarrier(void*, nvrhi::ICommandList* const commandList, nvrhi::IResource* const resourceAfter,
-                                                  nvrhi::IResource* const resourceBefore, const bool discardAfter) noexcept
+        [[nodiscard]] static bool AliasingBarrier(void*, nvrhi::ICommandList* const commandList, nvrhi::IResource* const resourceAfter) noexcept
         {
             if (commandList == nullptr || resourceAfter == nullptr)
                 return false;
             ID3D12GraphicsCommandList* const nativeCommandList = commandList->getNativeObject(nvrhi::ObjectTypes::D3D12_GraphicsCommandList);
             ID3D12Resource* const nativeAfter = resourceAfter->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource);
-            ID3D12Resource* const nativeBefore = resourceBefore != nullptr ? resourceBefore->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource) : nullptr;
-            if (nativeCommandList == nullptr || nativeAfter == nullptr || (resourceBefore != nullptr && nativeBefore == nullptr))
+            if (nativeCommandList == nullptr || nativeAfter == nullptr)
                 return false;
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
-            barrier.Aliasing.pResourceBefore = nativeBefore;
+            barrier.Aliasing.pResourceBefore = nullptr;
             barrier.Aliasing.pResourceAfter = nativeAfter;
             nativeCommandList->ResourceBarrier(1, &barrier);
-            if (discardAfter)
-                nativeCommandList->DiscardResource(nativeAfter, nullptr);
             return true;
         }
 
-        [[nodiscard]] static bool RectColorClear(void*, nvrhi::ICommandList* const commandList, nvrhi::ITexture* const texture, const ColorValue& value,
-                                                 const SubresourceRange& range, const Rect& rectangle) noexcept
+        [[nodiscard]] static bool RectColorClear(void*, nvrhi::ICommandList* const commandList, nvrhi::ITexture* const texture, const ColorValue& value, const SubresourceRange& range,
+                                                 const Rect& rectangle) noexcept
         {
             if (commandList == nullptr || texture == nullptr || range.mipCount != 1)
                 return false;
@@ -1198,9 +1201,8 @@ namespace vanguard::rhi::d3d12
             return true;
         }
 
-        [[nodiscard]] static bool RectDepthStencilClear(void*, nvrhi::ICommandList* const commandList, nvrhi::ITexture* const texture, const bool clearDepth,
-                                                        const f32 depth, const bool clearStencil, const u8 stencil, const SubresourceRange& range,
-                                                        const Rect& rectangle) noexcept
+        [[nodiscard]] static bool RectDepthStencilClear(void*, nvrhi::ICommandList* const commandList, nvrhi::ITexture* const texture, const bool clearDepth, const f32 depth, const bool clearStencil,
+                                                        const u8 stencil, const SubresourceRange& range, const Rect& rectangle) noexcept
         {
             if (commandList == nullptr || texture == nullptr || range.mipCount != 1 || (!clearDepth && !clearStencil))
                 return false;
@@ -1218,31 +1220,21 @@ namespace vanguard::rhi::d3d12
             return true;
         }
 
-        [[nodiscard]] static bool DiscardResource(void*, nvrhi::ICommandList* const commandList, nvrhi::IResource* const resource,
-                                                  const SubresourceRange* const textureRange) noexcept
+        [[nodiscard]] static bool DiscardTexture(void*, nvrhi::ICommandList* const commandList, nvrhi::ITexture* const texture, const SubresourceRange& range) noexcept
         {
-            if (commandList == nullptr || resource == nullptr)
+            if (commandList == nullptr || texture == nullptr)
                 return false;
             ID3D12GraphicsCommandList* const nativeCommandList = commandList->getNativeObject(nvrhi::ObjectTypes::D3D12_GraphicsCommandList);
-            ID3D12Resource* const nativeResource = resource->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource);
+            ID3D12Resource* const nativeResource = texture->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource);
             if (nativeCommandList == nullptr || nativeResource == nullptr)
                 return false;
-            if (textureRange == nullptr)
-            {
-                D3D12_DISCARD_REGION region{};
-                region.FirstSubresource = 0;
-                region.NumSubresources = 1;
-                nativeCommandList->DiscardResource(nativeResource, &region);
-                return true;
-            }
-            auto* const texture = static_cast<nvrhi::ITexture*>(resource);
             const u32 mipLevels = texture->getDesc().mipLevels;
-            for (u32 slice = 0; slice < textureRange->sliceCount; ++slice)
+            for (u32 slice = 0; slice < range.sliceCount; ++slice)
             {
-                D3D12_DISCARD_REGION region{};
-                region.FirstSubresource = textureRange->firstMip + (textureRange->firstSlice + slice) * mipLevels;
-                region.NumSubresources = textureRange->mipCount;
-                nativeCommandList->DiscardResource(nativeResource, &region);
+                D3D12_DISCARD_REGION nativeRegion{};
+                nativeRegion.FirstSubresource = range.firstMip + (range.firstSlice + slice) * mipLevels;
+                nativeRegion.NumSubresources = range.mipCount;
+                nativeCommandList->DiscardResource(nativeResource, &nativeRegion);
             }
             return true;
         }
@@ -1394,9 +1386,9 @@ namespace vanguard::rhi::d3d12
             m_impl->ReleaseDeviceObjects();
             return BackendStatus::Failure(FailureCode::BackendFailure, 0, "NVRHI failed to create its D3D12 device");
         }
-        if (!m_impl->common.Initialize(static_cast<nvrhi::DeviceHandle&&>(device), &Impl::IsFenceComplete, &Impl::SignalFence, &Impl::WaitFence,
-                                       &Impl::AliasingBarrier, &Impl::RectColorClear, &Impl::RectDepthStencilClear, &Impl::DiscardResource,
-                                       &Impl::PrepareWorkingSet, &Impl::CommitWorkingSet, &Impl::ReleaseResidencyRecord, m_impl))
+        const bool commonInitialized = m_impl->common.Initialize(static_cast<nvrhi::DeviceHandle&&>(device), &Impl::IsFenceComplete, &Impl::SignalFence, &Impl::WaitFence, &Impl::QueueWait, &Impl::AliasingBarrier, &Impl::RectColorClear,
+                                       &Impl::RectDepthStencilClear, &Impl::DiscardTexture, &Impl::PrepareWorkingSet, &Impl::CommitWorkingSet, &Impl::ReleaseResidencyRecord, m_impl);
+        if (!commonInitialized)
         {
             m_impl->ReleaseDeviceObjects();
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "could not initialize D3D12 resource lifetime tables");
@@ -1416,6 +1408,18 @@ namespace vanguard::rhi::d3d12
         caps.maximumTextureDimension3D = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
         caps.maximumTextureArrayLayers = D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
         m_impl->common.PopulateCapabilities(caps);
+        D3D12_FEATURE_DATA_D3D12_OPTIONS d3d12Options{};
+        const bool heapTier2 =
+            SUCCEEDED(m_impl->nativeDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &d3d12Options, sizeof(d3d12Options))) && d3d12Options.ResourceHeapTier == D3D12_RESOURCE_HEAP_TIER_2;
+        const bool placedProfile = m_impl->common.GetDevice()->queryFeatureSupport(nvrhi::Feature::VirtualResources) && heapTier2;
+        if (placedProfile)
+        {
+            caps.placedResources.buffers = {PlacedHeapCategory::Buffer, DeviceLocalBufferCompatibilityClass, true, D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT};
+            caps.placedResources.textures = {PlacedHeapCategory::Texture, DeviceLocalTextureCompatibilityClass, true, D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT};
+            caps.placedResources.aliasDiscard = PlacedAliasDiscardLowering::LegacyBarrierAndDiscard;
+            caps.placedResources.sameQueueGraphics = true;
+            caps.placedResources.sameQueueCompute = true;
+        }
         caps.rayTracing = false;
         caps.rayTracingPipeline = false;
         caps.meshShaders = false;
@@ -1431,8 +1435,7 @@ namespace vanguard::rhi::d3d12
         m_impl->initialized = true;
         capabilities = caps;
 
-        VG_LOG_INFO(diagnostics::Category::Rendering, "D3D12 RHI initialized on %s (%llu MiB dedicated VRAM)", caps.adapterName,
-                    static_cast<unsigned long long>(caps.dedicatedVideoMemory / (1024u * 1024u)));
+        VG_LOG_INFO(diagnostics::Category::Rendering, "D3D12 RHI initialized on %s (%llu MiB dedicated VRAM)", caps.adapterName, static_cast<unsigned long long>(caps.dedicatedVideoMemory / (1024u * 1024u)));
         return BackendStatus::Success();
     }
 
@@ -1449,6 +1452,16 @@ namespace vanguard::rhi::d3d12
         if (!m_impl->common.ShutdownAfterGpuIdle())
             return BackendStatus::Failure(FailureCode::Busy, 0, "RHI backend still owns live resources");
         m_impl->ReleaseDeviceObjects();
+        return BackendStatus::Success();
+    }
+
+    BackendStatus Backend::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr || !m_impl->initialized)
+            return BackendStatus::Failure(FailureCode::NotInitialized, 0, "D3D12 backend is not initialized");
+        m_impl->common.ForceShutdownAfterGpuIdle();
+        m_impl->ReleaseDeviceObjects();
+        m_impl->initialized = false;
         return BackendStatus::Success();
     }
 
@@ -1471,8 +1484,7 @@ namespace vanguard::rhi::d3d12
         if (m_impl == nullptr || !m_impl->initialized || !m_impl->common.IsInitialized())
             return BackendStatus::Failure(FailureCode::NotInitialized, 0, "D3D12 backend is not initialized");
         return m_impl->common.WaitIdle() ? BackendStatus::Success()
-                                         : BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(),
-                                                                  "D3D12 device failed while waiting for idle");
+                                         : BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(), "D3D12 device failed while waiting for idle");
     }
 
     BackendStatus Backend::RetireResources() noexcept
@@ -1489,8 +1501,7 @@ namespace vanguard::rhi::d3d12
         if (m_impl == nullptr || !m_impl->initialized || !m_impl->common.IsInitialized())
             return BackendStatus::Failure(FailureCode::NotInitialized, 0, "D3D12 backend is not initialized");
         if (!m_impl->common.WaitIdle())
-            return BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(),
-                                          "D3D12 device failed while draining retired resources");
+            return BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(), "D3D12 device failed while draining retired resources");
         m_impl->common.DrainRetiredResourcesAfterGpuIdle();
         m_impl->CollectQueryPools();
         return BackendStatus::Success();
@@ -1503,8 +1514,7 @@ namespace vanguard::rhi::d3d12
         if (m_impl == nullptr || !m_impl->initialized || m_impl->budgetAdapter == nullptr)
             return BackendStatus::Failure(FailureCode::Unsupported, 0, "DXGI memory-budget queries are unavailable");
         DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-        const HRESULT result = m_impl->budgetAdapter->QueryVideoMemoryInfo(
-            0, segment == MemorySegment::Local ? DXGI_MEMORY_SEGMENT_GROUP_LOCAL : DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &info);
+        const HRESULT result = m_impl->budgetAdapter->QueryVideoMemoryInfo(0, segment == MemorySegment::Local ? DXGI_MEMORY_SEGMENT_GROUP_LOCAL : DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &info);
         if (FAILED(result))
             return BackendStatus::Failure(FailureCode::BackendFailure, result, "DXGI video-memory budget query failed");
         budget.budget = info.Budget;
@@ -1537,8 +1547,7 @@ namespace vanguard::rhi::d3d12
             {
                 auto& value = *static_cast<Operation*>(context);
                 const HRESULT result = value.device->SetResidencyPriority(1, &value.pageable, &value.priority);
-                return SUCCEEDED(result) ? BackendStatus::Success()
-                                         : BackendStatus::Failure(FailureCode::BackendFailure, result, "D3D12 residency-priority update failed");
+                return SUCCEEDED(result) ? BackendStatus::Success() : BackendStatus::Failure(FailureCode::BackendFailure, result, "D3D12 residency-priority update failed");
             },
             &operation);
         concurrency::ScopedLock guard(m_impl->residencyLock);
@@ -1602,8 +1611,7 @@ namespace vanguard::rhi::d3d12
                 auto& value = *static_cast<Operation*>(context);
                 const HRESULT result = value.impl->residencyDevice->MakeResident(value.count, value.pageables);
                 if (FAILED(result))
-                    return BackendStatus::Failure(result == E_OUTOFMEMORY ? FailureCode::OutOfMemory : FailureCode::BackendFailure, result,
-                                                  "D3D12 failed to make the GPU working set resident");
+                    return BackendStatus::Failure(result == E_OUTOFMEMORY ? FailureCode::OutOfMemory : FailureCode::BackendFailure, result, "D3D12 failed to make the GPU working set resident");
                 concurrency::ScopedLock guard(value.impl->residencyLock);
                 for (const ResourceRef resource : value.resources)
                     value.impl->MarkResident(value.impl->common.GetResidencyAllocation(resource));
@@ -1694,45 +1702,65 @@ namespace vanguard::rhi::d3d12
         return m_impl->residencyStats;
     }
 
-    TextureRef Backend::CreateTexture(const TextureDesc& desc, const TextureInitData& data) noexcept
+    BackendStatus Backend::CreateTexture(const TextureDesc& desc, const TextureInitData& data, TextureRef& texture) noexcept
     {
-        const TextureRef texture = m_impl->common.CreateTexture(desc, data);
-        if (!texture || desc.virtualResource)
-            return texture;
+        texture = {};
+        const BackendStatus status = m_impl->common.CreateTexture(desc, data, texture);
+        if (!status)
+        {
+            const DeviceState device = TestDeviceState();
+            return device == DeviceState::Removed || device == DeviceState::ResetRequired
+                       ? BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(), "device was lost while creating texture")
+                       : status;
+        }
+        if (desc.virtualResource)
+            return BackendStatus::Success();
         const MemoryRequirements requirements = m_impl->common.GetMemoryRequirements(texture);
         const backend::FenceSet use = m_impl->common.GetResourceLastUse(ResourceRef(texture));
         if (!m_impl->RegisterAllocation(ResourceRef(texture), requirements.size, {use.graphics, use.compute, use.copy}))
         {
             static_cast<void>(m_impl->common.Release(ResourceRef(texture)));
-            return {};
+            texture = {};
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to register texture residency allocation");
         }
-        return texture;
+        return BackendStatus::Success();
     }
-    BufferRef Backend::CreateBuffer(const BufferDesc& desc, const BufferInitData& data) noexcept
+    BackendStatus Backend::CreateBuffer(const BufferDesc& desc, const BufferInitData& data, BufferRef& buffer) noexcept
     {
-        const BufferRef buffer = m_impl->common.CreateBuffer(desc, data);
-        if (!buffer || desc.virtualResource || desc.memoryType != MemoryType::DeviceLocal)
-            return buffer;
+        buffer = {};
+        const BackendStatus status = m_impl->common.CreateBuffer(desc, data, buffer);
+        if (!status)
+        {
+            const DeviceState device = TestDeviceState();
+            return device == DeviceState::Removed || device == DeviceState::ResetRequired
+                       ? BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(), "device was lost while creating buffer")
+                       : status;
+        }
+        if (desc.virtualResource || desc.memoryType != MemoryType::DeviceLocal)
+            return BackendStatus::Success();
         const MemoryRequirements requirements = m_impl->common.GetMemoryRequirements(buffer);
         const backend::FenceSet use = m_impl->common.GetResourceLastUse(ResourceRef(buffer));
         if (!m_impl->RegisterAllocation(ResourceRef(buffer), requirements.size, {use.graphics, use.compute, use.copy}))
         {
             static_cast<void>(m_impl->common.Release(ResourceRef(buffer)));
-            return {};
+            buffer = {};
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to register buffer residency allocation");
         }
-        return buffer;
+        return BackendStatus::Success();
     }
-    HeapRef Backend::CreateHeap(const HeapDesc& desc) noexcept
+    BackendStatus Backend::CreateHeap(const HeapDesc& desc, HeapRef& heap) noexcept
     {
-        const HeapRef heap = m_impl->common.CreateHeap(desc);
-        if (!heap || desc.memoryType != MemoryType::DeviceLocal)
-            return heap;
+        heap = {};
+        const BackendStatus created = m_impl->common.CreateHeap(desc, heap);
+        if (!created || desc.memoryType != MemoryType::DeviceLocal)
+            return created;
         if (!m_impl->RegisterAllocation(ResourceRef(heap), desc.size))
         {
             static_cast<void>(m_impl->common.Release(ResourceRef(heap)));
-            return {};
+            heap = {};
+            return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to register placed heap residency allocation");
         }
-        return heap;
+        return BackendStatus::Success();
     }
     BindingLayoutRef Backend::RequestBindingLayout(const BindingLayoutDesc& desc) noexcept
     {
@@ -1746,13 +1774,11 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.AllocateDescriptor(domain);
     }
-    BackendStatus Backend::WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const TextureRef texture,
-                                           const BindingType type, const TextureViewDesc& view) noexcept
+    BackendStatus Backend::WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const TextureRef texture, const BindingType type, const TextureViewDesc& view) noexcept
     {
         return m_impl->common.WriteDescriptor(domain, descriptor, texture, type, view);
     }
-    BackendStatus Backend::WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const BufferRef buffer, const BindingType type,
-                                           const BufferViewDesc& view) noexcept
+    BackendStatus Backend::WriteDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const BufferRef buffer, const BindingType type, const BufferViewDesc& view) noexcept
     {
         return m_impl->common.WriteDescriptor(domain, descriptor, buffer, type, view);
     }
@@ -1764,8 +1790,7 @@ namespace vanguard::rhi::d3d12
     {
         return BackendStatus::Failure(FailureCode::Unsupported, 0, "ray-tracing acceleration-structure descriptors are not implemented");
     }
-    BackendStatus Backend::RetireDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor,
-                                            const DescriptorRetirement& retirement) noexcept
+    BackendStatus Backend::RetireDescriptor(const DescriptorDomainRef domain, const DescriptorHandle descriptor, const DescriptorRetirement& retirement) noexcept
     {
         return m_impl->common.RetireDescriptor(domain, descriptor, retirement);
     }
@@ -1811,8 +1836,7 @@ namespace vanguard::rhi::d3d12
     }
     QueryPoolRef Backend::CreateQueryPool(const QueryPoolDesc& desc) noexcept
     {
-        if (m_impl == nullptr || !m_impl->initialized || desc.capacity == 0 || desc.capacity > MaximumQueryPoolEntries ||
-            desc.type == QueryType::AccelerationStructureCompactedSize)
+        if (m_impl == nullptr || !m_impl->initialized || desc.capacity == 0 || desc.capacity > MaximumQueryPoolEntries || desc.type == QueryType::AccelerationStructureCompactedSize)
             return {};
         concurrency::ScopedLock guard(m_impl->queryPoolLock);
         u32 slotIndex = MaximumQueryPools;
@@ -1864,8 +1888,7 @@ namespace vanguard::rhi::d3d12
         bufferDesc.MipLevels = 1;
         bufferDesc.SampleDesc.Count = 1;
         bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        result = m_impl->nativeDevice->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                               IID_PPV_ARGS(&payload->readback));
+        result = m_impl->nativeDevice->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&payload->readback));
         if (FAILED(result))
         {
             Impl::DestroyQueryPoolPayload(payload);
@@ -1908,8 +1931,7 @@ namespace vanguard::rhi::d3d12
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid query pool or command list");
         if (!IsRangedQuery(payload->type))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "timestamp queries must be issued, not begun");
-        if (index >= payload->capacity || payload->openQueries[index] != 0 ||
-            (payload->mapped != nullptr && index >= payload->mappedStart && index < payload->mappedEnd))
+        if (index >= payload->capacity || payload->openQueries[index] != 0 || (payload->mapped != nullptr && index >= payload->mappedStart && index < payload->mappedEnd))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "query index is unavailable for begin");
         if (payload->type == QueryType::PipelineStatistics && m_impl->common.GetCommandListType(commandList) != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::Unsupported, 0, "pipeline statistics require a graphics command list");
@@ -1945,8 +1967,7 @@ namespace vanguard::rhi::d3d12
         ID3D12GraphicsCommandList* const native = command != nullptr ? command->getNativeObject(nvrhi::ObjectTypes::D3D12_GraphicsCommandList) : nullptr;
         if (payload == nullptr || native == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid query pool or command list");
-        if (payload->type != QueryType::Timestamp || index >= payload->capacity ||
-            (payload->mapped != nullptr && index >= payload->mappedStart && index < payload->mappedEnd))
+        if (payload->type != QueryType::Timestamp || index >= payload->capacity || (payload->mapped != nullptr && index >= payload->mappedStart && index < payload->mappedEnd))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "query cannot be issued at this index");
         if (!m_impl->TrackQueryPoolUse(commandList, *payload))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain query pool use");
@@ -1971,8 +1992,7 @@ namespace vanguard::rhi::d3d12
                 return BackendStatus::Failure(FailureCode::Busy, 0, "query resolve range contains an open query");
         if (!m_impl->TrackQueryPoolUse(commandList, *payload, true))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain query pool use");
-        native->ResolveQueryData(payload->heap, ToNativeQueryType(payload->type), start, count, payload->readback,
-                                 static_cast<u64>(start) * payload->resultStride);
+        native->ResolveQueryData(payload->heap, ToNativeQueryType(payload->type), start, count, payload->readback, static_cast<u64>(start) * payload->resultStride);
         return BackendStatus::Success();
     }
 
@@ -2016,8 +2036,7 @@ namespace vanguard::rhi::d3d12
         result = 0;
         concurrency::ScopedLock guard(m_impl->queryPoolLock);
         QueryPoolPayload* const payload = m_impl->FindQueryPool(queryPool);
-        if (payload == nullptr || payload->type == QueryType::PipelineStatistics || payload->mapped == nullptr || index < payload->mappedStart ||
-            index >= payload->mappedEnd)
+        if (payload == nullptr || payload->type == QueryType::PipelineStatistics || payload->mapped == nullptr || index < payload->mappedStart || index >= payload->mappedEnd)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "query result is not in the acquired range");
         result = static_cast<const u64*>(payload->mapped)[index];
         return BackendStatus::Success();
@@ -2028,8 +2047,7 @@ namespace vanguard::rhi::d3d12
         result = {};
         concurrency::ScopedLock guard(m_impl->queryPoolLock);
         QueryPoolPayload* const payload = m_impl->FindQueryPool(queryPool);
-        if (payload == nullptr || payload->type != QueryType::PipelineStatistics || payload->mapped == nullptr || index < payload->mappedStart ||
-            index >= payload->mappedEnd)
+        if (payload == nullptr || payload->type != QueryType::PipelineStatistics || payload->mapped == nullptr || index < payload->mappedStart || index >= payload->mappedEnd)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "pipeline statistics are not in the acquired range");
         const auto& native = static_cast<const D3D12_QUERY_DATA_PIPELINE_STATISTICS*>(payload->mapped)[index];
         result = {native.IAVertices,  native.IAPrimitives,  native.VSInvocations, native.GSInvocations, native.GSPrimitives, native.CInvocations,
@@ -2040,22 +2058,17 @@ namespace vanguard::rhi::d3d12
     BackendStatus Backend::GetTimestampFrequency(const QueueType queue, u64& frequency) const noexcept
     {
         frequency = 0;
-        ID3D12CommandQueue* const native = queue == QueueType::Graphics  ? m_impl->graphicsQueue
-                                           : queue == QueueType::Compute ? m_impl->computeQueue
-                                                                         : m_impl->copyQueue;
+        ID3D12CommandQueue* const native = queue == QueueType::Graphics ? m_impl->graphicsQueue : queue == QueueType::Compute ? m_impl->computeQueue : m_impl->copyQueue;
         if (native == nullptr)
             return BackendStatus::Failure(FailureCode::Unsupported, 0, "command queue is unavailable");
         const HRESULT result = native->GetTimestampFrequency(&frequency);
-        return SUCCEEDED(result) && frequency != 0 ? BackendStatus::Success()
-                                                   : BackendStatus::Failure(FailureCode::BackendFailure, result, "failed to query GPU timestamp frequency");
+        return SUCCEEDED(result) && frequency != 0 ? BackendStatus::Success() : BackendStatus::Failure(FailureCode::BackendFailure, result, "failed to query GPU timestamp frequency");
     }
 
     BackendStatus Backend::CalibrateTimestamps(const QueueType queue, TimestampCalibration& calibration) const noexcept
     {
         calibration = {};
-        ID3D12CommandQueue* const native = queue == QueueType::Graphics  ? m_impl->graphicsQueue
-                                           : queue == QueueType::Compute ? m_impl->computeQueue
-                                                                         : m_impl->copyQueue;
+        ID3D12CommandQueue* const native = queue == QueueType::Graphics ? m_impl->graphicsQueue : queue == QueueType::Compute ? m_impl->computeQueue : m_impl->copyQueue;
         LARGE_INTEGER cpuFrequency{};
         if (native == nullptr || QueryPerformanceFrequency(&cpuFrequency) == FALSE)
             return BackendStatus::Failure(FailureCode::Unsupported, 0, "timestamp calibration is unavailable");
@@ -2063,9 +2076,7 @@ namespace vanguard::rhi::d3d12
         if (SUCCEEDED(result))
             result = native->GetClockCalibration(&calibration.gpuTimestamp, &calibration.cpuTimestamp);
         calibration.cpuFrequency = static_cast<u64>(cpuFrequency.QuadPart);
-        return SUCCEEDED(result) && calibration.IsValid()
-                   ? BackendStatus::Success()
-                   : BackendStatus::Failure(FailureCode::BackendFailure, result, "failed to calibrate CPU and GPU timestamps");
+        return SUCCEEDED(result) && calibration.IsValid() ? BackendStatus::Success() : BackendStatus::Failure(FailureCode::BackendFailure, result, "failed to calibrate CPU and GPU timestamps");
     }
     BackendStatus Backend::BindMemory(const TextureRef texture, const HeapRef heap, const u64 offset) noexcept
     {
@@ -2075,6 +2086,18 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.BindMemory(buffer, heap, offset);
     }
+    BackendStatus Backend::GetHeapDesc(const HeapRef heap, HeapDesc& desc) const noexcept
+    {
+        return m_impl->common.GetHeapDesc(heap, desc);
+    }
+    BackendStatus Backend::GetPlacement(const TextureRef texture, PlacementRecord& placement) const noexcept
+    {
+        return m_impl->common.GetPlacement(texture, placement);
+    }
+    BackendStatus Backend::GetPlacement(const BufferRef buffer, PlacementRecord& placement) const noexcept
+    {
+        return m_impl->common.GetPlacement(buffer, placement);
+    }
     MemoryRequirements Backend::GetMemoryRequirements(const TextureRef texture) const noexcept
     {
         return m_impl->common.GetMemoryRequirements(texture);
@@ -2082,6 +2105,34 @@ namespace vanguard::rhi::d3d12
     MemoryRequirements Backend::GetMemoryRequirements(const BufferRef buffer) const noexcept
     {
         return m_impl->common.GetMemoryRequirements(buffer);
+    }
+    BackendStatus Backend::GetTextureDesc(const TextureRef texture, TextureDesc& desc) const noexcept
+    {
+        return m_impl->common.GetTextureDesc(texture, desc);
+    }
+    BackendStatus Backend::GetBufferDesc(const BufferRef buffer, BufferDesc& desc) const noexcept
+    {
+        return m_impl->common.GetBufferDesc(buffer, desc);
+    }
+    BackendStatus Backend::GetMemoryRequirements(const TextureDesc& desc, MemoryRequirements& requirements) const noexcept
+    {
+        return m_impl->common.GetMemoryRequirements(desc, requirements);
+    }
+    BackendStatus Backend::GetMemoryRequirements(const BufferDesc& desc, MemoryRequirements& requirements) const noexcept
+    {
+        return m_impl->common.GetMemoryRequirements(desc, requirements);
+    }
+    BackendStatus Backend::ObserveNativeRelease(const ResourceRef resource, NativeReleaseObservation& observation) const noexcept
+    {
+        observation = {};
+        const BackendStatus status = m_impl->common.ValidateNativeReleaseObservation(resource);
+        if (status)
+            observation = MakeNativeReleaseObservation(resource);
+        return status;
+    }
+    bool Backend::IsNativeReleaseComplete(const NativeReleaseObservation observation) const noexcept
+    {
+        return observation.IsValid() && m_impl->common.IsNativeReleaseComplete(GetObservedResource(observation));
     }
     bool Backend::IsResourceReferenceValid(const ResourceRef resource) const noexcept
     {
@@ -2112,10 +2163,13 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.GetCommandListType(commandList);
     }
-    BackendStatus Backend::CloseAndSubmitCommandLists(const char* const name, const containers::ArraySpan<const CommandListRef> lists,
-                                                      const CommandListSyncType sync, GpuFence& completion) noexcept
+    BackendStatus Backend::CloseCommandList(const CommandListRef commandList) noexcept
     {
-        return m_impl->common.CloseAndSubmitCommandLists(name, lists, sync, completion);
+        return m_impl->common.CloseCommandList(commandList);
+    }
+    BackendStatus Backend::SubmitCommandLists(const char* const name, const containers::ArraySpan<const CommandListRef> lists, const CommandListSyncType sync, SubmissionReceipt& receipt) noexcept
+    {
+        return m_impl->common.SubmitCommandLists(name, lists, sync, receipt);
     }
     GpuFence Backend::GetGpuFence(const CommandListRef commandList) const noexcept
     {
@@ -2131,9 +2185,8 @@ namespace vanguard::rhi::d3d12
     }
     BackendStatus Backend::AddToResidencyWorkingSet(const CommandListRef commandList, const ResourceRef resource) noexcept
     {
-        return m_impl != nullptr && m_impl->common.RetainCommandResource(commandList, resource)
-                   ? BackendStatus::Success()
-                   : BackendStatus::Failure(FailureCode::InvalidReference, 0, "could not retain a command-list residency resource");
+        return m_impl != nullptr && m_impl->common.RetainCommandResource(commandList, resource) ? BackendStatus::Success()
+                                                                                                : BackendStatus::Failure(FailureCode::InvalidReference, 0, "could not retain a command-list residency resource");
     }
     BackendStatus Backend::SetPipeline(const CommandListRef commandList, const PipelineRef pipeline) noexcept
     {
@@ -2155,8 +2208,7 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.SetScissors(commandList, rect);
     }
-    BackendStatus Backend::BindVertexBuffers(const CommandListRef commandList, const u32 startIndex,
-                                             const containers::ArraySpan<const VertexBufferBinding> bindings) noexcept
+    BackendStatus Backend::BindVertexBuffers(const CommandListRef commandList, const u32 startIndex, const containers::ArraySpan<const VertexBufferBinding> bindings) noexcept
     {
         return m_impl->common.BindVertexBuffers(commandList, startIndex, bindings);
     }
@@ -2172,19 +2224,16 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.SetPushConstants(commandList, data, size);
     }
-    BackendStatus Backend::ClearColorTarget(const CommandListRef commandList, const TextureRef target, const ColorValue& value, const SubresourceRange& range,
-                                            const Rect* const rectangle) noexcept
+    BackendStatus Backend::ClearColorTarget(const CommandListRef commandList, const TextureRef target, const ColorValue& value, const SubresourceRange& range, const Rect* const rectangle) noexcept
     {
         return m_impl->common.ClearColorTarget(commandList, target, value, range, rectangle);
     }
-    BackendStatus Backend::ClearDepthStencilTarget(const CommandListRef commandList, const TextureRef target, const bool clearDepth, const f32 depth,
-                                                   const bool clearStencil, const u8 stencil, const SubresourceRange& range,
-                                                   const Rect* const rectangle) noexcept
+    BackendStatus Backend::ClearDepthStencilTarget(const CommandListRef commandList, const TextureRef target, const bool clearDepth, const f32 depth, const bool clearStencil, const u8 stencil,
+                                                   const SubresourceRange& range, const Rect* const rectangle) noexcept
     {
         return m_impl->common.ClearDepthStencilTarget(commandList, target, clearDepth, depth, clearStencil, stencil, range, rectangle);
     }
-    BackendStatus Backend::ClearTextureUav(const CommandListRef commandList, const TextureRef texture, const ColorValue& value,
-                                           const SubresourceRange& range) noexcept
+    BackendStatus Backend::ClearTextureUav(const CommandListRef commandList, const TextureRef texture, const ColorValue& value, const SubresourceRange& range) noexcept
     {
         return m_impl->common.ClearTextureUav(commandList, texture, value, range);
     }
@@ -2199,10 +2248,6 @@ namespace vanguard::rhi::d3d12
     BackendStatus Backend::DiscardTexture(const CommandListRef commandList, const TextureRef texture, const SubresourceRange& range) noexcept
     {
         return m_impl->common.DiscardTexture(commandList, texture, range);
-    }
-    BackendStatus Backend::DiscardBuffer(const CommandListRef commandList, const BufferRef buffer) noexcept
-    {
-        return m_impl->common.DiscardBuffer(commandList, buffer);
     }
     BackendStatus Backend::SetStencilRefValue(const CommandListRef commandList, const u8 value) noexcept
     {
@@ -2240,8 +2285,7 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.DrawIndexedPrimitiveIndirect(commandList, offset, count);
     }
-    BackendStatus Backend::DrawIndexedPrimitiveIndirectCount(const CommandListRef commandList, const u64 argumentsOffset, const u64 countOffset,
-                                                             const u32 maximumCount) noexcept
+    BackendStatus Backend::DrawIndexedPrimitiveIndirectCount(const CommandListRef commandList, const u64 argumentsOffset, const u64 countOffset, const u32 maximumCount) noexcept
     {
         return m_impl->common.DrawIndexedPrimitiveIndirectCount(commandList, argumentsOffset, countOffset, maximumCount);
     }
@@ -2253,18 +2297,15 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.DispatchIndirectCompute(commandList, offset);
     }
-    BackendStatus Backend::BuildBottomLevelAccelerationStructure(CommandListRef, AccelerationStructureRef, containers::ArraySpan<const RayTracingGeometryDesc>,
-                                                                 AccelerationStructureBuildMode) noexcept
+    BackendStatus Backend::BuildBottomLevelAccelerationStructure(CommandListRef, AccelerationStructureRef, containers::ArraySpan<const RayTracingGeometryDesc>, AccelerationStructureBuildMode) noexcept
     {
         return BackendStatus::Failure(FailureCode::Unsupported, 0, "bottom-level acceleration-structure builds are not implemented");
     }
-    BackendStatus Backend::BuildTopLevelAccelerationStructure(CommandListRef, AccelerationStructureRef, containers::ArraySpan<const RayTracingInstanceDesc>,
-                                                              AccelerationStructureBuildMode) noexcept
+    BackendStatus Backend::BuildTopLevelAccelerationStructure(CommandListRef, AccelerationStructureRef, containers::ArraySpan<const RayTracingInstanceDesc>, AccelerationStructureBuildMode) noexcept
     {
         return BackendStatus::Failure(FailureCode::Unsupported, 0, "top-level acceleration-structure builds are not implemented");
     }
-    BackendStatus Backend::BuildTopLevelAccelerationStructureIndirect(CommandListRef, AccelerationStructureRef, BufferRef, u64, u32,
-                                                                      AccelerationStructureBuildMode) noexcept
+    BackendStatus Backend::BuildTopLevelAccelerationStructureIndirect(CommandListRef, AccelerationStructureRef, BufferRef, u64, u32, AccelerationStructureBuildMode) noexcept
     {
         return BackendStatus::Failure(FailureCode::Unsupported, 0, "GPU-driven top-level acceleration-structure builds are not implemented");
     }
@@ -2280,8 +2321,7 @@ namespace vanguard::rhi::d3d12
     {
         return BackendStatus::Failure(FailureCode::Unsupported, 0, "ray dispatch is not implemented");
     }
-    BackendStatus Backend::WriteBuffer(const CommandListRef commandList, const BufferRef buffer, const void* const data, const u64 size,
-                                       const u64 offset) noexcept
+    BackendStatus Backend::WriteBuffer(const CommandListRef commandList, const BufferRef buffer, const void* const data, const u64 size, const u64 offset) noexcept
     {
         return m_impl->common.WriteBuffer(commandList, buffer, data, size, offset);
     }
@@ -2289,23 +2329,19 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.WriteTexture(commandList, texture, data);
     }
-    BackendStatus Backend::CopyBuffer(const CommandListRef commandList, const BufferRef destination, const u64 destinationOffset, const BufferRef source,
-                                      const u64 sourceOffset, const u64 size) noexcept
+    BackendStatus Backend::CopyBuffer(const CommandListRef commandList, const BufferRef destination, const u64 destinationOffset, const BufferRef source, const u64 sourceOffset, const u64 size) noexcept
     {
         return m_impl->common.CopyBuffer(commandList, destination, destinationOffset, source, sourceOffset, size);
     }
-    BackendStatus Backend::CopyTexture(const CommandListRef commandList, const TextureRef destination, const TextureRef source,
-                                       const TextureCopyRegion& region) noexcept
+    BackendStatus Backend::CopyTexture(const CommandListRef commandList, const TextureRef destination, const TextureRef source, const TextureCopyRegion& region) noexcept
     {
         return m_impl->common.CopyTexture(commandList, destination, source, region);
     }
-    BackendStatus Backend::ResolveTexture(const CommandListRef commandList, const TextureRef destination, const TextureRef source,
-                                          const TextureResolveRegion& region) noexcept
+    BackendStatus Backend::ResolveTexture(const CommandListRef commandList, const TextureRef destination, const TextureRef source, const TextureResolveRegion& region) noexcept
     {
         return m_impl->common.ResolveTexture(commandList, destination, source, region);
     }
-    BackendStatus Backend::RequestTextureReadback(const CommandListRef commandList, const TextureRef source, const TextureReadbackRegion& region,
-                                                  TextureReadbackRef& readback) noexcept
+    BackendStatus Backend::RequestTextureReadback(const CommandListRef commandList, const TextureRef source, const TextureReadbackRegion& region, TextureReadbackRef& readback) noexcept
     {
         return m_impl->common.RequestTextureReadback(commandList, source, region, readback);
     }
@@ -2329,13 +2365,20 @@ namespace vanguard::rhi::d3d12
     {
         m_impl->common.UnlockBuffer(buffer);
     }
-    BackendStatus Backend::TransitionTexture(const CommandListRef commandList, const TextureRef texture, const ResourceState before, const ResourceState after,
-                                             const SubresourceRange& range) noexcept
+    BackendStatus Backend::AddCommandListWait(const CommandListRef commandList, const GpuFence fence) noexcept
+    {
+        return m_impl->common.AddCommandListWait(commandList, fence);
+    }
+
+    BackendStatus Backend::SeedCommandListStates(const CommandListRef commandList, const containers::ArraySpan<const CommandListEntryState> entries) noexcept
+    {
+        return m_impl->common.SeedCommandListStates(commandList, entries);
+    }
+    BackendStatus Backend::TransitionTexture(const CommandListRef commandList, const TextureRef texture, const ResourceState before, const ResourceState after, const SubresourceRange& range) noexcept
     {
         return m_impl->common.TransitionTexture(commandList, texture, before, after, range);
     }
-    BackendStatus Backend::TransitionBuffer(const CommandListRef commandList, const BufferRef buffer, const ResourceState before,
-                                            const ResourceState after) noexcept
+    BackendStatus Backend::TransitionBuffer(const CommandListRef commandList, const BufferRef buffer, const ResourceState before, const ResourceState after) noexcept
     {
         return m_impl->common.TransitionBuffer(commandList, buffer, before, after);
     }
@@ -2347,14 +2390,9 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl->common.BarrierBufferUav(commandList, buffer);
     }
-    BackendStatus Backend::BarrierTextureAliasing(const CommandListRef commandList, const bool discard, const TextureRef after,
-                                                  const TextureRef before) noexcept
+    BackendStatus Backend::ActivateAliasedResource(const CommandListRef commandList, const ResourceRef destination, const containers::ArraySpan<const ResourceRef> predecessors) noexcept
     {
-        return m_impl->common.BarrierTextureAliasing(commandList, discard, after, before);
-    }
-    BackendStatus Backend::BarrierBufferAliasing(const CommandListRef commandList, const bool discard, const BufferRef after, const BufferRef before) noexcept
-    {
-        return m_impl->common.BarrierBufferAliasing(commandList, discard, after, before);
+        return m_impl->common.ActivateAliasedResource(commandList, destination, predecessors);
     }
     BackendStatus Backend::FlushPendingBarriers(const CommandListRef commandList) noexcept
     {
@@ -2374,9 +2412,7 @@ namespace vanguard::rhi::d3d12
             return {};
 
         BOOL tearingSupported = FALSE;
-        const bool tearingAvailable =
-            SUCCEEDED(m_impl->factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearingSupported, sizeof(tearingSupported))) &&
-            tearingSupported == TRUE;
+        const bool tearingAvailable = SUCCEEDED(m_impl->factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearingSupported, sizeof(tearingSupported))) && tearingSupported == TRUE;
         const bool tearingEnabled = desc.allowTearing && tearingAvailable;
 
         DXGI_SWAP_CHAIN_DESC1 nativeDesc{};
@@ -2390,12 +2426,10 @@ namespace vanguard::rhi::d3d12
         nativeDesc.Scaling = DXGI_SCALING_STRETCH;
         nativeDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         nativeDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        nativeDesc.Flags =
-            (tearingEnabled ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (desc.frameLatency.enabled ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
+        nativeDesc.Flags = (tearingEnabled ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (desc.frameLatency.enabled ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0);
 
         IDXGISwapChain1* baseSwapChain = nullptr;
-        HRESULT result = m_impl->factory->CreateSwapChainForHwnd(m_impl->graphicsQueue, static_cast<HWND>(desc.surface.nativeWindow), &nativeDesc, nullptr,
-                                                                 nullptr, &baseSwapChain);
+        HRESULT result = m_impl->factory->CreateSwapChainForHwnd(m_impl->graphicsQueue, static_cast<HWND>(desc.surface.nativeWindow), &nativeDesc, nullptr, nullptr, &baseSwapChain);
         if (FAILED(result) || baseSwapChain == nullptr)
             return {};
 
@@ -2439,8 +2473,7 @@ namespace vanguard::rhi::d3d12
         payload->bufferCount = desc.bufferCount;
         payload->tearingEnabled = tearingEnabled;
         payload->stats.state = SwapChainState::Available;
-        payload->stats.presentParameters = {desc.presentMode, static_cast<u8>(desc.presentMode == PresentMode::Fifo ? 1u : 0u),
-                                            desc.presentMode == PresentMode::Immediate && tearingEnabled};
+        payload->stats.presentParameters = {desc.presentMode, static_cast<u8>(desc.presentMode == PresentMode::Fifo ? 1u : 0u), desc.presentMode == PresentMode::Immediate && tearingEnabled};
         payload->stats.bufferCount = desc.bufferCount;
         payload->stats.width = desc.width;
         payload->stats.height = desc.height;
@@ -2491,8 +2524,7 @@ namespace vanguard::rhi::d3d12
             const u32 current = payload->native->GetCurrentBackBufferIndex();
             if (current < payload->bufferCount && payload->backBuffers[current].IsValid())
                 return BackendStatus::Success();
-            return CreateBackBufferHandles(*payload) ? BackendStatus::Success()
-                                                     : BackendStatus::Failure(FailureCode::BackendFailure, 0, "failed to recover DXGI back-buffer wrappers");
+            return CreateBackBufferHandles(*payload) ? BackendStatus::Success() : BackendStatus::Failure(FailureCode::BackendFailure, 0, "failed to recover DXGI back-buffer wrappers");
         }
         for (u32 index = 0; index < payload->bufferCount; ++index)
             if (m_impl->common.GetResourceReferenceCount(ResourceRef(payload->backBuffers[index])) != 1)
@@ -2516,13 +2548,11 @@ namespace vanguard::rhi::d3d12
         m_impl->common.DrainRetiredResourcesAfterGpuIdle();
         const HRESULT result =
             payload->native->ResizeBuffers(payload->bufferCount, width, height, ToSwapChainFormat(payload->desc.format),
-                                           (payload->tearingEnabled ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) |
-                                               (payload->desc.frameLatency.enabled ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0));
+                                           (payload->tearingEnabled ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (payload->desc.frameLatency.enabled ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0));
         if (FAILED(result))
         {
             const bool recovered = CreateBackBufferHandles(*payload);
-            const FailureCode code =
-                result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET ? FailureCode::DeviceLost : FailureCode::BackendFailure;
+            const FailureCode code = result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET ? FailureCode::DeviceLost : FailureCode::BackendFailure;
             payload->stats.state = recovered && code != FailureCode::DeviceLost ? SwapChainState::Available : SwapChainState::Failed;
             return BackendStatus::Failure(code, result, "DXGI ResizeBuffers failed");
         }
@@ -2554,8 +2584,7 @@ namespace vanguard::rhi::d3d12
         if (!IsPresentParametersValid(parameters))
         {
             ++payload->stats.rejectedOperations;
-            return BackendStatus::Failure(parameters.mode == PresentMode::Mailbox ? FailureCode::Unsupported : FailureCode::InvalidArgument, 0,
-                                          "invalid swap-chain presentation parameters");
+            return BackendStatus::Failure(parameters.mode == PresentMode::Mailbox ? FailureCode::Unsupported : FailureCode::InvalidArgument, 0, "invalid swap-chain presentation parameters");
         }
         if (payload->stats.state != SwapChainState::Available)
         {
@@ -2580,12 +2609,18 @@ namespace vanguard::rhi::d3d12
         auto* const payload = static_cast<SwapChainPayload*>(m_impl->common.GetResourcePayload(ResourceRef(swapChain)));
         if (payload == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid D3D12 swap chain");
+#if VG_BUILD_DEBUG
+        const u64 lockStart = system::GetMonotonicTicks();
+#endif
         concurrency::ScopedLock guard(payload->lock);
+#if VG_BUILD_DEBUG
+        const double lockMs = 1000.0 * double(system::GetMonotonicTicks() - lockStart) / double(system::GetMonotonicFrequency());
+        if (lockMs >= 100.0) VG_LOG_WARNING(diagnostics::Category::Rendering, "Acquire back-buffer lock: %.2f ms", lockMs);
+#endif
         if (payload->stats.state != SwapChainState::Available)
         {
             ++payload->stats.rejectedOperations;
-            return BackendStatus::Failure(payload->stats.state == SwapChainState::Acquired ? FailureCode::Busy : FailureCode::BackendFailure, 0,
-                                          "swap chain is not available for back-buffer acquisition");
+            return BackendStatus::Failure(payload->stats.state == SwapChainState::Acquired ? FailureCode::Busy : FailureCode::BackendFailure, 0, "swap chain is not available for back-buffer acquisition");
         }
         if (payload->desc.frameLatency.enabled)
         {
@@ -2608,7 +2643,14 @@ namespace vanguard::rhi::d3d12
                 return BackendStatus::Failure(FailureCode::BackendFailure, GetLastError(), "DXGI frame-latency wait failed");
             }
         }
+#if VG_BUILD_DEBUG
+        const u64 queryStart = system::GetMonotonicTicks();
+#endif
         const u32 index = payload->native->GetCurrentBackBufferIndex();
+#if VG_BUILD_DEBUG
+        const double queryMs = 1000.0 * double(system::GetMonotonicTicks() - queryStart) / double(system::GetMonotonicFrequency());
+        if (queryMs >= 100.0) VG_LOG_WARNING(diagnostics::Category::Rendering, "Acquire native back-buffer query: %.2f ms", queryMs);
+#endif
         if (index >= payload->bufferCount || !payload->backBuffers[index].IsValid())
         {
             payload->stats.state = SwapChainState::Failed;
@@ -2624,6 +2666,9 @@ namespace vanguard::rhi::d3d12
         if (waited)
         {
             const u64 elapsed = TicksToNanoseconds(system::GetMonotonicTicks() - waitStart);
+#if VG_BUILD_DEBUG
+            if (elapsed >= 100000000) VG_LOG_WARNING(diagnostics::Category::Rendering, "Acquire back-buffer GPU fence: %.2f ms", double(elapsed) / 1000000.0);
+#endif
             ++payload->stats.acquireWaits;
             payload->stats.acquireWaitNanoseconds += elapsed;
             if (payload->stats.longestAcquireWaitNanoseconds < elapsed)
@@ -2662,6 +2707,11 @@ namespace vanguard::rhi::d3d12
         {
             ++payload->stats.rejectedOperations;
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "stale or foreign back-buffer acquisition");
+        }
+        if (payload->submittedAcquisitionSerial.GetValue() == acquisition.serial)
+        {
+            ++payload->stats.rejectedOperations;
+            return BackendStatus::Failure(FailureCode::Busy, 0, "a submitted back-buffer transition cannot be abandoned");
         }
         payload->activeAcquisition = {};
         payload->submittedAcquisitionSerial.SetValue(0);

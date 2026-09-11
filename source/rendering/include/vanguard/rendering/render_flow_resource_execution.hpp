@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/rendering/render_flow_resource_allocator.hpp>
+#include <vanguard/rhi/rhi.hpp>
 
 namespace vanguard::rendering
 {
@@ -20,6 +21,8 @@ namespace vanguard::rendering
     {
         Submitted,
         DiscardedBeforeSubmission,
+        // CloseAndSubmit returned false after SubmissionReceipt::WasSubmitted.
+        // The executor has lost the fence but must not classify issued work as discarded.
         UnknownDueToDeviceLoss
     };
 
@@ -30,6 +33,14 @@ namespace vanguard::rendering
         DeviceLost
     };
 
+    enum class QueueDependencyCompletionKind : u8
+    {
+        Submitted,
+        DiscardedBeforeSubmission,
+        // The lowering submission issued native work, then lost completion evidence.
+        UnknownDueToDeviceLoss
+    };
+
     struct CommandScopeExecutionReceipt
     {
         CommandScopeId scope;
@@ -38,8 +49,20 @@ namespace vanguard::rendering
         rhi::GpuFence fence;
     };
 
+    // Executor acknowledgement that the matching compiled queue dependency
+    // was lowered through CloseAndSubmitCommandLists with this sync mode.
+    struct QueueDependencyExecutionReceipt
+    {
+        CommandScopeId producerScope;
+        CommandScopeId consumerScope;
+        rhi::CommandListSyncType sync = rhi::CommandListSyncType::None;
+        QueueDependencyCompletionKind completion = QueueDependencyCompletionKind::DiscardedBeforeSubmission;
+    };
+
     // CPU completion evidence for the complete execution generation. Per-scope
     // receipts separately report whether GPU work was submitted and its fence.
+    // Neither factory joins jobs. The caller supplies an already established
+    // complete-generation join, including queued work and child continuations.
     class TerminalJoinToken final
     {
     public:
@@ -68,6 +91,49 @@ namespace vanguard::rendering
         TerminalExecutionCompletionKind completion = TerminalExecutionCompletionKind::Completed;
         containers::ArraySpan<const CommandScopeExecutionReceipt> commandScopes;
         TerminalJoinToken join = TerminalJoinToken::CompletedSynchronously({});
+        containers::ArraySpan<const QueueDependencyExecutionReceipt> queueDependencies;
+    };
+
+    // Owning result published only by a successful terminal frame completion.
+    // The ready fence is the actual submission receipt for the resource's last
+    // command scope; same-queue consumers may instead continue in submission
+    // order on terminalQueue.
+    class PublishedResourceExport final
+    {
+    public:
+        PublishedResourceExport() noexcept = default;
+        ~PublishedResourceExport() = default;
+        PublishedResourceExport(PublishedResourceExport&&) noexcept = default;
+        PublishedResourceExport& operator=(PublishedResourceExport&&) noexcept = default;
+
+        PublishedResourceExport(const PublishedResourceExport&) = delete;
+        PublishedResourceExport& operator=(const PublishedResourceExport&) = delete;
+
+        [[nodiscard]] bool IsValid() const noexcept;
+        [[nodiscard]] FrameResourceKind GetKind() const noexcept;
+        [[nodiscard]] ExportSlotId GetSlot() const noexcept;
+        [[nodiscard]] rhi::TextureRef GetTexture() const noexcept;
+        [[nodiscard]] rhi::BufferRef GetBuffer() const noexcept;
+        [[nodiscard]] const rhi::TextureDesc& GetTextureDesc() const noexcept;
+        [[nodiscard]] const rhi::BufferDesc& GetBufferDesc() const noexcept;
+        [[nodiscard]] rhi::ResourceState GetTerminalState() const noexcept;
+        [[nodiscard]] rhi::QueueType GetTerminalQueue() const noexcept;
+        [[nodiscard]] ExportReadinessKind GetReadiness() const noexcept;
+        [[nodiscard]] rhi::GpuFence GetReadyFence() const noexcept;
+        void Reset() noexcept;
+
+    private:
+        ExportSlotId m_slot;
+        FrameResourceKind m_kind = FrameResourceKind::Texture;
+        rhi::Texture m_texture;
+        rhi::Buffer m_buffer;
+        rhi::TextureDesc m_textureDesc;
+        rhi::BufferDesc m_bufferDesc;
+        rhi::ResourceState m_terminalState = rhi::ResourceState::Unknown;
+        rhi::QueueType m_terminalQueue = rhi::QueueType::Graphics;
+        ExportReadinessKind m_readiness = ExportReadinessKind::SameQueueContinuation;
+        rhi::GpuFence m_readyFence;
+        friend class RenderFlowResourceAllocator;
     };
 
     class ExecutionPacketCursor;
@@ -91,13 +157,17 @@ namespace vanguard::rendering
     private:
         Impl* m_impl = nullptr;
         explicit ExecutionGenerationRef(Impl* impl) noexcept;
-        friend class FrameResourceSession;
+        friend class RenderFlowResourceAllocator;
         friend class CompiledExecutionPacketView;
         friend class ExecutionPacketCursor;
         friend class ResolvedTextureUse;
         friend class ResolvedBufferUse;
     };
 
+    // Views may be retained/copied, but each packet has exactly one recording
+    // owner. Opening the same packet concurrently is a caller contract violation.
+    // Owner handoff between continuation jobs must be ordered by job dependencies.
+    // Finish and allocator teardown cannot overlap opening or cursor operations.
     class CompiledExecutionPacketView final
     {
     public:
@@ -116,7 +186,7 @@ namespace vanguard::rendering
     private:
         ExecutionGenerationRef m_generation;
         u32 m_packetIndex = InvalidRenderFlowResourceIndex;
-        friend class FrameResourceSession;
+        friend class RenderFlowResourceAllocator;
     };
 
     // A resolved use retains only a packet-local liveness witness so stale
@@ -137,7 +207,12 @@ namespace vanguard::rendering
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] ResourceUseId GetUse() const noexcept;
         [[nodiscard]] PhysicalResourceId GetPhysicalResource() const noexcept;
+        // Non-owning and valid only while this scoped use is valid.
+        [[nodiscard]] rhi::TextureRef GetTexture() const noexcept;
         [[nodiscard]] const TextureUseDesc& GetDesc() const noexcept;
+        // Whole-resource descriptors, valid only during this use. Explicit views require their own descriptor support.
+        [[nodiscard]] rhi::DescriptorHandle GetShaderResourceDescriptor() const noexcept;
+        [[nodiscard]] rhi::DescriptorHandle GetUnorderedAccessDescriptor() const noexcept;
         [[nodiscard]] bool HasExplicitView() const noexcept;
         [[nodiscard]] const rhi::TextureViewDesc& GetViewDesc() const noexcept;
 
@@ -145,10 +220,13 @@ namespace vanguard::rendering
         detail::PacketUseLiveness* m_liveness = nullptr;
         ResourceUseId m_use;
         PhysicalResourceId m_physical;
+        rhi::TextureRef m_texture;
         TextureUseDesc m_desc;
         rhi::TextureViewDesc m_viewDesc;
         u32 m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
         bool m_hasExplicitView = false;
+        rhi::DescriptorHandle m_shaderResource;
+        rhi::DescriptorHandle m_unorderedAccess;
         friend class ExecutionPacketCursor;
     };
 
@@ -166,7 +244,12 @@ namespace vanguard::rendering
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] ResourceUseId GetUse() const noexcept;
         [[nodiscard]] PhysicalResourceId GetPhysicalResource() const noexcept;
+        // Non-owning and valid only while this scoped use is valid.
+        [[nodiscard]] rhi::BufferRef GetBuffer() const noexcept;
         [[nodiscard]] const BufferUseDesc& GetDesc() const noexcept;
+        // Whole-resource descriptors, valid only during this use. Explicit views require their own descriptor support.
+        [[nodiscard]] rhi::DescriptorHandle GetShaderResourceDescriptor() const noexcept;
+        [[nodiscard]] rhi::DescriptorHandle GetUnorderedAccessDescriptor() const noexcept;
         [[nodiscard]] bool HasExplicitView() const noexcept;
         [[nodiscard]] const rhi::BufferViewDesc& GetViewDesc() const noexcept;
 
@@ -174,13 +257,19 @@ namespace vanguard::rendering
         detail::PacketUseLiveness* m_liveness = nullptr;
         ResourceUseId m_use;
         PhysicalResourceId m_physical;
+        rhi::BufferRef m_buffer;
         BufferUseDesc m_desc;
         rhi::BufferViewDesc m_viewDesc;
         u32 m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
         bool m_hasExplicitView = false;
+        rhi::DescriptorHandle m_shaderResource;
+        rhi::DescriptorHandle m_unorderedAccess;
         friend class ExecutionPacketCursor;
     };
 
+    // Single-owner execution state. Moves transfer ownership only after the old
+    // owner's access has ended; destruction and cancellation are owner operations,
+    // not asynchronous requests to stop another recording job.
     class ExecutionPacketCursor final
     {
     public:
@@ -203,6 +292,7 @@ namespace vanguard::rendering
     private:
         ExecutionGenerationRef m_generation;
         u32 m_packetIndex = InvalidRenderFlowResourceIndex;
+        rhi::CommandListRef m_commandList;
         bool m_open = false;
         friend class CompiledExecutionPacketView;
     };

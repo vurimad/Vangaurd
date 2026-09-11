@@ -57,6 +57,12 @@ namespace vanguard::rendering
                 return {sizeof(GpuDecal), "GPU Scene Decals"};
             case GpuSceneTableKind::TextureResidency:
                 return {sizeof(GpuTextureResidency), "GPU Scene Texture Residency"};
+            case GpuSceneTableKind::MaterialParameterWord:
+                return {sizeof(GpuMaterialParameterWord), "GPU Scene Material Parameter Words"};
+            case GpuSceneTableKind::GeometryShell:
+                return {sizeof(GpuGeometryShell), "GPU Scene Geometry Shells"};
+            case GpuSceneTableKind::GeometryBin:
+                return {sizeof(GpuGeometryBin), "GPU Scene Geometry Bins"};
             default:
                 return {};
             }
@@ -68,8 +74,8 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(GpuSceneTablesFailure* const failure, const GpuSceneTablesFailureCode code, const char* const message,
-                                const GpuSceneTableKind table = GpuSceneTableKind::Count, const u32 page = 0, const rhi::Failure& rhiFailure = {}) noexcept
+        [[nodiscard]] bool Fail(GpuSceneTablesFailure* const failure, const GpuSceneTablesFailureCode code, const char* const message, const GpuSceneTableKind table = GpuSceneTableKind::Count,
+                                const u32 page = 0, const rhi::Failure& rhiFailure = {}) noexcept
         {
             if (failure != nullptr)
                 *failure = {code, table, page, message, rhiFailure};
@@ -113,6 +119,8 @@ namespace vanguard::rendering
         rhi::DescriptorHandle tableDirectoryDescriptor;
         rhi::DescriptorHandle pageDirectoryDescriptor;
         GpuSceneTablesStats stats;
+        rhi::BufferRef consumerBuffers[2 + GpuSceneTableCount * MaximumGpuScenePagesPerTable];
+        u32 consumerBufferCount = 0;
         u32 maximumPagesPerTable = 0;
 
         [[nodiscard]] bool RetireDescriptor(rhi::DescriptorHandle& descriptor, const rhi::DescriptorRetirement& safeAfter) noexcept
@@ -151,8 +159,7 @@ namespace vanguard::rendering
         const u32 requiredDescriptors = 2u + GpuSceneTableCount * config.maximumPagesPerTable * 2u;
         const rhi::DescriptorDomainStats domainStats = rhi::GetDescriptorDomainStats(config.resourceDescriptors);
         if (domainStats.free < requiredDescriptors)
-            return Fail(failure, GpuSceneTablesFailureCode::DescriptorCapacityExceeded,
-                        "bindless resource domain cannot reserve every GPU Scene page identity");
+            return Fail(failure, GpuSceneTablesFailureCode::DescriptorCapacityExceeded, "bindless resource domain cannot reserve every GPU Scene page identity");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
         if (!block)
@@ -168,15 +175,13 @@ namespace vanguard::rendering
         if (!impl->tableDirectoryDescriptor)
         {
             static_cast<void>(Shutdown({}));
-            return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene table-directory descriptor reservation failed",
-                        GpuSceneTableKind::Count, 0, rhiFailure);
+            return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene table-directory descriptor reservation failed", GpuSceneTableKind::Count, 0, rhiFailure);
         }
         impl->pageDirectoryDescriptor = rhi::AllocateDescriptor(impl->resourceDescriptors, &rhiFailure);
         if (!impl->pageDirectoryDescriptor)
         {
             static_cast<void>(Shutdown({}));
-            return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page-directory descriptor reservation failed",
-                        GpuSceneTableKind::Count, 0, rhiFailure);
+            return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page-directory descriptor reservation failed", GpuSceneTableKind::Count, 0, rhiFailure);
         }
 
         for (u32 tableIndex = 0; tableIndex < GpuSceneTableCount; ++tableIndex)
@@ -189,8 +194,7 @@ namespace vanguard::rendering
             table.stats.elementsPerPage = elementsPerPage;
             table.stats.elementStride = layout.stride;
             const u32 pageShift = GetGpuScenePageShift(kind);
-            impl->tableDirectory[tableIndex] = {
-                tableIndex * MaximumGpuScenePagesPerTable, config.maximumPagesPerTable, pageShift, elementsPerPage - 1u, elementsPerPage, layout.stride, 0, 0};
+            impl->tableDirectory[tableIndex] = {tableIndex * MaximumGpuScenePagesPerTable, config.maximumPagesPerTable, pageShift, elementsPerPage - 1u, elementsPerPage, layout.stride, 0, 0};
             for (u32 pageIndex = 0; pageIndex < config.maximumPagesPerTable; ++pageIndex)
             {
                 Impl::Page& page = table.pages[pageIndex];
@@ -198,18 +202,15 @@ namespace vanguard::rendering
                 if (!page.shaderResourceDescriptor)
                 {
                     static_cast<void>(Shutdown({}));
-                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page shader-resource descriptor reservation failed", kind,
-                                pageIndex, rhiFailure);
+                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page shader-resource descriptor reservation failed", kind, pageIndex, rhiFailure);
                 }
                 page.unorderedAccessDescriptor = rhi::AllocateDescriptor(impl->resourceDescriptors, &rhiFailure);
                 if (!page.unorderedAccessDescriptor)
                 {
                     static_cast<void>(Shutdown({}));
-                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page unordered-access descriptor reservation failed", kind,
-                                pageIndex, rhiFailure);
+                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page unordered-access descriptor reservation failed", kind, pageIndex, rhiFailure);
                 }
-                impl->pageDirectory[DirectoryPageIndex(kind, pageIndex)] = {page.shaderResourceDescriptor.GpuIndex(), page.unorderedAccessDescriptor.GpuIndex(),
-                                                                            pageIndex * elementsPerPage, elementsPerPage};
+                impl->pageDirectory[DirectoryPageIndex(kind, pageIndex)] = {page.shaderResourceDescriptor.GpuIndex(), page.unorderedAccessDescriptor.GpuIndex(), pageIndex * elementsPerPage, elementsPerPage};
             }
         }
 
@@ -222,8 +223,7 @@ namespace vanguard::rendering
         if (!impl->tableDirectoryBuffer)
         {
             static_cast<void>(Shutdown({}));
-            return Fail(failure, GpuSceneTablesFailureCode::BufferFailure, "GPU Scene table-directory buffer creation failed", GpuSceneTableKind::Count, 0,
-                        rhiFailure);
+            return Fail(failure, GpuSceneTablesFailureCode::BufferFailure, "GPU Scene table-directory buffer creation failed", GpuSceneTableKind::Count, 0, rhiFailure);
         }
         directoryDesc.size = sizeof(impl->pageDirectory);
         directoryDesc.structureStride = sizeof(GpuScenePageDirectoryEntry);
@@ -231,19 +231,17 @@ namespace vanguard::rendering
         if (!impl->pageDirectoryBuffer)
         {
             static_cast<void>(Shutdown({}));
-            return Fail(failure, GpuSceneTablesFailureCode::BufferFailure, "GPU Scene page-directory buffer creation failed", GpuSceneTableKind::Count, 0,
-                        rhiFailure);
+            return Fail(failure, GpuSceneTablesFailureCode::BufferFailure, "GPU Scene page-directory buffer creation failed", GpuSceneTableKind::Count, 0, rhiFailure);
         }
         rhi::SetResourceDebugName(impl->tableDirectoryBuffer, "GPU Scene Table Directory");
         rhi::SetResourceDebugName(impl->pageDirectoryBuffer, "GPU Scene Page Directory");
-        if (!rhi::WriteDescriptor(impl->resourceDescriptors, impl->tableDirectoryDescriptor, impl->tableDirectoryBuffer,
-                                  rhi::BindingType::StructuredBufferShaderResource, {}, &rhiFailure) ||
-            !rhi::WriteDescriptor(impl->resourceDescriptors, impl->pageDirectoryDescriptor, impl->pageDirectoryBuffer,
-                                  rhi::BindingType::StructuredBufferShaderResource, {}, &rhiFailure))
+        impl->consumerBuffers[impl->consumerBufferCount++] = impl->tableDirectoryBuffer;
+        impl->consumerBuffers[impl->consumerBufferCount++] = impl->pageDirectoryBuffer;
+        if (!rhi::WriteDescriptor(impl->resourceDescriptors, impl->tableDirectoryDescriptor, impl->tableDirectoryBuffer, rhi::BindingType::StructuredBufferShaderResource, {}, &rhiFailure) ||
+            !rhi::WriteDescriptor(impl->resourceDescriptors, impl->pageDirectoryDescriptor, impl->pageDirectoryBuffer, rhi::BindingType::StructuredBufferShaderResource, {}, &rhiFailure))
         {
             static_cast<void>(Shutdown({}));
-            return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene directory descriptor publication failed", GpuSceneTableKind::Count, 0,
-                        rhiFailure);
+            return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene directory descriptor publication failed", GpuSceneTableKind::Count, 0, rhiFailure);
         }
 
         impl->stats.reservedDescriptors = requiredDescriptors;
@@ -287,13 +285,29 @@ namespace vanguard::rendering
         return true;
     }
 
+    void GpuSceneTables::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        Impl* const impl = m_impl;
+        for (u32 tableIndex = 0; tableIndex < GpuSceneTableCount; ++tableIndex)
+            for (u32 pageIndex = 0; pageIndex < impl->maximumPagesPerTable; ++pageIndex)
+                static_cast<void>(rhi::SafeRelease(impl->tables[tableIndex].pages[pageIndex].buffer));
+        static_cast<void>(rhi::SafeRelease(impl->tableDirectoryBuffer));
+        static_cast<void>(rhi::SafeRelease(impl->pageDirectoryBuffer));
+        static_cast<void>(rhi::SafeRelease(impl->resourceDescriptors));
+        m_impl = nullptr;
+        impl->~Impl();
+        memory::MemoryBlock block{impl, sizeof(Impl), memory::PoolId::Rendering};
+        memory::Free(block);
+    }
+
     bool GpuSceneTables::IsInitialized() const noexcept
     {
         return m_impl != nullptr;
     }
 
-    bool GpuSceneTables::EnsureCapacityRaw(const GpuSceneTableKind kind, const u32 stride, const u32 requiredElements,
-                                           GpuSceneTablesFailure* const failure) noexcept
+    bool GpuSceneTables::EnsureCapacityRaw(const GpuSceneTableKind kind, const u32 stride, const u32 requiredElements, GpuSceneTablesFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -315,8 +329,7 @@ namespace vanguard::rendering
         if (requiredPages64 > table.stats.maximumPages)
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, GpuSceneTablesFailureCode::CapacityExceeded, "GPU Scene table reached its configured page capacity", kind,
-                        static_cast<u32>(requiredPages64));
+            return Fail(failure, GpuSceneTablesFailureCode::CapacityExceeded, "GPU Scene table reached its configured page capacity", kind, static_cast<u32>(requiredPages64));
         }
         const u32 requiredPages = static_cast<u32>(requiredPages64);
 
@@ -331,8 +344,7 @@ namespace vanguard::rendering
                 rhi::BufferDesc desc;
                 desc.size = static_cast<u64>(table.stats.elementsPerPage) * stride;
                 desc.structureStride = stride;
-                desc.usage =
-                    rhi::BufferUsage::Structured | rhi::BufferUsage::ShaderResource | rhi::BufferUsage::UnorderedAccess | rhi::BufferUsage::CopyDestination;
+                desc.usage = rhi::BufferUsage::Structured | rhi::BufferUsage::ShaderResource | rhi::BufferUsage::UnorderedAccess | rhi::BufferUsage::CopyDestination;
                 desc.initialState = rhi::ResourceState::Common;
                 page.buffer = rhi::CreateBuffer(desc, {}, &rhiFailure);
                 if (!page.buffer)
@@ -345,31 +357,28 @@ namespace vanguard::rendering
             }
             if (!page.shaderResourcePublished)
             {
-                if (!rhi::WriteDescriptor(m_impl->resourceDescriptors, page.shaderResourceDescriptor, page.buffer,
-                                          rhi::BindingType::StructuredBufferShaderResource, {}, &rhiFailure))
+                if (!rhi::WriteDescriptor(m_impl->resourceDescriptors, page.shaderResourceDescriptor, page.buffer, rhi::BindingType::StructuredBufferShaderResource, {}, &rhiFailure))
                 {
                     ++table.stats.pageCreationFailures;
                     ++m_impl->stats.pageCreationFailures;
-                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page shader-resource descriptor publication failed", kind,
-                                pageIndex, rhiFailure);
+                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page shader-resource descriptor publication failed", kind, pageIndex, rhiFailure);
                 }
                 page.shaderResourcePublished = true;
                 ++m_impl->stats.populatedDescriptors;
             }
             if (!page.unorderedAccessPublished)
             {
-                if (!rhi::WriteDescriptor(m_impl->resourceDescriptors, page.unorderedAccessDescriptor, page.buffer,
-                                          rhi::BindingType::StructuredBufferUnorderedAccess, {}, &rhiFailure))
+                if (!rhi::WriteDescriptor(m_impl->resourceDescriptors, page.unorderedAccessDescriptor, page.buffer, rhi::BindingType::StructuredBufferUnorderedAccess, {}, &rhiFailure))
                 {
                     ++table.stats.pageCreationFailures;
                     ++m_impl->stats.pageCreationFailures;
-                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page unordered-access descriptor publication failed", kind,
-                                pageIndex, rhiFailure);
+                    return Fail(failure, GpuSceneTablesFailureCode::DescriptorFailure, "GPU Scene page unordered-access descriptor publication failed", kind, pageIndex, rhiFailure);
                 }
                 page.unorderedAccessPublished = true;
                 ++m_impl->stats.populatedDescriptors;
             }
             const u64 pageBytes = static_cast<u64>(table.stats.elementsPerPage) * stride;
+            m_impl->consumerBuffers[m_impl->consumerBufferCount++] = page.buffer;
             ++table.stats.materializedPages;
             table.stats.elementCapacity += table.stats.elementsPerPage;
             table.stats.allocatedBytes += pageBytes;
@@ -453,6 +462,12 @@ namespace vanguard::rendering
     {
         const TableLayout layout = GetTableLayout(kind);
         return GetTableStatsRaw(kind, layout.stride);
+    }
+
+    containers::ArraySpan<const rhi::BufferRef> GpuSceneTables::GetConsumerBuffers() const noexcept
+    {
+        return m_impl != nullptr ? containers::ArraySpan<const rhi::BufferRef>{m_impl->consumerBuffers, m_impl->consumerBufferCount}
+                                 : containers::ArraySpan<const rhi::BufferRef>{};
     }
 
     GpuSceneDirectoryBinding GpuSceneTables::GetDirectoryBinding() const noexcept

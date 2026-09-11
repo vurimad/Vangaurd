@@ -4,6 +4,8 @@
 
 namespace vanguard::mesh_tools
 {
+    // Backend capability hint only; actual decoding still validates contents.
+    [[nodiscard]] bool GetMeshSourceExtensions(containers::String& extensions) noexcept;
     enum class MeshImportResult : u8
     {
         Success,

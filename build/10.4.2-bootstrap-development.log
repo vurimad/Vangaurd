@@ -1,0 +1,1030 @@
+Build started 9/11/2026 8:08:29 AM.
+Logging verbosity is set to: Normal.
+Project "D:\ENGINE\build\projects\vs2022\bootstrapImage.vcxproj" on node 1 (Build target(s)).
+Project "D:\ENGINE\build\projects\vs2022\bootstrapImage.vcxproj" (1) is building "D:\ENGINE\build\projects\vs2022\materialTools.vcxproj" (2) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\materialTools.vcxproj" (2) is building "D:\ENGINE\build\projects\vs2022\assets.vcxproj" (3) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\assets.vcxproj" (3) is building "D:\ENGINE\build\projects\vs2022\packages.vcxproj" (4) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\packages.vcxproj" (4) is building "D:\ENGINE\build\projects\vs2022\packagesCompat.vcxproj" (5) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\packagesCompat.vcxproj" (5) is building "D:\ENGINE\build\projects\vs2022\redCompressionThirdPartyCompat.vcxproj" (6) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionThirdPartyCompat\Development\redCompr.A1418005.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionThirdPartyCompat\Development\redCompr.A1418005.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redCompressionThirdPartyCompat.vcxproj -> D:\ENGINE\build\output\Development\redCompressionThirdPartyCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionThirdPartyCompat\Development\redCompr.A1418005.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionThirdPartyCompat\Development\redCompr.A1418005.tlog\redCompressionThirdPartyCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redCompressionThirdPartyCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\packagesCompat\Development\packagesCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\packagesCompat\Development\packagesCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  packagesCompat.vcxproj -> D:\ENGINE\build\output\Development\packagesCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\packagesCompat\Development\packagesCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\packagesCompat\Development\packagesCompat.tlog\packagesCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\packagesCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\packages.vcxproj" (4) is building "D:\ENGINE\build\projects\vs2022\serialization.vcxproj" (7) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\serialization.vcxproj" (7) is building "D:\ENGINE\build\projects\vs2022\serializationCompat.vcxproj" (8) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\serializationCompat.vcxproj" (8) is building "D:\ENGINE\build\projects\vs2022\redSystemCompat.vcxproj" (9) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redSystemCompat\Development\redSystemCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redSystemCompat\Development\redSystemCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redSystemCompat.vcxproj -> D:\ENGINE\build\output\Development\redSystemCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redSystemCompat\Development\redSystemCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redSystemCompat\Development\redSystemCompat.tlog\redSystemCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redSystemCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\serializationCompat\Development\serializ.47E0C006.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\serializationCompat\Development\serializ.47E0C006.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  serializationCompat.vcxproj -> D:\ENGINE\build\output\Development\serializationCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\serializationCompat\Development\serializ.47E0C006.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\serializationCompat\Development\serializ.47E0C006.tlog\serializationCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\serializationCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\serialization.vcxproj" (7) is building "D:\ENGINE\build\projects\vs2022\filesystem.vcxproj" (10) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\filesystem.vcxproj" (10) is building "D:\ENGINE\build\projects\vs2022\filesystemCompat.vcxproj" (11) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\filesystemCompat.vcxproj" (11) is building "D:\ENGINE\build\projects\vs2022\redFileSystemCompat.vcxproj" (12) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redFileSystemCompat.vcxproj" (12) is building "D:\ENGINE\build\projects\vs2022\redCompressionCompat.vcxproj" (13) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redCompressionCompat.vcxproj" (13) is building "D:\ENGINE\build\projects\vs2022\memory.vcxproj" (14) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\memory.vcxproj" (14) is building "D:\ENGINE\build\projects\vs2022\system.vcxproj" (15) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\system\Development\system.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\system\Development\system.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  system.vcxproj -> D:\ENGINE\build\output\Development\system.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\system\Development\system.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\system\Development\system.tlog\system.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\system.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\memory\Development\memory.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\memory\Development\memory.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  memory.vcxproj -> D:\ENGINE\build\output\Development\memory.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\memory\Development\memory.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\memory\Development\memory.tlog\memory.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\memory.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionCompat\Development\redCompr.16B5DAD2.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionCompat\Development\redCompr.16B5DAD2.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redCompressionCompat.vcxproj -> D:\ENGINE\build\output\Development\redCompressionCompat.lib
+PostBuildEvent:
+  copy /B /Y "D:\ENGINE\source\imported\external\oodle\lib\x64.Release\oo2ext_7_win64.dll" "..\..\output\Development\oo2ext_7_win64.dll"
+  :VCEnd
+          1 file(s) copied.
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionCompat\Development\redCompr.16B5DAD2.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redCompressionCompat\Development\redCompr.16B5DAD2.tlog\redCompressionCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redCompressionCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redFileSystemCompat.vcxproj" (12) is building "D:\ENGINE\build\projects\vs2022\redCoreCompat.vcxproj" (16) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redCoreCompat.vcxproj" (16) is building "D:\ENGINE\build\projects\vs2022\redIOCompat.vcxproj" (17) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redIOCompat.vcxproj" (17) is building "D:\ENGINE\build\projects\vs2022\redContainersCompat.vcxproj" (18) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redContainersCompat.vcxproj" (18) is building "D:\ENGINE\build\projects\vs2022\redMathCompat.vcxproj" (19) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redMathCompat\Development\redMathCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redMathCompat\Development\redMathCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redMathCompat.vcxproj -> D:\ENGINE\build\output\Development\redMathCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redMathCompat\Development\redMathCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redMathCompat\Development\redMathCompat.tlog\redMathCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redMathCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redContainersCompat\Development\redConta.1A6A2F0A.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redContainersCompat\Development\redConta.1A6A2F0A.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redContainersCompat.vcxproj -> D:\ENGINE\build\output\Development\redContainersCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redContainersCompat\Development\redConta.1A6A2F0A.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redContainersCompat\Development\redConta.1A6A2F0A.tlog\redContainersCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redContainersCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redIOCompat\Development\redIOCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redIOCompat\Development\redIOCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redIOCompat.vcxproj -> D:\ENGINE\build\output\Development\redIOCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redIOCompat\Development\redIOCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redIOCompat\Development\redIOCompat.tlog\redIOCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redIOCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redCoreCompat\Development\redCoreCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redCoreCompat\Development\redCoreCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redCoreCompat.vcxproj -> D:\ENGINE\build\output\Development\redCoreCompat.lib
+PostBuildEvent:
+  copy /B /Y "D:\ENGINE\source\imported\external\nvToolsExt\lib\x64.Release\nvToolsExt64_1.dll" "..\..\output\Development\nvToolsExt64_1.dll"
+  :VCEnd
+          1 file(s) copied.
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redCoreCompat\Development\redCoreCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redCoreCompat\Development\redCoreCompat.tlog\redCoreCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redCoreCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redFileSystemCompat\Development\redFileS.E9B8D600.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redFileSystemCompat\Development\redFileS.E9B8D600.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redFileSystemCompat.vcxproj -> D:\ENGINE\build\output\Development\redFileSystemCompat.lib
+PostBuildEvent:
+  copy /B /Y "D:\ENGINE\source\imported\internal\FileSync\lib\release_x64\FileSync.dll" "..\..\output\Development\FileSync.dll"
+  copy /B /Y "D:\ENGINE\source\imported\external\udt\lib\release_x64\udt.dll" "..\..\output\Development\udt.dll"
+  :VCEnd
+          1 file(s) copied.
+          1 file(s) copied.
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redFileSystemCompat\Development\redFileS.E9B8D600.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redFileSystemCompat\Development\redFileS.E9B8D600.tlog\redFileSystemCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redFileSystemCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystemCompat\Development\filesystemCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystemCompat\Development\filesystemCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  filesystemCompat.vcxproj -> D:\ENGINE\build\output\Development\filesystemCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystemCompat\Development\filesystemCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystemCompat\Development\filesystemCompat.tlog\filesystemCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\filesystemCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\filesystem.vcxproj" (10) is building "D:\ENGINE\build\projects\vs2022\io.vcxproj" (20) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\io.vcxproj" (20) is building "D:\ENGINE\build\projects\vs2022\ioCompat.vcxproj" (21) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\ioCompat\Development\ioCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\ioCompat\Development\ioCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  ioCompat.vcxproj -> D:\ENGINE\build\output\Development\ioCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\ioCompat\Development\ioCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\ioCompat\Development\ioCompat.tlog\ioCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\ioCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\io.vcxproj" (20) is building "D:\ENGINE\build\projects\vs2022\diagnostics.vcxproj" (22) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\diagnostics.vcxproj" (22) is building "D:\ENGINE\build\projects\vs2022\diagnosticsCompat.vcxproj" (23) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnosticsCompat\Development\diagnost.C1A01FFA.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnosticsCompat\Development\diagnost.C1A01FFA.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  diagnosticsCompat.vcxproj -> D:\ENGINE\build\output\Development\diagnosticsCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnosticsCompat\Development\diagnost.C1A01FFA.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnosticsCompat\Development\diagnost.C1A01FFA.tlog\diagnosticsCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\diagnosticsCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnostics\Development\diagnostics.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnostics\Development\diagnostics.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  diagnostics.vcxproj -> D:\ENGINE\build\output\Development\diagnostics.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnostics\Development\diagnostics.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\diagnostics\Development\diagnostics.tlog\diagnostics.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\diagnostics.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\io.vcxproj" (20) is building "D:\ENGINE\build\projects\vs2022\containers.vcxproj" (24) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\containers.vcxproj" (24) is building "D:\ENGINE\build\projects\vs2022\containersCompat.vcxproj" (25) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\containersCompat\Development\containersCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\containersCompat\Development\containersCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  containersCompat.vcxproj -> D:\ENGINE\build\output\Development\containersCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\containersCompat\Development\containersCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\containersCompat\Development\containersCompat.tlog\containersCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\containersCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\containers\Development\containers.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\containers\Development\containers.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  containers.vcxproj -> D:\ENGINE\build\output\Development\containers.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\containers\Development\containers.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\containers\Development\containers.tlog\containers.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\containers.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\io\Development\io.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\io\Development\io.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  io.vcxproj -> D:\ENGINE\build\output\Development\io.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\io\Development\io.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\io\Development\io.tlog\io.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\io.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystem\Development\filesystem.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystem\Development\filesystem.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  filesystem.vcxproj -> D:\ENGINE\build\output\Development\filesystem.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystem\Development\filesystem.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\filesystem\Development\filesystem.tlog\filesystem.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\filesystem.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\serialization\Development\serialization.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\serialization\Development\serialization.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  serialization.vcxproj -> D:\ENGINE\build\output\Development\serialization.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\serialization\Development\serialization.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\serialization\Development\serialization.tlog\serialization.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\serialization.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\packages.vcxproj" (4) is building "D:\ENGINE\build\projects\vs2022\crypto.vcxproj" (26) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\crypto\Development\crypto.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\crypto\Development\crypto.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  crypto.vcxproj -> D:\ENGINE\build\output\Development\crypto.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\crypto\Development\crypto.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\crypto\Development\crypto.tlog\crypto.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\crypto.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\packages.vcxproj" (4) is building "D:\ENGINE\build\projects\vs2022\resources.vcxproj" (27) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\resources.vcxproj" (27) is building "D:\ENGINE\build\projects\vs2022\concurrency.vcxproj" (28) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\concurrency.vcxproj" (28) is building "D:\ENGINE\build\projects\vs2022\concurrencyCompat.vcxproj" (29) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrencyCompat\Development\concurre.5414E81E.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrencyCompat\Development\concurre.5414E81E.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  concurrencyCompat.vcxproj -> D:\ENGINE\build\output\Development\concurrencyCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrencyCompat\Development\concurre.5414E81E.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrencyCompat\Development\concurre.5414E81E.tlog\concurrencyCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\concurrencyCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrency\Development\concurrency.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrency\Development\concurrency.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  concurrency.vcxproj -> D:\ENGINE\build\output\Development\concurrency.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrency\Development\concurrency.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\concurrency\Development\concurrency.tlog\concurrency.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\concurrency.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\resources.vcxproj" (27) is building "D:\ENGINE\build\projects\vs2022\jobs.vcxproj" (30) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\jobs.vcxproj" (30) is building "D:\ENGINE\build\projects\vs2022\jobsCompat.vcxproj" (31) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\jobsCompat.vcxproj" (31) is building "D:\ENGINE\build\projects\vs2022\redJobsCompat.vcxproj" (32) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redJobsCompat\Development\redJobsCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redJobsCompat\Development\redJobsCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redJobsCompat.vcxproj -> D:\ENGINE\build\output\Development\redJobsCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redJobsCompat\Development\redJobsCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redJobsCompat\Development\redJobsCompat.tlog\redJobsCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redJobsCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\jobsCompat\Development\jobsCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\jobsCompat\Development\jobsCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  jobsCompat.vcxproj -> D:\ENGINE\build\output\Development\jobsCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\jobsCompat\Development\jobsCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\jobsCompat\Development\jobsCompat.tlog\jobsCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\jobsCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\jobs\Development\jobs.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\jobs\Development\jobs.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  jobs.vcxproj -> D:\ENGINE\build\output\Development\jobs.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\jobs\Development\jobs.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\jobs\Development\jobs.tlog\jobs.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\jobs.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\resources\Development\resources.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\resources\Development\resources.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  resources.vcxproj -> D:\ENGINE\build\output\Development\resources.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\resources\Development\resources.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\resources\Development\resources.tlog\resources.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\resources.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\packages\Development\packages.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\packages\Development\packages.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  packages.vcxproj -> D:\ENGINE\build\output\Development\packages.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\packages\Development\packages.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\packages\Development\packages.tlog\packages.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\packages.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\assets\Development\assets.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\assets\Development\assets.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  assets.vcxproj -> D:\ENGINE\build\output\Development\assets.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\assets\Development\assets.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\assets\Development\assets.tlog\assets.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\assets.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\materialTools.vcxproj" (2) is building "D:\ENGINE\build\projects\vs2022\shaderTools.vcxproj" (33) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\shaderTools.vcxproj" (33) is building "D:\ENGINE\build\projects\vs2022\shaders.vcxproj" (34) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\shaders\Development\shaders.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\shaders\Development\shaders.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  shaders.vcxproj -> D:\ENGINE\build\output\Development\shaders.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\shaders\Development\shaders.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\shaders\Development\shaders.tlog\shaders.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\shaders.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\shaderTools\Development\shaderTools.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\shaderTools\Development\shaderTools.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  shaderTools.vcxproj -> D:\ENGINE\build\output\Development\shaderTools.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\shaderTools\Development\shaderTools.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\shaderTools\Development\shaderTools.tlog\shaderTools.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\shaderTools.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\materialTools.vcxproj" (2) is building "D:\ENGINE\build\projects\vs2022\pipelines.vcxproj" (35) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelines\Development\pipelines.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelines\Development\pipelines.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  pipelines.vcxproj -> D:\ENGINE\build\output\Development\pipelines.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelines\Development\pipelines.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelines\Development\pipelines.tlog\pipelines.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\pipelines.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\materialTools.vcxproj" (2) is building "D:\ENGINE\build\projects\vs2022\materials.vcxproj" (36) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\materials\Development\materials.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\materials\Development\materials.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  materials.vcxproj -> D:\ENGINE\build\output\Development\materials.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\materials\Development\materials.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\materials\Development\materials.tlog\materials.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\materials.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\materialTools\Development\materialTools.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\materialTools\Development\materialTools.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  materialTools.vcxproj -> D:\ENGINE\build\output\Development\materialTools.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\materialTools\Development\materialTools.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\materialTools\Development\materialTools.tlog\materialTools.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\materialTools.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\bootstrapImage.vcxproj" (1) is building "D:\ENGINE\build\projects\vs2022\entities.vcxproj" (37) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\entities.vcxproj" (37) is building "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (38) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (38) is building "D:\ENGINE\build\projects\vs2022\pipelineCache.vcxproj" (39) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelineCache\Development\pipelineCache.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelineCache\Development\pipelineCache.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  pipelineCache.vcxproj -> D:\ENGINE\build\output\Development\pipelineCache.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelineCache\Development\pipelineCache.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\pipelineCache\Development\pipelineCache.tlog\pipelineCache.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\pipelineCache.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (38) is building "D:\ENGINE\build\projects\vs2022\rhi.vcxproj" (40) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\rhi\Development\rhi.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\rhi\Development\rhi.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  rhi.vcxproj -> D:\ENGINE\build\output\Development\rhi.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\rhi\Development\rhi.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\rhi\Development\rhi.tlog\rhi.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\rhi.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (38) is building "D:\ENGINE\build\projects\vs2022\window.vcxproj" (41) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\window\Development\window.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\window\Development\window.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  window.vcxproj -> D:\ENGINE\build\output\Development\window.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\window\Development\window.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\window\Development\window.tlog\window.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\window.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (38) is building "D:\ENGINE\build\projects\vs2022\meshes.vcxproj" (42) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\meshes.vcxproj" (42) is building "D:\ENGINE\build\projects\vs2022\streaming.vcxproj" (43) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\streaming.vcxproj" (43) is building "D:\ENGINE\build\projects\vs2022\schemas.vcxproj" (44) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\schemas.vcxproj" (44) is building "D:\ENGINE\build\projects\vs2022\reflection.vcxproj" (45) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\reflection.vcxproj" (45) is building "D:\ENGINE\build\projects\vs2022\reflectionCompat.vcxproj" (46) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\reflectionCompat.vcxproj" (46) is building "D:\ENGINE\build\projects\vs2022\redReflectionCompat.vcxproj" (47) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redReflectionCompat.vcxproj" (47) is building "D:\ENGINE\build\projects\vs2022\redConfigCompat.vcxproj" (48) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redConfigCompat\Development\redConfigCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redConfigCompat\Development\redConfigCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redConfigCompat.vcxproj -> D:\ENGINE\build\output\Development\redConfigCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redConfigCompat\Development\redConfigCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redConfigCompat\Development\redConfigCompat.tlog\redConfigCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redConfigCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redReflectionCompat.vcxproj" (47) is building "D:\ENGINE\build\projects\vs2022\commChannelCompat.vcxproj" (49) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\commChannelCompat.vcxproj" (49) is building "D:\ENGINE\build\projects\vs2022\commProtocolCompat.vcxproj" (50) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\commProtocolCompat\Development\commProt.27BED7B4.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\commProtocolCompat\Development\commProt.27BED7B4.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  commProtocolCompat.vcxproj -> D:\ENGINE\build\output\Development\commProtocolCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\commProtocolCompat\Development\commProt.27BED7B4.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\commProtocolCompat\Development\commProt.27BED7B4.tlog\commProtocolCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\commProtocolCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\commChannelCompat.vcxproj" (49) is building "D:\ENGINE\build\projects\vs2022\redNetworkCompat.vcxproj" (51) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redNetworkCompat\Development\redNetworkCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redNetworkCompat\Development\redNetworkCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redNetworkCompat.vcxproj -> D:\ENGINE\build\output\Development\redNetworkCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redNetworkCompat\Development\redNetworkCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redNetworkCompat\Development\redNetworkCompat.tlog\redNetworkCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redNetworkCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\commChannelCompat\Development\commChan.AE0A179B.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\commChannelCompat\Development\commChan.AE0A179B.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  commChannelCompat.vcxproj -> D:\ENGINE\build\output\Development\commChannelCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\commChannelCompat\Development\commChan.AE0A179B.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\commChannelCompat\Development\commChan.AE0A179B.tlog\commChannelCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\commChannelCompat.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\redReflectionCompat.vcxproj" (47) is building "D:\ENGINE\build\projects\vs2022\redLexerCompat.vcxproj" (52) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redLexerCompat\Development\redLexerCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redLexerCompat\Development\redLexerCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redLexerCompat.vcxproj -> D:\ENGINE\build\output\Development\redLexerCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redLexerCompat\Development\redLexerCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redLexerCompat\Development\redLexerCompat.tlog\redLexerCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redLexerCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\redReflectionCompat\Development\redRefle.0FF2B153.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redReflectionCompat\Development\redRefle.0FF2B153.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  redReflectionCompat.vcxproj -> D:\ENGINE\build\output\Development\redReflectionCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\redReflectionCompat\Development\redRefle.0FF2B153.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\redReflectionCompat\Development\redRefle.0FF2B153.tlog\redReflectionCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\redReflectionCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\reflectionCompat\Development\reflectionCompat.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\reflectionCompat\Development\reflectionCompat.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  reflectionCompat.vcxproj -> D:\ENGINE\build\output\Development\reflectionCompat.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\reflectionCompat\Development\reflectionCompat.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\reflectionCompat\Development\reflectionCompat.tlog\reflectionCompat.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\reflectionCompat.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\reflection\Development\reflection.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\reflection\Development\reflection.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  reflection.vcxproj -> D:\ENGINE\build\output\Development\reflection.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\reflection\Development\reflection.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\reflection\Development\reflection.tlog\reflection.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\reflection.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\schemas\Development\schemas.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\schemas\Development\schemas.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  schemas.vcxproj -> D:\ENGINE\build\output\Development\schemas.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\schemas\Development\schemas.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\schemas\Development\schemas.tlog\schemas.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\schemas.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\streaming\Development\streaming.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\streaming\Development\streaming.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  streaming.vcxproj -> D:\ENGINE\build\output\Development\streaming.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\streaming\Development\streaming.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\streaming\Development\streaming.tlog\streaming.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\streaming.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\meshes\Development\meshes.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\meshes\Development\meshes.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  meshes.vcxproj -> D:\ENGINE\build\output\Development\meshes.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\meshes\Development\meshes.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\meshes\Development\meshes.tlog\meshes.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\meshes.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (38) is building "D:\ENGINE\build\projects\vs2022\textures.vcxproj" (53) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\textures\Development\textures.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\textures\Development\textures.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  textures.vcxproj -> D:\ENGINE\build\output\Development\textures.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\textures\Development\textures.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\textures\Development\textures.tlog\textures.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\textures.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\rendering\Development\rendering.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\rendering\Development\rendering.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  rendering.vcxproj -> D:\ENGINE\build\output\Development\rendering.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\rendering\Development\rendering.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\rendering\Development\rendering.tlog\rendering.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\rendering.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\entities.vcxproj" (37) is building "D:\ENGINE\build\projects\vs2022\gameWorld.vcxproj" (54) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\gameWorld.vcxproj" (54) is building "D:\ENGINE\build\projects\vs2022\ecs.vcxproj" (55) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\ecs.vcxproj" (55) is building "D:\ENGINE\build\projects\vs2022\flecs.vcxproj" (56) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\flecs\Development\flecs.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\flecs\Development\flecs.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  flecs.vcxproj -> D:\ENGINE\build\output\Development\flecs.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\flecs\Development\flecs.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\flecs\Development\flecs.tlog\flecs.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\flecs.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\ecs\Development\ecs.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\ecs\Development\ecs.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  ecs.vcxproj -> D:\ENGINE\build\output\Development\ecs.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\ecs\Development\ecs.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\ecs\Development\ecs.tlog\ecs.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\ecs.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\gameWorld\Development\gameWorld.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\gameWorld\Development\gameWorld.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  gameWorld.vcxproj -> D:\ENGINE\build\output\Development\gameWorld.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\gameWorld\Development\gameWorld.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\gameWorld\Development\gameWorld.tlog\gameWorld.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\gameWorld.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\entities.vcxproj" (37) is building "D:\ENGINE\build\projects\vs2022\world.vcxproj" (57) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\world.vcxproj" (57) is building "D:\ENGINE\build\projects\vs2022\prefabs.vcxproj" (58) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\prefabs\Development\prefabs.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\prefabs\Development\prefabs.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  prefabs.vcxproj -> D:\ENGINE\build\output\Development\prefabs.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\prefabs\Development\prefabs.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\prefabs\Development\prefabs.tlog\prefabs.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\prefabs.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\world\Development\world.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\world\Development\world.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  world.vcxproj -> D:\ENGINE\build\output\Development\world.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\world\Development\world.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\world\Development\world.tlog\world.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\world.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\entities.vcxproj" (37) is building "D:\ENGINE\build\projects\vs2022\math.vcxproj" (59) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\math\Development\math.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\math\Development\math.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  math.vcxproj -> D:\ENGINE\build\output\Development\math.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\math\Development\math.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\math\Development\math.tlog\math.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\math.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\entities\Development\entities.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\entities\Development\entities.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  entities.vcxproj -> D:\ENGINE\build\output\Development\entities.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\entities\Development\entities.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\entities\Development\entities.tlog\entities.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\entities.vcxproj" (default targets).
+Project "D:\ENGINE\build\projects\vs2022\bootstrapImage.vcxproj" (1) is building "D:\ENGINE\build\projects\vs2022\gameInput.vcxproj" (60) on node 1 (default targets).
+Project "D:\ENGINE\build\projects\vs2022\gameInput.vcxproj" (60) is building "D:\ENGINE\build\projects\vs2022\input.vcxproj" (61) on node 1 (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\input\Development\input.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\input\Development\input.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  input.vcxproj -> D:\ENGINE\build\output\Development\input.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\input\Development\input.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\input\Development\input.tlog\input.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\input.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\gameInput\Development\gameInput.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\gameInput\Development\gameInput.tlog\unsuccessfulbuild".
+ClCompile:
+  All outputs are up-to-date.
+Lib:
+  All outputs are up-to-date.
+  gameInput.vcxproj -> D:\ENGINE\build\output\Development\gameInput.lib
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\gameInput\Development\gameInput.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\gameInput\Development\gameInput.tlog\gameInput.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\gameInput.vcxproj" (default targets).
+PrepareForBuild:
+  Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+InitializeBuildStatus:
+  Creating "D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\bootstrapImage.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\bootstrapImage.tlog\unsuccessfulbuild".
+ClCompile:
+  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.38.33130\bin\HostX86\x64\CL.exe /c /I..\..\..\source\assets\include /I..\..\..\source\world\include /I..\..\..\source\prefabs\include /I..\..\..\source\gameInput\include /I..\..\..\source\input\include /I..\..\..\source\window\include /I..\..\..\source\meshes\include /I..\..\..\source\entities\include /I..\..\..\source\ecs\include /I..\..\..\source\gameWorld\include /I..\..\..\source\math\include /I..\..\..\source\rendering\include /I..\..\..\source\rhi\include /I..\..\..\source\streaming\include /I..\..\..\source\textures\include /I..\..\..\source\pipelineCache\include /I..\..\..\source\materialTools\include /I..\..\..\source\materials\include /I..\..\..\source\pipelines\include /I..\..\..\source\shaderTools\include /I..\..\..\source\shaders\include /I..\..\..\source\schemas\include /I..\..\..\source\reflection\include /I..\..\..\source\resources\include /I..\..\..\source\packages\include /I..\..\..\source\serialization\include /I..\..\..\source\crypto\include /I..\..\..\source\filesystem\include /I..\..\..\source\io\include /I..\..\..\source\jobs\include /I..\..\..\source\concurrency\include /I..\..\..\source\containers\include /I..\..\..\source\diagnostics\include /I..\..\..\source\memory\include /I..\..\..\source\system\include /I..\..\..\source\imported\common\redSystem\include /I..\..\..\source\imported\common\redMemory\include /I..\..\..\source\imported\common\redMath\include /I..\..\..\source\imported\common\redContainers\include /I..\..\..\external\flecs\upstream\distr /I..\..\..\source\imported\common\redIO\include /I..\..\..\source\imported\common\redCore\include /I..\..\..\source\imported\common\redCompression\include /I..\..\..\source\imported\common\redFileSystem\include /Zi /nologo /W4 /WX /diagnostics:column /O2 /Oi /D NOMINMAX /D WIN32_LEAN_AND_MEAN /D VG_BUILD_DEVELOPMENT=1 /D VG_ENABLE_ASSERTS=1 /D FLECS_CUSTOM_BUILD /D FLECS_CPP /D FLECS_MODULE /D FLECS_SYSTEM /D FLECS_PIPELINE /D FLECS_TIMER /D _HAS_EXCEPTIONS=0 /D _UNICODE /D UNICODE /GF /Gm- /MT /GS /Gy /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /std:c++20 /Fo"D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\\" /Fd"D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\vc143.pdb" /external:W3 /Gd /TP /wd4324 /FC /errorReport:queue /MP /FS /volatile:ms ..\..\..\tools\bootstrapImage\src\main.cpp
+  main.cpp
+Link:
+  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.38.33130\bin\HostX86\x64\link.exe /ERRORREPORT:QUEUE /OUT:"D:\ENGINE\build\projects\vs2022\..\..\..\bin\Tools\bootstrapImage\Development\bootstrapImage.exe" /INCREMENTAL:NO /NOLOGO /LIBPATH:..\..\..\source\imported\external\nvToolsExt\lib\x64.Release /LIBPATH:..\..\..\external\slang\upstream\lib /LIBPATH:..\..\..\source\imported\external\oodle\lib\x64.Release nvToolsExt64_1.lib Advapi32.lib Dbghelp.lib Psapi.lib Shlwapi.lib Shell32.lib Version.lib ws2_32.lib "slang-compiler.lib" oo2ext_win64.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"D:\ENGINE\build\projects\vs2022\..\..\..\bin\Tools\bootstrapImage\Development\bootstrapImage.pdb" /SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"D:\ENGINE\build\projects\vs2022\..\..\..\bin\Tools\bootstrapImage\Development\bootstrapImage.lib" /MACHINE:X64 D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\main.obj
+  D:\ENGINE\build\output\Development\redCompressionThirdPartyCompat.lib
+  D:\ENGINE\build\output\Development\packagesCompat.lib
+  D:\ENGINE\build\output\Development\redSystemCompat.lib
+  D:\ENGINE\build\output\Development\serializationCompat.lib
+  D:\ENGINE\build\output\Development\system.lib
+  D:\ENGINE\build\output\Development\memory.lib
+  D:\ENGINE\build\output\Development\redCompressionCompat.lib
+  D:\ENGINE\build\output\Development\redMathCompat.lib
+  D:\ENGINE\build\output\Development\redContainersCompat.lib
+  D:\ENGINE\build\output\Development\redIOCompat.lib
+  D:\ENGINE\build\output\Development\redCoreCompat.lib
+  D:\ENGINE\build\output\Development\redFileSystemCompat.lib
+  D:\ENGINE\build\output\Development\filesystemCompat.lib
+  D:\ENGINE\build\output\Development\ioCompat.lib
+  D:\ENGINE\build\output\Development\diagnosticsCompat.lib
+  D:\ENGINE\build\output\Development\diagnostics.lib
+  D:\ENGINE\build\output\Development\containersCompat.lib
+  D:\ENGINE\build\output\Development\containers.lib
+  D:\ENGINE\build\output\Development\io.lib
+  D:\ENGINE\build\output\Development\filesystem.lib
+  D:\ENGINE\build\output\Development\serialization.lib
+  D:\ENGINE\build\output\Development\crypto.lib
+  D:\ENGINE\build\output\Development\concurrencyCompat.lib
+  D:\ENGINE\build\output\Development\concurrency.lib
+  D:\ENGINE\build\output\Development\redJobsCompat.lib
+  D:\ENGINE\build\output\Development\jobsCompat.lib
+  D:\ENGINE\build\output\Development\jobs.lib
+  D:\ENGINE\build\output\Development\resources.lib
+  D:\ENGINE\build\output\Development\packages.lib
+  D:\ENGINE\build\output\Development\assets.lib
+  D:\ENGINE\build\output\Development\shaders.lib
+  D:\ENGINE\build\output\Development\shaderTools.lib
+  D:\ENGINE\build\output\Development\pipelines.lib
+  D:\ENGINE\build\output\Development\materials.lib
+  D:\ENGINE\build\output\Development\materialTools.lib
+  D:\ENGINE\build\output\Development\pipelineCache.lib
+  D:\ENGINE\build\output\Development\rhi.lib
+  D:\ENGINE\build\output\Development\window.lib
+  D:\ENGINE\build\output\Development\redConfigCompat.lib
+  D:\ENGINE\build\output\Development\commProtocolCompat.lib
+  D:\ENGINE\build\output\Development\redNetworkCompat.lib
+  D:\ENGINE\build\output\Development\commChannelCompat.lib
+  D:\ENGINE\build\output\Development\redLexerCompat.lib
+  D:\ENGINE\build\output\Development\redReflectionCompat.lib
+  D:\ENGINE\build\output\Development\reflectionCompat.lib
+  D:\ENGINE\build\output\Development\reflection.lib
+  D:\ENGINE\build\output\Development\schemas.lib
+  D:\ENGINE\build\output\Development\streaming.lib
+  D:\ENGINE\build\output\Development\meshes.lib
+  D:\ENGINE\build\output\Development\textures.lib
+  D:\ENGINE\build\output\Development\rendering.lib
+  D:\ENGINE\build\output\Development\flecs.lib
+  D:\ENGINE\build\output\Development\ecs.lib
+  D:\ENGINE\build\output\Development\gameWorld.lib
+  D:\ENGINE\build\output\Development\prefabs.lib
+  D:\ENGINE\build\output\Development\world.lib
+  D:\ENGINE\build\output\Development\math.lib
+  D:\ENGINE\build\output\Development\entities.lib
+  D:\ENGINE\build\output\Development\input.lib
+  D:\ENGINE\build\output\Development\gameInput.lib
+  bootstrapImage.vcxproj -> D:\ENGINE\bin\Tools\bootstrapImage\Development\bootstrapImage.exe
+PostBuildEvent:
+  copy /B /Y "D:\ENGINE\build\output\Development\nvToolsExt64_1.dll" "..\..\..\bin\Tools\bootstrapImage\Development\nvToolsExt64_1.dll"
+  copy /B /Y "D:\ENGINE\build\output\Development\oo2ext_7_win64.dll" "..\..\..\bin\Tools\bootstrapImage\Development\oo2ext_7_win64.dll"
+  copy /B /Y "D:\ENGINE\external\slang\upstream\bin\slang-compiler.dll" "..\..\..\bin\Tools\bootstrapImage\Development\slang-compiler.dll"
+  copy /B /Y "D:\ENGINE\external\slang\upstream\bin\slang-glslang.dll" "..\..\..\bin\Tools\bootstrapImage\Development\slang-glslang.dll"
+  copy /B /Y "D:\ENGINE\external\slang\upstream\bin\slang-glsl-module.dll" "..\..\..\bin\Tools\bootstrapImage\Development\slang-glsl-module.dll"
+  copy /B /Y "D:\ENGINE\external\dxc\upstream\bin\dxcompiler.dll" "..\..\..\bin\Tools\bootstrapImage\Development\dxcompiler.dll"
+  copy /B /Y "D:\ENGINE\external\dxc\upstream\bin\dxil.dll" "..\..\..\bin\Tools\bootstrapImage\Development\dxil.dll"
+  :VCEnd
+          1 file(s) copied.
+          1 file(s) copied.
+          1 file(s) copied.
+          1 file(s) copied.
+          1 file(s) copied.
+          1 file(s) copied.
+          1 file(s) copied.
+FinalizeBuildStatus:
+  Deleting file "D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\bootstrapImage.tlog\unsuccessfulbuild".
+  Touching "D:\ENGINE\build\projects\vs2022\..\..\obj\bootstrapImage\Development\bootstrapImage.tlog\bootstrapImage.lastbuildstate".
+Done Building Project "D:\ENGINE\build\projects\vs2022\bootstrapImage.vcxproj" (Build target(s)).
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:06.93

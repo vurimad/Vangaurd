@@ -189,11 +189,16 @@ namespace vanguard::jobs
                                             Fence fence = Fence::Full) noexcept;
 
         void AddDependency(const Counter& dependency) noexcept;
+        // Consume an independent branch builder directly, without allocating a Counter wrapper.
+        // The branch must not be a continuation of this builder's current job.
+        void AddDependency(Builder&& branch) noexcept;
 
         // Required after one or more Fence::None dispatches and before a
         // Fence::Full dispatch, AddDependency, ExtractCounter, or destruction.
         void DispatchFence() noexcept;
         [[nodiscard]] Counter ExtractCounter() noexcept;
+        // Invalidates this builder like ExtractCounter(), but synchronously drains its complete chain without allocating a public Counter wrapper.
+        [[nodiscard]] bool WaitForCompletion() noexcept;
 
     private:
         void* m_backend = nullptr;

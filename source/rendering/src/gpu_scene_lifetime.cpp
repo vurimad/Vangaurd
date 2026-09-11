@@ -17,9 +17,9 @@ namespace vanguard::rendering
 
         [[nodiscard]] constexpr bool UsesIndividualSlots(const GpuSceneTableKind table) noexcept
         {
-            return table == GpuSceneTableKind::Instance || table == GpuSceneTableKind::Motion || table == GpuSceneTableKind::Renderable ||
-                   table == GpuSceneTableKind::PositionDecode || table == GpuSceneTableKind::Material || table == GpuSceneTableKind::MaterialSet ||
-                   table == GpuSceneTableKind::Light || table == GpuSceneTableKind::Decal || table == GpuSceneTableKind::TextureResidency;
+            return table == GpuSceneTableKind::Instance || table == GpuSceneTableKind::Motion || table == GpuSceneTableKind::Renderable || table == GpuSceneTableKind::PositionDecode ||
+                   table == GpuSceneTableKind::Material || table == GpuSceneTableKind::MaterialSet || table == GpuSceneTableKind::Light || table == GpuSceneTableKind::Decal ||
+                   table == GpuSceneTableKind::TextureResidency;
         }
 
         [[nodiscard]] constexpr u32 NextGeneration(const u32 generation) noexcept
@@ -31,8 +31,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool FencesComplete(const rhi::ResidencyFenceSet& fences) noexcept
         {
             return (fences.graphics == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Graphics, fences.graphics})) &&
-                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) &&
-                   (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
+                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) && (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
         }
 
         [[nodiscard]] constexpr bool HasQueue(const GpuSceneQueueMask mask, const GpuSceneQueueMask queue) noexcept
@@ -42,8 +41,8 @@ namespace vanguard::rendering
 
         [[nodiscard]] constexpr bool CoversQueues(const rhi::ResidencyFenceSet& fences, const GpuSceneQueueMask queues) noexcept
         {
-            return (!HasQueue(queues, GpuSceneQueueMask::Graphics) || fences.graphics != 0) &&
-                   (!HasQueue(queues, GpuSceneQueueMask::Compute) || fences.compute != 0) && (!HasQueue(queues, GpuSceneQueueMask::Copy) || fences.copy != 0);
+            return (!HasQueue(queues, GpuSceneQueueMask::Graphics) || fences.Covers(rhi::QueueType::Graphics)) && (!HasQueue(queues, GpuSceneQueueMask::Compute) || fences.Covers(rhi::QueueType::Compute)) &&
+                   (!HasQueue(queues, GpuSceneQueueMask::Copy) || fences.Covers(rhi::QueueType::Copy));
         }
 
         [[nodiscard]] constexpr u64 AllocationIdentity(const GpuSceneAllocation allocation) noexcept
@@ -57,8 +56,8 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(GpuSceneLifetimeFailure* const failure, const GpuSceneLifetimeFailureCode code, const char* const message,
-                                const GpuSceneAllocation allocation = {}, const GpuSceneTablesFailure& tableFailure = {}) noexcept
+        [[nodiscard]] bool Fail(GpuSceneLifetimeFailure* const failure, const GpuSceneLifetimeFailureCode code, const char* const message, const GpuSceneAllocation allocation = {},
+                                const GpuSceneTablesFailure& tableFailure = {}) noexcept
         {
             if (failure != nullptr)
                 *failure = {code, allocation, message, tableFailure};
@@ -89,9 +88,8 @@ namespace vanguard::rendering
         struct Table
         {
             Table() noexcept
-                : slots(memory::pools::Rendering::GetInstance()), recycledSlots(memory::pools::Rendering::GetInstance()),
-                  freeRanges(memory::pools::Rendering::GetInstance()), ranges(memory::pools::Rendering::GetInstance()),
-                  recycledRangeRecords(memory::pools::Rendering::GetInstance()), rangeLookup(memory::pools::Rendering::GetInstance())
+                : slots(memory::pools::Rendering::GetInstance()), recycledSlots(memory::pools::Rendering::GetInstance()), freeRanges(memory::pools::Rendering::GetInstance()),
+                  ranges(memory::pools::Rendering::GetInstance()), recycledRangeRecords(memory::pools::Rendering::GetInstance()), rangeLookup(memory::pools::Rendering::GetInstance())
             {
             }
 
@@ -123,8 +121,7 @@ namespace vanguard::rendering
         };
 
         explicit Impl(GpuSceneTables& owner, const GpuSceneLifetimeConfig& config) noexcept
-            : batchIdentities(memory::pools::Rendering::GetInstance()), tablesOwner(&owner), retirementQueues(config.retirementQueues),
-              epochCount(config.retirementEpochCount)
+            : batchIdentities(memory::pools::Rendering::GetInstance()), tablesOwner(&owner), retirementQueues(config.retirementQueues), epochCount(config.retirementEpochCount)
         {
             batchIdentities.Reserve(config.initialRetirementsPerEpoch);
             for (u32 index = 0; index < epochCount; ++index)
@@ -239,8 +236,8 @@ namespace vanguard::rendering
             return range != nullptr ? range->state : GpuSceneAllocationState::Invalid;
         }
 
-        [[nodiscard]] bool ValidateBatch(const containers::ArraySpan<const GpuSceneAllocation> allocations, const GpuSceneAllocationState requiredState,
-                                         GpuSceneLifetimeFailure* const failure, const char* const invalidStateMessage) noexcept
+        [[nodiscard]] bool ValidateBatch(const containers::ArraySpan<const GpuSceneAllocation> allocations, const GpuSceneAllocationState requiredState, GpuSceneLifetimeFailure* const failure,
+                                         const char* const invalidStateMessage) noexcept
         {
             if (allocations.Size() == 0)
             {
@@ -262,8 +259,7 @@ namespace vanguard::rendering
                 if (!batchIdentities.Insert(AllocationIdentity(allocation)).IsSuccessful())
                 {
                     ++stats.rejectedOperations;
-                    return Fail(failure, GpuSceneLifetimeFailureCode::DuplicateAllocation, "GPU Scene lifetime batch contains a duplicate allocation",
-                                allocation);
+                    return Fail(failure, GpuSceneLifetimeFailureCode::DuplicateAllocation, "GPU Scene lifetime batch contains a duplicate allocation", allocation);
                 }
             }
             return true;
@@ -308,11 +304,9 @@ namespace vanguard::rendering
             return Fail(failure, GpuSceneLifetimeFailureCode::AlreadyInitialized, "GPU Scene lifetime is already initialized");
         if (!concurrency::IsMainThread())
             return Fail(failure, GpuSceneLifetimeFailureCode::WrongThread, "GPU Scene lifetime must initialize on the main thread");
-        constexpr u8 validQueueBits =
-            static_cast<u8>(GpuSceneQueueMask::Graphics) | static_cast<u8>(GpuSceneQueueMask::Compute) | static_cast<u8>(GpuSceneQueueMask::Copy);
-        if (!tables.IsInitialized() || config.retirementEpochCount < 2 || config.retirementEpochCount > MaximumGpuSceneRetirementEpochs ||
-            config.initialRetirementsPerEpoch == 0 || config.retirementQueues == GpuSceneQueueMask::None ||
-            (static_cast<u8>(config.retirementQueues) & ~validQueueBits) != 0)
+        constexpr u8 validQueueBits = static_cast<u8>(GpuSceneQueueMask::Graphics) | static_cast<u8>(GpuSceneQueueMask::Compute) | static_cast<u8>(GpuSceneQueueMask::Copy);
+        if (!tables.IsInitialized() || config.retirementEpochCount < 2 || config.retirementEpochCount > MaximumGpuSceneRetirementEpochs || config.initialRetirementsPerEpoch == 0 ||
+            config.retirementQueues == GpuSceneQueueMask::None || (static_cast<u8>(config.retirementQueues) & ~validQueueBits) != 0)
             return Fail(failure, GpuSceneLifetimeFailureCode::InvalidConfiguration, "GPU Scene lifetime configuration is invalid");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
@@ -340,6 +334,17 @@ namespace vanguard::rendering
         memory::MemoryBlock block{impl, sizeof(Impl), memory::PoolId::Rendering};
         memory::Free(block);
         return true;
+    }
+
+    void GpuSceneLifetime::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        Impl* const impl = m_impl;
+        m_impl = nullptr;
+        impl->~Impl();
+        memory::MemoryBlock block{impl, sizeof(Impl), memory::PoolId::Rendering};
+        memory::Free(block);
     }
 
     bool GpuSceneLifetime::IsInitialized() const noexcept
@@ -383,8 +388,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GpuSceneLifetime::Allocate(const GpuSceneTableKind kind, const u32 count, GpuSceneAllocation& allocation,
-                                    GpuSceneLifetimeFailure* const failure) noexcept
+    bool GpuSceneLifetime::Allocate(const GpuSceneTableKind kind, const u32 count, GpuSceneAllocation& allocation, GpuSceneLifetimeFailure* const failure) noexcept
     {
         ClearFailure(failure);
         allocation = {};
@@ -398,8 +402,7 @@ namespace vanguard::rendering
         if (IsGpuSceneParallelTable(kind))
         {
             ++m_impl->stats.rejectedOperations;
-            return Fail(failure, GpuSceneLifetimeFailureCode::ParallelTableHasNoIndependentLifetime,
-                        "GPU Scene parallel tables are owned by their same-index topology tables");
+            return Fail(failure, GpuSceneLifetimeFailureCode::ParallelTableHasNoIndependentLifetime, "GPU Scene parallel tables are owned by their same-index topology tables");
         }
         if (!IsValidTable(kind) || count == 0 || (UsesIndividualSlots(kind) && count != 1))
         {
@@ -496,8 +499,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GpuSceneLifetime::AllocateBatch(const containers::ArraySpan<const GpuSceneAllocationRequest> requests,
-                                         const containers::ArraySpan<GpuSceneAllocation> allocations, GpuSceneLifetimeFailure* const failure) noexcept
+    bool GpuSceneLifetime::AllocateBatch(const containers::ArraySpan<const GpuSceneAllocationRequest> requests, const containers::ArraySpan<GpuSceneAllocation> allocations,
+                                         GpuSceneLifetimeFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -517,8 +520,7 @@ namespace vanguard::rendering
             allocations[index] = {};
         for (const GpuSceneAllocationRequest request : requests)
         {
-            if (!IsValidTable(request.table) || IsGpuSceneParallelTable(request.table) || request.count == 0 ||
-                (UsesIndividualSlots(request.table) && request.count != 1))
+            if (!IsValidTable(request.table) || IsGpuSceneParallelTable(request.table) || request.count == 0 || (UsesIndividualSlots(request.table) && request.count != 1))
             {
                 ++m_impl->stats.rejectedOperations;
                 return Fail(failure, GpuSceneLifetimeFailureCode::InvalidConfiguration, "GPU Scene batch contains an invalid allocation request");
@@ -570,8 +572,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GpuSceneLifetime::CommitInitialPublications(const containers::ArraySpan<const GpuSceneAllocation> allocations,
-                                                     GpuSceneLifetimeFailure* const failure) noexcept
+    bool GpuSceneLifetime::CommitInitialPublications(const containers::ArraySpan<const GpuSceneAllocation> allocations, GpuSceneLifetimeFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -777,8 +778,7 @@ namespace vanguard::rendering
             {
                 if (m_impl->GetState(allocation) != GpuSceneAllocationState::Retiring)
                 {
-                    static_cast<void>(
-                        Fail(failure, GpuSceneLifetimeFailureCode::InvalidState, "GPU Scene retirement epoch contains a stale allocation", allocation));
+                    static_cast<void>(Fail(failure, GpuSceneLifetimeFailureCode::InvalidState, "GPU Scene retirement epoch contains a stale allocation", allocation));
                     return reclaimed;
                 }
             }

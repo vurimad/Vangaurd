@@ -22,7 +22,8 @@ namespace vanguard::runtime
                 return application::StateOperationStatus::Failure("World Session service is unavailable");
 
             engine::WorldSessionFailure failure;
-            if (!session->RequestStop(engine::WorldSessionStopMode::ReleaseEverything, &failure))
+            const bool stopRequested = session->RequestStop(&failure);
+            if (!stopRequested)
                 return application::StateOperationStatus::Failure(failure.message != nullptr ? failure.message : "world session stop request failed");
             const engine::WorldSessionStatus status = session->Poll(&failure);
             if (status == engine::WorldSessionStatus::Idle)
@@ -30,8 +31,8 @@ namespace vanguard::runtime
             if (status == engine::WorldSessionStatus::Failed)
             {
                 const engine::WorldSessionFailure& reported = session->GetLastFailure();
-                VG_LOG_ERROR(diagnostics::Category::Engine, "world session stop failed: code=%u packageResult=%u resourceFailure=%u message=%s",
-                             static_cast<u32>(reported.code), static_cast<u32>(reported.packageResult), static_cast<u32>(reported.resourceFailure),
+                VG_LOG_ERROR(diagnostics::Category::Engine, "world session stop failed: code=%u resourceFailure=%u message=%s",
+                             static_cast<u32>(reported.code), static_cast<u32>(reported.resourceFailure),
                              reported.message != nullptr ? reported.message : "<none>");
                 return application::StateOperationStatus::Failure(reported.message != nullptr ? reported.message : "world session stop failed");
             }
@@ -42,16 +43,20 @@ namespace vanguard::runtime
     application::StateOperationStatus StartupSessionState::OnEnter(application::StateContext& context) noexcept
     {
         engine::WorldSessionService* const session = engine::FindWorldSessionService(context.GetServices());
-        if (session == nullptr || !filesystem::IsInitialized())
+        engine::ResourceStreamingService* const sources = engine::FindResourceStreamingService(context.GetServices());
+        if (session == nullptr || sources == nullptr || !sources->GetPackageSet().IsMounted())
             return application::StateOperationStatus::Failure("runtime session dependencies are unavailable");
 
         engine::WorldSessionStartRequest request;
-        request.gameDirectory = filesystem::GetManager().GetGameRoot();
+        request.world = sources->GetPackageSet().StartupWorld();
+        request.input = sources->GetPackageSet().GetDefaultInput();
+        request.inputMode = engine::WorldSessionInputMode::Mapping;
         engine::WorldSessionFailure failure;
-        if (!session->Begin(request, &failure))
+        const bool sessionStarted = session->Begin(request, &failure);
+        if (!sessionStarted)
         {
-            VG_LOG_ERROR(diagnostics::Category::Resources, "runtime session start failed: root=%s code=%u packageResult=%u resourceFailure=%u message=%s",
-                         request.gameDirectory.ToDebugString(), static_cast<u32>(failure.code), static_cast<u32>(failure.packageResult),
+            VG_LOG_ERROR(diagnostics::Category::Resources, "runtime session start failed: code=%u resourceFailure=%u message=%s",
+                         static_cast<u32>(failure.code),
                          static_cast<u32>(failure.resourceFailure), failure.message != nullptr ? failure.message : "<none>");
             return application::StateOperationStatus::Failure(failure.message != nullptr ? failure.message : "runtime session start failed");
         }
@@ -71,8 +76,8 @@ namespace vanguard::runtime
         if (status == engine::WorldSessionStatus::Failed)
         {
             const engine::WorldSessionFailure& reported = session->GetLastFailure();
-            VG_LOG_ERROR(diagnostics::Category::Resources, "runtime session loading failed: code=%u packageResult=%u resourceFailure=%u message=%s",
-                         static_cast<u32>(reported.code), static_cast<u32>(reported.packageResult), static_cast<u32>(reported.resourceFailure),
+            VG_LOG_ERROR(diagnostics::Category::Resources, "runtime session loading failed: code=%u resourceFailure=%u message=%s",
+                         static_cast<u32>(reported.code), static_cast<u32>(reported.resourceFailure),
                          reported.message != nullptr ? reported.message : "<none>");
             return application::StateTickStatus::Failure(reported.message != nullptr ? reported.message : "runtime session loading failed");
         }
@@ -143,8 +148,12 @@ namespace vanguard::runtime
     {
         const filesystem::AbsolutePath runtimeRoot = filesystem::paths::GetExecutableDirectory();
         m_filesystemConfig = {runtimeRoot, runtimeRoot, filesystem::paths::GetUserCacheDirectory()};
+        m_streamingConfig = {};
+        if (!startup.commandLine.HasArgument("--validate-bootstrap"))
+            m_streamingConfig.packageDirectory = runtimeRoot;
         m_renderingConfig = {};
         m_renderingConfig.deviceMode = engine::RenderingDeviceMode::Required;
+        m_renderingConfig.usePackageRendererBootstrap = !startup.commandLine.HasArgument("--validate-bootstrap");
         m_renderingConfig.backendFactory = rhi::d3d12::GetBackendFactory();
         m_runningState.ExitAfterFirstTick(startup.commandLine.HasArgument("--validate-bootstrap"));
         application::HostFailure failure;
@@ -153,7 +162,7 @@ namespace vanguard::runtime
             !engine::RegisterFramePipelineService(services, &failure) || !engine::RegisterRenderingService(services, m_renderingConfig, &failure) ||
             !engine::RegisterReflectionService(services, &failure) || !engine::RegisterWindowService(services, startup.platform, &failure) ||
             !engine::RegisterInputService(services, startup.platform->GetInputBackend(), &failure) || !engine::RegisterGameInputService(services, &failure) ||
-            !engine::RegisterResourcesService(services, &failure) || !engine::RegisterResourceStreamingService(services, &failure) ||
+            !engine::RegisterResourcesService(services, &failure) || !engine::RegisterResourceStreamingService(services, m_streamingConfig, &failure) ||
             !engine::RegisterWorldService(services, &failure) || !engine::RegisterGameWorldService(services, &failure) ||
             !engine::RegisterStreamingObserverService(services, &failure) || !engine::RegisterWorldSessionService(services, &failure) ||
             !services.RegisterModule({RuntimeModule, "runtime", 1}, &failure))

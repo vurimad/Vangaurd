@@ -3,7 +3,8 @@
 #include <vanguard/nanovanguard/project_platform.hpp>
 
 #include <vanguard/filesystem/filesystem.hpp>
-#include <vanguard/projects/project.hpp>
+#include <vanguard/projects/project_workspace.hpp>
+#include <vanguard/assets/source_database.hpp>
 
 namespace
 {
@@ -236,27 +237,23 @@ namespace
 
     [[nodiscard]] bool ValidateLayout(const ResolvedProject& resolved, const projects::ProjectDescriptor& project, containers::String& failure) noexcept
     {
-        const containers::String* roots[]{&project.assets, &project.derivedData, &project.intermediate, &project.saved,
-                                          &project.builds, &project.config,      &project.pluginsRoot};
-        for (const containers::String* const relative : roots)
+        projects::ProjectWorkspace workspace;
+        projects::Diagnostic diagnostic;
+        const filesystem::AbsolutePath projectFile = filesystem::AbsolutePath::ParseFilePath(resolved.file);
+        if (projects::ResolveWorkspace(projectFile, project, workspace, &diagnostic) != projects::Result::Success)
         {
-            containers::String absolute;
-            Join(resolved.root, *relative, absolute);
-            if (platform::GetPathKind(absolute) != platform::PathKind::Directory)
+            failure = diagnostic.message != nullptr ? diagnostic.message : "project workspace resolution failed";
+            return false;
+        }
+        const filesystem::AbsolutePath* roots[]{&workspace.assets, &workspace.derivedData, &workspace.intermediate, &workspace.saved, &workspace.builds, &workspace.config, &workspace.plugins};
+        for (const filesystem::AbsolutePath* const root : roots)
+        {
+            if (platform::GetPathKind(root->AsStringView()) != platform::PathKind::Directory)
             {
                 failure = "required project directory is missing or has the wrong type: ";
-                failure.Append(*relative);
+                failure.Append(root->AsStringView());
                 return false;
             }
-        }
-        containers::String expectedName(project.technicalName);
-        expectedName.Append(".vproject", 9);
-        containers::String expectedFile;
-        Join(resolved.root, expectedName, expectedFile);
-        if (resolved.file != expectedFile)
-        {
-            failure = "project document filename must match project.technicalName";
-            return false;
         }
         return true;
     }
@@ -478,6 +475,49 @@ namespace
         {"technical-name", 'n', nano::OptionValue::Required, "identifier", "Set the stable technical project name.", false},
         {"target", 't', nano::OptionValue::Required, "triplet", "Add a supported target triplet.", true},
         {"format", '\0', nano::OptionValue::Required, "human|jsonl", "Select stable human or JSON Lines output.", false}};
+    nano::ExitCode InspectSources(const nano::Invocation& invocation, nano::Output& output) noexcept
+    {
+        ResolvedProject resolved;
+        if (!ResolveProject(invocation.Positional(0), resolved))
+            return ReportProjectFailure(output, invocation.Format(), "sources inspect", "could not resolve exactly one .vproject document");
+        projects::ProjectDescriptor project;
+        projects::Diagnostic diagnostic;
+        if (!LoadProject(resolved, project, diagnostic))
+            return ReportProjectFailure(output, invocation.Format(), "sources inspect", diagnostic.message, &diagnostic);
+        projects::ProjectWorkspace workspace;
+        if (projects::ResolveWorkspace(filesystem::AbsolutePath::CreateFilePath(resolved.file), project, workspace, &diagnostic) != projects::Result::Success)
+            return ReportProjectFailure(output, invocation.Format(), "sources inspect", diagnostic.message, &diagnostic);
+        // Absolute-path reads use the native manager, without installing a
+        // global manager, resource loader, or editor service.
+        filesystem::Manager files(workspace.root, workspace.root, workspace.derivedData);
+        assets::SourceDatabase sources;
+        const assets::SourceRoot root{workspace.assets, false};
+        filesystem::ScanResult scanFailure;
+        if (sources.Rescan(files, {&root, 1}, &scanFailure) != assets::SourceDatabaseResult::Success)
+            return ReportProjectFailure(output, invocation.Format(), "sources inspect", "source inventory failed; no partial inventory was published");
+        for (const assets::SourceRecord& record : sources.GetResources())
+        {
+            containers::String line;
+            if (invocation.Format() == nano::OutputFormat::JsonLines)
+            {
+                line.Append("{\"schema\":1,\"event\":\"source-inspected\",\"path\":");
+                AppendJsonString(line, record.path.AsStringView());
+                line.Append(containers::String::Printf(",\"issues\":%u,\"metadataResult\":%u,\"importState\":%u}\n", record.issues, static_cast<u32>(record.metadataResult), static_cast<u32>(record.importState)));
+            }
+            else
+            {
+                line.Append(record.path.AsStringView());
+                line.Append(containers::String::Printf(" issues=%u metadata=%u import=%u\n", record.issues, static_cast<u32>(record.metadataResult), static_cast<u32>(record.importState)));
+            }
+            if (!output.Write(line.AsChar(), line.Length()))
+                return nano::ExitCode::InternalFailure;
+        }
+        const containers::String summary = invocation.Format() == nano::OutputFormat::JsonLines
+            ? containers::String::Printf("{\"schema\":1,\"event\":\"sources-inspected\",\"count\":%u}\n", sources.GetResources().Count())
+            : containers::String::Printf("Sources: %u (importers not composed)\n", sources.GetResources().Count());
+        return output.Write(summary.AsChar(), summary.Length()) ? nano::ExitCode::Success : nano::ExitCode::InternalFailure;
+    }
+
     inline constexpr nano::OptionDescriptor InspectOptions[]{
         {"format", '\0', nano::OptionValue::Required, "human|jsonl", "Select stable human or JSON Lines output.", false}};
     inline constexpr nano::OptionDescriptor ValidateOptions[]{
@@ -489,6 +529,8 @@ namespace vanguard::nanovanguard
 {
     bool RegisterProjectCommands(CommandRegistry& registry) noexcept
     {
+        if (registry.Register({"inspect", "sources", "Inspect shared project source inventory without importing.", "<project>", InspectOptions, static_cast<u32>(sizeof(InspectOptions) / sizeof(InspectOptions[0])), 1, 1, &InspectSources}) != RegistrationResult::Success)
+            return false;
         return registry.Register({"create", "project", "Create and atomically publish a Vanguard project.", "<name>", CreateOptions,
                                   static_cast<u32>(sizeof(CreateOptions) / sizeof(CreateOptions[0])), 1, 1, &CreateProject}) == RegistrationResult::Success &&
                registry.Register({"inspect", "project", "Inspect a Vanguard project document.", "<project>", InspectOptions,

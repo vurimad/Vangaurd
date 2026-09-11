@@ -31,6 +31,12 @@ namespace vanguard::window::sdl
         [[nodiscard]] BackendStatus Create(const BackendWindowDescriptor& descriptor, BackendWindowId& window, BackendWindowState& state) noexcept override;
         [[nodiscard]] BackendStatus ApplyWindowState(BackendWindowId window, const BackendWindowRequest& request, BackendWindowState& state) noexcept override;
         [[nodiscard]] BackendStatus SetWindowTitle(BackendWindowId window, const char* title) noexcept override;
+        [[nodiscard]] BackendStatus SetWindowOpacity(BackendWindowId window, f32 opacity) noexcept override;
+        [[nodiscard]] BackendStatus RequestWindowFocus(BackendWindowId window) noexcept override;
+        [[nodiscard]] BackendStatus SetCursor(CursorShape shape, bool visible) noexcept override;
+        [[nodiscard]] BackendStatus ReadClipboardText(char* destination, u32 capacity, u32& requiredCapacity) noexcept override;
+        [[nodiscard]] BackendStatus WriteClipboardText(const char* text) noexcept override;
+        [[nodiscard]] BackendStatus SetTextInput(BackendWindowId window, const TextInputRequest& request) noexcept override;
         [[nodiscard]] BackendStatus ResolvePresentationSurface(BackendWindowId window, NativePresentationSurface& surface) noexcept override;
         [[nodiscard]] BackendStatus DestroyWindow(BackendWindowId window) noexcept override;
 

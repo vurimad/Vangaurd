@@ -8,7 +8,8 @@ The design follows RED's separation of native shader entries, reflection records
 
 - `vshader` owns permutation identity, native stage payloads, descriptor and constant layouts, stage interfaces, and specialization constants.
 - A future pipeline resource owns rasterizer, depth/stencil, blend, topology, render-target formats, sample count, and the selected shader permutation.
-- Materials bind against `BindingLayoutFingerprint()`.
+- Descriptor binding compatibility uses `BindingLayoutFingerprint()`.
+- Material-driven shaders additionally expose separate domain and material-layout fingerprints; pipelines and materials must match both exactly.
 - Pipeline descriptors and PSO caches bind against `PipelineInterfaceFingerprint()` and the selected shader permutation.
 - `LayoutFingerprint()` covers the complete normalized interface and is used for whole-resource validation.
 

@@ -1,6 +1,10 @@
 # Vanguard shader resource (`vshader`)
 
-`vshader` is Vanguard's platform-cooked shader resource. Version 1 stores normalized GPU interface metadata and one native bytecode payload for each stage. Runtime code performs no source compilation and no intermediate shader translation.
+`vshader` is Vanguard's platform-cooked shader resource. The current format is
+version 1.4 with metadata wire version 5. It stores normalized GPU interface
+metadata and one native bytecode payload for each stage. Readers accept only the
+current format; runtime code performs no source compilation and no intermediate
+shader translation.
 
 ## RED lineage and Vanguard boundary
 
@@ -10,7 +14,9 @@ Each Vanguard shader is an independently addressable resource suitable for the D
 
 ## Container
 
-The file uses the common Vanguard binary document header with magic `VSHD`, version `1.0`, little-endian encoding, deterministic flag, and exactly two checksummed sections.
+The file uses the common Vanguard binary document header with magic `VSHD`,
+version `1.4`, little-endian encoding, deterministic flag, and exactly two
+checksummed sections.
 
 | Section | Purpose |
 |---|---|
@@ -45,6 +51,24 @@ The normalized metadata contains:
 - specialization constants;
 - compute thread-group dimensions;
 - PSO-relevant interface flags and primitive class.
+
+For material programs, metadata also stores one exact `MaterialDomainContract`:
+the stable domain name, schema version, legal stage mask, input/output type
+fingerprints, and required offline shader-capability mask. The same canonical
+domain fingerprint is checked by the frozen material frontend, MPGI compiler
+input, reflection probe, final native compile, pipeline reference, and VMAT.
+Capability bits describe offline target requirements such as 16/64-bit numeric
+types, writable or multisampled resources, comparison sampling, and acceleration
+structures; they are not queries of the active runtime device.
+
+Every logical material-resource role stores both its full reflected type
+fingerprint and a compact reconstructable runtime shape. The shape records
+texture dimension/array/multisample/sample form, typed/structured/raw buffer
+form and structured stride, filtering/comparison sampler form, and resource
+access. It participates in canonical material-layout identity. Invalid family/
+shape combinations and unknown shape flags are rejected; the digest remains the
+complete compatibility authority while the shape is the bounded runtime view-
+construction contract.
 
 ## Fingerprints
 

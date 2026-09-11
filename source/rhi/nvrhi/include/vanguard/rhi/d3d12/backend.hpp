@@ -18,6 +18,7 @@ namespace vanguard::rhi::d3d12
 
         [[nodiscard]] BackendStatus Initialize(const DeviceParams& params, Capabilities& capabilities) noexcept override;
         [[nodiscard]] BackendStatus Shutdown() noexcept override;
+        [[nodiscard]] BackendStatus AbandonDevice() noexcept override;
         [[nodiscard]] DeviceState TestDeviceState() noexcept override;
         [[nodiscard]] BackendStatus WaitIdle() noexcept override;
         [[nodiscard]] BackendStatus RetireResources() noexcept override;
@@ -29,9 +30,9 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] BackendStatus Evict(containers::ArraySpan<const ResourceRef> resources, const ResidencyFenceSet& safeAfter) noexcept override;
         [[nodiscard]] ResidencyStats GetResidencyStats() const noexcept override;
 
-        [[nodiscard]] TextureRef CreateTexture(const TextureDesc&, const TextureInitData&) noexcept override;
-        [[nodiscard]] BufferRef CreateBuffer(const BufferDesc&, const BufferInitData&) noexcept override;
-        [[nodiscard]] HeapRef CreateHeap(const HeapDesc&) noexcept override;
+        [[nodiscard]] BackendStatus CreateTexture(const TextureDesc&, const TextureInitData&, TextureRef&) noexcept override;
+        [[nodiscard]] BackendStatus CreateBuffer(const BufferDesc&, const BufferInitData&, BufferRef&) noexcept override;
+        [[nodiscard]] BackendStatus CreateHeap(const HeapDesc&, HeapRef&) noexcept override;
         [[nodiscard]] BindingLayoutRef RequestBindingLayout(const BindingLayoutDesc&) noexcept override;
         [[nodiscard]] DescriptorDomainRef CreateDescriptorDomain(const DescriptorDomainDesc&) noexcept override;
         [[nodiscard]] DescriptorHandle AllocateDescriptor(DescriptorDomainRef) noexcept override;
@@ -64,8 +65,17 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] BackendStatus CalibrateTimestamps(QueueType, TimestampCalibration&) const noexcept override;
         [[nodiscard]] BackendStatus BindMemory(TextureRef, HeapRef, u64) noexcept override;
         [[nodiscard]] BackendStatus BindMemory(BufferRef, HeapRef, u64) noexcept override;
+        [[nodiscard]] BackendStatus GetHeapDesc(HeapRef, HeapDesc&) const noexcept override;
+        [[nodiscard]] BackendStatus GetPlacement(TextureRef, PlacementRecord&) const noexcept override;
+        [[nodiscard]] BackendStatus GetPlacement(BufferRef, PlacementRecord&) const noexcept override;
+        [[nodiscard]] BackendStatus GetTextureDesc(TextureRef, TextureDesc&) const noexcept override;
+        [[nodiscard]] BackendStatus GetBufferDesc(BufferRef, BufferDesc&) const noexcept override;
+        [[nodiscard]] BackendStatus GetMemoryRequirements(const TextureDesc&, MemoryRequirements&) const noexcept override;
+        [[nodiscard]] BackendStatus GetMemoryRequirements(const BufferDesc&, MemoryRequirements&) const noexcept override;
         [[nodiscard]] MemoryRequirements GetMemoryRequirements(TextureRef) const noexcept override;
         [[nodiscard]] MemoryRequirements GetMemoryRequirements(BufferRef) const noexcept override;
+        [[nodiscard]] BackendStatus ObserveNativeRelease(ResourceRef, NativeReleaseObservation&) const noexcept override;
+        [[nodiscard]] bool IsNativeReleaseComplete(NativeReleaseObservation) const noexcept override;
         [[nodiscard]] bool IsResourceReferenceValid(ResourceRef) const noexcept override;
         void AddRef(ResourceRef) noexcept override;
         [[nodiscard]] i32 Release(ResourceRef) noexcept override;
@@ -74,8 +84,8 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] CommandListRef CreateCommandList(CommandListType, u64) noexcept override;
         void DiscardCommandList(CommandListRef) noexcept override;
         [[nodiscard]] CommandListType GetCommandListType(CommandListRef) const noexcept override;
-        [[nodiscard]] BackendStatus CloseAndSubmitCommandLists(const char*, containers::ArraySpan<const CommandListRef>, CommandListSyncType,
-                                                               GpuFence&) noexcept override;
+        [[nodiscard]] BackendStatus CloseCommandList(CommandListRef) noexcept override;
+        [[nodiscard]] BackendStatus SubmitCommandLists(const char*, containers::ArraySpan<const CommandListRef>, CommandListSyncType, SubmissionReceipt&) noexcept override;
         [[nodiscard]] GpuFence GetGpuFence(CommandListRef) const noexcept override;
         [[nodiscard]] bool IsGpuFenceComplete(GpuFence) const noexcept override;
         [[nodiscard]] BackendStatus WaitForGpuFence(GpuFence, u64) noexcept override;
@@ -90,13 +100,11 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] BackendStatus BindIndirectArguments(CommandListRef, BufferRef, BufferRef) noexcept override;
         [[nodiscard]] BackendStatus SetPushConstants(CommandListRef, const void*, u32) noexcept override;
         [[nodiscard]] BackendStatus ClearColorTarget(CommandListRef, TextureRef, const ColorValue&, const SubresourceRange&, const Rect*) noexcept override;
-        [[nodiscard]] BackendStatus ClearDepthStencilTarget(CommandListRef, TextureRef, bool, f32, bool, u8, const SubresourceRange&,
-                                                            const Rect*) noexcept override;
+        [[nodiscard]] BackendStatus ClearDepthStencilTarget(CommandListRef, TextureRef, bool, f32, bool, u8, const SubresourceRange&, const Rect*) noexcept override;
         [[nodiscard]] BackendStatus ClearTextureUav(CommandListRef, TextureRef, const ColorValue&, const SubresourceRange&) noexcept override;
         [[nodiscard]] BackendStatus ClearTextureUav(CommandListRef, TextureRef, u32, const SubresourceRange&) noexcept override;
         [[nodiscard]] BackendStatus ClearBufferUav(CommandListRef, BufferRef, u32) noexcept override;
         [[nodiscard]] BackendStatus DiscardTexture(CommandListRef, TextureRef, const SubresourceRange&) noexcept override;
-        [[nodiscard]] BackendStatus DiscardBuffer(CommandListRef, BufferRef) noexcept override;
         [[nodiscard]] BackendStatus SetStencilRefValue(CommandListRef, u8) noexcept override;
         [[nodiscard]] BackendStatus SetBlendFactor(CommandListRef, const ColorValue&) noexcept override;
         [[nodiscard]] BackendStatus BeginGpuEvent(CommandListRef, const char*) noexcept override;
@@ -109,16 +117,12 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] BackendStatus DrawIndexedPrimitiveIndirectCount(CommandListRef, u64, u64, u32) noexcept override;
         [[nodiscard]] BackendStatus DispatchCompute(CommandListRef, u32, u32, u32) noexcept override;
         [[nodiscard]] BackendStatus DispatchIndirectCompute(CommandListRef, u64) noexcept override;
-        [[nodiscard]] BackendStatus BuildBottomLevelAccelerationStructure(CommandListRef, AccelerationStructureRef,
-                                                                          containers::ArraySpan<const RayTracingGeometryDesc>,
+        [[nodiscard]] BackendStatus BuildBottomLevelAccelerationStructure(CommandListRef, AccelerationStructureRef, containers::ArraySpan<const RayTracingGeometryDesc>,
                                                                           AccelerationStructureBuildMode) noexcept override;
-        [[nodiscard]] BackendStatus BuildTopLevelAccelerationStructure(CommandListRef, AccelerationStructureRef,
-                                                                       containers::ArraySpan<const RayTracingInstanceDesc>,
+        [[nodiscard]] BackendStatus BuildTopLevelAccelerationStructure(CommandListRef, AccelerationStructureRef, containers::ArraySpan<const RayTracingInstanceDesc>,
                                                                        AccelerationStructureBuildMode) noexcept override;
-        [[nodiscard]] BackendStatus BuildTopLevelAccelerationStructureIndirect(CommandListRef, AccelerationStructureRef, BufferRef, u64, u32,
-                                                                               AccelerationStructureBuildMode) noexcept override;
-        [[nodiscard]] BackendStatus CopyAccelerationStructure(CommandListRef, AccelerationStructureRef, AccelerationStructureRef,
-                                                              AccelerationStructureCopyMode) noexcept override;
+        [[nodiscard]] BackendStatus BuildTopLevelAccelerationStructureIndirect(CommandListRef, AccelerationStructureRef, BufferRef, u64, u32, AccelerationStructureBuildMode) noexcept override;
+        [[nodiscard]] BackendStatus CopyAccelerationStructure(CommandListRef, AccelerationStructureRef, AccelerationStructureRef, AccelerationStructureCopyMode) noexcept override;
         [[nodiscard]] BackendStatus WriteAccelerationStructureCompactedSize(CommandListRef, AccelerationStructureRef, QueryPoolRef, u32) noexcept override;
         [[nodiscard]] BackendStatus DispatchRays(CommandListRef, ShaderTableRef, const DispatchRaysArguments&) noexcept override;
         [[nodiscard]] BackendStatus WriteBuffer(CommandListRef, BufferRef, const void*, u64, u64) noexcept override;
@@ -133,12 +137,13 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] BackendStatus LockBuffer(BufferRef, u64, u64, void*&) noexcept override;
         void UnlockBuffer(BufferRef) noexcept override;
 
+        [[nodiscard]] BackendStatus AddCommandListWait(CommandListRef, GpuFence) noexcept override;
+        [[nodiscard]] BackendStatus SeedCommandListStates(CommandListRef, containers::ArraySpan<const CommandListEntryState>) noexcept override;
         [[nodiscard]] BackendStatus TransitionTexture(CommandListRef, TextureRef, ResourceState, ResourceState, const SubresourceRange&) noexcept override;
         [[nodiscard]] BackendStatus TransitionBuffer(CommandListRef, BufferRef, ResourceState, ResourceState) noexcept override;
         [[nodiscard]] BackendStatus BarrierTextureUav(CommandListRef, TextureRef) noexcept override;
         [[nodiscard]] BackendStatus BarrierBufferUav(CommandListRef, BufferRef) noexcept override;
-        [[nodiscard]] BackendStatus BarrierTextureAliasing(CommandListRef, bool, TextureRef, TextureRef) noexcept override;
-        [[nodiscard]] BackendStatus BarrierBufferAliasing(CommandListRef, bool, BufferRef, BufferRef) noexcept override;
+        [[nodiscard]] BackendStatus ActivateAliasedResource(CommandListRef, ResourceRef, containers::ArraySpan<const ResourceRef>) noexcept override;
         [[nodiscard]] BackendStatus FlushPendingBarriers(CommandListRef) noexcept override;
         [[nodiscard]] BackendStatus MakeStateSafeToRetire(CommandListRef, TextureRef) noexcept override;
         [[nodiscard]] BackendStatus MakeStateSafeToRetire(CommandListRef, BufferRef) noexcept override;

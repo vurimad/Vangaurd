@@ -117,20 +117,17 @@ namespace vanguard::rendering
         GeometryUploader(const GeometryUploader&) = delete;
         GeometryUploader& operator=(const GeometryUploader&) = delete;
 
-        [[nodiscard]] bool Initialize(GeometryAllocator& allocator, const GeometryUploadConfig& config = {},
-                                      GeometryUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(GeometryAllocator& allocator, const GeometryUploadConfig& config = {}, GeometryUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GeometryUploadFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] bool Begin(containers::ArraySpan<const GeometryUploadRequest> requests,
-                                 containers::ArraySpan<GeometryUploadReservation> reservations,
-                                 GeometryUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Begin(containers::ArraySpan<const GeometryUploadRequest> requests, containers::ArraySpan<GeometryUploadReservation> reservations, GeometryUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Complete(GeometryUploadReservation reservation, GeometryUploadFailure* failure = nullptr) noexcept;
 
         /// Submits one CopySync command list and atomically commits every geometry reservation only after
         /// successful submission. Placements retain request order.
-        [[nodiscard]] bool Submit(containers::ArraySpan<GeometryPlacement> placements, GeometryUploadResult& result,
-                                  GeometryUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Submit(containers::ArraySpan<GeometryPlacement> placements, GeometryUploadResult& result, GeometryUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Cancel(GeometryUploadFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] GeometryUploadStats GetStats() const noexcept;

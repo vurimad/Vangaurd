@@ -1,5 +1,9 @@
 # Window
 
+`WindowStateRequest::activateWhenShown` defaults to true. A visibility request with it set to false shows a window without requesting activation, for example when a tool creates a native host during an existing drag. The SDL adapter scopes the activation hint to that show operation; subsequent ordinary windows retain the previous effective setting.
+
+`SetOpacity` is a synchronous owner-thread operation for whole-window translucency. It validates a live generational handle and a finite value in `[0, 1]`, then delegates to the backend; unsupported backends report failure. It does not request presentation-resource recreation or resizing, or alter surface revisions. The SDL backend uses `SDL_SetWindowOpacity`.
+
 `window` is Vanguard's portable native-window and display-management core. It owns logical window identity, requested and native state, display topology, close transactions, and the multi-consumer event journal without depending on SDL, Win32, ImGui, Application, or a rendering API.
 
 All mutations are explicit owner-thread operations. Window and display identities are generational, titles and backend state are copied into manager-owned storage, events use a bounded sequence journal with per-consumer cursors, and shutdown rejects live windows. Native backends implement `IWindowBackend`; they never become public engine identity.

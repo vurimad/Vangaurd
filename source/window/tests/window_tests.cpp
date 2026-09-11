@@ -3,6 +3,7 @@
 #include <vanguard/window/window.hpp>
 
 #include <cstdio>
+#include <limits>
 
 namespace
 {
@@ -20,6 +21,9 @@ namespace
     class FakeWindowBackend final : public win::IWindowBackend
     {
     public:
+        vanguard::f32 lastOpacity = 1.0f;
+        vanguard::u32 opacityCalls = 0;
+        bool lastActivateWhenShown = true;
         struct Window
         {
             win::BackendWindowId id;
@@ -99,6 +103,7 @@ namespace
         [[nodiscard]] win::BackendStatus ApplyWindowState(const win::BackendWindowId window, const win::BackendWindowRequest& request,
                                                           win::BackendWindowState& state) noexcept override
         {
+            lastActivateWhenShown = request.activateWhenShown;
             if (failNext)
                 return ConsumeFailure();
             Window* const record = Find(window);
@@ -130,6 +135,17 @@ namespace
             if (record == nullptr)
                 return win::BackendStatus::Failure(4, "fake window is unavailable");
             CopyTitle(title, record->title);
+            return {};
+        }
+
+        [[nodiscard]] win::BackendStatus SetWindowOpacity(const win::BackendWindowId window, const vanguard::f32 opacity) noexcept override
+        {
+            ++opacityCalls;
+            if (failNext)
+                return ConsumeFailure();
+            if (Find(window) == nullptr)
+                return win::BackendStatus::Failure(5, "fake window is unavailable");
+            lastOpacity = opacity;
             return {};
         }
 
@@ -406,6 +422,22 @@ int main()
           "failed backend state request preserves the previous valid state");
     Check(manager.SetTitle(primary, "Vanguard Runtime", &failure) && manager.GetSnapshot(primary, primarySnapshot) && primarySnapshot.title[9] == 'R',
           "window title is copied into manager-owned state");
+
+    Check(manager.SetOpacity(primary, 0.5f, &failure) && backend.lastOpacity == 0.5f, "window opacity reaches the backend");
+    const vanguard::u32 opacityCalls = backend.opacityCalls;
+    Check(!manager.SetOpacity(primary, -0.1f, &failure) && failure.code == win::FailureCode::InvalidDescriptor &&
+              !manager.SetOpacity(primary, 1.1f, &failure) && !manager.SetOpacity(primary, std::numeric_limits<vanguard::f32>::quiet_NaN(), &failure) && backend.opacityCalls == opacityCalls,
+          "invalid opacity is rejected before reaching the backend");
+    Check(!manager.SetOpacity({}, 0.5f, &failure) && failure.code == win::FailureCode::InvalidHandle, "opacity rejects invalid window handles");
+    backend.FailNext();
+    Check(!manager.SetOpacity(primary, 0.75f, &failure) && failure.code == win::FailureCode::BackendFailure && backend.lastOpacity == 0.5f, "opacity backend failure is reported");
+    Check(manager.SetOpacity(primary, 1.0f, &failure) && backend.lastOpacity == 1.0f, "window returns to opaque after dragging");
+    win::WindowStateRequest showRequest;
+    showRequest.fields = win::WindowStateField::Visibility;
+    showRequest.placement = primarySnapshot.requested;
+    showRequest.placement.visible = true;
+    showRequest.activateWhenShown = false;
+    Check(manager.RequestState(primary, showRequest, &failure) && !backend.lastActivateWhenShown, "non-activating show policy reaches backend");
 
     const win::BackendWindowId primaryBackend = backend.IdAt(0);
     win::BackendWindowEvent pixelEvent = backend.Event(primaryBackend, win::BackendEventType::PixelExtentChanged, 42);

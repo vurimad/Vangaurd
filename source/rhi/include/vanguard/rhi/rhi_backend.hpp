@@ -30,6 +30,8 @@ namespace vanguard::rhi
 
         [[nodiscard]] virtual BackendStatus Initialize(const DeviceParams& params, Capabilities& capabilities) noexcept = 0;
         [[nodiscard]] virtual BackendStatus Shutdown() noexcept = 0;
+        // Terminal device-loss teardown. Implementations must not wait for GPU completion or require live-resource counts to reach zero.
+        [[nodiscard]] virtual BackendStatus AbandonDevice() noexcept = 0;
         [[nodiscard]] virtual DeviceState TestDeviceState() noexcept = 0;
         [[nodiscard]] virtual BackendStatus WaitIdle() noexcept = 0;
         // Seals the current retirement epoch and schedules fence-safe native destruction. The frame pipeline calls
@@ -43,21 +45,17 @@ namespace vanguard::rhi
         [[nodiscard]] virtual BackendStatus Evict(containers::ArraySpan<const ResourceRef> resources, const ResidencyFenceSet& safeAfter) noexcept = 0;
         [[nodiscard]] virtual ResidencyStats GetResidencyStats() const noexcept = 0;
 
-        [[nodiscard]] virtual TextureRef CreateTexture(const TextureDesc& desc, const TextureInitData& initialData) noexcept = 0;
-        [[nodiscard]] virtual BufferRef CreateBuffer(const BufferDesc& desc, const BufferInitData& initialData) noexcept = 0;
-        [[nodiscard]] virtual HeapRef CreateHeap(const HeapDesc& desc) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CreateTexture(const TextureDesc& desc, const TextureInitData& initialData, TextureRef& texture) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CreateBuffer(const BufferDesc& desc, const BufferInitData& initialData, BufferRef& buffer) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CreateHeap(const HeapDesc& desc, HeapRef& heap) noexcept = 0;
         [[nodiscard]] virtual BindingLayoutRef RequestBindingLayout(const BindingLayoutDesc& desc) noexcept = 0;
         [[nodiscard]] virtual DescriptorDomainRef CreateDescriptorDomain(const DescriptorDomainDesc& desc) noexcept = 0;
         [[nodiscard]] virtual DescriptorHandle AllocateDescriptor(DescriptorDomainRef domain) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, TextureRef texture, BindingType type,
-                                                            const TextureViewDesc& view) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, BufferRef buffer, BindingType type,
-                                                            const BufferViewDesc& view) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, TextureRef texture, BindingType type, const TextureViewDesc& view) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, BufferRef buffer, BindingType type, const BufferViewDesc& view) noexcept = 0;
         [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, SamplerStateRef sampler) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor,
-                                                            AccelerationStructureRef accelerationStructure) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus RetireDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor,
-                                                             const DescriptorRetirement& retirement) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, AccelerationStructureRef accelerationStructure) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus RetireDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, const DescriptorRetirement& retirement) noexcept = 0;
         [[nodiscard]] virtual DescriptorDomainStats GetDescriptorDomainStats(DescriptorDomainRef domain) const noexcept = 0;
         [[nodiscard]] virtual SamplerStateRef RequestSamplerState(const SamplerStateDesc& desc) noexcept = 0;
         [[nodiscard]] virtual ShaderRef CreateShader(const ShaderDesc& desc) noexcept = 0;
@@ -80,10 +78,20 @@ namespace vanguard::rhi
         [[nodiscard]] virtual BackendStatus GetQueryResult(QueryPoolRef queryPool, u32 index, PipelineStatistics& result) noexcept = 0;
         [[nodiscard]] virtual BackendStatus GetTimestampFrequency(QueueType queue, u64& frequency) const noexcept = 0;
         [[nodiscard]] virtual BackendStatus CalibrateTimestamps(QueueType queue, TimestampCalibration& calibration) const noexcept = 0;
+        // The caller exclusively owns each unbound resource through this one-time publication operation.
         [[nodiscard]] virtual BackendStatus BindMemory(TextureRef texture, HeapRef heap, u64 offset) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BindMemory(BufferRef buffer, HeapRef heap, u64 offset) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetHeapDesc(HeapRef heap, HeapDesc& desc) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetPlacement(TextureRef texture, PlacementRecord& placement) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetPlacement(BufferRef buffer, PlacementRecord& placement) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetTextureDesc(TextureRef texture, TextureDesc& desc) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetBufferDesc(BufferRef buffer, BufferDesc& desc) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetMemoryRequirements(const TextureDesc& desc, MemoryRequirements& requirements) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus GetMemoryRequirements(const BufferDesc& desc, MemoryRequirements& requirements) const noexcept = 0;
         [[nodiscard]] virtual MemoryRequirements GetMemoryRequirements(TextureRef texture) const noexcept = 0;
         [[nodiscard]] virtual MemoryRequirements GetMemoryRequirements(BufferRef buffer) const noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ObserveNativeRelease(ResourceRef resource, NativeReleaseObservation& observation) const noexcept = 0;
+        [[nodiscard]] virtual bool IsNativeReleaseComplete(NativeReleaseObservation observation) const noexcept = 0;
         [[nodiscard]] virtual bool IsResourceReferenceValid(ResourceRef resource) const noexcept = 0;
         // Reference counts are atomic. When Release reaches zero, the slot becomes stale immediately but native
         // destruction is deferred until every queue fence recorded as using the object has completed.
@@ -96,8 +104,9 @@ namespace vanguard::rhi
         [[nodiscard]] virtual CommandListRef CreateCommandList(CommandListType type, u64 debugHash) noexcept = 0;
         virtual void DiscardCommandList(CommandListRef commandList) noexcept = 0;
         [[nodiscard]] virtual CommandListType GetCommandListType(CommandListRef commandList) const noexcept = 0;
-        [[nodiscard]] virtual BackendStatus CloseAndSubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists,
-                                                                       CommandListSyncType sync, GpuFence& completion) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CloseCommandList(CommandListRef commandList) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus SubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists, CommandListSyncType sync,
+                                                               SubmissionReceipt& receipt) noexcept = 0;
         [[nodiscard]] virtual GpuFence GetGpuFence(CommandListRef commandList) const noexcept = 0;
         [[nodiscard]] virtual bool IsGpuFenceComplete(GpuFence fence) const noexcept = 0;
         [[nodiscard]] virtual BackendStatus WaitForGpuFence(GpuFence fence, u64 timeoutNanoseconds) noexcept = 0;
@@ -108,23 +117,17 @@ namespace vanguard::rhi
         [[nodiscard]] virtual BackendStatus SetVariableRateShading(CommandListRef commandList, const VariableRateShadingState& state) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetViewport(CommandListRef commandList, const ViewportDesc& viewport) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetScissors(CommandListRef commandList, const Rect& rect) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus BindVertexBuffers(CommandListRef commandList, u32 startIndex,
-                                                              containers::ArraySpan<const VertexBufferBinding> bindings) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus BindVertexBuffers(CommandListRef commandList, u32 startIndex, containers::ArraySpan<const VertexBufferBinding> bindings) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BindIndexBuffer(CommandListRef commandList, const IndexBufferBinding& binding) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BindIndirectArguments(CommandListRef commandList, BufferRef arguments, BufferRef count) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetPushConstants(CommandListRef commandList, const void* data, u32 size) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ClearColorTarget(CommandListRef commandList, TextureRef target, const ColorValue& value,
-                                                             const SubresourceRange& range, const Rect* rectangle) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ClearDepthStencilTarget(CommandListRef commandList, TextureRef target, bool clearDepth, f32 depth,
-                                                                    bool clearStencil, u8 stencil, const SubresourceRange& range,
+        [[nodiscard]] virtual BackendStatus ClearColorTarget(CommandListRef commandList, TextureRef target, const ColorValue& value, const SubresourceRange& range, const Rect* rectangle) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ClearDepthStencilTarget(CommandListRef commandList, TextureRef target, bool clearDepth, f32 depth, bool clearStencil, u8 stencil, const SubresourceRange& range,
                                                                     const Rect* rectangle) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ClearTextureUav(CommandListRef commandList, TextureRef texture, const ColorValue& value,
-                                                            const SubresourceRange& range) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ClearTextureUav(CommandListRef commandList, TextureRef texture, u32 value,
-                                                            const SubresourceRange& range) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ClearTextureUav(CommandListRef commandList, TextureRef texture, const ColorValue& value, const SubresourceRange& range) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ClearTextureUav(CommandListRef commandList, TextureRef texture, u32 value, const SubresourceRange& range) noexcept = 0;
         [[nodiscard]] virtual BackendStatus ClearBufferUav(CommandListRef commandList, BufferRef buffer, u32 value) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DiscardTexture(CommandListRef commandList, TextureRef texture, const SubresourceRange& range) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus DiscardBuffer(CommandListRef commandList, BufferRef buffer) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetStencilRefValue(CommandListRef commandList, u8 value) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetBlendFactor(CommandListRef commandList, const ColorValue& value) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BeginGpuEvent(CommandListRef commandList, const char* name) noexcept = 0;
@@ -134,53 +137,46 @@ namespace vanguard::rhi
         [[nodiscard]] virtual BackendStatus DrawIndexedPrimitive(CommandListRef commandList, const DrawIndexedArguments& arguments) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DrawPrimitiveIndirect(CommandListRef commandList, u64 argumentsOffset, u32 commandCount) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DrawIndexedPrimitiveIndirect(CommandListRef commandList, u64 argumentsOffset, u32 commandCount) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus DrawIndexedPrimitiveIndirectCount(CommandListRef commandList, u64 argumentsOffset, u64 countOffset,
-                                                                              u32 maximumCommandCount) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus DrawIndexedPrimitiveIndirectCount(CommandListRef commandList, u64 argumentsOffset, u64 countOffset, u32 maximumCommandCount) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DispatchCompute(CommandListRef commandList, u32 groupCountX, u32 groupCountY, u32 groupCountZ) noexcept = 0;
         [[nodiscard]] virtual BackendStatus DispatchIndirectCompute(CommandListRef commandList, u64 argumentsOffset) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BuildBottomLevelAccelerationStructure(CommandListRef commandList, AccelerationStructureRef destination,
-                                                                                  containers::ArraySpan<const RayTracingGeometryDesc> geometries,
-                                                                                  AccelerationStructureBuildMode mode) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus BuildTopLevelAccelerationStructure(CommandListRef commandList, AccelerationStructureRef destination,
-                                                                               containers::ArraySpan<const RayTracingInstanceDesc> instances,
+                                                                                  containers::ArraySpan<const RayTracingGeometryDesc> geometries, AccelerationStructureBuildMode mode) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus BuildTopLevelAccelerationStructure(CommandListRef commandList, AccelerationStructureRef destination, containers::ArraySpan<const RayTracingInstanceDesc> instances,
                                                                                AccelerationStructureBuildMode mode) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus BuildTopLevelAccelerationStructureIndirect(CommandListRef commandList, AccelerationStructureRef destination,
-                                                                                       BufferRef instanceBuffer, u64 offset, u32 instanceCount,
+        [[nodiscard]] virtual BackendStatus BuildTopLevelAccelerationStructureIndirect(CommandListRef commandList, AccelerationStructureRef destination, BufferRef instanceBuffer, u64 offset, u32 instanceCount,
                                                                                        AccelerationStructureBuildMode mode) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus CopyAccelerationStructure(CommandListRef commandList, AccelerationStructureRef destination,
-                                                                      AccelerationStructureRef source, AccelerationStructureCopyMode mode) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus WriteAccelerationStructureCompactedSize(CommandListRef commandList, AccelerationStructureRef accelerationStructure,
-                                                                                    QueryPoolRef queryPool, u32 queryIndex) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus DispatchRays(CommandListRef commandList, ShaderTableRef shaderTable,
-                                                         const DispatchRaysArguments& arguments) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CopyAccelerationStructure(CommandListRef commandList, AccelerationStructureRef destination, AccelerationStructureRef source,
+                                                                      AccelerationStructureCopyMode mode) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus WriteAccelerationStructureCompactedSize(CommandListRef commandList, AccelerationStructureRef accelerationStructure, QueryPoolRef queryPool,
+                                                                                    u32 queryIndex) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus DispatchRays(CommandListRef commandList, ShaderTableRef shaderTable, const DispatchRaysArguments& arguments) noexcept = 0;
 
-        [[nodiscard]] virtual BackendStatus WriteBuffer(CommandListRef commandList, BufferRef buffer, const void* data, u64 size,
-                                                        u64 destinationOffset) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus WriteBuffer(CommandListRef commandList, BufferRef buffer, const void* data, u64 size, u64 destinationOffset) noexcept = 0;
         [[nodiscard]] virtual BackendStatus WriteTexture(CommandListRef commandList, TextureRef texture, const TextureSubresourceData& data) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus CopyBuffer(CommandListRef commandList, BufferRef destination, u64 destinationOffset, BufferRef source,
-                                                       u64 sourceOffset, u64 size) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus CopyTexture(CommandListRef commandList, TextureRef destination, TextureRef source,
-                                                        const TextureCopyRegion& region) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus ResolveTexture(CommandListRef commandList, TextureRef destination, TextureRef source,
-                                                           const TextureResolveRegion& region) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus RequestTextureReadback(CommandListRef commandList, TextureRef source, const TextureReadbackRegion& region,
-                                                                   TextureReadbackRef& readback) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CopyBuffer(CommandListRef commandList, BufferRef destination, u64 destinationOffset, BufferRef source, u64 sourceOffset, u64 size) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus CopyTexture(CommandListRef commandList, TextureRef destination, TextureRef source, const TextureCopyRegion& region) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ResolveTexture(CommandListRef commandList, TextureRef destination, TextureRef source, const TextureResolveRegion& region) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus RequestTextureReadback(CommandListRef commandList, TextureRef source, const TextureReadbackRegion& region, TextureReadbackRef& readback) noexcept = 0;
         [[nodiscard]] virtual BackendStatus GetTextureReadbackInfo(TextureReadbackRef readback, TextureReadbackInfo& info) noexcept = 0;
         [[nodiscard]] virtual BackendStatus MapTextureReadback(TextureReadbackRef readback, TextureReadbackMapping& mapping) noexcept = 0;
         [[nodiscard]] virtual BackendStatus UnmapTextureReadback(TextureReadbackRef readback) noexcept = 0;
         [[nodiscard]] virtual BackendStatus LockBuffer(BufferRef buffer, u64 offset, u64 size, void*& data) noexcept = 0;
         virtual void UnlockBuffer(BufferRef buffer) noexcept = 0;
 
-        [[nodiscard]] virtual BackendStatus TransitionTexture(CommandListRef commandList, TextureRef texture, ResourceState before, ResourceState after,
-                                                              const SubresourceRange& range) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus TransitionBuffer(CommandListRef commandList, BufferRef buffer, ResourceState before,
-                                                             ResourceState after) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus AddCommandListWait(CommandListRef, GpuFence) noexcept
+        {
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "backend does not support incoming GPU queue waits");
+        }
+        [[nodiscard]] virtual BackendStatus SeedCommandListStates(CommandListRef, containers::ArraySpan<const CommandListEntryState>) noexcept
+        {
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "backend does not support explicit command-list entry state");
+        }
+        [[nodiscard]] virtual BackendStatus TransitionTexture(CommandListRef commandList, TextureRef texture, ResourceState before, ResourceState after, const SubresourceRange& range) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus TransitionBuffer(CommandListRef commandList, BufferRef buffer, ResourceState before, ResourceState after) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BarrierTextureUav(CommandListRef commandList, TextureRef texture) noexcept = 0;
         [[nodiscard]] virtual BackendStatus BarrierBufferUav(CommandListRef commandList, BufferRef buffer) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus BarrierTextureAliasing(CommandListRef commandList, bool discardAfter, TextureRef textureAfter,
-                                                                   TextureRef textureBefore) noexcept = 0;
-        [[nodiscard]] virtual BackendStatus BarrierBufferAliasing(CommandListRef commandList, bool discardAfter, BufferRef bufferAfter,
-                                                                  BufferRef bufferBefore) noexcept = 0;
+        [[nodiscard]] virtual BackendStatus ActivateAliasedResource(CommandListRef commandList, ResourceRef destination, containers::ArraySpan<const ResourceRef> predecessors) noexcept = 0;
         [[nodiscard]] virtual BackendStatus FlushPendingBarriers(CommandListRef commandList) noexcept = 0;
         [[nodiscard]] virtual BackendStatus MakeStateSafeToRetire(CommandListRef commandList, TextureRef texture) noexcept = 0;
         [[nodiscard]] virtual BackendStatus MakeStateSafeToRetire(CommandListRef commandList, BufferRef buffer) noexcept = 0;
@@ -209,6 +205,14 @@ namespace vanguard::rhi
         virtual void SetResourceDebugName(SwapChainRef swapChain, const char* name) noexcept = 0;
 
     protected:
+        [[nodiscard]] static constexpr NativeReleaseObservation MakeNativeReleaseObservation(const ResourceRef resource) noexcept
+        {
+            return NativeReleaseObservation(resource);
+        }
+        [[nodiscard]] static constexpr ResourceRef GetObservedResource(const NativeReleaseObservation observation) noexcept
+        {
+            return observation.m_resource;
+        }
         IBackend() noexcept = default;
     };
 } // namespace vanguard::rhi

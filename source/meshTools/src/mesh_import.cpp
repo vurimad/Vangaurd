@@ -14,6 +14,25 @@
 #include <cstdio>
 #include <cstring>
 
+namespace vanguard::mesh_tools
+{
+    bool GetMeshSourceExtensions(containers::String& extensions) noexcept
+    {
+        Assimp::Importer importer;
+        aiString supported;
+        importer.GetExtensionList(supported);
+        if (supported.length == 0 || supported.length > 65536)
+            return false;
+        containers::String result;
+        if (!result.Resize(static_cast<u32>(supported.length)))
+            return false;
+        std::memcpy(result.AsChar(), supported.data, supported.length);
+        result.ToLower();
+        extensions = static_cast<containers::String&&>(result);
+        return true;
+    }
+}
+
 namespace
 {
     namespace containers = vanguard::containers;

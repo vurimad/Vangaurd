@@ -1,0 +1,4 @@
+[2026.09.11 05:45:15][editor][Info] Profiler: 67108864 bytes buffer initiated [$000001AED2790000-$000001AEF2790000]..
+[2026.09.11 05:45:15][editor][Warning] Waiting for DispatcherThreads: 1/15 ready...
+[2026.09.11 05:45:16][editor][Info] D3D12 RHI initialized on NVIDIA GeForce RTX 4080 Laptop GPU (11997 MiB dedicated VRAM)
+[2026.09.11 05:45:24][editor][Info] E0F UI proof: frames=120 peakHosts=2 finalHosts=1 primaryPresent=1 detachedPresent=1 resized=1 lifecycle=PASS (visual checks remain manual)

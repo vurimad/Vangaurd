@@ -3,6 +3,7 @@
 #include <vanguard/application/engine_host.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/projects/project.hpp>
+#include <vanguard/assets/source_database.hpp>
 
 namespace vanguard::editor
 {
@@ -13,6 +14,9 @@ namespace vanguard::editor
     struct ProjectWorkspaceConfig
     {
         filesystem::AbsolutePath projectFile;
+        // Authored descriptor already read by composition. The service retains
+        // its value; no second disk read can change roots during startup.
+        projects::ProjectDescriptor project;
     };
 
     /// Owns the validated project document and every root derived from it for the lifetime of an editor workspace.
@@ -32,6 +36,10 @@ namespace vanguard::editor
         [[nodiscard]] virtual const filesystem::AbsolutePath& GetBuildsRoot() const noexcept = 0;
         [[nodiscard]] virtual const filesystem::AbsolutePath& GetConfigRoot() const noexcept = 0;
         [[nodiscard]] virtual const filesystem::AbsolutePath& GetPluginsRoot() const noexcept = 0;
+        [[nodiscard]] virtual const assets::SourceDatabase& GetSources() const noexcept = 0;
+        // Owner-thread calls only, after all borrowed catalog readers finish.
+        [[nodiscard]] virtual assets::SourceDatabaseResult RescanSources(filesystem::ScanResult* failure = nullptr) noexcept = 0;
+        [[nodiscard]] virtual bool ClassifySources(containers::ArraySpan<const assets::CompilerDescriptor> compilers) noexcept = 0;
 
     protected:
         ProjectWorkspaceService() noexcept = default;

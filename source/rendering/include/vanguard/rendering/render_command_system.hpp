@@ -1,11 +1,23 @@
 #pragma once
 
+#include <vanguard/rendering/geometry_frame_work.hpp>
+#include <vanguard/rendering/render_flow_resource_execution.hpp>
 #include <vanguard/rendering/render_scene.hpp>
 #include <vanguard/rendering/viewport.hpp>
+#include <vanguard/rhi/rhi.hpp>
 
 namespace vanguard::rendering
 {
     class FrameRenderer;
+    class RenderCommandSystem;
+    class RenderNodeResourceBindings;
+    class RenderNodeResourcePreparationFailures;
+    struct RenderFlowResourceFailure;
+
+    namespace detail
+    {
+        struct RenderCommandRetainedFrameAccess;
+    }
 
     enum class RenderCommandFailureCode : u8
     {
@@ -69,13 +81,121 @@ namespace vanguard::rendering
         u64 mutationEpoch = 0;
     };
 
+    enum class ReservedFrameCommandList : u32
+    {
+        StorageData,
+        Count
+    };
+
+    class RenderFrameCommandLists final
+    {
+    public:
+        RenderFrameCommandLists() noexcept;
+        ~RenderFrameCommandLists();
+
+        RenderFrameCommandLists(const RenderFrameCommandLists&) = delete;
+        RenderFrameCommandLists& operator=(const RenderFrameCommandLists&) = delete;
+
+        void PrepareForFrame(u32 commandListCount) noexcept;
+        void SetCommandList(u32 index, rhi::CommandListRef commandList) noexcept;
+        [[nodiscard]] rhi::CommandListRef GetCommandList(u32 index) const noexcept;
+        [[nodiscard]] u32 GetCount() const noexcept;
+        [[nodiscard]] bool Submit(const char* scopeName, u32 upToIndex, rhi::CommandListSyncType sync, jobs::Builder& builder) noexcept;
+        void Reset() noexcept;
+
+    private:
+        struct Entry
+        {
+            rhi::CommandListRef commandList;
+            CommandScopeId scope;
+            rhi::QueueType queue = rhi::QueueType::Graphics;
+            rhi::FailureCode closeFailure = rhi::FailureCode::None;
+            bool completionRecorded = false;
+        };
+
+        struct ExpectedQueueDependency
+        {
+            CommandScopeId producerScope;
+            CommandScopeId consumerScope;
+            rhi::CommandListSyncType sync = rhi::CommandListSyncType::None;
+            u32 producerIndex = 0;
+            u32 consumerIndex = 0;
+            bool completionRecorded = false;
+        };
+
+        void RegisterCommandScope(u32 index, CommandScopeId scope, rhi::QueueType queue) noexcept;
+        void RegisterQueueDependency(const CompiledQueueDependency& dependency) noexcept;
+        void SealCommandScopes() noexcept;
+        void FinalizeSubmissions(bool frameFailed) noexcept;
+        [[nodiscard]] bool HasFailure() const noexcept { return m_submissionFailurePending; }
+        [[nodiscard]] bool GetFirstSubmissionFailure(rhi::Failure& failure) const noexcept;
+        [[nodiscard]] containers::ArraySpan<const CommandScopeExecutionReceipt> GetCommandScopeReceipts() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const QueueDependencyExecutionReceipt> GetQueueDependencyReceipts() const noexcept;
+        [[nodiscard]] bool WasDeviceLost() const noexcept;
+
+        containers::DynamicArray<Entry> m_commandLists;
+        containers::DynamicArray<ExpectedQueueDependency> m_expectedQueueDependencies;
+        containers::DynamicArray<CommandScopeExecutionReceipt> m_commandScopeReceipts;
+        containers::DynamicArray<QueueDependencyExecutionReceipt> m_queueDependencyReceipts;
+        rhi::Failure m_submissionFailure;
+        u32 m_nextFlushStart = 0;
+        // Written by ordered submission continuations and read only after their terminal join.
+        bool m_submissionFailurePending = false;
+        bool m_deviceLost = false;
+
+        friend class FrameRenderer;
+        friend class RenderNodeGraph;
+        friend struct RenderNodeImplContext;
+    };
+
+    /// Cheap strong reference to the one stable frame allocation shared by the
+    /// render-command root and every independently scheduled frame branch.
+    class RetainedRenderFrameRef final
+    {
+    public:
+        struct Impl;
+
+        RetainedRenderFrameRef() noexcept = default;
+        ~RetainedRenderFrameRef();
+        RetainedRenderFrameRef(const RetainedRenderFrameRef& other) noexcept;
+        RetainedRenderFrameRef& operator=(const RetainedRenderFrameRef& other) noexcept;
+        RetainedRenderFrameRef(RetainedRenderFrameRef&& other) noexcept;
+        RetainedRenderFrameRef& operator=(RetainedRenderFrameRef&& other) noexcept;
+
+        [[nodiscard]] bool IsValid() const noexcept;
+        [[nodiscard]] const RenderFrameInfo& GetFrame() const noexcept;
+        [[nodiscard]] PreparedRenderViewFamily& GetPreparedViewFamily() noexcept;
+        [[nodiscard]] FrameCustomData& GetFrameCustomData() noexcept;
+        [[nodiscard]] GeometryFrameWork& GetGeometryFrameWork() noexcept;
+        [[nodiscard]] RenderFrameCommandLists& GetFrameCommandLists() noexcept;
+        [[nodiscard]] RenderNodeResourceBindings& GetResourceBindings() noexcept;
+        [[nodiscard]] RenderNodeResourcePreparationFailures& GetResourcePreparationFailures() noexcept;
+        [[nodiscard]] RenderFrameOutputTransaction& GetOutputTransaction() noexcept;
+        void RecordFailure(const char* message) noexcept;
+        void RecordFailure(const RenderFlowResourceFailure& failure) noexcept;
+        [[nodiscard]] bool HasFailure() const noexcept;
+        [[nodiscard]] const char* GetFailureMessage() const noexcept;
+        void InstallJobsRenderFrame() noexcept;
+        void ClearJobsRenderFrame() noexcept;
+        void Reset() noexcept;
+
+    private:
+        explicit RetainedRenderFrameRef(Impl* impl) noexcept : m_impl(impl) {}
+        void DeferTerminalCompletion() noexcept;
+        void PublishTerminalCompletion(bool skipped = false) noexcept;
+
+        Impl* m_impl = nullptr;
+        friend class FrameRenderer;
+        friend struct detail::RenderCommandRetainedFrameAccess;
+    };
+
     /// Renderer-global continuation created after scene update work on the shared CPU rendering chain.
     class RenderFrameTickContext final
     {
     public:
         RenderFrameTickContext(const u64 tick, const containers::ArraySpan<const RenderSceneProcessingEpoch> scenes,
                                const jobs::JobContext& continuation) noexcept
-            : m_tick(tick), m_scenes(scenes), m_dispatcherThreadIndex(continuation.dispatcherThreadIndex), m_jobs(continuation)
+            : m_tick(tick), m_scenes(scenes), m_dispatcherThreadIndex(continuation.dispatcherThreadIndex), m_builder(continuation)
         {
         }
 
@@ -97,30 +217,30 @@ namespace vanguard::rendering
             return m_scenes;
         }
 
-        [[nodiscard]] jobs::Builder& GetJobs() noexcept
+        [[nodiscard]] jobs::Builder& GetBuilder() noexcept
         {
-            return m_jobs;
+            return m_builder;
         }
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return m_tick != 0 && m_jobs.IsValid();
+            return m_tick != 0 && m_builder.IsValid();
         }
 
     private:
         u64 m_tick = 0;
         containers::ArraySpan<const RenderSceneProcessingEpoch> m_scenes;
         u32 m_dispatcherThreadIndex = 0;
-        jobs::Builder m_jobs;
+        jobs::Builder m_builder;
     };
 
-    /// Renderer-owned execution context created inside the retained RenderFrame job. Work dispatched through GetJobs()
+    /// Renderer-owned execution context created inside the retained RenderFrame job. Work dispatched through GetBuilder()
     /// continues the command system's CPU rendering chain instead of creating or waiting on a second chain.
     class RenderFrameContext final
     {
     public:
-        RenderFrameContext(const RenderFrameInfo& frame, const jobs::JobContext& continuation) noexcept
-            : m_frame(frame), m_dispatcherThreadIndex(continuation.dispatcherThreadIndex), m_jobs(continuation)
+        RenderFrameContext(const RetainedRenderFrameRef& frame, const jobs::JobContext& continuation) noexcept
+            : m_frame(frame), m_dispatcherThreadIndex(continuation.dispatcherThreadIndex), m_builder(continuation)
         {
         }
 
@@ -129,12 +249,52 @@ namespace vanguard::rendering
 
         [[nodiscard]] const RenderFrameInfo& GetFrame() const noexcept
         {
+            return m_frame.GetFrame();
+        }
+
+        [[nodiscard]] RenderViewport* GetViewport() const noexcept
+        {
+            return m_frame.GetFrame().GetViewport();
+        }
+
+        [[nodiscard]] RetainedRenderFrameRef RetainFrame() const noexcept
+        {
             return m_frame;
         }
 
-        [[nodiscard]] jobs::Builder& GetJobs() noexcept
+        [[nodiscard]] PreparedRenderViewFamily& GetPreparedViewFamily() noexcept
         {
-            return m_jobs;
+            return m_frame.GetPreparedViewFamily();
+        }
+
+        [[nodiscard]] FrameCustomData& GetFrameCustomData() noexcept
+        {
+            return m_frame.GetFrameCustomData();
+        }
+
+        [[nodiscard]] GeometryFrameWork& GetGeometryFrameWork() noexcept
+        {
+            return m_frame.GetGeometryFrameWork();
+        }
+
+        [[nodiscard]] RenderFrameCommandLists& GetFrameCommandLists() noexcept
+        {
+            return m_frame.GetFrameCommandLists();
+        }
+
+        [[nodiscard]] RenderNodeResourceBindings& GetResourceBindings() noexcept
+        {
+            return m_frame.GetResourceBindings();
+        }
+
+        [[nodiscard]] RenderNodeResourcePreparationFailures& GetResourcePreparationFailures() noexcept
+        {
+            return m_frame.GetResourcePreparationFailures();
+        }
+
+        [[nodiscard]] jobs::Builder& GetBuilder() noexcept
+        {
+            return m_builder;
         }
 
         [[nodiscard]] u32 GetDispatcherThreadIndex() const noexcept
@@ -144,13 +304,13 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return m_jobs.IsValid();
+            return m_frame.IsValid() && m_builder.IsValid();
         }
 
     private:
-        const RenderFrameInfo& m_frame;
+        RetainedRenderFrameRef m_frame;
         u32 m_dispatcherThreadIndex = 0;
-        jobs::Builder m_jobs;
+        jobs::Builder m_builder;
     };
 
     using ExecuteRenderingFrameTick = RenderFrameExecutionStatus (*)(RenderFrameTickContext&, void*) noexcept;
@@ -203,6 +363,8 @@ namespace vanguard::rendering
 
         /// Retains and appends one viewport frame behind FrameTick and every earlier render frame.
         [[nodiscard]] bool RenderFrame(const RenderFrameInfo& frame, RenderFrameSubmission& submission, RenderCommandFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RenderFrame(const RenderFrameInfo& frame, RenderFrameOutputTransaction& output, RenderFrameSubmission& submission,
+                                       RenderCommandFailure* failure = nullptr) noexcept;
 
         /// Strong CPU boundary. This processes/waits for the current rendering chain, never for GPU queue completion.
         [[nodiscard]] bool FlushPreviousFrameProcessing(RenderCommandFailure* failure = nullptr) noexcept;
@@ -214,6 +376,9 @@ namespace vanguard::rendering
         [[nodiscard]] RenderCommandSystemStats GetStats() const noexcept;
 
     private:
+        void PublishFrameCompletion(u64 serial, bool failed, bool skipped, const char* message) noexcept;
+
         Impl* m_impl = nullptr;
+        friend class RetainedRenderFrameRef;
     };
 } // namespace vanguard::rendering

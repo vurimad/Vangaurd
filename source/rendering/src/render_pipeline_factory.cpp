@@ -15,7 +15,8 @@ namespace vanguard::rendering
         [[nodiscard]] bool IsCurrent(const RenderShader& shader, const pipelines::ShaderReference& reference) noexcept
         {
             return shader.IsLoaded() && shader.GetPermutation() == reference.permutation && shader.BindingLayoutFingerprint() == reference.bindingLayout &&
-                   shader.GetPipelineInterfaceFingerprint() == reference.pipelineInterface;
+                   shader.GetPipelineInterfaceFingerprint() == reference.pipelineInterface && shader.GetMaterialDomainFingerprint() == reference.materialDomain &&
+                   shader.GetMaterialLayoutFingerprint() == reference.materialLayout;
         }
 
         [[nodiscard]] rhi::Format ConvertFormat(const pipelines::Format format) noexcept
@@ -25,8 +26,7 @@ namespace vanguard::rendering
             return format < pipelines::Format::Count ? static_cast<rhi::Format>(format) : rhi::Format::Unknown;
         }
 
-        [[nodiscard]] RenderPipelineResult PopulateShaders(const RenderPipelineRequest& request, rhi::GraphicsPipelineDesc& output,
-                                                           rhi::ComputePipelineDesc& compute) noexcept
+        [[nodiscard]] RenderPipelineResult PopulateShaders(const RenderPipelineRequest& request, rhi::GraphicsPipelineDesc& output, rhi::ComputePipelineDesc& compute) noexcept
         {
             for (const pipelines::ShaderReference& reference : request.pipeline->GetShaders())
             {
@@ -42,12 +42,9 @@ namespace vanguard::rendering
                     destination = source;
                     return true;
                 };
-                if (!assign(output.vertexShader, shader->GetStage(shaders::ShaderStage::Vertex)) ||
-                    !assign(output.hullShader, shader->GetStage(shaders::ShaderStage::Hull)) ||
-                    !assign(output.domainShader, shader->GetStage(shaders::ShaderStage::Domain)) ||
-                    !assign(output.geometryShader, shader->GetStage(shaders::ShaderStage::Geometry)) ||
-                    !assign(output.pixelShader, shader->GetStage(shaders::ShaderStage::Fragment)) ||
-                    !assign(compute.computeShader, shader->GetStage(shaders::ShaderStage::Compute)))
+                if (!assign(output.vertexShader, shader->GetStage(shaders::ShaderStage::Vertex)) || !assign(output.hullShader, shader->GetStage(shaders::ShaderStage::Hull)) ||
+                    !assign(output.domainShader, shader->GetStage(shaders::ShaderStage::Domain)) || !assign(output.geometryShader, shader->GetStage(shaders::ShaderStage::Geometry)) ||
+                    !assign(output.pixelShader, shader->GetStage(shaders::ShaderStage::Fragment)) || !assign(compute.computeShader, shader->GetStage(shaders::ShaderStage::Compute)))
                     return RenderPipelineResult::DuplicateStage;
                 if (shader->GetStage(shaders::ShaderStage::Task) || shader->GetStage(shaders::ShaderStage::Mesh) || shader->GetStage(shaders::ShaderStage::Library))
                     return RenderPipelineResult::UnsupportedState;
@@ -130,12 +127,11 @@ namespace vanguard::rendering
             return {ConvertStencil(source.fail), ConvertStencil(source.depthFail), ConvertStencil(source.pass), ConvertCompare(source.compare)};
         }
 
-        [[nodiscard]] bool BuildGraphicsDescription(const RenderPipelineRequest& request, rhi::GraphicsPipelineDesc& output,
-                                                    rhi::VertexLayoutRef& ownedVertexLayout) noexcept
+        [[nodiscard]] bool BuildGraphicsDescription(const RenderPipelineRequest& request, rhi::GraphicsPipelineDesc& output, rhi::VertexLayoutRef& ownedVertexLayout) noexcept
         {
             const pipelines::GraphicsState& source = request.pipeline->GetGraphics();
-            if (source.primitiveRestart || source.rasterizer.rasterizerDiscard || source.multisample.sampleMask != 0xffffffffu ||
-                source.multisample.sampleShading || source.depthStencil.depthBoundsTest || source.blend.logicOperationEnable)
+            if (source.primitiveRestart || source.rasterizer.rasterizerDiscard || source.multisample.sampleMask != 0xffffffffu || source.multisample.sampleShading || source.depthStencil.depthBoundsTest ||
+                source.blend.logicOperationEnable)
                 return false;
 
             containers::DynamicArray<rhi::VertexBindingDesc> bindings{memory::pools::Rendering::GetInstance()};
@@ -147,15 +143,14 @@ namespace vanguard::rendering
                 if (stream.binding > 0xffu || stream.stride > 0xffffu || stream.instanceStepRate > 0xffffu)
                     return false;
                 bindings.PushBack({static_cast<u8>(stream.binding), static_cast<u16>(stream.stride),
-                                   stream.inputRate == pipelines::InputRate::PerInstance ? rhi::VertexInputRate::PerInstance : rhi::VertexInputRate::PerVertex,
-                                   static_cast<u16>(stream.instanceStepRate)});
+                                   stream.inputRate == pipelines::InputRate::PerInstance ? rhi::VertexInputRate::PerInstance : rhi::VertexInputRate::PerVertex, static_cast<u16>(stream.instanceStepRate)});
             }
             for (const pipelines::VertexAttribute& attribute : request.pipeline->GetVertexAttributes())
             {
                 if (attribute.location > 0xffu || attribute.streamBinding > 0xffu || attribute.byteOffset > 0xffffu)
                     return false;
-                attributes.PushBack({static_cast<u8>(attribute.location), static_cast<u8>(attribute.streamBinding), static_cast<u16>(attribute.byteOffset),
-                                     ConvertFormat(attribute.format), attribute.semanticName, attribute.semanticIndex});
+                attributes.PushBack({static_cast<u8>(attribute.location), static_cast<u8>(attribute.streamBinding), static_cast<u16>(attribute.byteOffset), ConvertFormat(attribute.format),
+                                     attribute.semanticName, attribute.semanticIndex});
             }
             if (!bindings.Empty())
             {
@@ -169,8 +164,10 @@ namespace vanguard::rendering
             output.topology = static_cast<rhi::PrimitiveTopology>(source.topology);
             output.patchControlPoints = source.patchControlPoints;
             output.rasterizer.fill = static_cast<rhi::RasterFillMode>(source.rasterizer.fill);
-            output.rasterizer.cull = static_cast<rhi::RasterCullMode>(source.rasterizer.cull);
-            output.rasterizer.frontCounterClockwise = source.rasterizer.frontFace == pipelines::FrontFace::CounterClockwise;
+            output.rasterizer.cull = request.twoSided ? rhi::RasterCullMode::None : static_cast<rhi::RasterCullMode>(source.rasterizer.cull);
+            // Cull-none still needs mirrored winding: SV_IsFrontFace controls
+            // back-side normal orientation in the static-surface GBuffer pass.
+            output.rasterizer.frontCounterClockwise = (source.rasterizer.frontFace == pipelines::FrontFace::CounterClockwise) != request.mirrored;
             output.rasterizer.depthClipEnable = source.rasterizer.depthClipEnable;
             output.rasterizer.conservativeRasterization = source.rasterizer.conservativeRasterization;
             output.rasterizer.depthBias = source.rasterizer.depthBias;
@@ -190,10 +187,8 @@ namespace vanguard::rendering
             {
                 const pipelines::BlendAttachmentState& input = source.blend.attachments[index];
                 rhi::BlendAttachmentStateDesc& destination = output.blend.attachments[index];
-                if (!ConvertBlendFactor(input.sourceColor, destination.sourceColor) ||
-                    !ConvertBlendFactor(input.destinationColor, destination.destinationColor) ||
-                    !ConvertBlendFactor(input.sourceAlpha, destination.sourceAlpha) ||
-                    !ConvertBlendFactor(input.destinationAlpha, destination.destinationAlpha))
+                if (!ConvertBlendFactor(input.sourceColor, destination.sourceColor) || !ConvertBlendFactor(input.destinationColor, destination.destinationColor) ||
+                    !ConvertBlendFactor(input.sourceAlpha, destination.sourceAlpha) || !ConvertBlendFactor(input.destinationAlpha, destination.destinationAlpha))
                     return false;
                 destination.blendEnable = input.blendEnable;
                 destination.colorOperation = static_cast<rhi::BlendOperation>(input.colorOperation);
@@ -242,9 +237,10 @@ namespace vanguard::rendering
     RenderPipelineResult RequestRenderPipeline(const RenderPipelineRequest& request, PipelineCache& cache, PipelineRequest& output) noexcept
     {
         output.Reset();
-        if (request.pipeline == nullptr || !request.pipeline->IsOpen() || !cache.IsInitialized() ||
-            request.interfaceResources.bindingLayouts.Size() > rhi::MaximumBindingLayoutsPerPipeline ||
+        if (request.pipeline == nullptr || !request.pipeline->IsOpen() || !cache.IsInitialized() || request.interfaceResources.bindingLayouts.Size() > rhi::MaximumBindingLayoutsPerPipeline ||
             request.interfaceResources.descriptorDomains.Size() > rhi::MaximumDescriptorDomainsPerPipeline)
+            return RenderPipelineResult::InvalidArgument;
+        if ((request.mirrored || request.twoSided) && request.pipeline->GetKind() != pipelines::PipelineKind::Graphics)
             return RenderPipelineResult::InvalidArgument;
         for (const pipelines::ShaderReference& reference : request.pipeline->GetShaders())
         {
@@ -259,17 +255,52 @@ namespace vanguard::rendering
         if (pipelines::CalculateConcretePipelineKey(*request.pipeline, request.attachments, key) != pipelines::Result::Success)
             return RenderPipelineResult::InvalidArgument;
 
+        // The cooked key describes the shader interface, not its native layout
+        // owners. A shared device cache must not alias different root interfaces.
+        const PipelineInterfaceResources& resources = request.interfaceResources;
+        if (!resources.bindingLayouts.Empty() || !resources.descriptorDomains.Empty())
+        {
+            crypto::Sha256Builder hash;
+            const u32 counts[]{resources.bindingLayouts.Size(), resources.descriptorDomains.Size()};
+            if (!hash.Update(key.bytes, crypto::Digest256::ByteCount) || !hash.Update(counts, sizeof(counts)))
+                return RenderPipelineResult::InvalidArgument;
+            for (const rhi::BindingLayoutRef layout : resources.bindingLayouts)
+            {
+                const u32 identity[]{layout.index, layout.generation};
+                if (!layout.IsValid() || !hash.Update(identity, sizeof(identity)))
+                    return RenderPipelineResult::InvalidArgument;
+            }
+            for (const rhi::DescriptorDomainRef domain : resources.descriptorDomains)
+            {
+                const u32 identity[]{domain.index, domain.generation};
+                if (!domain.IsValid() || !hash.Update(identity, sizeof(identity)))
+                    return RenderPipelineResult::InvalidArgument;
+            }
+            if (!hash.Finalize(key))
+                return RenderPipelineResult::InvalidArgument;
+        }
+
         rhi::GraphicsPipelineDesc graphics;
         rhi::ComputePipelineDesc compute;
         const RenderPipelineResult shaderResult = PopulateShaders(request, graphics, compute);
         if (shaderResult != RenderPipelineResult::Success)
             return shaderResult;
-        const PipelineInterfaceResources& resources = request.interfaceResources;
         if (request.pipeline->GetKind() == pipelines::PipelineKind::Graphics)
         {
             rhi::VertexLayoutRef vertexLayout;
             if (!BuildGraphicsDescription(request, graphics, vertexLayout))
                 return RenderPipelineResult::UnsupportedState;
+            // Hash effective state, not the requested flags: forcing two-sided on
+            // an already uncullable pipeline must reuse that pipeline. Mirroring
+            // still changes front-face semantics even when culling is disabled.
+            const pipelines::RasterizerState& authored = request.pipeline->GetGraphics().rasterizer;
+            if (graphics.rasterizer.cull != static_cast<rhi::RasterCullMode>(authored.cull) || graphics.rasterizer.frontCounterClockwise != (authored.frontFace == pipelines::FrontFace::CounterClockwise))
+            {
+                const u8 variant[]{1, static_cast<u8>(graphics.rasterizer.cull), static_cast<u8>(graphics.rasterizer.frontCounterClockwise)};
+                crypto::Sha256Builder hash;
+                if (!hash.Update(key.bytes, crypto::Digest256::ByteCount) || !hash.Update(variant, sizeof(variant)) || !hash.Finalize(key))
+                    return RenderPipelineResult::InvalidArgument;
+            }
             graphics.bindingLayouts = resources.bindingLayouts.Data();
             graphics.bindingLayoutCount = resources.bindingLayouts.Size();
             graphics.descriptorDomains = resources.descriptorDomains.Data();
@@ -283,8 +314,7 @@ namespace vanguard::rendering
             compute.bindingLayoutCount = resources.bindingLayouts.Size();
             compute.descriptorDomains = resources.descriptorDomains.Data();
             compute.descriptorDomainCount = resources.descriptorDomains.Size();
-            return cache.RequestCompute(key, compute, output, request.priority) == pipeline_cache::Result::Success ? RenderPipelineResult::Success
-                                                                                                                   : RenderPipelineResult::CacheFailure;
+            return cache.RequestCompute(key, compute, output, request.priority) == pipeline_cache::Result::Success ? RenderPipelineResult::Success : RenderPipelineResult::CacheFailure;
         }
         return RenderPipelineResult::UnsupportedState;
     }

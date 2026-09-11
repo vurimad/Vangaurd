@@ -11,7 +11,7 @@ The Materials module owns Vanguard's cooked `vmat` contract. A material is a sma
 - Global descriptor domains, bindless indices, GPU material records, residency and native objects belong to the renderer.
 - Source graphs, inheritance and instances belong to authoring and are flattened by the cooker.
 
-The format has no built-in PBR, cloth, hair, terrain or decal schema. A cooker selects material-owned parameter blocks from shader reflection and supplies logical resource-parameter declarations from the material interface produced by the shader toolchain. `WriteMaterial` copies reflected offsets, sizes, strides and scalar types but never descriptor spaces, registers or bindless indices. Each named technique is checked against an opened `PipelineFile` and must select a compatible shader resource and permutation.
+The format has no built-in PBR, cloth, hair, terrain or decal schema. An annotated shader material contract supplies the complete reflected parameter range and ordered logical resource roles; a shader without that sealed contract is rejected by `WriteMaterial`. The writer copies reflected offsets, sizes, strides and scalar types but never descriptor spaces, registers or bindless indices. An offline compatibility policy maps each coarse shader resource kind to one concrete cooked asset type; that expected type is stored per slot, assigned references must match it exactly, and an unsupported kind may only remain optional and unbound. Each named technique is checked against an opened `PipelineFile` and must match the shader permutation plus its exact material-domain and material-layout fingerprints.
 
 ## Runtime and streaming
 

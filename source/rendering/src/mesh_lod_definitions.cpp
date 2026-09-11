@@ -183,6 +183,7 @@ namespace vanguard::rendering
 
             u32 highestBinding = 0;
             bool quantizedPosition = false;
+            u32 vertexDecodeFlags = 0;
             u32 bindingStrides[rhi::MaximumVertexBindings]{};
             bool bindingSeen[rhi::MaximumVertexBindings]{};
             for (u32 localStream = 0; localStream < layout.streamCount; ++localStream)
@@ -195,8 +196,15 @@ namespace vanguard::rendering
                 bindingSeen[stream.binding] = true;
                 bindingStrides[stream.binding] = stream.stride;
                 quantizedPosition = quantizedPosition ||
-                                    (stream.semantic == meshes::VertexSemantic::Position &&
+                                    (stream.semantic == meshes::VertexSemantic::Position && stream.semanticIndex == 0 &&
                                      stream.format == meshes::VertexFormat::R16G16B16A16SNorm);
+                if (stream.semanticIndex == 0 && stream.format == meshes::VertexFormat::R10G10B10A2UNorm)
+                {
+                    if (stream.semantic == meshes::VertexSemantic::Normal)
+                        vertexDecodeFlags |= static_cast<u32>(GpuGeometryFlags::NormalPackedUnorm10);
+                    else if (stream.semantic == meshes::VertexSemantic::Tangent)
+                        vertexDecodeFlags |= static_cast<u32>(GpuGeometryFlags::TangentPackedUnorm10);
+                }
             }
             const u32 bindingCount = highestBinding + 1u;
             for (u32 binding = 0; binding < bindingCount; ++binding)
@@ -218,7 +226,7 @@ namespace vanguard::rendering
             range.vertexCount = placement.vertex.vertexCount;
             range.indexFormat = placement.index.format == rhi::IndexFormat::UInt32 ? GpuIndexFormat::UInt32 : GpuIndexFormat::UInt16;
             range.flags = static_cast<GpuGeometryFlags>(static_cast<u32>(GpuGeometryFlags::Resident) |
-                                                        static_cast<u32>(GpuGeometryFlags::Indexed));
+                                                        static_cast<u32>(GpuGeometryFlags::Indexed) | vertexDecodeFlags);
 
             GpuPositionDecode* decode = nullptr;
             if (quantizedPosition)

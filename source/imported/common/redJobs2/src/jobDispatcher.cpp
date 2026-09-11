@@ -1144,6 +1144,16 @@ namespace helper
 			if ( !m_isMainThread )
 				return;
 
+#ifdef VG_INTERACTIVE_DXGI_WAIT
+			// Interactive native windows need prompt sent-message service while workers present.
+			// Do not consume queued input or dispatch another application update here.
+			const Uint64 tickNow = red::Timer::GetTicks();
+			if ( tickNow >= m_nextUpdateTick )
+			{
+				m_nextUpdateTick = tickNow + std::max< Uint64 >( 1, m_tickFrequency / 1000 );
+				PumpWindowsMessagesForDXGI();
+			}
+#else
 			// If we couldn't pop any more jobs, maybe the other threads are hung in Win32 API calls where messages are posted the HWND
 			// So we need to pump messages. We queue this job because where this occurs on PC we should be able to tolerate a momentary FPS hitch
 			// where the main thread has to drain the job queue to get to this: e.g., going from windowed to fullscreen mode etc.
@@ -1174,6 +1184,7 @@ namespace helper
 				m_sentPumpMessagesReminder = false;
 				PumpWindowsMessagesForDXGI();
 			}
+#endif
 #endif
 		}
 

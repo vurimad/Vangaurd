@@ -131,24 +131,21 @@ namespace vanguard::rendering
         TextureResidencyRuntime(const TextureResidencyRuntime&) = delete;
         TextureResidencyRuntime& operator=(const TextureResidencyRuntime&) = delete;
 
-        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, rhi::DescriptorDomainRef resourceDescriptors,
-                                      const TextureResidencyRuntimeConfig& config = {},
+        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, rhi::DescriptorDomainRef resourceDescriptors, const TextureResidencyRuntimeConfig& config = {},
                                       TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool AbandonDevice(TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Main-thread. Returns the real stable GPU residency identity immediately and coalesces only an
         /// identical resource path and generation. The first demand queues the guaranteed mip-tail upload.
-        [[nodiscard]] bool RequestTexture(const resources::ResourceHandle& resource, TextureDemandHandle& demand,
-                                          TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestTexture(const resources::ResourceHandle& resource, TextureDemandHandle& demand, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         /// Thread-safe explicit counterpart to TextureDemandHandle::Reset/destruction.
-        [[nodiscard]] bool CancelDemand(TextureDemandHandle& demand,
-                                        TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool CancelDemand(TextureDemandHandle& demand, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
 
         /// Main-thread, non-blocking progress. Empty prerequisites are valid for initial mip-tail uploads;
         /// future copies from an installed texture must receive the renderer's real prior-reader cutover.
-        [[nodiscard]] bool Tick(const rhi::ResidencyFenceSet& prerequisiteFences,
-                                TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Tick(const rhi::ResidencyFenceSet& prerequisiteFences, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Tick(TextureResidencyRuntimeFailure* failure = nullptr) noexcept
         {
             return Tick({}, failure);
@@ -156,14 +153,11 @@ namespace vanguard::rendering
 
         /// Main-thread immediately before renderer FrameTick dispatch. Freezes a bounded pending table batch
         /// and stages it into the one shared GPU Scene transaction.
-        [[nodiscard]] bool StageGpuSceneContribution(GpuSceneRuntime& gpuScene,
-                                                     TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool StageGpuSceneContribution(GpuSceneRuntime& gpuScene, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
 
-        [[nodiscard]] bool SealRetirements(const rhi::ResidencyFenceSet& safeAfter,
-                                           TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool SealRetirements(const rhi::ResidencyFenceSet& safeAfter, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] u32 CollectRetirements(TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool GetInfo(GpuTextureResidencyHandle residency, TextureRuntimeInfo& info,
-                                   TextureResidencyRuntimeFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] bool GetInfo(GpuTextureResidencyHandle residency, TextureRuntimeInfo& info, TextureResidencyRuntimeFailure* failure = nullptr) const noexcept;
         [[nodiscard]] TextureResidencyRuntimeStats GetStats() const noexcept;
 
         /// Phase 5B uses this manager only through the shared GPU Scene contribution coordinator.
@@ -173,6 +167,7 @@ namespace vanguard::rendering
     private:
         struct Impl;
         void ReleaseDemand(TextureDemandId demand) noexcept;
+        [[nodiscard]] bool IsDemandValid(TextureDemandId demand) const noexcept;
 
         TextureResidencyManager m_residency;
         TextureUploader m_uploader;

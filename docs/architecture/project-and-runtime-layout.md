@@ -36,7 +36,7 @@ MyGame/
         `-- Shipping/
 ```
 
-`MyGame.vproject` is an editor-only authored project definition. It establishes project identity, source and derived-data roots, target platforms, plugins, cooking policy, package construction policy, and default editor/runtime worlds. It is never required by a shipped runtime.
+`MyGame.vproject` is a shared authoring/tool project definition, consumed by the editor and headless tools through `source/projects`. It establishes project identity, source and derived-data roots, target platforms, plugins, cooking policy, package construction policy, and default editor/runtime worlds. It is never required by a shipped runtime.
 
 The normative grammar, validation levels, identity rules, and transactional creation contract are defined in [`../formats/vproject-format.md`](../formats/vproject-format.md). The editor and `nanovanguard` must consume the same shared parser and validator; neither product may maintain a private interpretation.
 
@@ -68,7 +68,7 @@ Artifacts should be content-addressed rather than physically mirror source paths
 DerivedData/Windows/Development/Artifacts/7A/31/<fingerprint>.vtex
 ```
 
-The editor asset registry presents the authored `Assets` hierarchy and maintains the mapping:
+The shared source asset registry maintains the following mapping; the editor asset browser presents it rather than owning a separate registry:
 
 ```text
 AssetId -> current source path and metadata -> build fingerprint -> current derived artifact

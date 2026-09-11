@@ -712,7 +712,7 @@ namespace vanguard::rhi::backend
                                                                        config.heapCapacity,
                                                                        config.samplerStateCapacity,
                                                                        config.shaderCapacity,
-                                                                       1,
+                                                                       config.vertexLayoutCapacity,
                                                                        config.pipelineCapacity,
                                                                        config.bindingLayoutCapacity,
                                                                        config.descriptorDomainCapacity,
@@ -810,6 +810,21 @@ namespace vanguard::rhi::backend
         const u64 identity = slot->identity.GetValue();
         const u32 references = IdentityReferences(identity);
         return IdentityGeneration(identity) == resource.GetGeneration() && references > 0 && references < DestroyingReferenceCount;
+    }
+
+    bool ResourceLifetimeManager::IsNativeReleaseComplete(const ResourceRef resource) const noexcept
+    {
+        if (!IsInitialized() || !resource.IsValid())
+            return false;
+        const ResourceTable* const table = m_impl->GetTable(resource.GetKind());
+        const ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
+        if (slot == nullptr)
+            return false;
+        const u64 identity = slot->identity.GetValue();
+        // Release-to-zero and the Destroying sentinel deliberately remain
+        // incomplete. FinishDestroy advances the generation only after the
+        // native payload destructor and destruction notification have run.
+        return IdentityGeneration(identity) != resource.GetGeneration();
     }
 
     bool ResourceLifetimeManager::AddRef(const ResourceRef resource) noexcept

@@ -33,6 +33,8 @@ project "shaderToolsTests"
     targetdir(output_root)
     objdir(object_root)
     files { "tests/**.cpp", "tests/data/**.slang" }
+    includedirs { "../pipelines/include" }
+    links { "pipelines" }
     includedirs {
         "include", "../assets/include", "../shaders/include", "../crypto/include", "../serialization/include", "../resources/include",
         "../filesystem/include", "../io/include", "../containers/include", "../concurrency/include", "../memory/include",

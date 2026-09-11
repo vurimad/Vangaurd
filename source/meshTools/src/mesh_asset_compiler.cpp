@@ -278,6 +278,7 @@ namespace vanguard::mesh_tools
         MeshAssetCompilerConfig config;
         assets::BuildSystem* buildSystem = nullptr;
         assets::CompilerId compilerId = assets::InvalidCompilerId;
+        containers::String sourceExtensions;
     };
 
     MeshBuildSettingsResult EncodeMeshBuildSettings(const MeshBuildDescription& description, containers::DynamicArray<u8>& output) noexcept
@@ -426,6 +427,11 @@ namespace vanguard::mesh_tools
         if (implementation == nullptr)
             return false;
         implementation->config = config;
+        if (!GetMeshSourceExtensions(implementation->sourceExtensions))
+        {
+            VANGUARD_DELETE(implementation);
+            return false;
+        }
         implementation->compilerId = assets::HashCompilerName(CompilerName);
         m_impl = implementation;
         return true;
@@ -451,7 +457,26 @@ namespace vanguard::mesh_tools
     {
         if (m_impl == nullptr)
             return {};
-        return {m_impl->compilerId, CompilerName, MeshAssetCompilerVersion, MeshSourceResourceType, meshes::MeshResourceType, Discover, CompileAsset, m_impl};
+        assets::CompilerDescriptor descriptor{m_impl->compilerId, CompilerName, MeshAssetCompilerVersion, MeshSourceResourceType, meshes::MeshResourceType, Discover, CompileAsset, m_impl};
+        descriptor.recognizeSource = [](const containers::StringView sourcePath, void* userData) noexcept
+        {
+            const auto extension = filesystem::paths::GetExtension(sourcePath);
+            if (extension.Empty())
+                return false;
+            const containers::StringView supported = static_cast<Impl*>(userData)->sourceExtensions;
+            u32 start = 0;
+            for (u32 end = 0; end <= supported.Length(); ++end)
+            {
+                if (end != supported.Length() && supported[end] != ';')
+                    continue;
+                const auto token = supported.Slice(start, end);
+                if (token.StartsWith("*.") && token.Length() == extension.Length() + 2u && token.SubView(2).StartsWithIgnoreCase(extension))
+                    return true;
+                start = end + 1u;
+            }
+            return false;
+        };
+        return descriptor;
     }
 
     assets::Result MeshAssetCompiler::Register(assets::BuildSystem& buildSystem) noexcept

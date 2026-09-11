@@ -1,5 +1,7 @@
 #include <vanguard/rendering/render_camera.hpp>
 
+#include <vanguard/rendering/render_node_impl_context.hpp>
+
 #include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -328,6 +330,7 @@ namespace vanguard::rendering
             u32 pendingPreparedFamilies = 0;
             RenderViewOrigin historyOrigin;
             RenderViewMatrices historyMatrices;
+            RenderCameraExtent historyExtent;
             f32 historyJitter[2]{};
             u64 lastSubmittedFrameSerial = 0;
             u64 temporalIdentity = 0;
@@ -653,12 +656,32 @@ namespace vanguard::rendering
         {
             view = {};
             const RenderCameraState& state = camera.state;
-            const RenderCameraExtent extent = ResolveExtent(state, request.frameExtent);
+            RenderCameraExtent frameExtent = request.frameExtent;
+            f32 outputAspect = 0.0f;
+            for (const auto& region : request.outputRegions)
+            {
+                if (region.camera != camera.handle) continue;
+                if (!request.outputExtent.IsValid() || !region.rect.IsValid() ||
+                    region.rect.x >= request.outputExtent.width || region.rect.y >= request.outputExtent.height ||
+                    region.rect.width > request.outputExtent.width - region.rect.x ||
+                    region.rect.height > request.outputExtent.height - region.rect.y)
+                    return false;
+                // Scale destination edges, not widths independently: adjacent
+                // regions keep the same boundary under an odd render extent.
+                const u32 left = static_cast<u32>(static_cast<u64>(region.rect.x) * frameExtent.width / request.outputExtent.width);
+                const u32 top = static_cast<u32>(static_cast<u64>(region.rect.y) * frameExtent.height / request.outputExtent.height);
+                const u32 right = static_cast<u32>(static_cast<u64>(region.rect.x + region.rect.width) * frameExtent.width / request.outputExtent.width);
+                const u32 bottom = static_cast<u32>(static_cast<u64>(region.rect.y + region.rect.height) * frameExtent.height / request.outputExtent.height);
+                frameExtent = {right > left ? right - left : 1u, bottom > top ? bottom - top : 1u};
+                outputAspect = static_cast<f32>(region.rect.width) / static_cast<f32>(region.rect.height);
+                break;
+            }
+            const RenderCameraExtent extent = ResolveExtent(state, frameExtent);
             if (!extent.IsValid())
                 return false;
 
-            const f32 aspect =
-                state.projection.aspectRatio > 0.0f ? state.projection.aspectRatio : static_cast<f32>(extent.width) / static_cast<f32>(extent.height);
+            const f32 automaticAspect = outputAspect > 0.0f ? outputAspect : static_cast<f32>(extent.width) / static_cast<f32>(extent.height);
+            const f32 aspect = state.projection.aspectRatio > 0.0f ? state.projection.aspectRatio : automaticAspect;
             f32 unjitteredProjection[16]{};
             f32 unjitteredWorldToClip[16]{};
             const f32 noJitter[2]{};
@@ -674,7 +697,10 @@ namespace vanguard::rendering
             Multiply(view.matrices.worldToView, view.matrices.viewToClip, view.matrices.worldToClip);
 
             const bool cameraCut = request.forceCameraCut || !camera.historyValid || camera.requestedCutRevision != camera.committedCutRevision ||
-                                   request.frameSerial <= camera.lastSubmittedFrameSerial;
+                                   request.frameSerial <= camera.lastSubmittedFrameSerial ||
+                                   extent.width != camera.historyExtent.width || extent.height != camera.historyExtent.height ||
+                                   view.matrices.viewToClip[0] != camera.historyMatrices.viewToClip[0] ||
+                                   view.matrices.viewToClip[5] != camera.historyMatrices.viewToClip[5];
             view.id = {camera.handle.index, camera.handle.generation};
             view.family = family;
             view.purpose = state.purpose;
@@ -1219,10 +1245,26 @@ namespace vanguard::rendering
             return Fail(failure, RenderCameraFailureCode::NotInitialized, "RenderCameraStorage is not initialized", request.scene);
         if (frame.m_owner != nullptr)
             return Fail(failure, RenderCameraFailureCode::PreparedFamilyUnavailable, "prepared RenderViewFamily output is already occupied", request.scene);
-        if (!request.scene.IsValid() || !request.frameExtent.IsValid() || request.frameSerial == 0)
+        if (!request.scene.IsValid() || !request.frameExtent.IsValid() || request.frameSerial == 0 ||
+            request.roots.Size() > MaximumRenderViewsPerFamily || (!request.roots.Empty() && request.roots.Data() == nullptr) ||
+            request.outputRegions.Size() > MaximumRenderViewsPerFamily ||
+            (!request.outputRegions.Empty() && (request.outputRegions.Data() == nullptr || !request.outputExtent.IsValid())))
         {
             static_cast<void>(m_impl->rejectedOperations.Increment());
             return Fail(failure, RenderCameraFailureCode::InvalidDescriptor, "invalid RenderCamera frame preparation request", request.scene);
+        }
+
+        for (u32 index = 0; index < request.outputRegions.Size(); ++index)
+        {
+            const auto& region = request.outputRegions[index];
+            bool isRoot = false;
+            for (const auto root : request.roots) isRoot |= root == region.camera;
+            if (!isRoot || !region.rect.IsValid() || region.rect.x >= request.outputExtent.width || region.rect.y >= request.outputExtent.height ||
+                region.rect.width > request.outputExtent.width - region.rect.x || region.rect.height > request.outputExtent.height - region.rect.y)
+                return Fail(failure, RenderCameraFailureCode::InvalidDescriptor, "invalid camera output region", request.scene);
+            for (u32 previous = 0; previous < index; ++previous)
+                if (request.outputRegions[previous].camera == region.camera)
+                    return Fail(failure, RenderCameraFailureCode::InvalidDescriptor, "duplicate camera output region", request.scene);
         }
 
         Impl::SceneState* const scene = m_impl->FindScene(request.scene);
@@ -1311,23 +1353,42 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderCameraStorage::PrepareCustomData(const PreparedRenderViewFamily& family, RenderCameraFailure* const failure) noexcept
+    bool RenderCameraStorage::PrepareCustomData(RenderNodeImplContext& context, RenderCameraFailure* const failure) noexcept
     {
         ClearFailure(failure);
+        const PreparedRenderViewFamily* const family = context.GetViewFamily();
         if (m_impl == nullptr)
-            return Fail(failure, RenderCameraFailureCode::NotInitialized, "RenderCameraStorage is not initialized", family.m_scene);
+            return Fail(failure, RenderCameraFailureCode::NotInitialized, "RenderCameraStorage is not initialized");
+        if (family == nullptr)
+            return Fail(failure, RenderCameraFailureCode::InvalidHandle, "custom-data preparation requires a prepared RenderViewFamily");
 
-        Impl::SceneState* const scene = m_impl->FindScene(family.m_scene);
-        Impl::FrameSlot* const frame = m_impl->FindFrame(family);
+        Impl::SceneState* const scene = m_impl->FindScene(family->m_scene);
+        Impl::FrameSlot* const frame = m_impl->FindFrame(*family);
         if (scene == nullptr || frame == nullptr)
-            return Fail(failure, RenderCameraFailureCode::InvalidHandle, "invalid prepared RenderViewFamily", family.m_scene);
+            return Fail(failure, RenderCameraFailureCode::InvalidHandle, "invalid prepared RenderViewFamily", family->m_scene);
 
-        CustomDataPrepareInfo info{frame->frameSerial, frame->scene, &frame->family, nullptr};
+        const auto failCustomData = [failure, frame](const CustomDataKind kind, const u32 typeIndex, const RenderCameraHandle camera) noexcept
+        {
+            if (failure != nullptr && failure->code == RenderCameraFailureCode::None)
+                static_cast<void>(Fail(failure, RenderCameraFailureCode::CustomDataPreparationFailed, "custom-data preparation failed", frame->scene, camera));
+            if (failure != nullptr)
+            {
+                failure->customDataKind = kind;
+                failure->customDataTypeIndex = typeIndex;
+            }
+            return false;
+        };
+
+        context.SetCustomDataView(nullptr, -1);
         for (SceneCustomData* const data : scene->customData)
         {
             if (data == nullptr)
                 continue;
-            data->Prepare(info);
+            if (!data->Prepare(context, failure))
+            {
+                context.SetCustomDataView(nullptr, -1);
+                return failCustomData(CustomDataKind::Scene, data->GetTypeIndex(), {});
+            }
             data->MarkPrepared(frame->frameSerial);
         }
 
@@ -1336,17 +1397,25 @@ namespace vanguard::rendering
             const RenderCameraHandle cameraHandle = frame->cameras[cameraIndex];
             Impl::CameraSlot* const camera = m_impl->Find(cameraHandle);
             if (camera == nullptr)
+            {
+                context.SetCustomDataView(nullptr, -1);
                 return Fail(failure, RenderCameraFailureCode::InvalidHandle, "prepared RenderCamera became unavailable", frame->scene, cameraHandle);
+            }
 
-            info.view = &frame->views[cameraIndex];
+            context.SetCustomDataView(&frame->views[cameraIndex], static_cast<i32>(cameraIndex));
             for (CameraCustomData* const data : camera->camera.customData)
             {
                 if (data == nullptr)
                     continue;
-                data->Prepare(info);
+                if (!data->Prepare(context, frame->views[cameraIndex], failure))
+                {
+                    context.SetCustomDataView(nullptr, -1);
+                    return failCustomData(CustomDataKind::Camera, data->GetTypeIndex(), cameraHandle);
+                }
                 data->MarkPrepared(frame->frameSerial);
             }
         }
+        context.SetCustomDataView(nullptr, -1);
         return true;
     }
 
@@ -1591,6 +1660,7 @@ namespace vanguard::rendering
                 const RenderView& view = slot->views[index];
                 storedCamera.historyOrigin = view.origin;
                 storedCamera.historyMatrices = view.matrices;
+                storedCamera.historyExtent = {view.rect.width, view.rect.height};
                 storedCamera.historyJitter[0] = view.jitter[0];
                 storedCamera.historyJitter[1] = view.jitter[1];
                 storedCamera.lastSubmittedFrameSerial = slot->frameSerial;

@@ -6,6 +6,7 @@
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/shader_tools/shader_compiler.hpp>
 #include <vanguard/shader_tools/shader_asset_compiler.hpp>
+#include <vanguard/pipelines/pipelines.hpp>
 
 #include <cstdio>
 
@@ -63,6 +64,60 @@ int main()
 
     sht::ShaderCompiler compiler;
     Check(compiler.Initialize() == sht::Result::Success, "Slang compiler initialization");
+
+    {
+        char featurePath[2048];
+        std::snprintf(featurePath, sizeof(featurePath), "%s/../../../rendering/shaders/fullscreen_copy.vsl", __FILE__);
+        auto file = filesystem::RawFileReader::Create(filesystem::AbsolutePath::CreateFilePath(featurePath));
+        Check(static_cast<bool>(file), "fullscreen copy source opens");
+        if (file)
+        {
+            containers::DynamicArray<u8> source(memory::pools::Serialization::GetInstance());
+            source.Resize(static_cast<u32>(file->GetSize()));
+            file->Serialize(source.Data(), source.Size());
+            const sht::EntryPoint featureEntries[] = {{"CopyVertexMain", shaders::ShaderStage::Vertex}, {"CopyFragmentMain", shaders::ShaderStage::Fragment}};
+            sht::CompileRequest featureRequest;
+            featureRequest.sourceName = "rendering/shaders/fullscreen_copy.vsl";
+            featureRequest.moduleName = "fullscreen_copy";
+            featureRequest.source = source;
+            featureRequest.entryPoints = featureEntries;
+            sht::CompileOutput featureOutput;
+            const auto result = compiler.Compile(featureRequest, featureOutput);
+            if (result != sht::Result::Success)
+                std::fprintf(stderr, "[shaderToolsTests] fullscreen copy: %s\n", featureOutput.GetDiagnostics());
+            Check(result == sht::Result::Success, "fullscreen copy DXIL compilation");
+            if (result == sht::Result::Success)
+            {
+                Check(featureOutput.GetVertexInputs().Empty() && featureOutput.GetFragmentOutputs().Size() == 1, "fullscreen copy needs no vertex stream and writes one target");
+                containers::DynamicArray<u8> bytes(memory::pools::Serialization::GetInstance());
+                filesystem::MemoryFileWriter writer(bytes);
+                // This fixture has one fixed target/entry-point variant; the asset compiler supplies production permutation identities.
+                const auto permutation = crypto::Sha256(source.Data(), source.Size());
+                Check(featureOutput.WriteShader(writer, 0x4653434f5059ull, permutation) == sht::Result::Success, "fullscreen copy cooked emission");
+                filesystem::MemoryFileReader reader(bytes, 0);
+                shaders::ShaderFile cooked;
+                Check(cooked.Open(reader) == shaders::Result::Success, "fullscreen copy cooked round trip");
+                const pipelines::ShaderReference shaderReference{resources::ResourcePath::FromString("rendering/shaders/fullscreen_copy.vshader").Id(), cooked.GetPermutation(),
+                    cooked.BindingLayoutFingerprint(), cooked.GetPipelineInterfaceFingerprint()};
+                pipelines::BuildDescription pipeline;
+                pipeline.kind = pipelines::PipelineKind::Graphics;
+                pipeline.name = 0x4653434f5059ull;
+                pipeline.shaders = {&shaderReference, 1};
+                pipeline.graphics.rasterizer.cull = pipelines::CullMode::None;
+                pipeline.graphics.blend.attachmentCount = 1;
+                pipeline.graphics.attachmentPolicy = pipelines::AttachmentPolicy::Deferred;
+                containers::DynamicArray<u8> pipelineBytes(memory::pools::Serialization::GetInstance());
+                filesystem::MemoryFileWriter pipelineWriter(pipelineBytes);
+                const auto pipelineResult = pipelines::WritePipeline(pipelineWriter, pipeline);
+                if (pipelineResult != pipelines::Result::Success)
+                    std::fprintf(stderr, "[shaderToolsTests] fullscreen copy pipeline: %s\n", pipelines::ToString(pipelineResult));
+                Check(pipelineResult == pipelines::Result::Success, "fullscreen copy pipeline cooked emission");
+                filesystem::MemoryFileReader pipelineReader(pipelineBytes, 0);
+                pipelines::PipelineFile cookedPipeline;
+                Check(cookedPipeline.Open(pipelineReader) == pipelines::Result::Success, "fullscreen copy pipeline cooked round trip");
+            }
+        }
+    }
 
     constexpr char Source[] = R"(
         [shader("compute")]
@@ -252,6 +307,102 @@ int main()
     shaders::ShaderFile graphicsFile;
     Check(graphicsFile.Open(graphicsReader) == shaders::Result::Success && graphicsFile.GetKind() == shaders::ProgramKind::Graphics,
           "emitted graphics .vshader reopens");
+
+    constexpr char MaterialSource[] = R"(
+        #ifndef VANGUARD_TEST_MATERIAL_CAPABILITIES
+        #define VANGUARD_TEST_MATERIAL_CAPABILITIES 33
+        #endif
+        [__AttributeUsage(_AttributeTargets.Function)]
+        struct VanguardMaterialDomainAttribute { string stableName; int schemaVersion; int legalStages; int requiredCapabilities; };
+        [__AttributeUsage(_AttributeTargets.Function)]
+        struct VanguardMaterialProgramAttribute { string domainFunction; string parameterType; string resourceType; int accessorAbi; };
+        [__AttributeUsage(_AttributeTargets.Struct)]
+        struct VanguardMaterialParametersAttribute {};
+        [__AttributeUsage(_AttributeTargets.Struct)]
+        struct VanguardMaterialResourcesAttribute {};
+        [__AttributeUsage(_AttributeTargets.Var)]
+        struct VanguardMaterialResourceAttribute { int firstSlot; int required; };
+
+        struct SurfaceInput { float2 uv; };
+        struct SurfaceOutput { float4 color; };
+        [VanguardMaterialParameters]
+        struct SurfaceParameters { float4 baseColor; float roughness; };
+        [VanguardMaterialResources]
+        struct SurfaceResources
+        {
+            [VanguardMaterialResource(0, 1)] Texture2D<float4> albedo;
+            [VanguardMaterialResource(1, 1)] SamplerState samplerState;
+        };
+
+        [VanguardMaterialDomain("Surface", 1, 16, VANGUARD_TEST_MATERIAL_CAPABILITIES)]
+        SurfaceOutput EvaluateSurface(SurfaceInput input)
+        {
+            SurfaceOutput output;
+            output.color = float4(input.uv, 0.0, 1.0);
+            return output;
+        }
+
+        struct MaterialVertexInput { float3 position : POSITION; float2 uv : TEXCOORD0; };
+        struct MaterialVertexOutput { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+        [shader("vertex")]
+        MaterialVertexOutput MaterialVertex(MaterialVertexInput input)
+        {
+            MaterialVertexOutput output;
+            output.position = float4(input.position, 1.0);
+            output.uv = input.uv;
+            return output;
+        }
+        [VanguardMaterialProgram("EvaluateSurface", "SurfaceParameters", "SurfaceResources", 1)]
+        [shader("fragment")]
+        float4 MaterialFragment(MaterialVertexOutput input) : SV_Target0
+        {
+            SurfaceInput materialInput;
+            materialInput.uv = input.uv;
+            return EvaluateSurface(materialInput).color;
+        }
+    )";
+    const sht::EntryPoint materialEntries[]{{"MaterialVertex", shaders::ShaderStage::Vertex}, {"MaterialFragment", shaders::ShaderStage::Fragment}};
+    request.sourceName = "tests/material_contract.slang";
+    request.moduleName = "material_contract";
+    request.source = {reinterpret_cast<const u8*>(MaterialSource), static_cast<u32>(sizeof(MaterialSource) - 1u)};
+    request.entryPoints = materialEntries;
+    request.settings.target = sht::Target::D3D12Dxil;
+    const sht::Result materialResult = compiler.Compile(request, output);
+    if (materialResult != sht::Result::Success)
+        std::fprintf(stderr, "[shaderToolsTests] material contract result %s\n%s", sht::ToString(materialResult), output.GetDiagnostics());
+    Check(materialResult == sht::Result::Success && output.HasMaterialContract(), "annotated material program is reflected");
+    Check(output.GetMaterialDomain().name != 0 && output.GetMaterialDomain().schemaVersion == 1 &&
+              output.GetMaterialDomain().legalStages == shaders::StageBit(shaders::ShaderStage::Fragment) &&
+              output.GetMaterialDomain().requiredCapabilities ==
+                  (shaders::MaterialShaderCapabilityBit(shaders::MaterialShaderCapability::Numeric16Bit) |
+                   shaders::MaterialShaderCapabilityBit(shaders::MaterialShaderCapability::ComparisonSampling)),
+          "material domain identity, legal stages, and required capabilities are reflected");
+    Check(output.GetMaterialParameterByteSize() != 0 && output.GetMaterialParameters().Size() == 2 && output.GetMaterialResources().Size() == 2,
+          "material parameter bytes and logical resource roles are reflected from named types");
+    Check(output.GetMaterialResources().Size() == 2 &&
+              output.GetMaterialResources()[0].shape.access == shaders::MaterialResourceAccess::Read &&
+              output.GetMaterialResources()[0].shape.textureDimension == shaders::MaterialTextureDimension::D2 &&
+              output.GetMaterialResources()[0].shape.scalarType == shaders::ScalarType::F32 &&
+              output.GetMaterialResources()[0].shape.componentCount == 4 &&
+              output.GetMaterialResources()[1].shape.samplerKind == shaders::MaterialSamplerKind::Filtering,
+          "material resource reflection retains reconstructable texture and sampler shape");
+    containers::DynamicArray<u8> cookedMaterial(memory::pools::Serialization::GetInstance());
+    filesystem::MemoryFileWriter materialWriter(cookedMaterial);
+    Check(output.WriteShader(materialWriter, 0x4d41544cu) == sht::Result::Success, "material contract .vshader emission");
+    filesystem::MemoryFileReader materialReader(cookedMaterial, 0);
+    shaders::ShaderFile materialFile;
+    Check(materialFile.Open(materialReader) == shaders::Result::Success && materialFile.HasMaterialContract() &&
+              materialFile.GetMaterialParameters().Size() == 2 && materialFile.GetMaterialResources().Size() == 2 &&
+              materialFile.GetMaterialResources()[0].shape == output.GetMaterialResources()[0].shape &&
+              materialFile.GetMaterialResources()[1].shape == output.GetMaterialResources()[1].shape &&
+              materialFile.GetMaterialContract()->domain.requiredCapabilities == output.GetMaterialDomain().requiredCapabilities &&
+              !materialFile.GetMaterialContract()->domainFingerprint.IsEmpty() && !materialFile.GetMaterialContract()->layoutFingerprint.IsEmpty(),
+          "material contract survives cooked shader serialization");
+    const sht::Define unknownCapabilityDefine{"VANGUARD_TEST_MATERIAL_CAPABILITIES", "128"};
+    request.defines = {&unknownCapabilityDefine, 1};
+    Check(compiler.Compile(request, output) == sht::Result::ReflectionFailure,
+          "unknown reflected material shader capability bits are rejected");
+    request.defines = {};
 
     constexpr char AssetSource[] = R"(
         #include "../common/constants.slang"

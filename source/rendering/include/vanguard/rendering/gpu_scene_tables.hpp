@@ -28,10 +28,15 @@ namespace vanguard::rendering
         Light,
         Decal,
         TextureResidency,
+        MaterialParameterWord,
+        GeometryShell,
+        GeometryBin,
         Count
     };
 
     inline constexpr u32 GpuSceneTableCount = static_cast<u32>(GpuSceneTableKind::Count);
+    static_assert(static_cast<u32>(GpuSceneTableKind::GeometryShell) == 20);
+    static_assert(static_cast<u32>(GpuSceneTableKind::GeometryBin) == 21);
     static_assert(static_cast<u32>(GpuSceneTableKind::Instance) == 0);
     static_assert(static_cast<u32>(GpuSceneTableKind::RenderableResidency) == 3);
     static_assert(static_cast<u32>(GpuSceneTableKind::PrimitivePlacement) == 6);
@@ -39,12 +44,12 @@ namespace vanguard::rendering
     static_assert(static_cast<u32>(GpuSceneTableKind::MaterialIndex) == 15);
     static_assert(static_cast<u32>(GpuSceneTableKind::Decal) == 17);
     static_assert(static_cast<u32>(GpuSceneTableKind::TextureResidency) == 18);
-    static_assert(GpuSceneTableCount == 19);
+    static_assert(static_cast<u32>(GpuSceneTableKind::MaterialParameterWord) == 19);
+    static_assert(GpuSceneTableCount == 22);
 
     [[nodiscard]] constexpr bool IsGpuSceneParallelTable(const GpuSceneTableKind kind) noexcept
     {
-        return kind == GpuSceneTableKind::RenderableResidency || kind == GpuSceneTableKind::PrimitivePlacement ||
-               kind == GpuSceneTableKind::PhasePlacement;
+        return kind == GpuSceneTableKind::RenderableResidency || kind == GpuSceneTableKind::PrimitivePlacement || kind == GpuSceneTableKind::PhasePlacement;
     }
 
     [[nodiscard]] constexpr GpuSceneTableKind GetGpuSceneParallelTable(const GpuSceneTableKind owner) noexcept
@@ -82,6 +87,8 @@ namespace vanguard::rendering
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuMotion> = GpuSceneTableKind::Motion;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuRenderable> = GpuSceneTableKind::Renderable;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuRenderableResidency> = GpuSceneTableKind::RenderableResidency;
+    template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuGeometryShell> = GpuSceneTableKind::GeometryShell;
+    template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuGeometryBin> = GpuSceneTableKind::GeometryBin;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuLod> = GpuSceneTableKind::Lod;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuPrimitive> = GpuSceneTableKind::Primitive;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuPrimitivePlacement> = GpuSceneTableKind::PrimitivePlacement;
@@ -97,6 +104,7 @@ namespace vanguard::rendering
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuLight> = GpuSceneTableKind::Light;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuDecal> = GpuSceneTableKind::Decal;
     template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuTextureResidency> = GpuSceneTableKind::TextureResidency;
+    template <> inline constexpr GpuSceneTableKind GpuSceneTableKindOf<GpuMaterialParameterWord> = GpuSceneTableKind::MaterialParameterWord;
 
     [[nodiscard]] constexpr u32 GetGpuSceneElementsPerPage(const GpuSceneTableKind kind) noexcept
     {
@@ -137,6 +145,12 @@ namespace vanguard::rendering
             return 16'384;
         case GpuSceneTableKind::TextureResidency:
             return 65'536;
+        case GpuSceneTableKind::MaterialParameterWord:
+            return 262'144;
+        case GpuSceneTableKind::GeometryShell:
+            return 4'096;
+        case GpuSceneTableKind::GeometryBin:
+            return 16'384;
         default:
             return 0;
         }
@@ -304,6 +318,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool Initialize(const GpuSceneTablesConfig& config, GpuSceneTablesFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(const rhi::DescriptorRetirement& safeAfter, GpuSceneTablesFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         template <typename T> [[nodiscard]] bool EnsureCapacity(const u32 requiredElements, GpuSceneTablesFailure* const failure = nullptr) noexcept
@@ -339,6 +354,8 @@ namespace vanguard::rendering
         [[nodiscard]] GpuSceneTableStats GetTableStats(GpuSceneTableKind kind) const noexcept;
 
         [[nodiscard]] GpuSceneDirectoryBinding GetDirectoryBinding() const noexcept;
+        // Dense borrowed buffer catalog, updated only when pages materialize.
+        [[nodiscard]] containers::ArraySpan<const rhi::BufferRef> GetConsumerBuffers() const noexcept;
         [[nodiscard]] bool GetTableDirectory(GpuSceneTableKind kind, GpuSceneTableDirectory& output) const noexcept;
         [[nodiscard]] bool GetPageDirectory(GpuSceneTableKind kind, u32 page, GpuScenePageDirectoryEntry& output) const noexcept;
         [[nodiscard]] GpuSceneTablesStats GetStats() const noexcept;

@@ -49,7 +49,7 @@ The studies may refine details, but they begin with these decisions:
   deferred memory binding should be called a **placed resource** or
   **deferred-binding resource**, not merely a "virtual resource."
 - Vanguard should support two physical strategies:
-  - whole-resource reuse when compatible cached resource lifetimes do not
+  - dedicated-resource reuse when compatible cached resource lifetimes do not
     overlap;
   - true placed-resource aliasing, where distinct resource objects occupy the
     same heap memory and require explicit alias activation/barriers.
@@ -272,7 +272,7 @@ Questions this set must answer:
 Preserved output:
 
 - logical-to-physical resolve algorithm;
-- explicit distinction between whole-resource reuse and placed aliasing;
+- explicit distinction between dedicated-resource reuse and placed aliasing;
 - compatibility and barrier contract;
 - pool/cache ownership and retirement model;
 - RED-to-current-Vanguard RHI capability/gap table.
@@ -444,7 +444,7 @@ Preserved results:
 - the missing work is allocator policy plus truthful compatibility, placement
   metadata, release validation, budgets, failure classification, and atomic
   plan publication;
-- whole-resource reuse remains the required capability fallback;
+- dedicated-resource reuse remains the required capability fallback;
 - Unreal/NVRHI defects and Vanguard hardening requirements are recorded in
   Sections 68 through 80 of the design document.
 

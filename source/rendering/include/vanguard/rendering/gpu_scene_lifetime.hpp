@@ -146,6 +146,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool Initialize(GpuSceneTables& tables, const GpuSceneLifetimeConfig& config = {}, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GpuSceneLifetimeFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Materializes GPU pages and corresponding logical metadata ahead of demand. Streaming lookahead
@@ -159,8 +160,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool AllocateBatch(containers::ArraySpan<const GpuSceneAllocationRequest> requests, containers::ArraySpan<GpuSceneAllocation> allocations,
                                          GpuSceneLifetimeFailure* failure = nullptr) noexcept;
 
-        template <typename T>
-        [[nodiscard]] bool Allocate(const u32 count, GpuSceneAllocation& allocation, GpuSceneLifetimeFailure* const failure = nullptr) noexcept
+        template <typename T> [[nodiscard]] bool Allocate(const u32 count, GpuSceneAllocation& allocation, GpuSceneLifetimeFailure* const failure = nullptr) noexcept
         {
             static_assert(GpuSceneTableKindOf<T> != GpuSceneTableKind::Count, "type is not a GPU Scene table element");
             return Allocate(GpuSceneTableKindOf<T>, count, allocation, failure);
@@ -169,8 +169,7 @@ namespace vanguard::rendering
         /// Commits an allocation only after its complete initial payload has been admitted to the GPU
         /// publication stream. The sparse uploader is the runtime owner of this boundary.
         [[nodiscard]] bool CommitInitialPublication(GpuSceneAllocation allocation, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool CommitInitialPublications(containers::ArraySpan<const GpuSceneAllocation> allocations,
-                                                     GpuSceneLifetimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool CommitInitialPublications(containers::ArraySpan<const GpuSceneAllocation> allocations, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
         /// Cancels an allocation that has never become visible to GPU work. Active allocations must retire.
         [[nodiscard]] bool Cancel(GpuSceneAllocation allocation, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool CancelBatch(containers::ArraySpan<const GpuSceneAllocation> allocations, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
@@ -179,7 +178,8 @@ namespace vanguard::rendering
         [[nodiscard]] bool RetireBatch(containers::ArraySpan<const GpuSceneAllocation> allocations, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
 
         /// Seals the current retirement epoch. Every queue selected by retirementQueues must provide its
-        /// latest submission fence; an empty or partial fence set cannot publish a non-empty epoch.
+        /// latest submission fence or the joined RHI snapshot's explicit evidence
+        /// that the queue has never submitted. Bare empty/partial sets are rejected.
         [[nodiscard]] bool SealRetirements(const rhi::ResidencyFenceSet& safeAfter, GpuSceneLifetimeFailure* failure = nullptr) noexcept;
         /// Non-blocking maintenance; only fence-complete sealed allocations return to their free lists.
         [[nodiscard]] u32 Collect(GpuSceneLifetimeFailure* failure = nullptr) noexcept;

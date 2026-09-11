@@ -1,11 +1,15 @@
 #include <vanguard/entities/rendering_runtime.hpp>
+#include <vanguard/entities/static_mesh_component.hpp>
+#include <vanguard/entities/scene_components.hpp>
 
 #include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/containers/containers.hpp>
+#include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/meshes/meshes.hpp>
+#include <vanguard/system/assert.hpp>
 
 #include <cmath>
 #include <new>
@@ -81,7 +85,8 @@ namespace vanguard::entities
             ProxyAdmissionSink sink;
             u32 generation = 1;
             u32 nextFree = ~0u;
-            u32 queueIndex = ~0u;
+            u32 previousQueued = ~0u;
+            u32 nextQueued = ~0u;
             AdmissionKind kind = AdmissionKind::Proxy;
             AdmissionState state = AdmissionState::Vacant;
         };
@@ -111,8 +116,9 @@ namespace vanguard::entities
         };
 
         explicit Impl(const RenderingRuntimeConfig& config) noexcept
-            : pendingAdmissions(memory::pools::Rendering::GetInstance()), processingAdmissions(memory::pools::Rendering::GetInstance()),
-              pendingRetirements(memory::pools::Rendering::GetInstance()), distantProxies(memory::pools::Rendering::GetInstance())
+            : processingAdmissions(memory::pools::Rendering::GetInstance()),
+              pendingRetirements(memory::pools::Rendering::GetInstance()), distantProxies(memory::pools::Rendering::GetInstance()),
+              meshDrawPhases(memory::pools::Rendering::GetInstance())
         {
             admissionStorage = memory::Allocate(memory::PoolId::Rendering,
                                                 static_cast<usize>(config.maximumPendingProxyAdmissions) * sizeof(AdmissionSlot), alignof(AdmissionSlot));
@@ -122,12 +128,14 @@ namespace vanguard::entities
             admissionCapacity = config.maximumPendingProxyAdmissions;
             for (u32 index = 0; index < admissionCapacity; ++index)
                 ::new (&admissionSlots[index]) AdmissionSlot;
-            pendingAdmissions.Reserve(config.maximumPendingProxyAdmissions);
             processingAdmissions.Reserve(config.maximumProxyAdmissionsPerFrame);
             pendingRetirements.Reserve(config.maximumPendingProxyRetirements);
             for (u32 index = 0; index < admissionCapacity; ++index)
                 admissionSlots[index].nextFree = index + 1u < admissionCapacity ? index + 1u : ~0u;
             firstFreeAdmission = 0u;
+            meshDrawPhases.Reserve(config.meshDrawPhases.Count());
+            for (const auto& phase : config.meshDrawPhases)
+                meshDrawPhases.PushBack(phase);
         }
 
         ~Impl()
@@ -183,11 +191,17 @@ namespace vanguard::entities
             AdmissionSlot& slot = admissionSlots[index];
             firstFreeAdmission = slot.nextFree;
             slot.nextFree = ~0u;
-            slot.queueIndex = pendingAdmissions.Size();
+            slot.previousQueued = lastQueuedAdmission;
+            slot.nextQueued = ~0u;
             slot.kind = kind;
             slot.state = AdmissionState::Queued;
             slot.sink = sink;
-            pendingAdmissions.PushBack(index);
+            if (lastQueuedAdmission != ~0u)
+                admissionSlots[lastQueuedAdmission].nextQueued = index;
+            else
+                firstQueuedAdmission = index;
+            lastQueuedAdmission = index;
+            ++queuedAdmissionCount;
             admission = {index, slot.generation};
             return true;
         }
@@ -200,7 +214,8 @@ namespace vanguard::entities
             slot.sink = {};
             slot.generation = generation != 0 ? generation : 1u;
             slot.nextFree = firstFreeAdmission;
-            slot.queueIndex = ~0u;
+            slot.previousQueued = ~0u;
+            slot.nextQueued = ~0u;
             slot.kind = AdmissionKind::Proxy;
             slot.state = AdmissionState::Vacant;
             firstFreeAdmission = index;
@@ -208,16 +223,17 @@ namespace vanguard::entities
 
         void RemoveQueuedAdmission(AdmissionSlot& slot) noexcept
         {
-            const u32 removed = slot.queueIndex;
-            const u32 last = pendingAdmissions.Size() - 1u;
-            if (removed != last)
-            {
-                const u32 moved = pendingAdmissions[last];
-                pendingAdmissions[removed] = moved;
-                admissionSlots[moved].queueIndex = removed;
-            }
-            static_cast<void>(pendingAdmissions.PopBack());
-            slot.queueIndex = ~0u;
+            if (slot.previousQueued != ~0u)
+                admissionSlots[slot.previousQueued].nextQueued = slot.nextQueued;
+            else
+                firstQueuedAdmission = slot.nextQueued;
+            if (slot.nextQueued != ~0u)
+                admissionSlots[slot.nextQueued].previousQueued = slot.previousQueued;
+            else
+                lastQueuedAdmission = slot.previousQueued;
+            slot.previousQueued = ~0u;
+            slot.nextQueued = ~0u;
+            --queuedAdmissionCount;
         }
 
         rendering::RenderSceneHandle scene;
@@ -225,10 +241,18 @@ namespace vanguard::entities
         memory::MemoryBlock admissionStorage;
         AdmissionSlot* admissionSlots = nullptr;
         u32 admissionCapacity = 0;
-        containers::DynamicArray<u32> pendingAdmissions;
+        u32 firstQueuedAdmission = ~0u;
+        u32 lastQueuedAdmission = ~0u;
+        u32 queuedAdmissionCount = 0;
         containers::DynamicArray<u32> processingAdmissions;
         containers::DynamicArray<PendingRetirement> pendingRetirements;
         containers::DynamicArray<DistantProxyInstance> distantProxies;
+        containers::DynamicArray<rendering::MeshDrawPhaseContext> meshDrawPhases;
+        StaticMeshComponent* firstPendingMesh = nullptr;
+        StaticMeshComponent* lastPendingMesh = nullptr;
+        u32 pendingMeshCount = 0;
+        concurrency::Atomic<CameraComponent*> dirtyCameras{nullptr};
+        concurrency::Atomic<u32> dirtyCameraCount{0};
         u32 firstFreeAdmission = ~0u;
         u64 admittedProxies = 0;
         u64 cancelledProxyAdmissions = 0;
@@ -259,6 +283,157 @@ namespace vanguard::entities
             static_cast<void>(ReleaseScene());
             VANGUARD_DELETE(m_impl);
             m_impl = nullptr;
+        }
+    }
+
+    bool RenderingRuntime::BindMeshResidency(rendering::MeshResidencyManager& residency) noexcept
+    {
+        if (m_impl != nullptr || !concurrency::IsMainThread())
+            return false;
+        m_meshResidency = &residency;
+        return true;
+    }
+
+    rendering::MeshResidencyManager* RenderingRuntime::GetMeshResidency() noexcept { return m_meshResidency; }
+
+    bool RenderingRuntime::BindCommands(rendering::RenderCommandSystem& commands, const rendering::RenderPhaseRegistry& phases) noexcept
+    {
+        if (m_impl != nullptr || !concurrency::IsMainThread())
+            return false;
+        m_commands = &commands;
+        m_renderPhases = &phases;
+        return true;
+    }
+
+    void RenderingRuntime::QueueCameraTransform(CameraComponent& component) noexcept
+    {
+        // Different cameras can be updated concurrently, but a placed component
+        // has one transform writer. Structural mutation and draining require a join.
+        if (component.m_dirty)
+            return;
+        if (m_impl->dirtyCameraCount.Increment() > m_config.maximumPendingCameraTransforms)
+        {
+            static_cast<void>(m_impl->dirtyCameraCount.Decrement());
+            const rendering::RenderSceneFailure failure{rendering::RenderSceneFailureCode::CapacityExceeded, m_impl->scene, {},
+                                                        "camera transform queue capacity exceeded"};
+            ReportRelinkFailure({{}, failure}, this);
+            return;
+        }
+        component.m_dirty = true;
+        component.m_previousDirty = nullptr;
+        CameraComponent* previous = m_impl->dirtyCameras.GetValue();
+        for (;;)
+        {
+            component.m_nextDirty = previous;
+            CameraComponent* const observed = m_impl->dirtyCameras.CompareExchange(&component, previous);
+            if (observed == previous)
+            {
+                // Only this successful successor writes the previous head's
+                // backlink. Owner-thread removal waits for all producers to join.
+                if (previous != nullptr)
+                    previous->m_previousDirty = &component;
+                break;
+            }
+            previous = observed;
+        }
+    }
+
+    void RenderingRuntime::CancelCameraTransform(CameraComponent& component) noexcept
+    {
+        if (!component.m_dirty || m_impl == nullptr)
+            return;
+        VG_ASSERT_MSG(concurrency::IsMainThread() && (m_impl->transforms == nullptr || !m_impl->transforms->IsProcessing()),
+                      "camera dirty-node removal requires joined transform producers");
+        // Structural cancellation after the transform join; no dirty-list search.
+        if (component.m_previousDirty != nullptr)
+            component.m_previousDirty->m_nextDirty = component.m_nextDirty;
+        else
+            m_impl->dirtyCameras.SetValue(component.m_nextDirty);
+        if (component.m_nextDirty != nullptr)
+            component.m_nextDirty->m_previousDirty = component.m_previousDirty;
+        static_cast<void>(m_impl->dirtyCameraCount.Decrement());
+        component.m_nextDirty = nullptr;
+        component.m_previousDirty = nullptr;
+        component.m_dirty = false;
+    }
+
+    bool RenderingRuntime::FlushCameraTransforms() noexcept
+    {
+        if (!concurrency::IsMainThread())
+            return false;
+        if (m_impl == nullptr)
+            return true;
+        if (m_impl->transforms != nullptr && m_impl->transforms->IsProcessing())
+            return false;
+        CameraComponent* camera = m_impl->dirtyCameras.Exchange(nullptr);
+        bool succeeded = true;
+        while (camera != nullptr)
+        {
+            CameraComponent* const next = camera->m_nextDirty;
+            camera->m_nextDirty = nullptr;
+            camera->m_previousDirty = nullptr;
+            camera->m_dirty = false;
+            static_cast<void>(m_impl->dirtyCameraCount.Decrement());
+            if (!camera->ApplyTransform())
+            {
+                ReportComponentFailure("camera transform publication failed");
+                succeeded = false;
+            }
+            camera = next;
+        }
+        return succeeded;
+    }
+
+    containers::ArraySpan<const rendering::MeshDrawPhaseContext> RenderingRuntime::GetMeshDrawPhases() const noexcept
+    {
+        return m_impl != nullptr ? containers::ArraySpan<const rendering::MeshDrawPhaseContext>{m_impl->meshDrawPhases.TypedData(), m_impl->meshDrawPhases.Size()}
+                                 : containers::ArraySpan<const rendering::MeshDrawPhaseContext>{};
+    }
+
+    bool RenderingRuntime::QueueMeshPreparation(StaticMeshComponent& component) noexcept
+    {
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || component.m_rendering != this)
+            return false;
+        if (component.m_pending)
+            return true;
+        if (m_impl->pendingMeshCount == m_config.maximumPendingMeshPreparations)
+            return false;
+        component.m_previousPending = m_impl->lastPendingMesh;
+        component.m_nextPending = nullptr;
+        if (m_impl->lastPendingMesh != nullptr)
+            m_impl->lastPendingMesh->m_nextPending = &component;
+        else
+            m_impl->firstPendingMesh = &component;
+        m_impl->lastPendingMesh = &component;
+        component.m_pending = true;
+        ++m_impl->pendingMeshCount;
+        return true;
+    }
+
+    void RenderingRuntime::CancelMeshPreparation(StaticMeshComponent& component) noexcept
+    {
+        if (!component.m_pending || component.m_rendering != this || m_impl == nullptr)
+            return;
+        if (component.m_previousPending != nullptr)
+            component.m_previousPending->m_nextPending = component.m_nextPending;
+        else
+            m_impl->firstPendingMesh = component.m_nextPending;
+        if (component.m_nextPending != nullptr)
+            component.m_nextPending->m_previousPending = component.m_previousPending;
+        else
+            m_impl->lastPendingMesh = component.m_previousPending;
+        component.m_previousPending = nullptr;
+        component.m_nextPending = nullptr;
+        component.m_pending = false;
+        --m_impl->pendingMeshCount;
+    }
+
+    void RenderingRuntime::ReportComponentFailure(const char* const message) noexcept
+    {
+        if (m_impl != nullptr && !m_impl->admissionFailureClaimed)
+        {
+            m_impl->firstAdmissionFailure = {rendering::RenderSceneFailureCode::InvalidState, m_impl->scene, {}, message};
+            m_impl->admissionFailureClaimed = true;
         }
     }
 
@@ -465,10 +640,7 @@ namespace vanguard::entities
         if (m_impl->pendingRetirements.Size() == m_config.maximumPendingProxyRetirements)
             return Fail(failure, rendering::RenderSceneFailureCode::CapacityExceeded, "RenderingRuntime proxy retirement capacity exceeded", m_impl->scene,
                         proxy);
-        for (const Impl::PendingRetirement& retirement : m_impl->pendingRetirements)
-            if (retirement.proxy == proxy)
-                return Fail(failure, rendering::RenderSceneFailureCode::InvalidState, "RenderProxy is already pending retirement", m_impl->scene, proxy);
-        if (!m_scenes->UpdateProxyVisibility(proxy, rendering::RenderProxyVisibilityFlags::None, 0, failure))
+        if (!m_scenes->BeginProxyRetirement(proxy, failure))
             return false;
         m_impl->pendingRetirements.PushBack({proxy, m_config.proxyRetirementDelayFrames});
         return true;
@@ -522,15 +694,20 @@ namespace vanguard::entities
         ClearFailure(failure);
         if (m_impl == nullptr || !m_impl->scene.IsValid())
             return true;
+        // Components must cancel their borrowed queue nodes before scene teardown.
+        if (m_impl->pendingMeshCount != 0 || m_impl->dirtyCameraCount.GetValue() != 0)
+            return Fail(failure, rendering::RenderSceneFailureCode::InvalidState,
+                        "RenderingRuntime still has attached mesh preparations", m_impl->scene);
         if (m_impl->relinkFailureClaimed.GetValue())
             return Fail(failure, rendering::RenderSceneFailureCode::InvalidState,
                         "RenderingRuntime has an unconsumed transform-worker relink failure", m_impl->scene);
-        for (const u32 slotIndex : m_impl->pendingAdmissions)
+        while (m_impl->firstQueuedAdmission != ~0u)
         {
+            const u32 slotIndex = m_impl->firstQueuedAdmission;
+            m_impl->RemoveQueuedAdmission(m_impl->admissionSlots[slotIndex]);
             m_impl->ReleaseAdmission(slotIndex);
             ++m_impl->cancelledProxyAdmissions;
         }
-        m_impl->pendingAdmissions.Clear();
         for (Impl::DistantProxyInstance& instance : m_impl->distantProxies)
         {
             instance.resource.Reset();
@@ -542,7 +719,7 @@ namespace vanguard::entities
         {
             if (!m_scenes->DestroyProxy(m_impl->pendingRetirements[index - 1u].proxy, failure))
                 return false;
-            static_cast<void>(m_impl->pendingRetirements.RemoveAt(index - 1u));
+            static_cast<void>(m_impl->pendingRetirements.PopBack());
             ++m_impl->retiredProxies;
         }
         if (m_impl->ownsScene && !m_scenes->DestroyScene(m_impl->scene, failure))
@@ -563,8 +740,10 @@ namespace vanguard::entities
         if (m_impl == nullptr)
             return stats;
         stats.scene = m_impl->scene;
-        stats.pendingProxyAdmissions = m_impl->pendingAdmissions.Size();
+        stats.pendingProxyAdmissions = m_impl->queuedAdmissionCount;
         stats.pendingProxyRetirements = m_impl->pendingRetirements.Size();
+        stats.pendingMeshPreparations = m_impl->pendingMeshCount;
+        stats.pendingCameraTransforms = m_impl->dirtyCameraCount.GetValue();
         stats.admittedProxies = m_impl->admittedProxies;
         stats.cancelledProxyAdmissions = m_impl->cancelledProxyAdmissions;
         stats.failedProxyAdmissions = m_impl->failedProxyAdmissions;
@@ -598,10 +777,24 @@ namespace vanguard::entities
         if (transforms == nullptr)
             return false;
         if (m_config.maximumPendingProxyAdmissions == 0 || m_config.maximumProxyAdmissionsPerFrame == 0 ||
-            m_config.maximumProxyAdmissionsPerFrame > m_config.maximumPendingProxyAdmissions || m_config.maximumPendingProxyRetirements == 0)
+            m_config.maximumProxyAdmissionsPerFrame > m_config.maximumPendingProxyAdmissions || m_config.maximumPendingProxyRetirements == 0 ||
+            m_config.maximumPendingCameraTransforms == 0 || m_config.maximumPendingMeshPreparations == 0 || m_config.maximumMeshPreparationsPerFrame == 0 ||
+            m_config.maximumMeshPreparationsPerFrame > m_config.maximumPendingMeshPreparations ||
+            (!m_config.meshDrawPhases.Empty() && (m_config.meshDrawPhases.Data() == nullptr || m_meshResidency == nullptr)))
             return false;
+        if (m_config.meshDrawPhases.Count() > rendering::MaximumRenderPhases)
+            return false;
+        for (u32 index = 0; index < m_config.meshDrawPhases.Count(); ++index)
+        {
+            const auto phase = m_config.meshDrawPhases[index].phase;
+            if (!phase.IsValid() || (m_renderPhases != nullptr && !m_renderPhases->Find(phase).IsValid()))
+                return false;
+            for (u32 previous = 0; previous < index; ++previous)
+                if (m_config.meshDrawPhases[previous].phase == phase)
+                    return false;
+        }
         m_impl = VANGUARD_NEW(Impl)(m_config);
-        if (m_impl == nullptr || !m_impl->HasAdmissionStorage())
+        if (m_impl == nullptr || !m_impl->HasAdmissionStorage() || m_impl->meshDrawPhases.Size() != m_config.meshDrawPhases.Count())
         {
             if (m_impl != nullptr)
                 VANGUARD_DELETE(m_impl);
@@ -652,24 +845,32 @@ namespace vanguard::entities
         if (m_impl == nullptr || !m_impl->scene.IsValid())
             return;
 
+        const u32 meshCount = m_impl->pendingMeshCount < m_config.maximumMeshPreparationsPerFrame
+                                  ? m_impl->pendingMeshCount : m_config.maximumMeshPreparationsPerFrame;
+        for (u32 index = 0; index < meshCount; ++index)
+        {
+            StaticMeshComponent& component = *m_impl->firstPendingMesh;
+            CancelMeshPreparation(component);
+            if (component.Progress() && !QueueMeshPreparation(component))
+                component.Fail("static mesh preparation could not be requeued");
+        }
+
         m_impl->processingAdmissions.Clear();
-        const u32 admissionCount = m_impl->pendingAdmissions.Size() < m_config.maximumProxyAdmissionsPerFrame
-                                       ? m_impl->pendingAdmissions.Size()
+        const u32 admissionCount = m_impl->queuedAdmissionCount < m_config.maximumProxyAdmissionsPerFrame
+                                       ? m_impl->queuedAdmissionCount
                                        : m_config.maximumProxyAdmissionsPerFrame;
         for (u32 index = 0; index < admissionCount; ++index)
-            m_impl->processingAdmissions.PushBack(m_impl->pendingAdmissions[index]);
-        if (admissionCount != 0)
         {
-            static_cast<void>(m_impl->pendingAdmissions.RemoveAt(0, admissionCount));
-            for (u32 index = 0; index < m_impl->pendingAdmissions.Size(); ++index)
-                m_impl->admissionSlots[m_impl->pendingAdmissions[index]].queueIndex = index;
+            const u32 slotIndex = m_impl->firstQueuedAdmission;
+            Impl::AdmissionSlot& slot = m_impl->admissionSlots[slotIndex];
+            m_impl->RemoveQueuedAdmission(slot);
+            slot.state = Impl::AdmissionState::Processing;
+            m_impl->processingAdmissions.PushBack(slotIndex);
         }
 
         for (const u32 slotIndex : m_impl->processingAdmissions)
         {
             Impl::AdmissionSlot& slot = m_impl->admissionSlots[slotIndex];
-            slot.state = Impl::AdmissionState::Processing;
-            slot.queueIndex = ~0u;
             const ProxyAdmissionHandle admission{slotIndex, slot.generation};
             rendering::RenderProxyHandle proxy;
             rendering::RenderSceneFailure failure;
@@ -735,7 +936,12 @@ namespace vanguard::entities
                 }
                 continue;
             }
-            static_cast<void>(m_impl->pendingRetirements.RemoveAt(index - 1u));
+            // Reverse traversal has already visited the last entry this frame.
+            // Preserve its countdown without shifting every later failed entry.
+            const u32 last = m_impl->pendingRetirements.Size() - 1u;
+            if (index - 1u != last)
+                m_impl->pendingRetirements[index - 1u] = m_impl->pendingRetirements[last];
+            static_cast<void>(m_impl->pendingRetirements.PopBack());
             ++m_impl->retiredProxies;
         }
     }
@@ -746,8 +952,13 @@ namespace vanguard::entities
             return "world RenderingRuntime has no RenderScene";
         if (m_impl->admissionFailureClaimed)
             return "world RenderingRuntime has a failed proxy admission";
-        if (m_impl->pendingAdmissions.Size() != 0)
+        if (m_impl->pendingMeshCount != 0)
+            return "world RenderingRuntime has pending mesh preparation";
+        if (m_impl->queuedAdmissionCount != 0)
             return "world RenderingRuntime has pending proxies to admit";
+        rendering::RenderSceneSnapshot sceneSnapshot;
+        if (m_scenes != nullptr && m_scenes->GetSnapshot(m_impl->scene, sceneSnapshot) && sceneSnapshot.pendingMeshBindings != 0)
+            return "world RenderingRuntime has pending mesh binding acceptance";
         if (m_impl->retirementFailureClaimed)
             return "world RenderingRuntime has a failed proxy retirement";
         if (m_impl->relinkFailureClaimed.GetValue())

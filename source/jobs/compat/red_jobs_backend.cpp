@@ -507,6 +507,12 @@ namespace vanguard::jobs::backend
         static_cast<job::Builder*>(builder)->DispatchWait(*static_cast<const job::Counter*>(dependency));
     }
 
+    void AddBuilderDependency(void* builder, void* branch) noexcept
+    {
+        job::Counter completion = static_cast<job::Builder*>(branch)->ExtractWaitCounter();
+        static_cast<job::Builder*>(builder)->DispatchWait(completion);
+    }
+
     void DispatchFence(void* builder) noexcept
     {
         static_cast<job::Builder*>(builder)->DispatchFenceExplicitly();
@@ -514,14 +520,29 @@ namespace vanguard::jobs::backend
 
     void* ExtractCounter(void* builder) noexcept
     {
-        auto* counter = AllocateEngineObject<job::Counter>(static_cast<job::Builder*>(builder)->ExtractWaitCounter());
-        if (counter == nullptr)
-        {
+        using Envelope = EngineObjectEnvelope<job::Counter>;
+        vanguard::memory::MemoryBlock allocation = vanguard::memory::Allocate(vanguard::memory::PoolId::Jobs, sizeof(Envelope), alignof(Envelope));
+        if (!allocation)
             return nullptr;
-        }
+
+        auto* envelope = ::new (allocation.address) Envelope{};
+        envelope->allocation = allocation;
+        auto* counter = ::new (envelope->object) job::Counter(static_cast<job::Builder*>(builder)->ExtractWaitCounter());
 
         g_liveCounters.Increment();
         return counter;
+    }
+
+    bool WaitForBuilder(void* builder) noexcept
+    {
+        if (builder == nullptr)
+            return false;
+        job::Counter counter = static_cast<job::Builder*>(builder)->ExtractWaitCounter();
+        g_waitCalls.Increment();
+        const bool completed = job::FlushCounter(counter, true, -1);
+        if (!completed)
+            g_timedOutWaits.Increment();
+        return completed;
     }
 
     void DestroyCounter(void* counter) noexcept

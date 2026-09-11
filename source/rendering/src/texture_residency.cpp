@@ -50,7 +50,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] constexpr bool HasCompleteCutover(const rhi::ResidencyFenceSet& fences) noexcept
         {
-            return fences.graphics != 0 && fences.compute != 0 && fences.copy != 0;
+            return fences.Covers(rhi::QueueType::Graphics) && fences.Covers(rhi::QueueType::Compute) && fences.Covers(rhi::QueueType::Copy);
         }
 
         [[nodiscard]] constexpr rhi::ResidencyFenceSet MergeCutover(rhi::ResidencyFenceSet left, const rhi::ResidencyFenceSet& right) noexcept
@@ -129,8 +129,7 @@ namespace vanguard::rendering
 
         explicit Impl(const TextureResidencyConfig& value) noexcept
             : slots(memory::pools::Rendering::GetInstance()), recycledSlots(memory::pools::Rendering::GetInstance()), slotByGpuIndex(memory::pools::Rendering::GetInstance()),
-              frozenSlots(memory::pools::Rendering::GetInstance()), pendingRetirements(memory::pools::Rendering::GetInstance()), retiringSlots(memory::pools::Rendering::GetInstance()),
-              config(value)
+              frozenSlots(memory::pools::Rendering::GetInstance()), pendingRetirements(memory::pools::Rendering::GetInstance()), retiringSlots(memory::pools::Rendering::GetInstance()), config(value)
         {
             slots.Reserve(config.maximumTextures);
             recycledSlots.Reserve(config.maximumTextures);
@@ -312,6 +311,14 @@ namespace vanguard::rendering
         return true;
     }
 
+    void TextureResidencyManager::AbandonDevice() noexcept
+    {
+        DeleteObject(m_impl);
+        m_impl = nullptr;
+        m_lifetime = nullptr;
+        m_resourceDescriptors.Reset();
+    }
+
     bool TextureResidencyManager::IsInitialized() const noexcept
     {
         return m_impl != nullptr && m_lifetime != nullptr && m_resourceDescriptors.IsValid();
@@ -366,8 +373,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool TextureResidencyManager::Install(const GpuTextureResidencyHandle handle, const TextureInstallationDesc& installation, TextureInstallationTicket& ticket,
-                                          TextureResidencyFailure* const failure) noexcept
+    bool TextureResidencyManager::Install(const GpuTextureResidencyHandle handle, const TextureInstallationDesc& installation, TextureInstallationTicket& ticket, TextureResidencyFailure* const failure) noexcept
     {
         ClearFailure(failure);
         ticket = {};
@@ -398,12 +404,11 @@ namespace vanguard::rendering
             const Impl::Slot::ActiveTransition& transition = slot->transition;
             const bool sameSource = transition.source.IsValid() && installation.source.IsValid() && transition.source.GetPath().Id() == installation.source.GetPath().Id() &&
                                     transition.source.GetGeneration() == installation.source.GetGeneration();
-            const bool currentMatches =
-                transition.expectedInstallationRevision == slot->installationRevision && transition.currentFirstResidentMip == slot->current.firstResidentMip &&
-                transition.currentResidentMipCount == slot->current.residentMipCount &&
-                ((!slot->current.IsValid() && !transition.sourceTexture.IsValid()) || (slot->current.IsValid() && transition.sourceTexture.GetRef() == slot->current.texture.GetRef()));
-            if (installation.transition.texture != handle || installation.transition.serial != transition.serial || transition.targetFirstResidentMip != installation.firstResidentMip ||
-                !sameSource || !(transition.contentFingerprint == installation.contentFingerprint) || !currentMatches)
+            const bool currentMatches = transition.expectedInstallationRevision == slot->installationRevision && transition.currentFirstResidentMip == slot->current.firstResidentMip &&
+                                        transition.currentResidentMipCount == slot->current.residentMipCount &&
+                                        ((!slot->current.IsValid() && !transition.sourceTexture.IsValid()) || (slot->current.IsValid() && transition.sourceTexture.GetRef() == slot->current.texture.GetRef()));
+            if (installation.transition.texture != handle || installation.transition.serial != transition.serial || transition.targetFirstResidentMip != installation.firstResidentMip || !sameSource ||
+                !(transition.contentFingerprint == installation.contentFingerprint) || !currentMatches)
             {
                 ++m_impl->stats.rejectedOperations;
                 return Fail(failure, TextureResidencyFailureCode::StaleHandle, "texture transition source, content, target mip, or installation revision changed before admission");
@@ -411,8 +416,8 @@ namespace vanguard::rendering
         }
         const bool hasSource = installation.source.IsValid();
         const bool hasContentFingerprint = !installation.contentFingerprint.IsEmpty();
-        if (!installation.texture.IsValid() || installation.residentMipCount == 0 || installation.firstResidentMip > 0xffffffffu - installation.residentMipCount ||
-            hasSource != hasContentFingerprint || (hasSource && installation.source.IsStale()))
+        if (!installation.texture.IsValid() || installation.residentMipCount == 0 || installation.firstResidentMip > 0xffffffffu - installation.residentMipCount || hasSource != hasContentFingerprint ||
+            (hasSource && installation.source.IsStale()))
         {
             ++m_impl->stats.rejectedOperations;
             return Fail(failure, TextureResidencyFailureCode::InvalidArgument, "texture installation is invalid");
@@ -573,8 +578,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool TextureResidencyManager::BuildUploadRequests(const TextureResidencyBatch& batch, const containers::ArraySpan<GpuSceneUploadRequest> requests,
-                                                      TextureResidencyFailure* const failure) const noexcept
+    bool TextureResidencyManager::BuildUploadRequests(const TextureResidencyBatch& batch, const containers::ArraySpan<GpuSceneUploadRequest> requests, TextureResidencyFailure* const failure) const noexcept
     {
         ClearFailure(failure);
         if (!IsInitialized())
@@ -593,8 +597,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool TextureResidencyManager::WriteBatch(const TextureResidencyBatch& batch, const containers::ArraySpan<const GpuSceneUploadReservation> reservations,
-                                             TextureResidencyFailure* const failure) noexcept
+    bool TextureResidencyManager::WriteBatch(const TextureResidencyBatch& batch, const containers::ArraySpan<const GpuSceneUploadReservation> reservations, TextureResidencyFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (!IsInitialized())
@@ -625,8 +628,8 @@ namespace vanguard::rendering
 
     void TextureResidencyManager::AcceptSubmittedBatch(const TextureResidencyBatch& batch, const rhi::GpuFence sharedCompletion) noexcept
     {
-        const bool valid = IsInitialized() && concurrency::IsMainThread() && batch.IsValid() && batch.serial == m_impl->frozenBatchSerial &&
-                           batch.installationCount == m_impl->frozenSlots.Size() && m_impl->frozenBatchWritten && (batch.installationCount == 0 || sharedCompletion.IsValid());
+        const bool valid = IsInitialized() && concurrency::IsMainThread() && batch.IsValid() && batch.serial == m_impl->frozenBatchSerial && batch.installationCount == m_impl->frozenSlots.Size() &&
+                           m_impl->frozenBatchWritten && (batch.installationCount == 0 || sharedCompletion.IsValid());
         VG_ASSERT_MSG(valid, "submitted texture installation batch must have been validated and written before submission");
         if (!valid)
             return;

@@ -1,0 +1,33 @@
+struct CopyConstants
+{
+    uint sourceDescriptor;
+    uint samplerDescriptor;
+    float2 uvScale;
+    float2 uvOffset;
+};
+
+[push_constant] ConstantBuffer<CopyConstants> copyConstants;
+
+struct CopyVertex
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+CopyVertex CopyVertexMain(uint vertexId : SV_VertexID)
+{
+    float2 uv = float2((vertexId << 1u) & 2u, vertexId & 2u);
+    CopyVertex output;
+    output.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    output.uv = uv;
+    return output;
+}
+
+[shader("fragment")]
+float4 CopyFragmentMain(CopyVertex input) : SV_Target0
+{
+    Texture2D<float4> source = ResourceDescriptorHeap[copyConstants.sourceDescriptor];
+    SamplerState sourceSampler = SamplerDescriptorHeap[copyConstants.samplerDescriptor];
+    return source.SampleLevel(sourceSampler, input.uv * copyConstants.uvScale + copyConstants.uvOffset, 0.0);
+}

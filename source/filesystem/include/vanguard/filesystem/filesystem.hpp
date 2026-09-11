@@ -112,4 +112,10 @@ namespace vanguard::filesystem
     // filesystem volume. On failure this function performs no cleanup, so the
     // caller can inspect or remove staged while the previous target remains.
     [[nodiscard]] bool ReplaceFile(const AbsolutePath& staged, const AbsolutePath& target) noexcept;
+
+    enum class ScanResult : u8 { Success, InvalidRoot, IoFailure, UnsupportedLink, LimitExceeded, UnsupportedPlatform };
+    // Physical, read-only recursive scan. Destination is unchanged on failure.
+    // Refuses reparse points; callers must coordinate external edits when a
+    // transactionally consistent inventory is required. No filesystem snapshot.
+    [[nodiscard]] ScanResult ScanFiles(const AbsolutePath& root, containers::DynamicArray<AbsolutePath>& files, u32 maximumEntries = 262144) noexcept;
 } // namespace vanguard::filesystem

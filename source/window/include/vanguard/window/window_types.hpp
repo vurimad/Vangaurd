@@ -58,6 +58,30 @@ namespace vanguard::window
         [[nodiscard]] friend constexpr bool operator==(const WindowPoint&, const WindowPoint&) noexcept = default;
     };
 
+    enum class CursorShape : u8
+    {
+        Arrow,
+        TextInput,
+        Move,
+        ResizeNorthSouth,
+        ResizeEastWest,
+        ResizeNorthEastSouthWest,
+        ResizeNorthWestSouthEast,
+        Pointer,
+        Wait,
+        Progress,
+        NotAllowed,
+        Count
+    };
+
+    struct TextInputRequest
+    {
+        WindowPoint position;
+        u32 lineHeight = 0;
+        bool enabled = false;
+        bool showIme = false;
+    };
+
     struct WindowExtent
     {
         u32 width = 0;
@@ -107,7 +131,7 @@ namespace vanguard::window
         Owned,
         Modal,
         Embedded,
-        ImGuiViewport
+        EditorPlatformViewport
     };
 
     enum class WindowMode : u8
@@ -251,6 +275,8 @@ namespace vanguard::window
     {
         WindowStateField fields = WindowStateField::None;
         WindowPlacement placement;
+        // Only applies when showing a window; false preserves the current keyboard focus and mouse capture.
+        bool activateWhenShown = true;
     };
 
     struct WindowSnapshot

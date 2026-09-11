@@ -10,6 +10,7 @@ namespace vanguard::rendering
         Success,
         InvalidArgument,
         InvalidState,
+        OutOfMemory,
         UnsupportedBackendFormat,
         UnsupportedStage,
         NativeCreationFailure
@@ -36,6 +37,8 @@ namespace vanguard::rendering
         [[nodiscard]] const crypto::Digest256& GetPermutation() const noexcept;
         [[nodiscard]] const crypto::Digest256& BindingLayoutFingerprint() const noexcept;
         [[nodiscard]] const crypto::Digest256& GetPipelineInterfaceFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetMaterialDomainFingerprint() const noexcept;
+        [[nodiscard]] const crypto::Digest256& GetMaterialLayoutFingerprint() const noexcept;
         [[nodiscard]] const shaders::PipelineInterface& GetInterface() const noexcept;
 
     private:
@@ -45,6 +48,8 @@ namespace vanguard::rendering
         crypto::Digest256 m_permutation;
         crypto::Digest256 m_bindingLayoutFingerprint;
         crypto::Digest256 m_pipelineInterfaceFingerprint;
+        crypto::Digest256 m_materialDomainFingerprint;
+        crypto::Digest256 m_materialLayoutFingerprint;
         shaders::PipelineInterface m_interface;
         bool m_loaded = false;
     };

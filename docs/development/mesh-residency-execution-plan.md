@@ -1,5 +1,44 @@
 # Vanguard Mesh Residency Execution Plan
 
+Latest source checkpoint (2026-09-09): 9C component adapters and 9D RenderScene
+drawable ownership are implemented; see
+[the component ledger](../../source/entities/docs/concrete-rendering-components.md).
+They reuse 9B bindings and existing component/runtime infrastructure. 9D adds
+revision-safe bind/clear acceptance and bounded changed-proxy resolution. Executable
+verification has not run. Phase 10 drawing remains outstanding; preceding 9B.2
+proof gates are still open.
+
+## Current continuation authority -- 2026-09-07
+
+[Geometry rendering study](geometry-rendering-study.md) refines the remaining
+work after completed mesh Phase 9A. Continue with 9B RED batcher/binding, 9C
+components, 9D scene lifecycle and Phase 10 GPU-driven indirect drawing. Historical
+Stage numbers below are not additional phases to redo. Render Graph execution
+and material runtime now exist; reuse them. The study supersedes the independent
+pipeline-bucket/mesh-batch registry proposal below and records the exact
+source-port boundaries required by bindless, existing GPU Scene and GPU driving.
+The user's clarified 1:1 scope is relevant RED CPU preparation/recording, not
+CPU-visible sorting or direct draws. The first geometry path is GPU-driven and
+indirect; the former direct-first recommendation is withdrawn. Reuse existing
+RenderScene spatial GPU-candidate production instead of adding a chunk collector.
+Current slice (2026-09-09): **9B.2 -- shell/bin placement and strong drawable mesh
+binding**. The interruption stopped after unpublished shell/bin leases. Recovery
+now implements complete anchor closure, shared placement/residency acceptance,
+strong shared binding, withdrawal and existing GPU Scene lifetime retention.
+Normal retirement sealing consumes joined actual RHI receipts, with explicit
+coverage for never-submitted queues. **9B.1 implementation is complete; combined
+verification is deferred. 9B.2 production source is implemented, but phase exit
+is unverified.** No live acceptance or scene output was observed. The detailed
+checkpoint is `source/rendering/docs/geometry-batcher-port.md`. No compilation, test execution
+or writing tests until the user explicitly requests the final batch; no new
+component or CPU direct-draw path is included.
+
+9B.2 static review follow-up: new drawable table scans were replaced by an
+intrusive active-work queue, bounded to 64 closures and 256 preparation member
+checks per Tick. Publication examines at most 64 queued closures separately.
+Ready bindings remain off the queue. Oversized scene uploads and failed receipt
+snapshots now fail explicitly. Source inspection only; verification is deferred.
+
 Date: 2026-08-28
 
 Status: Final study-derived plan. Production implementation was explicitly
@@ -541,15 +580,18 @@ synthesis and explicit approval.
 
 ### Required pipeline bucket and batch registry
 
-Add a renderer-global `PipelineBucketRegistry` above `PipelineCache`:
+Current refinement: keep ready shell/bin ownership in the RED-derived
+`RenderGeometryBatcher`, reusing `MaterialTechniqueRequest` and `PipelineCache`.
+Do not add a renderer-global `PipelineBucketRegistry` above the existing cache:
 
 - poll asynchronous requests without calling `Wait` during frame execution;
 - publish only successful complete graphics pipeline descriptions;
 - assign stable generational bucket identities and normal/mirrored variants;
 - make pipeline hot reload create a new generation and retire the old one;
-- require a ready fallback pipeline before drawable admission.
+- require a real ready compatible pipeline before drawable admission; a fallback,
+  if used, must itself satisfy that requirement.
 
-Add a stable batch registry with:
+Keep stable batch data inside that owner with:
 
 ```text
 GpuBatchShellKey
@@ -1263,7 +1305,7 @@ Modify:
 
 - `source/rendering/include/vanguard/rendering/gpu_scene_visibility.hpp`
 - `source/rendering/src/gpu_scene_visibility.cpp`
-- `source/rendering/shaders/gpu_scene_visibility.slang`
+- `source/rendering/shaders/gpu_scene_visibility.vsl`
 - render-graph/frame-resource declarations when that executor is installed.
 
 Work: select desired and best resident LOD on GPU, validate residency revision,
@@ -1281,9 +1323,9 @@ identity and proxy binding remain valid.
 
 Add:
 
-- `source/rendering/include/vanguard/rendering/mesh_batch_registry.hpp`
-- `source/rendering/src/mesh_batch_registry.cpp`
-- registry tests.
+- `source/rendering/include/vanguard/rendering/render_geometry_batcher.hpp`
+- `source/rendering/src/render_geometry_batcher.cpp`
+- RED-port compatibility and placement ownership tests.
 
 Modify:
 
@@ -1332,8 +1374,9 @@ counts, and record one counted/fixed MDI per immutable shell segment. Admit only
 supported RHI capability sets. Route exact back-to-front phases away from this
 executor.
 
-Completion gate: direct-reference versus MDI GPU images and argument buffers
-match for all required variants; zero/one/many bins and boundary offsets pass;
+Completion gate: exact expected argument buffers/counts and GPU pixel samples
+match small deterministic fixtures for all required variants; no new direct-draw
+renderer is needed as an oracle. Zero/one/many bins and boundary offsets pass;
 missing graph edges are detected; no map/readback or CPU visible sort appears in
 the frame; RenderDoc reconstructs the fixed-function mesh.
 

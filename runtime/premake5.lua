@@ -6,7 +6,7 @@ project "runtime"
     cppdialect "C++20"
     exceptionhandling "Off"
     fatalwarnings "All"
-    disablewarnings { "4127" }
+    disablewarnings { "4127", "4324" }
     targetname "Vanguard"
     targetdir(runtime_output_root)
     objdir(object_root)
@@ -16,6 +16,9 @@ project "runtime"
     includedirs {
         "private", "../source/application/include", "../source/engine/include", "../source/rendering/include",
         "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/jobs/include",
+        "../source/shaders/include",
+        "../source/input/include", "../source/gameInput/include",
+        "../source/pipelines/include", "../source/pipelineCache/include", "../source/textures/include", "../source/materials/include",
         "../source/platform/windows/include", "../source/system/include",
         "../source/memory/include", "../source/diagnostics/include", "../source/containers/include",
         "../source/concurrency/include", "../source/filesystem/include", "../source/streaming/include",

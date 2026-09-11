@@ -1,6 +1,6 @@
 BasedOnStyle: Microsoft
 Standard: c++20
-ColumnLimit: 190
+ColumnLimit: 210
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never

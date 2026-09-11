@@ -2,6 +2,7 @@
 
 namespace vanguard::rendering
 {
+
     namespace
     {
         [[nodiscard]] bool IsNativeFormatCompatible(const shaders::NativeFormat format, const rhi::BackendKind backend) noexcept
@@ -57,6 +58,8 @@ namespace vanguard::rendering
             return "InvalidArgument";
         case RenderShaderResult::InvalidState:
             return "InvalidState";
+        case RenderShaderResult::OutOfMemory:
+            return "OutOfMemory";
         case RenderShaderResult::UnsupportedBackendFormat:
             return "UnsupportedBackendFormat";
         case RenderShaderResult::UnsupportedStage:
@@ -109,6 +112,11 @@ namespace vanguard::rendering
         m_permutation = shader.GetPermutation();
         m_bindingLayoutFingerprint = shader.BindingLayoutFingerprint();
         m_pipelineInterfaceFingerprint = shader.GetPipelineInterfaceFingerprint();
+        if (const shaders::MaterialContract* const material = shader.GetMaterialContract())
+        {
+            m_materialDomainFingerprint = material->domainFingerprint;
+            m_materialLayoutFingerprint = material->layoutFingerprint;
+        }
         m_interface = shader.GetInterface();
         m_loaded = true;
         return RenderShaderResult::Success;
@@ -123,6 +131,8 @@ namespace vanguard::rendering
         m_permutation = {};
         m_bindingLayoutFingerprint = {};
         m_pipelineInterfaceFingerprint = {};
+        m_materialDomainFingerprint = {};
+        m_materialLayoutFingerprint = {};
         m_interface = {};
         m_loaded = false;
     }
@@ -154,6 +164,14 @@ namespace vanguard::rendering
     const crypto::Digest256& RenderShader::GetPipelineInterfaceFingerprint() const noexcept
     {
         return m_pipelineInterfaceFingerprint;
+    }
+    const crypto::Digest256& RenderShader::GetMaterialDomainFingerprint() const noexcept
+    {
+        return m_materialDomainFingerprint;
+    }
+    const crypto::Digest256& RenderShader::GetMaterialLayoutFingerprint() const noexcept
+    {
+        return m_materialLayoutFingerprint;
     }
     const shaders::PipelineInterface& RenderShader::GetInterface() const noexcept
     {

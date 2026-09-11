@@ -1,4 +1,5 @@
 #include <vanguard/rendering/gpu_scene_definitions.hpp>
+#include <vanguard/rendering/gpu_scene_runtime.hpp>
 
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -22,6 +23,7 @@ namespace vanguard::rendering
             PositionDecode,
             Material,
             MaterialResources,
+            MaterialParameters,
             Renderable,
             Lods,
             Primitives,
@@ -51,9 +53,8 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(GpuSceneDefinitionFailure* const failure, const GpuSceneDefinitionFailureCode code, const char* const message,
-                                const GpuSceneDefinitionKey key = {}, const GpuSceneLifetimeFailure lifetimeFailure = {},
-                                const GpuSceneUploadFailure uploadFailure = {}) noexcept
+        [[nodiscard]] bool Fail(GpuSceneDefinitionFailure* const failure, const GpuSceneDefinitionFailureCode code, const char* const message, const GpuSceneDefinitionKey key = {},
+                                const GpuSceneLifetimeFailure lifetimeFailure = {}, const GpuSceneUploadFailure uploadFailure = {}) noexcept
         {
             if (failure != nullptr)
                 *failure = {code, key, message, lifetimeFailure, uploadFailure};
@@ -107,9 +108,32 @@ namespace vanguard::rendering
             GpuSceneDefinitionKey key;
             GpuSceneAllocation material;
             GpuSceneAllocation resources;
+            GpuSceneAllocation parameters;
             u32 references = 0;
             u32 resourceCount = 0;
+            u32 parameterByteSize = 0;
+            u32 parameterWordCount = 0;
             DefinitionState state = DefinitionState::Free;
+        };
+
+        struct FrozenMaterialDefinition
+        {
+            GpuSceneDefinitionKey key;
+            GpuMaterial material;
+            u32 firstResource = 0;
+            u32 resourceCount = 0;
+            u32 firstParameterWord = 0;
+            u32 parameterWordCount = 0;
+            u32 parameterByteSize = 0;
+        };
+
+        enum class MaterialBatchState : u8
+        {
+            None,
+            Prepared,
+            Staged,
+            Written,
+            Accepted
         };
 
         struct RenderableRecord
@@ -130,17 +154,17 @@ namespace vanguard::rendering
         };
 
         Impl(GpuSceneLifetime& lifetimeOwner, GpuSceneUploader& uploaderOwner, const GpuSceneDefinitionsConfig& value) noexcept
-            : geometries(memory::pools::Rendering::GetInstance()), materials(memory::pools::Rendering::GetInstance()),
-              renderables(memory::pools::Rendering::GetInstance()), freeGeometries(memory::pools::Rendering::GetInstance()),
-              freeMaterials(memory::pools::Rendering::GetInstance()), freeRenderables(memory::pools::Rendering::GetInstance()),
-              geometryByKey(memory::pools::Rendering::GetInstance()), materialByKey(memory::pools::Rendering::GetInstance()),
-              renderableByKey(memory::pools::Rendering::GetInstance()), geometryByHandle(memory::pools::Rendering::GetInstance()),
-              materialByHandle(memory::pools::Rendering::GetInstance()), renderableByHandle(memory::pools::Rendering::GetInstance()),
-              allocationRequests(memory::pools::Rendering::GetInstance()), allocations(memory::pools::Rendering::GetInstance()),
-              payloads(memory::pools::Rendering::GetInstance()), uploadRequests(memory::pools::Rendering::GetInstance()),
-              reservations(memory::pools::Rendering::GetInstance()), transactionRecords(memory::pools::Rendering::GetInstance()),
-              transactionReuses(memory::pools::Rendering::GetInstance()), retirementAllocations(memory::pools::Rendering::GetInstance()),
-              geometryReleaseCounts(memory::pools::Rendering::GetInstance()), materialReleaseCounts(memory::pools::Rendering::GetInstance()),
+            : geometries(memory::pools::Rendering::GetInstance()), materials(memory::pools::Rendering::GetInstance()), renderables(memory::pools::Rendering::GetInstance()),
+              freeGeometries(memory::pools::Rendering::GetInstance()), freeMaterials(memory::pools::Rendering::GetInstance()), freeRenderables(memory::pools::Rendering::GetInstance()),
+              geometryByKey(memory::pools::Rendering::GetInstance()), materialByKey(memory::pools::Rendering::GetInstance()), renderableByKey(memory::pools::Rendering::GetInstance()),
+              geometryByHandle(memory::pools::Rendering::GetInstance()), materialByHandle(memory::pools::Rendering::GetInstance()), renderableByHandle(memory::pools::Rendering::GetInstance()),
+              allocationRequests(memory::pools::Rendering::GetInstance()), allocations(memory::pools::Rendering::GetInstance()), payloads(memory::pools::Rendering::GetInstance()),
+              uploadRequests(memory::pools::Rendering::GetInstance()), reservations(memory::pools::Rendering::GetInstance()), transactionRecords(memory::pools::Rendering::GetInstance()),
+              transactionReuses(memory::pools::Rendering::GetInstance()), retirementAllocations(memory::pools::Rendering::GetInstance()), geometryReleaseCounts(memory::pools::Rendering::GetInstance()),
+              materialReleaseCounts(memory::pools::Rendering::GetInstance()), frozenMaterials(memory::pools::Rendering::GetInstance()), frozenMaterialResources(memory::pools::Rendering::GetInstance()),
+              frozenMaterialParameters(memory::pools::Rendering::GetInstance()), frozenMaterialAllocations(memory::pools::Rendering::GetInstance()),
+              frozenMaterialPayloads(memory::pools::Rendering::GetInstance()), frozenMaterialUploadRequests(memory::pools::Rendering::GetInstance()),
+              frozenMaterialRecords(memory::pools::Rendering::GetInstance()), frozenMaterialReuses(memory::pools::Rendering::GetInstance()), frozenMaterialHandles(memory::pools::Rendering::GetInstance()),
               lifetime(&lifetimeOwner), uploader(&uploaderOwner), config(value)
         {
             geometries.Reserve(config.maximumGeometries);
@@ -165,6 +189,15 @@ namespace vanguard::rendering
             retirementAllocations.Reserve(config.maximumAllocationsPerBatch);
             geometryReleaseCounts.Reserve(config.maximumAllocationsPerBatch);
             materialReleaseCounts.Reserve(config.maximumAllocationsPerBatch);
+            frozenMaterials.Reserve(config.maximumDefinitionsPerBatch);
+            frozenMaterialResources.Reserve(config.maximumAllocationsPerBatch);
+            frozenMaterialParameters.Reserve(config.maximumAllocationsPerBatch);
+            frozenMaterialAllocations.Reserve(config.maximumAllocationsPerBatch);
+            frozenMaterialPayloads.Reserve(config.maximumAllocationsPerBatch);
+            frozenMaterialUploadRequests.Reserve(config.maximumAllocationsPerBatch);
+            frozenMaterialRecords.Reserve(config.maximumDefinitionsPerBatch);
+            frozenMaterialReuses.Reserve(config.maximumDefinitionsPerBatch);
+            frozenMaterialHandles.Reserve(config.maximumDefinitionsPerBatch);
         }
 
         containers::DynamicArray<GeometryRecord> geometries;
@@ -189,6 +222,18 @@ namespace vanguard::rendering
         containers::DynamicArray<GpuSceneAllocation> retirementAllocations;
         containers::HashMap<u64, u32> geometryReleaseCounts;
         containers::HashMap<u64, u32> materialReleaseCounts;
+        containers::DynamicArray<FrozenMaterialDefinition> frozenMaterials;
+        containers::DynamicArray<GpuMaterialResource> frozenMaterialResources;
+        containers::DynamicArray<GpuMaterialParameterWord> frozenMaterialParameters;
+        containers::DynamicArray<GpuSceneAllocation> frozenMaterialAllocations;
+        containers::DynamicArray<Payload> frozenMaterialPayloads;
+        containers::DynamicArray<GpuSceneUploadRequest> frozenMaterialUploadRequests;
+        containers::DynamicArray<u32> frozenMaterialRecords;
+        containers::DynamicArray<u32> frozenMaterialReuses;
+        containers::DynamicArray<GpuMaterialHandle> frozenMaterialHandles;
+        GpuSceneDefinitionPublication frozenMaterialPublication;
+        MaterialBatchState materialBatchState = MaterialBatchState::None;
+        u32 materialBatchSerial = 0;
         GpuSceneLifetime* lifetime = nullptr;
         GpuSceneUploader* uploader = nullptr;
         GpuSceneDefinitionsConfig config;
@@ -203,6 +248,33 @@ namespace vanguard::rendering
             reservations.Clear();
             transactionRecords.Clear();
             transactionReuses.Clear();
+        }
+
+        static constexpr u64 MaterialContributionMagic = 0x4d41544c44454653ull;
+
+        [[nodiscard]] static constexpr GpuSceneContributionToken EncodeMaterialBatch(const GpuMaterialDefinitionBatch batch) noexcept
+        {
+            return {static_cast<u64>(batch.serial) | (static_cast<u64>(batch.definitionCount) << 32u), MaterialContributionMagic};
+        }
+
+        [[nodiscard]] static constexpr GpuMaterialDefinitionBatch DecodeMaterialBatch(const GpuSceneContributionToken token) noexcept
+        {
+            return token.value1 == MaterialContributionMagic ? GpuMaterialDefinitionBatch{static_cast<u32>(token.value0), static_cast<u32>(token.value0 >> 32u)} : GpuMaterialDefinitionBatch{};
+        }
+
+        void ResetMaterialBatch() noexcept
+        {
+            frozenMaterials.Clear();
+            frozenMaterialResources.Clear();
+            frozenMaterialParameters.Clear();
+            frozenMaterialAllocations.Clear();
+            frozenMaterialPayloads.Clear();
+            frozenMaterialUploadRequests.Clear();
+            frozenMaterialRecords.Clear();
+            frozenMaterialReuses.Clear();
+            frozenMaterialHandles.Clear();
+            frozenMaterialPublication = {};
+            materialBatchState = MaterialBatchState::None;
         }
 
         [[nodiscard]] u32 NewGeometryRecord() noexcept
@@ -321,17 +393,16 @@ namespace vanguard::rendering
             static_cast<void>(Shutdown());
     }
 
-    bool GpuSceneDefinitions::Initialize(GpuSceneLifetime& lifetime, GpuSceneUploader& uploader, const GpuSceneDefinitionsConfig& config,
-                                         GpuSceneDefinitionFailure* const failure) noexcept
+    bool GpuSceneDefinitions::Initialize(GpuSceneLifetime& lifetime, GpuSceneUploader& uploader, const GpuSceneDefinitionsConfig& config, GpuSceneDefinitionFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl != nullptr)
             return Fail(failure, GpuSceneDefinitionFailureCode::AlreadyInitialized, "GPU Scene definitions are already initialized");
         if (!concurrency::IsMainThread())
             return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene definitions must initialize on the main thread");
-        if (!lifetime.IsInitialized() || !uploader.IsInitialized() || config.maximumGeometries == 0 || config.maximumMaterials == 0 ||
-            config.maximumRenderables == 0 || config.maximumDefinitionsPerBatch == 0 || config.maximumAllocationsPerBatch < 4 ||
-            config.maximumDefinitionsPerBatch > config.maximumAllocationsPerBatch)
+        if (!lifetime.IsInitialized() || !uploader.IsInitialized() || config.maximumGeometries == 0 || config.maximumMaterials == 0 || config.maximumRenderables == 0 || config.maximumDefinitionsPerBatch == 0 ||
+            config.maximumAllocationsPerBatch < 4 || config.maximumDefinitionsPerBatch > config.maximumAllocationsPerBatch || config.maximumMaterialResourcesPerBatch == 0 ||
+            config.maximumMaterialParameterBytesPerBatch == 0)
             return Fail(failure, GpuSceneDefinitionFailureCode::InvalidConfiguration, "GPU Scene definition configuration is invalid");
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
         if (!block)
@@ -347,6 +418,8 @@ namespace vanguard::rendering
             return true;
         if (!concurrency::IsMainThread())
             return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene definitions must shutdown on the main thread");
+        if (m_impl->materialBatchState != Impl::MaterialBatchState::None)
+            return Fail(failure, GpuSceneDefinitionFailureCode::Busy, "GPU Scene definitions cannot shutdown with an unconsumed material batch");
         if (m_impl->stats.geometries != 0 || m_impl->stats.materials != 0 || m_impl->stats.renderables != 0)
             return Fail(failure, GpuSceneDefinitionFailureCode::LiveDefinitionsRemain, "GPU Scene definitions cannot shutdown while references remain live");
         Impl* const impl = m_impl;
@@ -362,9 +435,8 @@ namespace vanguard::rendering
         return m_impl != nullptr;
     }
 
-    bool GpuSceneDefinitions::AcquireGeometries(const containers::ArraySpan<const GpuGeometryDefinition> definitions,
-                                                containers::ArraySpan<GpuGeometryHandle> handles, GpuSceneDefinitionPublication& publication,
-                                                GpuSceneDefinitionFailure* const failure) noexcept
+    bool GpuSceneDefinitions::AcquireGeometries(const containers::ArraySpan<const GpuGeometryDefinition> definitions, containers::ArraySpan<GpuGeometryHandle> handles,
+                                                GpuSceneDefinitionPublication& publication, GpuSceneDefinitionFailure* const failure) noexcept
     {
         ClearFailure(failure);
         publication = {};
@@ -408,13 +480,11 @@ namespace vanguard::rendering
             if (const u32* const existingIndex = m_impl->geometryByKey.FindPtr(definition.key))
             {
                 Impl::GeometryRecord& existing = m_impl->geometries[*existingIndex];
-                if (existing.state == DefinitionState::Free || existing.vertexStreamCount != definition.vertexStreams.Size() ||
-                    existing.hasPositionDecode != (definition.positionDecode != nullptr))
+                if (existing.state == DefinitionState::Free || existing.vertexStreamCount != definition.vertexStreams.Size() || existing.hasPositionDecode != (definition.positionDecode != nullptr))
                 {
                     rollback();
                     ++m_impl->stats.rejectedOperations;
-                    return Fail(failure, GpuSceneDefinitionFailureCode::IncompatibleDefinition, "equal geometry keys describe incompatible definitions",
-                                definition.key);
+                    return Fail(failure, GpuSceneDefinitionFailureCode::IncompatibleDefinition, "equal geometry keys describe incompatible definitions", definition.key);
                 }
                 ++existing.references;
                 m_impl->transactionReuses.PushBack(*existingIndex);
@@ -453,8 +523,7 @@ namespace vanguard::rendering
         {
             m_impl->allocations.Resize(m_impl->allocationRequests.Size());
             GpuSceneLifetimeFailure lifetimeFailure;
-            if (!m_impl->lifetime->AllocateBatch({m_impl->allocationRequests.TypedData(), m_impl->allocationRequests.Size()},
-                                                 {m_impl->allocations.TypedData(), m_impl->allocations.Size()}, &lifetimeFailure))
+            if (!m_impl->lifetime->AllocateBatch({m_impl->allocationRequests.TypedData(), m_impl->allocationRequests.Size()}, {m_impl->allocations.TypedData(), m_impl->allocations.Size()}, &lifetimeFailure))
             {
                 m_impl->allocations.Clear();
                 rollback();
@@ -467,8 +536,7 @@ namespace vanguard::rendering
             for (u32 definitionIndex = 0; definitionIndex < definitions.Size(); ++definitionIndex)
             {
                 const u32* const recordIndex = m_impl->geometryByKey.FindPtr(definitions[definitionIndex].key);
-                if (recordIndex == nullptr || newDefinitionIndex >= m_impl->transactionRecords.Size() ||
-                    *recordIndex != m_impl->transactionRecords[newDefinitionIndex])
+                if (recordIndex == nullptr || newDefinitionIndex >= m_impl->transactionRecords.Size() || *recordIndex != m_impl->transactionRecords[newDefinitionIndex])
                     continue;
                 Impl::GeometryRecord& record = m_impl->geometries[*recordIndex];
                 record.geometry = m_impl->allocations[allocationIndex++];
@@ -522,8 +590,7 @@ namespace vanguard::rendering
                     static_cast<void>(m_impl->uploader->Cancel());
                     rollback();
                     ++m_impl->stats.rejectedOperations;
-                    return Fail(failure, GpuSceneDefinitionFailureCode::UploadFailure, "GPU Scene geometry upload completion failed", definition.key, {},
-                                uploadFailure);
+                    return Fail(failure, GpuSceneDefinitionFailureCode::UploadFailure, "GPU Scene geometry upload completion failed", definition.key, {}, uploadFailure);
                 }
             }
             GpuSceneUploadResult uploadResult;
@@ -561,63 +628,98 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GpuSceneDefinitions::AcquireMaterials(const containers::ArraySpan<const GpuMaterialDefinition> definitions,
-                                               containers::ArraySpan<GpuMaterialHandle> handles, GpuSceneDefinitionPublication& publication,
-                                               GpuSceneDefinitionFailure* const failure) noexcept
+    bool GpuSceneDefinitions::PrepareMaterials(const containers::ArraySpan<const GpuMaterialDefinition> definitions, GpuMaterialDefinitionBatch& batch, GpuSceneDefinitionFailure* const failure) noexcept
     {
         ClearFailure(failure);
-        publication = {};
-        for (GpuMaterialHandle& handle : handles)
-            handle = {};
+        batch = {};
         if (m_impl == nullptr)
             return Fail(failure, GpuSceneDefinitionFailureCode::NotInitialized, "GPU Scene definitions are not initialized");
         if (!concurrency::IsMainThread())
-            return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene material acquisition must run on the main thread");
-        if (definitions.Empty() || definitions.Size() != handles.Size() || definitions.Size() > m_impl->config.maximumDefinitionsPerBatch)
+            return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene material preparation must run on the main thread");
+        if (m_impl->materialBatchState != Impl::MaterialBatchState::None)
+            return Fail(failure, GpuSceneDefinitionFailureCode::Busy, "GPU Scene definitions already own a material publication batch");
+        if (definitions.Empty() || definitions.Size() > m_impl->config.maximumDefinitionsPerBatch)
             return Fail(failure, GpuSceneDefinitionFailureCode::InvalidDefinition, "GPU Scene material definition batch is invalid");
 
         m_impl->ResetTransaction();
+        m_impl->ResetMaterialBatch();
         auto rollback = [&]() noexcept
         {
-            if (!m_impl->allocations.Empty())
-                static_cast<void>(m_impl->lifetime->CancelBatch({m_impl->allocations.TypedData(), m_impl->allocations.Size()}));
-            for (const u32 index : m_impl->transactionReuses)
+            if (!m_impl->frozenMaterialAllocations.Empty())
+                static_cast<void>(m_impl->lifetime->CancelBatch({m_impl->frozenMaterialAllocations.TypedData(), m_impl->frozenMaterialAllocations.Size()}));
+            for (const u32 index : m_impl->frozenMaterialReuses)
                 if (m_impl->materials[index].references != 0)
                     --m_impl->materials[index].references;
-            for (const u32 index : m_impl->transactionRecords)
+            for (const u32 index : m_impl->frozenMaterialRecords)
             {
                 Impl::MaterialRecord& record = m_impl->materials[index];
                 static_cast<void>(m_impl->materialByKey.Remove(record.key));
                 m_impl->RecycleMaterial(index);
             }
-            for (GpuMaterialHandle& handle : handles)
-                handle = {};
             m_impl->ResetTransaction();
+            m_impl->ResetMaterialBatch();
         };
 
+        u64 totalParameterBytes = 0;
+        u64 totalResources = 0;
         for (u32 definitionIndex = 0; definitionIndex < definitions.Size(); ++definitionIndex)
         {
             const GpuMaterialDefinition& definition = definitions[definitionIndex];
-            if (!definition.key.IsValid())
+            if (!definition.key.IsValid() || definition.material.parameterByteOffset != 0 || definition.material.parameterByteSize != 0 || definition.material.firstResource != 0 ||
+                definition.material.resourceCount != 0 || definition.material.generation != 0 || (definition.resources.Size() != 0 && definition.resources.Data() == nullptr) ||
+                (definition.parameterBytes.Size() != 0 && definition.parameterBytes.Data() == nullptr))
             {
                 rollback();
                 ++m_impl->stats.rejectedOperations;
-                return Fail(failure, GpuSceneDefinitionFailureCode::InvalidDefinition, "GPU Scene material definition is invalid", definition.key);
+                return Fail(failure, GpuSceneDefinitionFailureCode::InvalidDefinition, "GPU Scene material definition contains pre-resolved ranges or invalid source spans", definition.key);
             }
+            Impl::FrozenMaterialDefinition frozen;
+            frozen.key = definition.key;
+            frozen.material = definition.material;
+            frozen.firstResource = m_impl->frozenMaterialResources.Size();
+            frozen.resourceCount = definition.resources.Size();
+            frozen.firstParameterWord = m_impl->frozenMaterialParameters.Size();
+            frozen.parameterByteSize = definition.parameterBytes.Size();
+            frozen.parameterWordCount = (frozen.parameterByteSize + 3u) / 4u;
+
             if (const u32* const existingIndex = m_impl->materialByKey.FindPtr(definition.key))
             {
                 Impl::MaterialRecord& existing = m_impl->materials[*existingIndex];
-                if (existing.state == DefinitionState::Free || existing.resourceCount != definition.resources.Size())
+                if (existing.state == DefinitionState::Free || existing.resourceCount != frozen.resourceCount || existing.parameterByteSize != frozen.parameterByteSize ||
+                    existing.parameterWordCount != frozen.parameterWordCount)
                 {
                     rollback();
                     ++m_impl->stats.rejectedOperations;
-                    return Fail(failure, GpuSceneDefinitionFailureCode::IncompatibleDefinition, "equal material keys describe incompatible definitions",
-                                definition.key);
+                    return Fail(failure, GpuSceneDefinitionFailureCode::IncompatibleDefinition, "equal material keys describe incompatible compound definitions", definition.key);
                 }
                 ++existing.references;
-                m_impl->transactionReuses.PushBack(*existingIndex);
+                m_impl->frozenMaterialReuses.PushBack(*existingIndex);
+                m_impl->frozenMaterials.PushBack(frozen);
                 continue;
             }
+
+            totalResources += definition.resources.Size();
+            totalParameterBytes += definition.parameterBytes.Size();
+            if (totalResources > m_impl->config.maximumMaterialResourcesPerBatch || totalParameterBytes > m_impl->config.maximumMaterialParameterBytesPerBatch)
+            {
+                rollback();
+                ++m_impl->stats.rejectedOperations;
+                return Fail(failure, GpuSceneDefinitionFailureCode::CapacityExceeded, "GPU Scene material payload batch exceeds configured capacity", definition.key);
+            }
+            for (const GpuMaterialResource& resource : definition.resources)
+                m_impl->frozenMaterialResources.PushBack(resource);
+            for (u32 wordIndex = 0; wordIndex < frozen.parameterWordCount; ++wordIndex)
+            {
+                GpuMaterialParameterWord word;
+                for (u32 byteIndex = 0; byteIndex < 4; ++byteIndex)
+                {
+                    const u32 sourceIndex = wordIndex * 4u + byteIndex;
+                    if (sourceIndex < frozen.parameterByteSize)
+                        word.value |= static_cast<u32>(definition.parameterBytes[sourceIndex]) << (byteIndex * 8u);
+                }
+                m_impl->frozenMaterialParameters.PushBack(word);
+            }
+            m_impl->frozenMaterials.PushBack(frozen);
 
             const u32 recordIndex = m_impl->NewMaterialRecord();
             if (recordIndex == InvalidGpuSceneIndex)
@@ -629,13 +731,17 @@ namespace vanguard::rendering
             Impl::MaterialRecord& record = m_impl->materials[recordIndex];
             record.key = definition.key;
             record.references = 1;
-            record.resourceCount = definition.resources.Size();
+            record.resourceCount = frozen.resourceCount;
+            record.parameterByteSize = frozen.parameterByteSize;
+            record.parameterWordCount = frozen.parameterWordCount;
             record.state = DefinitionState::Publishing;
             static_cast<void>(m_impl->materialByKey.Insert(record.key, recordIndex));
-            m_impl->transactionRecords.PushBack(recordIndex);
+            m_impl->frozenMaterialRecords.PushBack(recordIndex);
             m_impl->allocationRequests.PushBack({GpuSceneTableKind::Material, 1});
             if (record.resourceCount != 0)
                 m_impl->allocationRequests.PushBack({GpuSceneTableKind::MaterialResource, record.resourceCount});
+            if (record.parameterWordCount != 0)
+                m_impl->allocationRequests.PushBack({GpuSceneTableKind::MaterialParameterWord, record.parameterWordCount});
         }
 
         if (m_impl->allocationRequests.Size() > m_impl->config.maximumAllocationsPerBatch)
@@ -644,107 +750,277 @@ namespace vanguard::rendering
             ++m_impl->stats.rejectedOperations;
             return Fail(failure, GpuSceneDefinitionFailureCode::CapacityExceeded, "GPU Scene material batch exceeds allocation capacity");
         }
-        if (!m_impl->allocationRequests.Empty())
+
+        m_impl->materialBatchSerial = m_impl->materialBatchSerial == 0xffffffffu ? 1u : m_impl->materialBatchSerial + 1u;
+        if (m_impl->materialBatchSerial == 0)
+            m_impl->materialBatchSerial = 1;
+        batch = {m_impl->materialBatchSerial, definitions.Size()};
+        m_impl->frozenMaterialPublication.requestedDefinitions = definitions.Size();
+        m_impl->frozenMaterialPublication.createdDefinitions = m_impl->frozenMaterialRecords.Size();
+        m_impl->frozenMaterialPublication.reusedDefinitions = definitions.Size() - m_impl->frozenMaterialRecords.Size();
+
+        if (m_impl->frozenMaterialRecords.Empty())
         {
-            m_impl->allocations.Resize(m_impl->allocationRequests.Size());
-            GpuSceneLifetimeFailure lifetimeFailure;
-            if (!m_impl->lifetime->AllocateBatch({m_impl->allocationRequests.TypedData(), m_impl->allocationRequests.Size()},
-                                                 {m_impl->allocations.TypedData(), m_impl->allocations.Size()}, &lifetimeFailure))
+            m_impl->frozenMaterialHandles.Resize(definitions.Size());
+            for (u32 index = 0; index < definitions.Size(); ++index)
             {
-                m_impl->allocations.Clear();
-                rollback();
-                ++m_impl->stats.rejectedOperations;
-                return Fail(failure, GpuSceneDefinitionFailureCode::LifetimeFailure, "GPU Scene material allocation failed", {}, lifetimeFailure);
+                const u32* const recordIndex = m_impl->materialByKey.FindPtr(definitions[index].key);
+                m_impl->frozenMaterialHandles[index] = m_impl->materials[*recordIndex].material.AsSlotHandle<GpuMaterialHandle>();
             }
-
-            u32 allocationIndex = 0;
-            u32 newDefinitionIndex = 0;
-            for (u32 definitionIndex = 0; definitionIndex < definitions.Size(); ++definitionIndex)
-            {
-                const u32* const recordIndex = m_impl->materialByKey.FindPtr(definitions[definitionIndex].key);
-                if (recordIndex == nullptr || newDefinitionIndex >= m_impl->transactionRecords.Size() ||
-                    *recordIndex != m_impl->transactionRecords[newDefinitionIndex])
-                    continue;
-                Impl::MaterialRecord& record = m_impl->materials[*recordIndex];
-                record.material = m_impl->allocations[allocationIndex++];
-                if (record.resourceCount != 0)
-                    record.resources = m_impl->allocations[allocationIndex++];
-                m_impl->payloads.PushBack({record.material, PayloadKind::Material, definitionIndex});
-                if (record.resourceCount != 0)
-                    m_impl->payloads.PushBack({record.resources, PayloadKind::MaterialResources, definitionIndex});
-                ++newDefinitionIndex;
-            }
-
-            if (!m_impl->BeginPublication(failure))
-            {
-                rollback();
-                ++m_impl->stats.rejectedOperations;
-                return false;
-            }
-            for (u32 payloadIndex = 0; payloadIndex < m_impl->payloads.Size(); ++payloadIndex)
-            {
-                const Payload payload = m_impl->payloads[payloadIndex];
-                const GpuMaterialDefinition& definition = definitions[payload.definition];
-                const u32* const recordIndex = m_impl->materialByKey.FindPtr(definition.key);
-                Impl::MaterialRecord& record = m_impl->materials[*recordIndex];
-                if (payload.kind == PayloadKind::Material)
-                {
-                    GpuMaterial value = definition.material;
-                    value.firstResource = record.resourceCount != 0 ? record.resources.first : 0;
-                    value.resourceCount = record.resourceCount;
-                    value.generation = record.material.generation;
-                    *static_cast<GpuMaterial*>(m_impl->reservations[payloadIndex].destination) = value;
-                }
-                else
-                    CopyElements(static_cast<GpuMaterialResource*>(m_impl->reservations[payloadIndex].destination), definition.resources);
-                GpuSceneUploadFailure uploadFailure;
-                if (!m_impl->uploader->Complete(m_impl->reservations[payloadIndex], &uploadFailure))
-                {
-                    static_cast<void>(m_impl->uploader->Cancel());
-                    rollback();
-                    ++m_impl->stats.rejectedOperations;
-                    return Fail(failure, GpuSceneDefinitionFailureCode::UploadFailure, "GPU Scene material upload completion failed", definition.key, {},
-                                uploadFailure);
-                }
-            }
-            GpuSceneUploadResult uploadResult;
-            GpuSceneUploadFailure uploadFailure;
-            if (!m_impl->uploader->Submit(uploadResult, &uploadFailure))
-            {
-                rollback();
-                ++m_impl->stats.rejectedOperations;
-                return Fail(failure, GpuSceneDefinitionFailureCode::UploadFailure, "GPU Scene material upload submission failed", {}, {}, uploadFailure);
-            }
-            publication.completion = uploadResult.completion;
-            publication.uploadedRanges = uploadResult.uniqueUpdates;
-            publication.uploadedBytes = uploadResult.uploadedBytes;
+            m_impl->stats.references += definitions.Size();
+            m_impl->stats.acquisitions += definitions.Size();
+            m_impl->stats.reuses += definitions.Size();
+            m_impl->materialBatchState = Impl::MaterialBatchState::Accepted;
+            m_impl->ResetTransaction();
+            return true;
         }
 
-        for (const u32 recordIndex : m_impl->transactionRecords)
+        m_impl->frozenMaterialAllocations.Resize(m_impl->allocationRequests.Size());
+        GpuSceneLifetimeFailure lifetimeFailure;
+        if (!m_impl->lifetime->AllocateBatch({m_impl->allocationRequests.TypedData(), m_impl->allocationRequests.Size()},
+                                             {m_impl->frozenMaterialAllocations.TypedData(), m_impl->frozenMaterialAllocations.Size()}, &lifetimeFailure))
         {
-            Impl::MaterialRecord& record = m_impl->materials[recordIndex];
-            record.state = DefinitionState::Active;
-            static_cast<void>(m_impl->materialByHandle.Insert(HandleIdentity(record.material.first, record.material.generation), recordIndex));
+            m_impl->frozenMaterialAllocations.Clear();
+            rollback();
+            ++m_impl->stats.rejectedOperations;
+            return Fail(failure, GpuSceneDefinitionFailureCode::LifetimeFailure, "GPU Scene material compound allocation failed", {}, lifetimeFailure);
         }
-        for (u32 definitionIndex = 0; definitionIndex < definitions.Size(); ++definitionIndex)
+
+        u32 allocationIndex = 0;
+        u32 newDefinitionIndex = 0;
+        for (u32 definitionIndex = 0; definitionIndex < m_impl->frozenMaterials.Size(); ++definitionIndex)
         {
-            const u32* const recordIndex = m_impl->materialByKey.FindPtr(definitions[definitionIndex].key);
-            handles[definitionIndex] = m_impl->materials[*recordIndex].material.AsSlotHandle<GpuMaterialHandle>();
+            const Impl::FrozenMaterialDefinition& frozen = m_impl->frozenMaterials[definitionIndex];
+            const u32* const recordIndex = m_impl->materialByKey.FindPtr(frozen.key);
+            if (recordIndex == nullptr || newDefinitionIndex >= m_impl->frozenMaterialRecords.Size() || *recordIndex != m_impl->frozenMaterialRecords[newDefinitionIndex])
+                continue;
+            Impl::MaterialRecord& record = m_impl->materials[*recordIndex];
+            record.material = m_impl->frozenMaterialAllocations[allocationIndex++];
+            if (record.resourceCount != 0)
+                record.resources = m_impl->frozenMaterialAllocations[allocationIndex++];
+            if (record.parameterWordCount != 0)
+                record.parameters = m_impl->frozenMaterialAllocations[allocationIndex++];
+            m_impl->frozenMaterialPayloads.PushBack({record.material, PayloadKind::Material, definitionIndex});
+            if (record.resourceCount != 0)
+                m_impl->frozenMaterialPayloads.PushBack({record.resources, PayloadKind::MaterialResources, definitionIndex});
+            if (record.parameterWordCount != 0)
+                m_impl->frozenMaterialPayloads.PushBack({record.parameters, PayloadKind::MaterialParameters, definitionIndex});
+            ++newDefinitionIndex;
         }
-        publication.requestedDefinitions = definitions.Size();
-        publication.createdDefinitions = m_impl->transactionRecords.Size();
-        publication.reusedDefinitions = definitions.Size() - publication.createdDefinitions;
-        m_impl->stats.materials += publication.createdDefinitions;
-        m_impl->stats.references += definitions.Size();
-        m_impl->stats.acquisitions += definitions.Size();
-        m_impl->stats.reuses += publication.reusedDefinitions;
+        m_impl->frozenMaterialUploadRequests.Resize(m_impl->frozenMaterialPayloads.Size());
+        for (u32 index = 0; index < m_impl->frozenMaterialPayloads.Size(); ++index)
+        {
+            const GpuSceneAllocation allocation = m_impl->frozenMaterialPayloads[index].allocation;
+            m_impl->frozenMaterialUploadRequests[index] = {allocation, 0, allocation.count};
+        }
+        m_impl->materialBatchState = Impl::MaterialBatchState::Prepared;
         m_impl->ResetTransaction();
         return true;
     }
 
-    bool GpuSceneDefinitions::AcquireRenderables(const containers::ArraySpan<const GpuRenderableDefinition> definitions,
-                                                 containers::ArraySpan<GpuRenderableHandle> handles, GpuSceneDefinitionPublication& publication,
-                                                 GpuSceneDefinitionFailure* const failure) noexcept
+    void GpuSceneDefinitions::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        Impl* const impl = m_impl;
+        m_impl = nullptr;
+        impl->~Impl();
+        memory::MemoryBlock block{impl, sizeof(Impl), memory::PoolId::Rendering};
+        memory::Free(block);
+    }
+
+    bool GpuSceneDefinitions::StageMaterials(GpuSceneRuntime& runtime, const GpuMaterialDefinitionBatch& batch, GpuSceneDefinitionFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return Fail(failure, GpuSceneDefinitionFailureCode::NotInitialized, "GPU Scene definitions are not initialized");
+        if (!concurrency::IsMainThread())
+            return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene material staging must run on the main thread");
+        if (!batch.IsValid() || batch.serial != m_impl->materialBatchSerial || batch.definitionCount != m_impl->frozenMaterials.Size())
+            return Fail(failure, GpuSceneDefinitionFailureCode::InvalidBatch, "GPU Scene material batch is stale or invalid");
+        if (m_impl->materialBatchState == Impl::MaterialBatchState::Accepted)
+            return true;
+        if (m_impl->materialBatchState != Impl::MaterialBatchState::Prepared || !runtime.IsInitialized() || &runtime.GetDefinitions() != this)
+            return Fail(failure, GpuSceneDefinitionFailureCode::InvalidBatch, "GPU Scene material batch is not ready for this runtime");
+
+        GpuSceneContributionDesc contribution;
+        contribution.owner = this;
+        contribution.token = Impl::EncodeMaterialBatch(batch);
+        contribution.requests = {m_impl->frozenMaterialUploadRequests.TypedData(), m_impl->frozenMaterialUploadRequests.Size()};
+        contribution.write = &GpuSceneDefinitions::WriteMaterialContribution;
+        contribution.accept = &GpuSceneDefinitions::AcceptMaterialContribution;
+        contribution.retry = &GpuSceneDefinitions::RetryMaterialContribution;
+        GpuSceneRuntimeFailure runtimeFailure;
+        if (!runtime.StageContribution(contribution, &runtimeFailure))
+            return Fail(failure, GpuSceneDefinitionFailureCode::ContributionFailure, runtimeFailure.message != nullptr ? runtimeFailure.message : "GPU Scene material contribution staging failed");
+        m_impl->materialBatchState = Impl::MaterialBatchState::Staged;
+        return true;
+    }
+
+    bool GpuSceneDefinitions::CancelMaterials(const GpuMaterialDefinitionBatch& batch, GpuSceneDefinitionFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return Fail(failure, GpuSceneDefinitionFailureCode::NotInitialized, "GPU Scene definitions are not initialized");
+        if (!concurrency::IsMainThread())
+            return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene material cancellation must run on the main thread");
+        if (!batch.IsValid() || batch.serial != m_impl->materialBatchSerial || batch.definitionCount != m_impl->frozenMaterials.Size() || m_impl->materialBatchState != Impl::MaterialBatchState::Prepared)
+            return Fail(failure, GpuSceneDefinitionFailureCode::InvalidBatch, "only a current unstaged material batch can cancel");
+        if (!m_impl->frozenMaterialAllocations.Empty())
+        {
+            GpuSceneLifetimeFailure lifetimeFailure;
+            if (!m_impl->lifetime->CancelBatch({m_impl->frozenMaterialAllocations.TypedData(), m_impl->frozenMaterialAllocations.Size()}, &lifetimeFailure))
+                return Fail(failure, GpuSceneDefinitionFailureCode::LifetimeFailure, "GPU Scene material compound cancellation failed", {}, lifetimeFailure);
+        }
+        for (const u32 index : m_impl->frozenMaterialReuses)
+            --m_impl->materials[index].references;
+        for (const u32 index : m_impl->frozenMaterialRecords)
+        {
+            const GpuSceneDefinitionKey key = m_impl->materials[index].key;
+            static_cast<void>(m_impl->materialByKey.Remove(key));
+            m_impl->RecycleMaterial(index);
+        }
+        m_impl->ResetMaterialBatch();
+        return true;
+    }
+
+    bool GpuSceneDefinitions::ConsumeMaterials(const GpuMaterialDefinitionBatch& batch, containers::ArraySpan<GpuMaterialHandle> handles, GpuSceneDefinitionPublication& publication,
+                                               GpuSceneDefinitionFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        publication = {};
+        for (GpuMaterialHandle& handle : handles)
+            handle = {};
+        if (m_impl == nullptr)
+            return Fail(failure, GpuSceneDefinitionFailureCode::NotInitialized, "GPU Scene definitions are not initialized");
+        if (!concurrency::IsMainThread())
+            return Fail(failure, GpuSceneDefinitionFailureCode::WrongThread, "GPU Scene material results must be consumed on the main thread");
+        if (!batch.IsValid() || batch.serial != m_impl->materialBatchSerial || batch.definitionCount != m_impl->frozenMaterials.Size() || m_impl->materialBatchState != Impl::MaterialBatchState::Accepted ||
+            handles.Size() != m_impl->frozenMaterialHandles.Size())
+            return Fail(failure, GpuSceneDefinitionFailureCode::InvalidBatch, "GPU Scene material batch has no accepted result");
+        for (u32 index = 0; index < handles.Size(); ++index)
+            handles[index] = m_impl->frozenMaterialHandles[index];
+        publication = m_impl->frozenMaterialPublication;
+        m_impl->ResetMaterialBatch();
+        return true;
+    }
+
+    GpuMaterialDefinitionBatchState GpuSceneDefinitions::GetMaterialBatchState(const GpuMaterialDefinitionBatch& batch) const noexcept
+    {
+        if (m_impl == nullptr || !batch.IsValid() || batch.serial != m_impl->materialBatchSerial || batch.definitionCount != m_impl->frozenMaterials.Size())
+            return GpuMaterialDefinitionBatchState::Invalid;
+        if (m_impl->materialBatchState == Impl::MaterialBatchState::Prepared)
+            return GpuMaterialDefinitionBatchState::Prepared;
+        if (m_impl->materialBatchState == Impl::MaterialBatchState::Staged || m_impl->materialBatchState == Impl::MaterialBatchState::Written)
+            return GpuMaterialDefinitionBatchState::Staged;
+        return m_impl->materialBatchState == Impl::MaterialBatchState::Accepted ? GpuMaterialDefinitionBatchState::Accepted : GpuMaterialDefinitionBatchState::Invalid;
+    }
+
+    bool GpuSceneDefinitions::WriteMaterialContribution(void* const owner, const GpuSceneContributionToken token, const containers::ArraySpan<const GpuSceneUploadReservation> reservations,
+                                                        const char*& failureMessage) noexcept
+    {
+        auto* const definitions = static_cast<GpuSceneDefinitions*>(owner);
+        const GpuMaterialDefinitionBatch batch = Impl::DecodeMaterialBatch(token);
+        if (definitions == nullptr || definitions->m_impl == nullptr || !batch.IsValid() || batch.serial != definitions->m_impl->materialBatchSerial ||
+            batch.definitionCount != definitions->m_impl->frozenMaterials.Size() || definitions->m_impl->materialBatchState != Impl::MaterialBatchState::Staged ||
+            reservations.Size() != definitions->m_impl->frozenMaterialPayloads.Size())
+        {
+            failureMessage = "GPU Scene material contribution is stale or has mismatched reservations";
+            return false;
+        }
+        Impl& impl = *definitions->m_impl;
+        for (u32 payloadIndex = 0; payloadIndex < impl.frozenMaterialPayloads.Size(); ++payloadIndex)
+        {
+            const Payload payload = impl.frozenMaterialPayloads[payloadIndex];
+            const GpuSceneUploadReservation& reservation = reservations[payloadIndex];
+            const Impl::FrozenMaterialDefinition& frozen = impl.frozenMaterials[payload.definition];
+            const u32* const recordIndex = impl.materialByKey.FindPtr(frozen.key);
+            if (recordIndex == nullptr || !reservation.IsValid() ||
+                reservation.size != static_cast<u64>(payload.allocation.count) * (payload.kind == PayloadKind::Material            ? sizeof(GpuMaterial)
+                                                                                  : payload.kind == PayloadKind::MaterialResources ? sizeof(GpuMaterialResource)
+                                                                                                                                   : sizeof(GpuMaterialParameterWord)))
+            {
+                failureMessage = "GPU Scene material contribution contains an invalid payload reservation";
+                return false;
+            }
+            const Impl::MaterialRecord& record = impl.materials[*recordIndex];
+            if (payload.kind == PayloadKind::Material)
+            {
+                GpuMaterial value = frozen.material;
+                value.parameterByteOffset = record.parameterWordCount != 0 ? record.parameters.first * sizeof(GpuMaterialParameterWord) : 0;
+                value.parameterByteSize = record.parameterByteSize;
+                value.firstResource = record.resourceCount != 0 ? record.resources.first : 0;
+                value.resourceCount = record.resourceCount;
+                value.generation = record.material.generation;
+                *static_cast<GpuMaterial*>(reservation.destination) = value;
+            }
+            else if (payload.kind == PayloadKind::MaterialResources)
+            {
+                CopyElements(static_cast<GpuMaterialResource*>(reservation.destination), {impl.frozenMaterialResources.TypedData() + frozen.firstResource, frozen.resourceCount});
+            }
+            else
+            {
+                CopyElements(static_cast<GpuMaterialParameterWord*>(reservation.destination), {impl.frozenMaterialParameters.TypedData() + frozen.firstParameterWord, frozen.parameterWordCount});
+            }
+        }
+        impl.materialBatchState = Impl::MaterialBatchState::Written;
+        failureMessage = nullptr;
+        return true;
+    }
+
+    void GpuSceneDefinitions::AcceptMaterialContribution(void* const owner, const GpuSceneContributionToken token, const rhi::GpuFence sharedCompletion) noexcept
+    {
+        auto* const definitions = static_cast<GpuSceneDefinitions*>(owner);
+        const GpuMaterialDefinitionBatch batch = Impl::DecodeMaterialBatch(token);
+        const bool valid = definitions != nullptr && definitions->m_impl != nullptr && batch.IsValid() && sharedCompletion.IsValid() && batch.serial == definitions->m_impl->materialBatchSerial &&
+                           batch.definitionCount == definitions->m_impl->frozenMaterials.Size() && definitions->m_impl->materialBatchState == Impl::MaterialBatchState::Written;
+        if (!valid)
+            return;
+        Impl& impl = *definitions->m_impl;
+        for (const u32 recordIndex : impl.frozenMaterialRecords)
+        {
+            Impl::MaterialRecord& record = impl.materials[recordIndex];
+            record.state = DefinitionState::Active;
+            static_cast<void>(impl.materialByHandle.Insert(HandleIdentity(record.material.first, record.material.generation), recordIndex));
+        }
+        impl.frozenMaterialHandles.Resize(impl.frozenMaterials.Size());
+        for (u32 index = 0; index < impl.frozenMaterials.Size(); ++index)
+        {
+            const u32* const recordIndex = impl.materialByKey.FindPtr(impl.frozenMaterials[index].key);
+            impl.frozenMaterialHandles[index] = impl.materials[*recordIndex].material.AsSlotHandle<GpuMaterialHandle>();
+        }
+        impl.frozenMaterialPublication.completion = sharedCompletion;
+        impl.frozenMaterialPublication.uploadedRanges = impl.frozenMaterialPayloads.Size();
+        for (const Payload& payload : impl.frozenMaterialPayloads)
+        {
+            const u32 stride = payload.kind == PayloadKind::Material ? sizeof(GpuMaterial) : payload.kind == PayloadKind::MaterialResources ? sizeof(GpuMaterialResource) : sizeof(GpuMaterialParameterWord);
+            impl.frozenMaterialPublication.uploadedBytes += static_cast<u64>(payload.allocation.count) * stride;
+        }
+        impl.stats.materials += impl.frozenMaterialRecords.Size();
+        impl.stats.references += impl.frozenMaterials.Size();
+        impl.stats.acquisitions += impl.frozenMaterials.Size();
+        impl.stats.reuses += impl.frozenMaterialReuses.Size();
+        impl.materialBatchState = Impl::MaterialBatchState::Accepted;
+    }
+
+    bool GpuSceneDefinitions::RetryMaterialContribution(void* const owner, const GpuSceneContributionToken token, const char*& failureMessage) noexcept
+    {
+        auto* const definitions = static_cast<GpuSceneDefinitions*>(owner);
+        const GpuMaterialDefinitionBatch batch = Impl::DecodeMaterialBatch(token);
+        if (definitions == nullptr || definitions->m_impl == nullptr || !batch.IsValid() || batch.serial != definitions->m_impl->materialBatchSerial ||
+            batch.definitionCount != definitions->m_impl->frozenMaterials.Size() ||
+            (definitions->m_impl->materialBatchState != Impl::MaterialBatchState::Staged && definitions->m_impl->materialBatchState != Impl::MaterialBatchState::Written))
+        {
+            failureMessage = "GPU Scene material contribution cannot return to its prepared state";
+            return false;
+        }
+        definitions->m_impl->materialBatchState = Impl::MaterialBatchState::Prepared;
+        failureMessage = nullptr;
+        return true;
+    }
+
+    bool GpuSceneDefinitions::AcquireRenderables(const containers::ArraySpan<const GpuRenderableDefinition> definitions, containers::ArraySpan<GpuRenderableHandle> handles,
+                                                 GpuSceneDefinitionPublication& publication, GpuSceneDefinitionFailure* const failure) noexcept
     {
         ClearFailure(failure);
         publication = {};
@@ -791,8 +1067,8 @@ namespace vanguard::rendering
             for (u32 primitiveIndex = 0; valid && primitiveIndex < definition.primitives.Size(); ++primitiveIndex)
             {
                 const GpuPrimitiveDefinition& primitive = definition.primitives[primitiveIndex];
-                valid = ValidRange(primitive.firstPhaseParticipation, primitive.phaseParticipationCount, definition.phaseParticipations.Size()) &&
-                        primitive.phaseParticipationCount != 0 && m_impl->Find(primitive.material) != nullptr;
+                valid = ValidRange(primitive.firstPhaseParticipation, primitive.phaseParticipationCount, definition.phaseParticipations.Size()) && primitive.phaseParticipationCount != 0 &&
+                        m_impl->Find(primitive.material) != nullptr;
             }
             for (u32 phaseIndex = 0; valid && phaseIndex < definition.phaseParticipations.Size(); ++phaseIndex)
                 valid = definition.phaseParticipations[phaseIndex].phase < MaximumRenderPhases;
@@ -800,20 +1076,18 @@ namespace vanguard::rendering
             {
                 rollback();
                 ++m_impl->stats.rejectedOperations;
-                return Fail(failure, GpuSceneDefinitionFailureCode::InvalidDependency, "GPU Scene renderable definition or dependency is invalid",
-                            definition.key);
+                return Fail(failure, GpuSceneDefinitionFailureCode::InvalidDependency, "GPU Scene renderable definition or dependency is invalid", definition.key);
             }
 
             if (const u32* const existingIndex = m_impl->renderableByKey.FindPtr(definition.key))
             {
                 Impl::RenderableRecord& existing = m_impl->renderables[*existingIndex];
-                if (existing.state == DefinitionState::Free || existing.lodCount != definition.lods.Size() ||
-                    existing.primitiveCount != definition.primitives.Size() || existing.phaseParticipationCount != definition.phaseParticipations.Size())
+                if (existing.state == DefinitionState::Free || existing.lodCount != definition.lods.Size() || existing.primitiveCount != definition.primitives.Size() ||
+                    existing.phaseParticipationCount != definition.phaseParticipations.Size())
                 {
                     rollback();
                     ++m_impl->stats.rejectedOperations;
-                    return Fail(failure, GpuSceneDefinitionFailureCode::IncompatibleDefinition, "equal renderable keys describe incompatible definitions",
-                                definition.key);
+                    return Fail(failure, GpuSceneDefinitionFailureCode::IncompatibleDefinition, "equal renderable keys describe incompatible definitions", definition.key);
                 }
                 ++existing.references;
                 m_impl->transactionReuses.PushBack(*existingIndex);
@@ -859,8 +1133,7 @@ namespace vanguard::rendering
         {
             m_impl->allocations.Resize(m_impl->allocationRequests.Size());
             GpuSceneLifetimeFailure lifetimeFailure;
-            if (!m_impl->lifetime->AllocateBatch({m_impl->allocationRequests.TypedData(), m_impl->allocationRequests.Size()},
-                                                 {m_impl->allocations.TypedData(), m_impl->allocations.Size()}, &lifetimeFailure))
+            if (!m_impl->lifetime->AllocateBatch({m_impl->allocationRequests.TypedData(), m_impl->allocationRequests.Size()}, {m_impl->allocations.TypedData(), m_impl->allocations.Size()}, &lifetimeFailure))
             {
                 m_impl->allocations.Clear();
                 rollback();
@@ -873,8 +1146,7 @@ namespace vanguard::rendering
             for (u32 definitionIndex = 0; definitionIndex < definitions.Size(); ++definitionIndex)
             {
                 const u32* const recordIndex = m_impl->renderableByKey.FindPtr(definitions[definitionIndex].key);
-                if (recordIndex == nullptr || newDefinitionIndex >= m_impl->transactionRecords.Size() ||
-                    *recordIndex != m_impl->transactionRecords[newDefinitionIndex])
+                if (recordIndex == nullptr || newDefinitionIndex >= m_impl->transactionRecords.Size() || *recordIndex != m_impl->transactionRecords[newDefinitionIndex])
                     continue;
                 Impl::RenderableRecord& record = m_impl->renderables[*recordIndex];
                 record.renderable = m_impl->allocations[allocationIndex++];
@@ -939,14 +1211,8 @@ namespace vanguard::rendering
                     for (u32 index = 0; index < definition.primitives.Size(); ++index)
                     {
                         const GpuPrimitiveDefinition& source = definition.primitives[index];
-                        destination[index] = {source.material.index,
-                                              record.phaseParticipations.first + source.firstPhaseParticipation,
-                                              source.phaseParticipationCount,
-                                              source.stableSubmesh,
-                                              source.flags,
-                                              0,
-                                              0,
-                                              0};
+                        destination[index] = {
+                            source.material.index, record.phaseParticipations.first + source.firstPhaseParticipation, source.phaseParticipationCount, source.sourceSubmesh, source.flags, 0, 0, 0};
                     }
                     break;
                 }
@@ -962,8 +1228,7 @@ namespace vanguard::rendering
                     static_cast<void>(m_impl->uploader->Cancel());
                     rollback();
                     ++m_impl->stats.rejectedOperations;
-                    return Fail(failure, GpuSceneDefinitionFailureCode::UploadFailure, "GPU Scene renderable upload completion failed", definition.key, {},
-                                uploadFailure);
+                    return Fail(failure, GpuSceneDefinitionFailureCode::UploadFailure, "GPU Scene renderable upload completion failed", definition.key, {}, uploadFailure);
                 }
             }
             GpuSceneUploadResult uploadResult;
@@ -1131,6 +1396,8 @@ namespace vanguard::rendering
         m_impl->retirementAllocations.PushBack(record.material);
         if (record.resources.IsValid())
             m_impl->retirementAllocations.PushBack(record.resources);
+        if (record.parameters.IsValid())
+            m_impl->retirementAllocations.PushBack(record.parameters);
         GpuSceneLifetimeFailure lifetimeFailure;
         if (!m_impl->lifetime->RetireBatch({m_impl->retirementAllocations.TypedData(), m_impl->retirementAllocations.Size()}, &lifetimeFailure))
         {
@@ -1186,14 +1453,15 @@ namespace vanguard::rendering
         {
             const u32* const dependencyIndex = m_impl->materialByHandle.FindPtr(iterator.Key());
             if (dependencyIndex == nullptr || m_impl->materials[*dependencyIndex].references < iterator.Value())
-                return Fail(failure, GpuSceneDefinitionFailureCode::ReferenceUnderflow, "GPU Scene renderable material references are inconsistent",
-                            record.key);
+                return Fail(failure, GpuSceneDefinitionFailureCode::ReferenceUnderflow, "GPU Scene renderable material references are inconsistent", record.key);
             const Impl::MaterialRecord& dependency = m_impl->materials[*dependencyIndex];
             if (dependency.references != iterator.Value())
                 continue;
             m_impl->retirementAllocations.PushBack(dependency.material);
             if (dependency.resources.IsValid())
                 m_impl->retirementAllocations.PushBack(dependency.resources);
+            if (dependency.parameters.IsValid())
+                m_impl->retirementAllocations.PushBack(dependency.parameters);
             ++retiredMaterials;
         }
         GpuSceneLifetimeFailure lifetimeFailure;
@@ -1226,6 +1494,17 @@ namespace vanguard::rendering
         m_impl->stats.references -= 1u + primitiveCount;
         ++m_impl->stats.releases;
         m_impl->stats.retirements += 1u + retiredMaterials;
+        return true;
+    }
+
+    bool GpuSceneDefinitions::GetRenderableAllocations(const GpuRenderableHandle handle, GpuRenderableAllocationView& output) const noexcept
+    {
+        if (!concurrency::IsMainThread() || m_impl == nullptr)
+            return false;
+        const auto* record = m_impl->Find(handle);
+        if (record == nullptr)
+            return false;
+        output = {record->renderable, record->primitives, record->phaseParticipations};
         return true;
     }
 

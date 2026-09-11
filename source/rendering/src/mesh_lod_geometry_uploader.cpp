@@ -148,8 +148,7 @@ namespace vanguard::rendering
         indexBytes = 0;
     }
 
-    bool AbortPendingMeshLodGeometry(PendingMeshLodGeometry& geometry, GeometryAllocator& allocator,
-                                     GeometryAllocatorFailure* const failure) noexcept
+    bool AbortPendingMeshLodGeometry(PendingMeshLodGeometry& geometry, GeometryAllocator& allocator, GeometryAllocatorFailure* const failure) noexcept
     {
         if (!concurrency::IsMainThread())
         {
@@ -165,8 +164,7 @@ namespace vanguard::rendering
             if (state != GeometryAllocationState::Active && state != GeometryAllocationState::Retiring)
             {
                 if (failure != nullptr)
-                    *failure = {GeometryAllocatorFailureCode::InvalidState, placement.allocation,
-                                "pending mesh LOD geometry contains a placement that is neither active nor already retiring"};
+                    *failure = {GeometryAllocatorFailureCode::InvalidState, placement.allocation, "pending mesh LOD geometry contains a placement that is neither active nor already retiring"};
                 return false;
             }
         }
@@ -187,8 +185,7 @@ namespace vanguard::rendering
         };
 
         explicit Impl(GeometryAllocator& geometryAllocator, GeometryUploader& geometryUploader, const MeshLodGeometryUploaderConfig& uploaderConfig) noexcept
-            : slots(memory::pools::Rendering::GetInstance()), recycledSlots(memory::pools::Rendering::GetInstance()), allocator(&geometryAllocator), uploader(&geometryUploader),
-              config(uploaderConfig)
+            : slots(memory::pools::Rendering::GetInstance()), recycledSlots(memory::pools::Rendering::GetInstance()), allocator(&geometryAllocator), uploader(&geometryUploader), config(uploaderConfig)
         {
             slots.Reserve(config.maximumRequests);
             recycledSlots.Reserve(config.maximumRequests);
@@ -279,11 +276,33 @@ namespace vanguard::rendering
         if (!concurrency::IsMainThread())
             return Fail(failure, MeshLodGeometryUploadFailureCode::WrongThread, "mesh LOD geometry uploader must shut down on the main thread");
         if (m_impl->stats.liveRequests != 0)
-            return Fail(failure, MeshLodGeometryUploadFailureCode::LiveRequestsRemain,
-                        "mesh LOD geometry uploader still owns pending, failed, or completed requests");
+            return Fail(failure, MeshLodGeometryUploadFailureCode::LiveRequestsRemain, "mesh LOD geometry uploader still owns pending, failed, or completed requests");
         DeleteObject(m_impl);
         m_impl = nullptr;
         return true;
+    }
+
+    void MeshLodGeometryUploader::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        for (Impl::Slot& slot : m_impl->slots)
+        {
+            UploadEntry* const entry = slot.entry;
+            if (entry == nullptr)
+                continue;
+            if (entry->preparationCounter.IsValid())
+                static_cast<void>(entry->preparationCounter.Wait());
+            for (PendingPageRead& read : entry->reads)
+                read.request.Reset();
+            entry->pendingGeometry.geometries.Clear();
+            entry->pendingGeometry.Reset();
+            entry->prepared.Reset();
+            DeleteObject(entry);
+            slot.entry = nullptr;
+        }
+        DeleteObject(m_impl);
+        m_impl = nullptr;
     }
 
     bool MeshLodGeometryUploader::IsInitialized() const noexcept
@@ -292,7 +311,7 @@ namespace vanguard::rendering
     }
 
     bool MeshLodGeometryUploader::Request(const resources::ResourceHandle& resource, const u16 lod, MeshLodGeometryUploadRequestId& request, const io::AsyncPriority priority,
-                                   MeshLodGeometryUploadFailure* const failure) noexcept
+                                          MeshLodGeometryUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         request = {};
@@ -452,8 +471,7 @@ namespace vanguard::rendering
             {
                 MeshGeometryUploadFailure cancelFailure;
                 if (!CancelPreparedMeshLodUpload(*m_impl->allocator, *m_impl->uploader, entry->prepared, &cancelFailure))
-                    return Fail(failure, MeshLodGeometryUploadFailureCode::GeometryRetirementFailure,
-                                "prepared mesh LOD upload could not be cancelled after worker completion", m_impl->Id(slot));
+                    return Fail(failure, MeshLodGeometryUploadFailureCode::GeometryRetirementFailure, "prepared mesh LOD upload could not be cancelled after worker completion", m_impl->Id(slot));
                 if (entry->cancelRequested)
                 {
                     m_impl->Remove(slot);
@@ -468,15 +486,12 @@ namespace vanguard::rendering
             }
 
             resources::ResourceHandle resource = entry->resource.Lock();
-            auto* const mesh = resource.IsValid() && resource.GetType() == meshes::MeshResourceType
-                                   ? static_cast<meshes::MeshResourceObject*>(resource.Get())
-                                   : nullptr;
+            auto* const mesh = resource.IsValid() && resource.GetType() == meshes::MeshResourceType ? static_cast<meshes::MeshResourceObject*>(resource.Get()) : nullptr;
             if (mesh == nullptr || !mesh->IsOpen() || !(mesh->GetMetadata().GetContentFingerprint() == entry->meshContentFingerprint))
             {
                 MeshGeometryUploadFailure cancelFailure;
                 if (!CancelPreparedMeshLodUpload(*m_impl->allocator, *m_impl->uploader, entry->prepared, &cancelFailure))
-                    return Fail(failure, MeshLodGeometryUploadFailureCode::GeometryRetirementFailure,
-                                "stale prepared mesh LOD upload could not be cancelled", m_impl->Id(slot));
+                    return Fail(failure, MeshLodGeometryUploadFailureCode::GeometryRetirementFailure, "stale prepared mesh LOD upload could not be cancelled", m_impl->Id(slot));
                 MeshLodGeometryUploadFailure stale;
                 stale.code = MeshLodGeometryUploadFailureCode::StaleResourceGeneration;
                 stale.message = "mesh resource generation changed while staging geometry";
@@ -494,8 +509,7 @@ namespace vanguard::rendering
                 {
                     GeometryAllocatorFailure cancelFailure;
                     if (!m_impl->allocator->CancelBatch({entry->prepared.geometries.TypedData(), entry->prepared.geometries.Size()}, &cancelFailure))
-                        return Fail(failure, MeshLodGeometryUploadFailureCode::GeometryRetirementFailure,
-                                    "failed mesh upload reservations could not be cancelled", m_impl->Id(slot));
+                        return Fail(failure, MeshLodGeometryUploadFailureCode::GeometryRetirementFailure, "failed mesh upload reservations could not be cancelled", m_impl->Id(slot));
                 }
                 MeshLodGeometryUploadFailure failed;
                 failed.code = MeshLodGeometryUploadFailureCode::GeometrySubmissionFailure;
@@ -618,9 +632,7 @@ namespace vanguard::rendering
             }
 
             jobs::Task task = jobs::Task::Create([entry, uploader = m_impl->uploader](const jobs::JobContext&) noexcept
-            {
-                entry->preparationSucceeded = FillPreparedMeshLodUpload(*uploader, entry->prepared, &entry->asyncPreparationFailure);
-            });
+                                                 { entry->preparationSucceeded = FillPreparedMeshLodUpload(*uploader, entry->prepared, &entry->asyncPreparationFailure); });
             jobs::Builder builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker}, entry);
             static jobs::JobName fillJobName{"MeshGeometry.FillStaging"};
             if (!task || !builder.IsValid() || !builder.Dispatch(fillJobName, std::move(task)))
@@ -665,8 +677,7 @@ namespace vanguard::rendering
             return Fail(failure, MeshLodGeometryUploadFailureCode::WrongThread, "completed mesh LOD ownership must be taken on the main thread", request);
         UploadEntry* const entry = m_impl->Find(request);
         if (entry == nullptr || entry->state != MeshLodGeometryUploadState::Complete || pendingGeometry.IsValid())
-            return Fail(failure, MeshLodGeometryUploadFailureCode::InvalidArgument,
-                        "mesh LOD request is not complete or output already owns pending geometry", request);
+            return Fail(failure, MeshLodGeometryUploadFailureCode::InvalidArgument, "mesh LOD request is not complete or output already owns pending geometry", request);
         pendingGeometry = std::move(entry->pendingGeometry);
         m_impl->Remove(request.index);
         return true;

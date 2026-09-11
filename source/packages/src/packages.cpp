@@ -165,9 +165,10 @@ namespace
         return Result::Success;
     }
 
-    [[nodiscard]] constexpr u64 PackageSetRecordSize(const u32 packageCount) noexcept
+    [[nodiscard]] constexpr u64 PackageSetRecordSize(const u32 packageCount, const bool bootstrapReference = true) noexcept
     {
-        return PackageSetHeaderWireSize + static_cast<u64>(packageCount) * PackageSetEntry::WireSize;
+        return PackageSetHeaderWireSize + (bootstrapReference ? PackageSet::BootstrapReferenceWireSize : 0u) +
+               static_cast<u64>(packageCount) * PackageSetEntry::WireSize;
     }
 
     [[nodiscard]] bool HasExactlyOneAvailabilityFlag(const PackageSetEntryFlags flags) noexcept
@@ -200,7 +201,8 @@ namespace
     {
         if (build.gameId == 0 || buildId == 0 || build.targetPlatformId == 0 || build.startupWorld == InvalidResourceId ||
             build.startupWorldType == resources::InvalidResourceTypeId || build.defaultInput == InvalidResourceId ||
-            build.defaultInputType == resources::InvalidResourceTypeId || build.packages.Count() > MaximumPackageNumber)
+            build.defaultInputType == resources::InvalidResourceTypeId || build.packages.Count() > MaximumPackageNumber ||
+            ((build.rendererBootstrap == InvalidResourceId) != (build.rendererBootstrapType == resources::InvalidResourceTypeId)))
         {
             return Result::InvalidArgument;
         }
@@ -219,6 +221,10 @@ namespace
         entries.Reserve(build.packages.Count() * PackageSetEntry::WireSize);
         filesystem::MemoryFileWriter entriesFile(entries);
         vgser::BinaryWriter entriesWriter(entriesFile);
+        const bool bootstrapWritten = entriesWriter.WriteU64(build.rendererBootstrap) &&
+            entriesWriter.WriteU32(build.rendererBootstrapType) && entriesWriter.WriteU32(0);
+        if (!bootstrapWritten)
+            return Result::IoFailure;
         for (const PackageSetEntry& entry : build.packages)
         {
             if (!entriesWriter.WriteU32(entry.packageNumber) || !entriesWriter.WriteU32(static_cast<u32>(entry.flags)) ||
@@ -244,7 +250,7 @@ namespace
         const u64 entriesCrc64 = vgser::Crc64(entryBytes, entries.Size());
         const bool headerWritten =
             headerWriter.WriteU32(PackageSetMagic) && headerWriter.WriteU8(LittleEndian) && headerWriter.WriteU8(PackageSetEncodingVersion) &&
-            headerWriter.WriteU16(PackageSetHeaderWireSize) && headerWriter.WriteU16(1) && headerWriter.WriteU16(1) && headerWriter.WriteU32(0) &&
+            headerWriter.WriteU16(PackageSetHeaderWireSize) && headerWriter.WriteU16(1) && headerWriter.WriteU16(2) && headerWriter.WriteU32(0) &&
             headerWriter.WriteU64(recordSize) && headerWriter.WriteU64(build.gameId) && headerWriter.WriteU64(buildId) &&
             headerWriter.WriteU64(build.startupWorld) && headerWriter.WriteU32(build.startupWorldType) && headerWriter.WriteU32(build.targetPlatformId) &&
             headerWriter.WriteU64(build.defaultInput) && headerWriter.WriteU32(build.defaultInputType) && headerWriter.WriteU32(build.packages.Count()) &&
@@ -318,7 +324,7 @@ namespace
         {
             return RejectPackageSet(output, Result::InvalidMagic);
         }
-        if (output.version != vgser::Version{1, 1})
+        if (output.version != vgser::Version{1, 1} && output.version != vgser::Version{1, 2})
         {
             return RejectPackageSet(output, Result::UnsupportedVersion);
         }
@@ -334,7 +340,7 @@ namespace
         {
             return RejectPackageSet(output, Result::LimitExceeded);
         }
-        if (recordSize != PackageSetRecordSize(packageCount) || AddOverflow(packageHeader.packageSetOffset, recordSize) ||
+        if (recordSize != PackageSetRecordSize(packageCount, output.version.minor >= 2) || AddOverflow(packageHeader.packageSetOffset, recordSize) ||
             packageHeader.packageSetOffset + recordSize > packageHeader.indexOffset || recordSize - PackageSetHeaderWireSize > std::numeric_limits<u32>::max())
         {
             return RejectPackageSet(output, Result::InvalidLayout);
@@ -355,6 +361,15 @@ namespace
 
         filesystem::MemoryFileReader entriesFile(entries, 0);
         vgser::BinaryReader entriesReader(entriesFile);
+        if (output.version.minor >= 2)
+        {
+            u32 reservedBootstrap = 0;
+            const bool bootstrapRead = entriesReader.ReadU64(output.rendererBootstrap) &&
+                entriesReader.ReadU32(output.rendererBootstrapType) && entriesReader.ReadU32(reservedBootstrap);
+            if (!bootstrapRead || reservedBootstrap != 0 ||
+                ((output.rendererBootstrap == InvalidResourceId) != (output.rendererBootstrapType == resources::InvalidResourceTypeId)))
+                return RejectPackageSet(output, Result::InvalidLayout);
+        }
         output.packages.Resize(packageCount);
         u32 previousNumber = 0;
         for (PackageSetEntry& entry : output.packages)
@@ -546,7 +561,7 @@ namespace vanguard::packages
 
     void PackageSet::Reset() noexcept
     {
-        version = {1, 1};
+        version = {1, 2};
         gameId = 0;
         buildId = 0;
         targetPlatformId = 0;
@@ -554,14 +569,17 @@ namespace vanguard::packages
         startupWorldType = resources::InvalidResourceTypeId;
         defaultInput = InvalidResourceId;
         defaultInputType = resources::InvalidResourceTypeId;
+        rendererBootstrap = InvalidResourceId;
+        rendererBootstrapType = resources::InvalidResourceTypeId;
         packages.Clear();
     }
 
     bool PackageSet::IsValid() const noexcept
     {
-        if (version != serialization::Version{1, 1} || gameId == 0 || buildId == 0 || targetPlatformId == 0 || startupWorld == InvalidResourceId ||
+        if ((version != serialization::Version{1, 1} && version != serialization::Version{1, 2}) || gameId == 0 || buildId == 0 || targetPlatformId == 0 || startupWorld == InvalidResourceId ||
             startupWorldType == resources::InvalidResourceTypeId || defaultInput == InvalidResourceId || defaultInputType == resources::InvalidResourceTypeId ||
-            packages.Size() > MaximumPackageNumber)
+            packages.Size() > MaximumPackageNumber ||
+            ((rendererBootstrap == InvalidResourceId) != (rendererBootstrapType == resources::InvalidResourceTypeId)))
         {
             return false;
         }
@@ -1312,7 +1330,7 @@ namespace vanguard::packages
         containers::DynamicArray<Segment> physicalSegments(memory::pools::Resources::GetInstance());
         containers::HashMap<u64, u32> physicalLookup(memory::pools::Resources::GetInstance());
         const u64 payloadStart = HasFlag(m_header.flags, PackageFlags::HasPackageSet)
-                                     ? m_header.packageSetOffset + PackageSetRecordSize(m_packageSet.packages.Size())
+                                     ? m_header.packageSetOffset + PackageSetRecordSize(m_packageSet.packages.Size(), m_packageSet.version.minor >= 2)
                                      : PackageHeader::WireSize;
         for (const Segment& segment : m_segments)
         {

@@ -115,6 +115,8 @@ namespace vanguard::entities
         /// scaled-local-box calculation while retaining direct relink admission.
         [[nodiscard]] virtual bool CalculateWorldBounds(const math::Matrix& localToWorld, math::Box& worldBounds) const noexcept;
         virtual void OnProxyAdmissionFailed(const rendering::RenderSceneFailure& failure) noexcept;
+        /// Owner-thread admission epilogue. Returning false rolls back the new proxy.
+        [[nodiscard]] virtual bool OnVisualProxyAdmitted() noexcept;
         virtual void OnVisualUninitialize(const ComponentContext& context) noexcept;
         virtual void OnVisualDetach(const ComponentContext& context) noexcept;
 

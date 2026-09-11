@@ -1,5 +1,7 @@
 # nanovanguard
 
+`nanovanguard sources inspect <project> [--format jsonl]` performs a read-only scan through the shared source database and reports source/metadata issues. It does not cook, assign identities, mount runtime resources or compose importers; records remain NotClassified until tool composition supplies descriptors. E1C.3 adds this command at source level; build/link and executable verification are deferred.
+
 `nanovanguard` is Vanguard's headless project, build, asset, cooking, and packaging orchestration facade. Commands coordinate shared Vanguard tool APIs; they do not reimplement importers, the DDC, the build graph, or VPAK assembly.
 
 The CLI uses strict nested commands, rejects unknown and duplicate options, provides deterministic generated help, uses stable process exit codes, accepts UTF-8 paths on Windows, and supports stable JSON Lines output for editor and CI integration.

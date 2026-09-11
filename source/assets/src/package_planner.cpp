@@ -543,7 +543,10 @@ namespace vanguard::assets
                     continue;
                 }
                 const resources::DependencyKind kind =
-                    dependency.requirement == DependencyRequirement::Required ? resources::DependencyKind::Required : resources::DependencyKind::Optional;
+                    dependency.requirement == DependencyRequirement::Required
+                        ? resources::DependencyKind::Required
+                        : (dependency.requirement == DependencyRequirement::Optional ? resources::DependencyKind::Optional
+                                                                                     : resources::DependencyKind::Soft);
                 const u32 previousRuntimeDependencies = runtimeDependencies.Size();
                 runtimeDependencies.PushBack({dependency.identity, kind});
                 if (runtimeDependencies.Size() != previousRuntimeDependencies + 1u)
@@ -553,7 +556,9 @@ namespace vanguard::assets
                 }
                 const bool includeDependency =
                     HasFlag(manifest.flags, PackageManifestFlags::IncludeGeneratedDependencies) &&
-                    (dependency.requirement == DependencyRequirement::Required || HasFlag(manifest.flags, PackageManifestFlags::IncludeOptionalDependencies));
+                    (dependency.requirement == DependencyRequirement::Required ||
+                     (dependency.requirement == DependencyRequirement::Optional &&
+                      HasFlag(manifest.flags, PackageManifestFlags::IncludeOptionalDependencies)));
                 u8 alreadyQueued = 0;
                 if (includeDependency && !queued.Find(dependency.identity.GetPath().Id(), alreadyQueued))
                 {

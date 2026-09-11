@@ -11,7 +11,9 @@ namespace
     using namespace vanguard::assets;
 
     constexpr u32 IndexMagic = vanguard::serialization::MakeFourCC('V', 'A', 'D', 'I');
-    constexpr u16 IndexMajorVersion = 1;
+    // The current index contract preserves Required/Optional/Soft exactly.
+    // Development indexes with any other format version are disposable.
+    constexpr u16 IndexMajorVersion = 2;
     constexpr u16 IndexMinorVersion = 0;
     constexpr u32 IndexHeaderSize = 128;
     constexpr char IndexFileName[] = "asset-dependencies.vadi";
@@ -367,6 +369,10 @@ namespace vanguard::assets
                 }
                 for (const BuildDependency& dependency : record->dependencies)
                 {
+                    if (dependency.requirement == DependencyRequirement::Soft)
+                    {
+                        continue;
+                    }
                     bool duplicate = dependency.identity == record->source;
                     for (const BuildDependency& previous : record->dependencies)
                     {
@@ -610,7 +616,7 @@ namespace vanguard::assets
             {
                 return IndexResult::Corrupt;
             }
-            if (magic != IndexMagic || major != IndexMajorVersion || minor > IndexMinorVersion || settings != impl.config.settingsFingerprint)
+            if (magic != IndexMagic || major != IndexMajorVersion || minor != IndexMinorVersion || settings != impl.config.settingsFingerprint)
             {
                 return IndexResult::Incompatible;
             }

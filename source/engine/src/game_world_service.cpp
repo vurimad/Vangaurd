@@ -4,6 +4,8 @@
 #include <vanguard/engine/resources_service.hpp>
 #include <vanguard/engine/rendering_service.hpp>
 #include <vanguard/engine/world_service.hpp>
+#include <vanguard/entities/static_mesh_component.hpp>
+#include <vanguard/entities/scene_components.hpp>
 #include <vanguard/jobs/jobs.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/prefabs/prefabs.hpp>
@@ -104,6 +106,8 @@ namespace
             m_rendering = AllocateRenderingRuntime(m_renderingService->GetScenes(), m_config.rendering);
             m_cellStreaming = AllocateCellStreamingSystem(systemConfig);
             if (m_components == nullptr || m_transforms == nullptr || m_rendering == nullptr || m_cellStreaming == nullptr ||
+                !m_rendering->BindMeshResidency(m_renderingService->GetMeshResidency()) ||
+                !m_rendering->BindCommands(m_renderingService->GetCommands(), m_renderingService->GetRenderPhases()) ||
                 !m_rendering->BindDistantProxyStreaming(m_worldService->GetResource()->GetFile(), *m_worldService->GetExecutor()) ||
                 !m_world.RegisterSystem(*m_components) || !m_world.RegisterSystem(*m_transforms) ||
                 !m_world.RegisterSystem(*m_rendering) || !m_world.RegisterSystem(*m_cellStreaming) || !m_world.Initialize(m_config.world))
@@ -352,6 +356,11 @@ namespace
                 m_transformTail = {};
             }
             vanguard::entities::VisualRelinkFailure failure;
+            if (m_rendering != nullptr && !m_rendering->FlushCameraTransforms())
+            {
+                m_status = vanguard::engine::GameWorldStatus::Failed;
+                return false;
+            }
             if (m_rendering != nullptr && m_rendering->ConsumeRelinkFailure(failure))
             {
                 m_status = vanguard::engine::GameWorldStatus::Failed;
@@ -370,6 +379,9 @@ namespace
         {
             auto* const service = static_cast<ManagedGameWorldService*>(userData);
             return service != nullptr &&
+                   vanguard::entities::RegisterStaticMeshComponent(registry) &&
+                   vanguard::entities::RegisterLightComponent(registry) &&
+                   vanguard::entities::RegisterCameraComponent(registry) &&
                    (service->m_config.registerComponents == nullptr || service->m_config.registerComponents(registry, service->m_config.userData));
         }
 

@@ -1,0 +1,938 @@
+/**
+* Copyright (c) 2016 CD Projekt Red. All Rights Reserved.
+*/
+// Until filip pierscinski fixes proper including for orbis
+#include "build.h"
+#include "renderNodeGraph.h"
+#include "renderNodeJob.h"
+#include "../../redJobs2/include/jobBuilder.h"
+
+//********************************************************************************//
+//********************************************************************************//
+
+#ifndef RED_CONFIGURATION_FINAL
+	// #define ENABLE_CPU_ORDER_RANDOMIZATION
+	static volatile Bool g_EnableCpuOrderRandomization = true;
+#endif
+
+//********************************************************************************//
+//********************************************************************************//
+
+template< typename T >
+RED_FORCE_INLINE CRenderNodeGraph::ItemId GetReindexedItemIdImpl( const T &targetGraphArray, const T &sourceGraphArray, const CRenderNodeGraph::ItemId &sourceId )
+{
+	return CRenderNodeGraph::INVALID_ITEM_ID != sourceId ? targetGraphArray.GetReindexedItemId( sourceGraphArray, sourceId ) : CRenderNodeGraph::INVALID_ITEM_ID;
+}
+
+RED_FORCE_INLINE Bool IsRenderNodeTypeInRange( ERenderNodeType type, ERenderNodeType rangeFirst, ERenderNodeType rangeLast )
+{
+	RED_ASSERT( rangeFirst <= rangeLast );
+	return type >= rangeFirst && type <= rangeLast;
+}
+
+RED_FORCE_INLINE Bool IsRenderNodesTypeRangesOverlapping( ERenderNodeType rangeFirst0, ERenderNodeType rangeLast0, ERenderNodeType rangeFirst1, ERenderNodeType rangeLast1 )
+{
+	RED_ASSERT( rangeFirst0 <= rangeLast0 );
+	RED_ASSERT( rangeFirst1 <= rangeLast1 );
+
+	if ( rangeFirst0 > rangeFirst1 )
+	{
+		Swap( rangeFirst0, rangeFirst1 );
+		Swap( rangeLast0, rangeLast1 );
+	}
+
+	return rangeLast0 >= rangeFirst1;
+}
+
+//********************************************************************************//
+//********************************************************************************//
+
+CRenderNodeGraph::SRenderNodeData::SRenderNodeData ()
+{	
+	for ( Uint32 i=0; i<RNDT_MAX; ++i )
+	{
+		m_firstParentDep[i] = INVALID_ITEM_ID;
+		m_firstChildDep[i] = INVALID_ITEM_ID;
+	}
+}
+
+Bool CRenderNodeGraph::SRenderNodeData::HasAnyDependency() const
+{
+	for ( Uint32 i=0; i<RNDT_MAX; ++i )
+	{
+		if ( INVALID_ITEM_ID != m_firstParentDep[i] || INVALID_ITEM_ID != m_firstChildDep[i] )
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+Bool CRenderNodeGraph::SRenderNodeData::HasAnyDependency( ERelationType relationType, ERenderNodeDependencyType depType ) const
+{
+	return INVALID_ITEM_ID != m_deps[relationType][depType];
+}
+
+Uint32 CRenderNodeGraph::SRenderNodeData::GetNumDependencies( const CRenderNodeGraph &graph, ERelationType relationType, ERenderNodeDependencyType depType ) const
+{
+	Uint32 numDeps = 0;
+	const ERelationType invertedRelationType = GetInvertedRelation( relationType );
+	for ( ItemId depId = m_deps[relationType][depType]; INVALID_ITEM_ID != depId; depId = graph.m_dependencies[depId].m_nextDep[invertedRelationType] )
+	{
+		++numDeps;
+	}
+	return numDeps;
+}
+
+//********************************************************************************//
+//********************************************************************************//
+
+CRenderNodeGraph::CRenderNodeGraph ()
+	: m_updateFlag( "Modifying CRenderNodeGraph while in use" )
+	, m_isBuilt ( false )
+	, m_nodes ( 0, 250 )
+	, m_dependencies ( 0, 500 )
+{
+} 
+
+Bool CRenderNodeGraph::IsAllocated( ItemId id ) const
+{
+	RED_ASSERT( NodesArray::IsValidId( id ) != DependenciesArray::IsValidId( id ) );
+	return NodesArray::IsValidId( id ) ? m_nodes.IsAllocated( id ) : m_dependencies.IsAllocated( id );
+}
+
+CRenderNodeGraph::ItemId CRenderNodeGraph::AddNode( const SRenderNodeParameters &nodeParams, Int32 cameraIndex )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	ItemId newNodeId = m_nodes.Allocate();
+	RED_ASSERT( !m_nodes[ newNodeId ].HasAnyDependency() );
+	m_nodes[ newNodeId ].m_renderNodeParams = nodeParams;
+	m_nodes[ newNodeId ].m_renderNodeContext.Set( cameraIndex, 0, 0 );
+	return newNodeId;
+}
+
+CRenderNodeGraph::ItemId CRenderNodeGraph::AddDependency( ItemId parentNodeId, ItemId childNodeId, ERenderNodeDependencyType depType, Bool swapParentChild )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	if ( swapParentChild )
+	{
+		Swap( parentNodeId, childNodeId );
+	}
+
+	RED_ASSERT( IsAllocated( parentNodeId ) && NodesArray::IsValidId( parentNodeId ) );
+	RED_ASSERT( IsAllocated( childNodeId ) && NodesArray::IsValidId( childNodeId ) );
+	RED_ASSERT( parentNodeId != childNodeId );
+	RED_ASSERT( !HasDependency( parentNodeId, childNodeId, depType, false ) );
+
+	SRenderNodeData &parentNode = m_nodes[parentNodeId];
+	SRenderNodeData &childNode = m_nodes[childNodeId];
+	
+	const ItemId newDepId = m_dependencies.Allocate();
+	m_dependencies[newDepId].m_parentNode = parentNodeId;
+	m_dependencies[newDepId].m_childNode = childNodeId;
+	m_dependencies[newDepId].m_parentNodeNextDep = parentNode.m_firstChildDep[depType];
+	m_dependencies[newDepId].m_childNodeNextDep = childNode.m_firstParentDep[depType];
+	m_dependencies[newDepId].m_type = depType;
+	
+	parentNode.m_firstChildDep[depType] = newDepId;
+	childNode.m_firstParentDep[depType] = newDepId;
+
+	RED_ASSERT( newDepId == FindDependency( parentNodeId, childNodeId, depType, false ) );
+	return newDepId;
+}
+
+Bool CRenderNodeGraph::HasDependency( ItemId parentNodeId, ItemId childNodeId, ERenderNodeDependencyType depType, Bool swapParentChild ) const
+{
+	return INVALID_ITEM_ID != FindDependency( parentNodeId, childNodeId, depType, swapParentChild );
+}
+
+CRenderNodeGraph::ItemId CRenderNodeGraph::FindDependency( ItemId parentNodeId, ItemId childNodeId, ERenderNodeDependencyType depType, Bool swapParentChild ) const
+{
+	if ( swapParentChild )
+	{
+		Swap( parentNodeId, childNodeId );
+	}
+
+	RED_ASSERT( IsAllocated( parentNodeId ) && NodesArray::IsValidId( parentNodeId ) );
+	RED_ASSERT( IsAllocated( childNodeId ) && NodesArray::IsValidId( childNodeId ) );
+
+	const SRenderNodeData &parentNode = m_nodes[parentNodeId];
+	for ( ItemId depId = parentNode.m_firstChildDep[depType]; INVALID_ITEM_ID != depId; depId = m_dependencies[depId].m_parentNodeNextDep )
+	{
+		const SDependencyData &dep = m_dependencies[depId];
+		RED_ASSERT( parentNodeId == dep.m_parentNode );
+		RED_ASSERT( depType == dep.m_type );
+		if ( childNodeId == dep.m_childNode )
+		{
+			return depId;
+		}
+	}
+
+	return INVALID_ITEM_ID;
+}
+
+void CRenderNodeGraph::Remove( ItemId id )
+{
+	RED_ASSERT( !m_isBuilt );
+	RED_ASSERT( NodesArray::IsValidId( id ) != DependenciesArray::IsValidId( id ) );
+	RED_ASSERT( IsAllocated( id ) );
+	
+	if ( NodesArray::IsValidId( id ) )
+	{
+		RemoveNode( id, false );
+	}
+	else
+	{
+		RemoveDependency( id );
+	}
+}
+
+void CRenderNodeGraph::RemoveDependency( ItemId id )
+{
+	RED_ASSERT( !m_isBuilt );
+	RED_ASSERT( IsAllocated( id ) && DependenciesArray::IsValidId( id ) );
+
+	const SDependencyData &dep = m_dependencies[id];
+	RED_ASSERT( HasDependency( dep.m_parentNode, dep.m_childNode, dep.m_type, false ) );
+	
+	// Detach from parent
+	if ( INVALID_ITEM_ID != dep.m_parentNode )
+	{
+		ItemId *ptr = &m_nodes[dep.m_parentNode].m_firstChildDep[dep.m_type];
+		while ( id != *ptr )
+		{
+			ptr = &m_dependencies[*ptr].m_parentNodeNextDep;
+			RED_ASSERT( INVALID_ITEM_ID != *ptr );
+		}
+		RED_ASSERT( *ptr != dep.m_parentNodeNextDep );
+		*ptr = dep.m_parentNodeNextDep;
+	}
+
+	// Detach from child
+	if ( INVALID_ITEM_ID != dep.m_childNode )
+	{
+		ItemId *ptr = &m_nodes[dep.m_childNode].m_firstParentDep[dep.m_type];
+		while ( id != *ptr )
+		{
+			ptr = &m_dependencies[*ptr].m_childNodeNextDep;
+			RED_ASSERT( INVALID_ITEM_ID != *ptr );
+		}
+		RED_ASSERT( *ptr != dep.m_childNodeNextDep );
+		*ptr = dep.m_childNodeNextDep;
+	}
+
+	// Free dependency
+	RED_ASSERT( !HasDependency( dep.m_parentNode, dep.m_childNode, dep.m_type, false ) );
+	m_dependencies.Free( id );
+
+	RED_ASSERT( !IsAllocated( id ) );
+}
+
+void CRenderNodeGraph::RemoveNode( ItemId id, Bool mergeDependencies )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	// Merge dependencies (add deps between all parents and children if they are not already dependent)
+	if ( mergeDependencies )
+	{
+		SRenderNodeData &node = m_nodes[id];
+		for ( Uint32 dep_type_i=0; dep_type_i<RNDT_MAX; ++dep_type_i )
+		{
+			const ERenderNodeDependencyType depType = (ERenderNodeDependencyType)dep_type_i;
+			for ( ItemId parent_dep_id=node.m_firstParentDep[depType]; INVALID_ITEM_ID!=parent_dep_id; parent_dep_id=m_dependencies[parent_dep_id].m_childNodeNextDep )
+			{
+				const ItemId parentNodeId = m_dependencies[parent_dep_id].m_parentNode;
+				for ( ItemId child_dep_id=node.m_firstChildDep[depType]; INVALID_ITEM_ID!=child_dep_id; child_dep_id=m_dependencies[child_dep_id].m_parentNodeNextDep )
+				{
+					const ItemId childNodeId = m_dependencies[child_dep_id].m_childNode;
+					if ( HasDependency( parentNodeId, childNodeId, depType, false ) )
+						continue;
+					RED_VERIFY( INVALID_ITEM_ID != AddDependency( parentNodeId, childNodeId, depType, false ) );
+				}
+			}
+		}
+	}
+
+	// Remove the node
+	{
+		RED_ASSERT( IsAllocated( id ) && NodesArray::IsValidId( id ) );
+
+		// Remove dependencies from given node
+		RemoveNodeDependencies( id );
+
+		// Free node
+		m_nodes.Free( id );
+
+		RED_ASSERT( !IsAllocated( id ) );
+	}
+}
+
+
+void CRenderNodeGraph::CopyDependencies( ItemId sourceNodeId, ItemId targetNodeId, ERelationType relationType, ERenderNodeDependencyType depType )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	if ( sourceNodeId == targetNodeId )
+	{
+		return;
+	}
+
+	const SRenderNodeData &sourceNode = m_nodes[sourceNodeId];
+	const SRenderNodeData &targetNode = m_nodes[targetNodeId];
+	const Bool needsExistingNodesTest = true; // acrs todo figure out why do I need this test afterall... !targetNode.HasAnyDependency( relationType, depType );
+	const Bool swapParentChild = RELTYPE_Child == relationType;
+	const ERelationType invertedRelationType = GetInvertedRelation( relationType );
+	for ( ItemId source_dep_id=sourceNode.m_deps[relationType][depType]; INVALID_ITEM_ID!=source_dep_id; source_dep_id=m_dependencies[source_dep_id].m_nextDep[invertedRelationType] )
+	{
+		const SDependencyData &sourceDep = m_dependencies[source_dep_id];
+		if ( needsExistingNodesTest && HasDependency( sourceDep.m_nodes[relationType], targetNodeId, depType, swapParentChild ) )
+			continue;
+		RED_VERIFY( INVALID_ITEM_ID != AddDependency( sourceDep.m_nodes[relationType], targetNodeId, depType, swapParentChild ) );
+	}
+}
+
+void CRenderNodeGraph::CopyDependencies( ItemId sourceNodeId, ItemId targetNodeId, ERelationType relationType )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	for ( Uint32 dep_type_i=0; dep_type_i<RNDT_MAX; ++dep_type_i )
+	{
+		CopyDependencies( sourceNodeId, targetNodeId, relationType, (ERenderNodeDependencyType)dep_type_i );
+	}
+}
+
+void CRenderNodeGraph::CopyDependencies( ItemId sourceNodeId, ItemId targetNodeId )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	for ( Uint32 rel_type_i=0; rel_type_i<RELTYPE_MAX; ++rel_type_i )
+	{
+		CopyDependencies( sourceNodeId, targetNodeId, (ERelationType)rel_type_i );
+	}
+}
+
+void CRenderNodeGraph::RemoveNodeDependencies( ItemId nodeId, ERelationType relationType, ERenderNodeDependencyType depType )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	SRenderNodeData &node = m_nodes[nodeId];
+	ItemId &refDepId = node.m_deps[relationType][depType];
+	while ( INVALID_ITEM_ID != refDepId )
+	{
+		RemoveDependency( refDepId );
+	}
+	RED_ASSERT( !node.HasAnyDependency( relationType, depType ) );
+}
+
+void CRenderNodeGraph::RemoveNodeDependencies( ItemId nodeId, ERelationType relationType )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	for ( Uint32 dep_type_i=0; dep_type_i<RNDT_MAX; ++dep_type_i )
+	{
+		RemoveNodeDependencies( nodeId, relationType, (ERenderNodeDependencyType)dep_type_i );
+	}
+}
+
+void CRenderNodeGraph::RemoveNodeDependencies( ItemId nodeId )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	for ( Uint32 rel_type_i=0; rel_type_i<RELTYPE_MAX; ++rel_type_i )
+	{
+		RemoveNodeDependencies( nodeId, (ERelationType)rel_type_i );
+	}
+}
+
+void CRenderNodeGraph::AddGraph( const CRenderNodeGraph &graph, Bool enableForceCameraIndex, TRenderFlowSpace forcedCameraIndex, Bool performMerge )
+{
+	PC_SCOPE(RenderNodeGraphAddGraph);
+	RED_ASSERT( !m_isBuilt );
+	RED_ASSERT( this != &graph );
+
+	// Allocate data for nodes and dependencies
+	const Uint32 nodesOffset = m_nodes.GetNumItems();
+	const Uint32 depsOffset = m_dependencies.GetNumItems();
+	m_nodes.Allocate( graph.m_nodes.GetNumItems() );
+	m_dependencies.Allocate( graph.m_dependencies.GetNumItems() );
+	RED_ASSERT( m_nodes.GetNumItems() == nodesOffset + graph.m_nodes.GetNumItems() );
+	RED_ASSERT( m_dependencies.GetNumItems() == depsOffset + graph.m_dependencies.GetNumItems() );
+
+	// Copy nodes data with reindexing
+	for ( Uint32 node_usage_i=0; node_usage_i<graph.m_nodes.GetNumItems(); ++node_usage_i )
+	{
+		const SRenderNodeData &sourceNode = graph.m_nodes[ graph.m_nodes.GetItemIdByUsageIndex( node_usage_i ) ];
+		SRenderNodeData &targetNode = m_nodes[ m_nodes.GetItemIdByUsageIndex( nodesOffset + node_usage_i ) ];
+		
+		targetNode.m_renderNodeParams = sourceNode.m_renderNodeParams;
+		targetNode.m_renderNodeContext = sourceNode.m_renderNodeContext;
+
+		if ( enableForceCameraIndex )
+		{
+			targetNode.m_renderNodeContext.m_cameraIndex = forcedCameraIndex;
+		}
+
+		for ( Uint32 rel_type_i=0; rel_type_i<RELTYPE_MAX; ++rel_type_i )
+		{
+			for ( Uint32 dep_type_i=0; dep_type_i<RNDT_MAX; ++dep_type_i )
+			{
+				targetNode.m_deps[rel_type_i][dep_type_i] = GetReindexedItemIdImpl( m_dependencies, graph.m_dependencies, sourceNode.m_deps[rel_type_i][dep_type_i] );				
+			}
+		}
+	}
+
+	// Copy dependencies data with reindexing
+	for ( Uint32 dep_usage_i=0; dep_usage_i<graph.m_dependencies.GetNumItems(); ++dep_usage_i )
+	{
+		const SDependencyData &sourceDep = graph.m_dependencies[ graph.m_dependencies.GetItemIdByUsageIndex( dep_usage_i ) ];
+		SDependencyData &targetDep = m_dependencies[ m_dependencies.GetItemIdByUsageIndex( depsOffset + dep_usage_i ) ];
+
+		targetDep.m_type = sourceDep.m_type;
+		for ( Uint32 rel_type_i=0; rel_type_i<RELTYPE_MAX; ++rel_type_i )
+		{
+			targetDep.m_nodes[rel_type_i] = GetReindexedItemIdImpl( m_nodes, graph.m_nodes, sourceDep.m_nodes[rel_type_i] );
+			targetDep.m_nextDep[rel_type_i] = GetReindexedItemIdImpl( m_dependencies, graph.m_dependencies, sourceDep.m_nextDep[rel_type_i] );
+		}
+	}
+
+	// Merge nodes
+	if ( performMerge )
+	{
+		MergeNodes( nodesOffset );
+	}
+}
+
+void CRenderNodeGraph::MergeNodes( Uint32 numOriginalUsedNodeIndices )
+{
+	PC_SCOPE(RenderNodeGraphMergeNodes);
+
+	RED_ASSERT( !m_isBuilt );
+
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	struct Local
+	{
+		enum { NUM_SPACIAL_NODE_TYPES = 3 };
+
+		static Bool IsSpecialNodeType( ERenderNodeType nodeType )
+		{
+			return RNT_SequenceBegin == nodeType || RNT_SequenceEnd == nodeType || RNT_Unique == nodeType;
+		}
+
+		static Uint32 GetSpecialNodeIndex( ERenderNodeType nodeType )
+		{	
+			RED_FATAL_ASSERT( IsSpecialNodeType( nodeType ), "" );
+			RED_STATIC_ASSERT( (Uint32)RNT_SequenceBegin == (Uint32)RNT_Unique + 1 );
+			RED_STATIC_ASSERT( (Uint32)RNT_SequenceEnd == (Uint32)RNT_SequenceBegin + 1 );
+			return (Uint32)nodeType - (Uint32)RNT_Unique;
+		}
+	};
+	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	// Build special nodes data
+	const Uint32 nodeSubtypeCapacity = 64;
+	ItemId specialNodesIds[2][Local::NUM_SPACIAL_NODE_TYPES][nodeSubtypeCapacity];
+	{
+		// Clear table
+		for ( Uint32 i=0; i<2; ++i )
+		{
+			for ( Uint32 j=0; j<Local::NUM_SPACIAL_NODE_TYPES; ++j )
+			{
+				for ( Uint32 k=0; k<nodeSubtypeCapacity; ++k )
+				{
+					specialNodesIds[i][j][k] = INVALID_ITEM_ID;
+				}
+			}
+		}
+		
+		// Fill special nodeId's data
+		if ( numOriginalUsedNodeIndices > 0 && numOriginalUsedNodeIndices < m_nodes.GetNumItems() )
+		{
+			for ( Uint32 node_usage_i=0; node_usage_i<m_nodes.GetNumItems(); ++node_usage_i )
+			{
+				const ItemId nodeId = m_nodes.GetItemIdByUsageIndex( node_usage_i );
+				const SRenderNodeData &node = m_nodes[ nodeId ];
+				const ERenderNodeType nodeType = node.m_renderNodeParams.m_type;
+
+				if ( !Local::IsSpecialNodeType( nodeType ) )
+					continue;
+
+				const Uint32 graphIndex = node_usage_i < numOriginalUsedNodeIndices ? 0 : 1;
+				const Uint32 subtypeIndex = node.m_renderNodeParams.m_subType.GetValue();
+				RED_FATAL_ASSERT( subtypeIndex < nodeSubtypeCapacity, "Subtype too big" );
+				ItemId &refSpecialId = specialNodesIds[graphIndex][Local::GetSpecialNodeIndex(nodeType)][subtypeIndex] ;
+				if ( INVALID_ITEM_ID != refSpecialId )
+				{
+					RED_FATAL( "Special nodes shouldn't be duplicated around one graph" );
+					return;
+				}
+
+				refSpecialId = nodeId;
+			}
+		}
+
+		// Check if special nodes are valid
+		for ( Uint32 graph_i=0; graph_i<2; ++graph_i )
+		for ( Uint32 subtype_i=0; subtype_i<nodeSubtypeCapacity; ++subtype_i )
+		{
+			const Bool beginPresent = INVALID_ITEM_ID != specialNodesIds[graph_i][Local::GetSpecialNodeIndex(RNT_SequenceBegin)][subtype_i];
+			const Bool endPresent = INVALID_ITEM_ID != specialNodesIds[graph_i][Local::GetSpecialNodeIndex(RNT_SequenceEnd)][subtype_i];
+			if ( endPresent != beginPresent )
+			{
+				RED_FATAL( "Sequence nodes pair is broken - only one of the node is present" );
+				return;
+			}
+		}
+	}
+
+	// Merge unique nodes
+	for ( Uint32 unique_subtype_i=0; unique_subtype_i<nodeSubtypeCapacity; ++unique_subtype_i )
+	{
+		const ItemId itemId0 = specialNodesIds[0][Local::GetSpecialNodeIndex(RNT_Unique)][unique_subtype_i];
+		const ItemId itemId1 = specialNodesIds[1][Local::GetSpecialNodeIndex(RNT_Unique)][unique_subtype_i];
+		if ( !(INVALID_ITEM_ID != itemId0 && INVALID_ITEM_ID != itemId1) )
+		{
+			// note. it's perfectly valid if a unique node was present only in one graph
+			continue;
+		}
+
+		CopyDependencies( itemId1, itemId0 );
+		RemoveNode( itemId1, false );
+	}
+
+	// Merge nodes sequences
+	for ( Uint32 sequence_subtype_i=0; sequence_subtype_i<nodeSubtypeCapacity; ++sequence_subtype_i )
+	{
+		const ItemId seqBegin0	= specialNodesIds[0][Local::GetSpecialNodeIndex(RNT_SequenceBegin)][sequence_subtype_i];
+		const ItemId seqEnd0	= specialNodesIds[0][Local::GetSpecialNodeIndex(RNT_SequenceEnd)][sequence_subtype_i];
+		const ItemId seqBegin1	= specialNodesIds[1][Local::GetSpecialNodeIndex(RNT_SequenceBegin)][sequence_subtype_i];
+		const ItemId seqEnd1	= specialNodesIds[1][Local::GetSpecialNodeIndex(RNT_SequenceEnd)][sequence_subtype_i];
+
+		// Skip if there is nothing to merge (sequence pair is present in both graphs).
+		RED_ASSERT( (INVALID_ITEM_ID != seqBegin0) == (INVALID_ITEM_ID != seqEnd0) && "Wasn't that tested before?" );
+		RED_ASSERT( (INVALID_ITEM_ID != seqBegin1) == (INVALID_ITEM_ID != seqEnd1) && "Wasn't that tested before?" );
+		if ( !(INVALID_ITEM_ID != seqBegin0 && INVALID_ITEM_ID != seqBegin1) )
+		{
+			continue;
+		}
+
+		CopyDependencies( seqBegin1, seqBegin0, RELTYPE_Parent );
+		RemoveNodeDependencies( seqBegin1, RELTYPE_Parent );
+		CopyDependencies( seqEnd0, seqBegin1, RELTYPE_Parent );
+		CopyDependencies( seqEnd0, seqEnd1, RELTYPE_Child );
+		RemoveNode( seqEnd0, false );
+		RemoveNode( seqBegin1, true );
+	}
+}
+
+void CRenderNodeGraph::RemoveHelperNodes()
+{
+	RED_ASSERT( !m_isBuilt );
+
+	for ( Uint32 node_usage_i=0; node_usage_i<m_nodes.GetNumItems(); ++node_usage_i )
+	{
+		const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(node_usage_i);
+		const SRenderNodeData &node = m_nodes[ nodeId ];
+		if ( IsRenderNodeTypeInRange( node.m_renderNodeParams.m_type, RNT_Range_HelperFirst, RNT_Range_HelperLast ) )
+		{
+			RemoveNode( nodeId, true );
+			--node_usage_i;
+			continue;
+		}
+	}
+
+#ifdef RED_ASSERTS_ENABLED
+	for ( Uint32 node_usage_i=0; node_usage_i; ++node_usage_i )
+	{
+		const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(node_usage_i);
+		const SRenderNodeData &node = m_nodes[ nodeId ];
+		RED_ASSERT( !IsRenderNodeTypeInRange( node.m_renderNodeParams.m_type, RNT_Range_HelperFirst, RNT_Range_HelperLast ) && "Seems like node removal is reindexing nodes so that some next nodes and up behind usage index of the node being removed" );
+	}
+#endif
+}
+
+#ifdef ENABLE_CPU_ORDER_RANDOMIZATION
+void GenerateRandomIndices( red::DynArray<Uint32> &outArray, Uint32 size )
+{
+	outArray.Resize( size );
+
+	for ( Uint32 i=0; i<size; ++i )
+	{
+		outArray[i] = i;
+	}
+
+	if ( g_EnableCpuOrderRandomization )
+	{
+		for ( Uint32 i=0; i<size*10; ++i )
+		{
+			Uint32 r0 = rand() % size;
+			Uint32 r1 = rand() % size;
+			Swap( outArray[r0], outArray[r1] );
+		}
+	}
+}
+#endif
+
+void CRenderNodeGraph::CalculateNodeLevelInRenderFlowGroup_Recursive( ERenderNodeDependencyType depType, ItemId nodeItemId, red::DynArray< Uint32 >& levelsNodesCount )
+{
+	RED_ASSERT( !m_isBuilt );
+
+	// DEBUG - - - - - - - - - - - - - -
+	const Uint32 nodeIdx = m_nodes.IdToIndex( nodeItemId );
+	// DEBUG - - - - - - - - - - - - - -
+
+	SRenderNodeData& node = m_nodes[ nodeItemId ];
+	TRenderFlowGroup level = node.m_renderNodeContext.m_renderFlowGroups[depType];
+
+	#ifdef ENABLE_CPU_ORDER_RANDOMIZATION
+		// get childNodes table
+		red::DynArray<Uint32> childNodes{ rend::PoolRenderGraph() };
+		childNodes.Reserve( 4 * 1024 );
+		for ( ItemId depId = node.m_firstChildDep[depType]; INVALID_ITEM_ID != depId; depId = m_dependencies[depId].m_parentNodeNextDep )
+		{
+			childNodes.PushBack( m_dependencies[depId].m_childNode );
+		}
+
+		// generate random order table
+		red::DynArray<Uint32> randomOrder{ rend::PoolRenderGraph() };
+		GenerateRandomIndices( randomOrder, childNodes.Size() );
+
+		for ( Uint32 i=0; i<childNodes.Size(); ++i )
+		{
+			ItemId childNodeId = childNodes[randomOrder[i]];
+			SRenderNodeData& childNode = m_nodes[ childNodeId ];
+
+			TRenderFlowGroup& childLevel = childNode.m_renderNodeContext.m_renderFlowGroups[depType];
+
+			if ( childLevel <= level )
+			{
+				if ( childLevel > 0 ) // 0 is an "init" value for all nodes except for roots (for which 0 indeed is their level)
+					levelsNodesCount[ childLevel ]--;
+				childLevel = level + 1;
+				levelsNodesCount[ childLevel ]++;
+
+				CalculateNodeLevelInRenderFlowGroup_Recursive( depType, childNodeId, levelsNodesCount );
+			}
+		}
+	#else
+		for ( ItemId depId = node.m_firstChildDep[depType]; INVALID_ITEM_ID != depId; depId = m_dependencies[depId].m_parentNodeNextDep )
+		{
+			ItemId childNodeId = m_dependencies[depId].m_childNode;
+			SRenderNodeData& childNode = m_nodes[ childNodeId ];
+
+			TRenderFlowGroup& childLevel = childNode.m_renderNodeContext.m_renderFlowGroups[depType];
+
+			if ( childLevel <= level )
+			{
+				if ( childLevel > 0 )
+					levelsNodesCount[ childLevel ]--;
+				childLevel = level + 1;
+				levelsNodesCount[ childLevel ]++;
+
+				CalculateNodeLevelInRenderFlowGroup_Recursive( depType, childNodeId, levelsNodesCount );
+			}
+		}
+	#endif
+}
+
+void CRenderNodeGraph::BuildRenderFlowGroups()
+{
+	PC_SCOPE(RenderNodeGraphBuildRenderFlowGroups);
+
+	RED_ASSERT( !m_isBuilt );
+
+	for ( Uint32 node_usage_i=0; node_usage_i<m_nodes.GetNumItems(); ++node_usage_i )
+	{
+		SRenderNodeData &node = m_nodes[ m_nodes.GetItemIdByUsageIndex( node_usage_i ) ];
+		for ( Uint32 dep_type_i=0; dep_type_i<RNDT_MAX; ++dep_type_i )
+		{
+			node.m_renderNodeContext.m_renderFlowGroups[dep_type_i] = 0;
+		}
+	}
+
+	RED_ASSERT( m_nodes.GetNumItems() < 0xffff );
+
+	red::DynArray< Uint32 > levelsNodesCount{ rend::PoolRenderGraph() }; // stores the number of nodes in each level (TODO: values stored here could possibly be stored in nodes thus avoiding need to allocate this extra memory)
+	levelsNodesCount.Resize( m_nodes.GetNumItems() ); // nodes count is the max number of possible levels
+
+#ifdef ENABLE_CPU_ORDER_RANDOMIZATION
+	red::DynArray< Uint32 > randomOrder{ rend::PoolRenderGraph() };
+	GenerateRandomIndices( randomOrder, m_nodes.GetNumItems() );
+#endif
+
+	for ( Uint32 dep_type_i=0; dep_type_i<RNDT_MAX; ++dep_type_i )
+	{
+		for ( Uint32 node_index_i=0; node_index_i<m_nodes.GetNumItems(); ++node_index_i )
+			levelsNodesCount[ node_index_i ] = 0;
+
+		// find on which (depth) levels all nodes are (a node whose "deepest" parent is at level i will be at level i+1)
+		for ( Uint32 node_index_i=0; node_index_i<m_nodes.GetNumItems(); ++node_index_i )
+		{
+		#ifdef ENABLE_CPU_ORDER_RANDOMIZATION
+			const Uint32 nodeItemId = m_nodes.GetItemIdByUsageIndex( randomOrder[node_index_i] );
+		#else
+			const Uint32 nodeItemId = m_nodes.GetItemIdByUsageIndex( node_index_i );
+		#endif
+
+			SRenderNodeData &node = m_nodes[ nodeItemId ];
+
+			if ( node.m_firstParentDep[dep_type_i] == INVALID_ITEM_ID )
+			{
+				levelsNodesCount[0]++;
+				CalculateNodeLevelInRenderFlowGroup_Recursive( (ERenderNodeDependencyType)dep_type_i, nodeItemId, levelsNodesCount );
+			}
+		}
+
+		// levelsNodesCount will now store accumulated nodes counts (level0 stores level0 nodes count, level1 stores level0+level1, etc.)
+		for ( Uint32 level_index_i=1; level_index_i<m_nodes.GetNumItems(); ++level_index_i )
+		{
+			if ( levelsNodesCount[level_index_i] == 0 )
+				break;
+
+			levelsNodesCount[level_index_i] += levelsNodesCount[ level_index_i - 1 ];
+		}
+
+		// transform nodes' levels to actual render flow groups (order is irrelevant but with this one the values will be nicer to read)
+		for ( Int32 node_usage_i=m_nodes.GetNumItems()-1; node_usage_i>=0; --node_usage_i )
+		{
+		#ifdef ENABLE_CPU_ORDER_RANDOMIZATION
+			SRenderNodeData &node = m_nodes[ m_nodes.GetItemIdByUsageIndex(randomOrder[node_usage_i]) ];
+		#else
+			SRenderNodeData &node = m_nodes[ m_nodes.GetItemIdByUsageIndex(node_usage_i) ];
+		#endif
+
+			Uint32 levelIndex = node.m_renderNodeContext.m_renderFlowGroups[dep_type_i];
+			node.m_renderNodeContext.m_renderFlowGroups[dep_type_i] = levelsNodesCount[levelIndex] - 1;
+			levelsNodesCount[levelIndex]--;
+		}
+	}
+
+	// Mark as built
+	m_isBuilt = true;
+
+	// #TODO: Re-enable some sort of sanity check? This is disabled now, because Gpu dependencies don't give a perfect
+	// ordering. Only nodes that deal with gpu command lists should be involved with the Gpu dependencies. That ends up
+	// breaking this check because there might be Cpu dependencies, but no Gpu dependency to put them in the proper
+	// order.
+#if 0
+	// Perform some sanity checks
+#ifdef RED_ASSERTS_ENABLED
+	{
+		red::DynArray<ItemId> nodes{ rend::PoolRenderGraph() };
+		BuildFlattenedNodesArray( nodes, RNDT_Gpu );
+		RED_ASSERT( IsFlattenedNodesArrayDepsValid( nodes ) && "Dependencies are not valid. Make sure that you did setup them correctly, i.e. cpu and gpu deps need to match (no situation like cpu:a->b and gpu:b->a)" );
+	}
+#endif
+#endif
+}
+
+void CRenderNodeGraph::BuildFlattenedNodesArray( red::DynArray<ItemId> &outNodes, ERenderNodeDependencyType depType ) const
+{
+	RED_ASSERT( m_isBuilt );
+
+	outNodes.Resize( m_nodes.GetNumItems() );
+
+	// Init with invalid item id
+	for ( Uint32 i=0; i<outNodes.Size(); ++i )
+	{
+		outNodes[i] = INVALID_ITEM_ID;
+	}
+
+	// Insert nodes to the array
+	for ( Uint32 i=0; i<m_nodes.GetNumItems(); ++i )
+	{
+		const ItemId nodeId = m_nodes.GetItemIdByUsageIndex( i );
+		const TRenderFlowGroup flowGroup = m_nodes[nodeId].m_renderNodeContext.m_renderFlowGroups[depType];
+		RED_FATAL_ASSERT( flowGroup < outNodes.Size(), "Expected order group to be in specified range" );
+		RED_FATAL_ASSERT( INVALID_ITEM_ID == outNodes[flowGroup], "Multiple groups with the same order?" );
+		outNodes[flowGroup] = nodeId;
+	}
+
+	// Some sanity checks
+	#ifdef RED_ASSERTS_ENABLED
+	for ( Uint32 i=0; i<outNodes.Size(); ++i )
+	{
+		RED_FATAL_ASSERT( outNodes[i] != INVALID_ITEM_ID, "Expected every ordered node to be filled" );
+	}
+	#endif
+}
+
+Bool CRenderNodeGraph::IsFlattenedNodesArrayDepsValid( const red::DynArray<ItemId> &flattenedNodes ) const
+{	
+	for ( Uint32 i=0; i+1<flattenedNodes.Size(); ++i )
+	for ( Uint32 j=i+1; j<flattenedNodes.Size(); ++j )
+	{
+		const ItemId nodeIdA = flattenedNodes[i];
+		const ItemId nodeIdB = flattenedNodes[j];
+		const SRenderNodeData &nodeA = m_nodes[nodeIdA]; // for easier debugging
+		const SRenderNodeData &nodeB = m_nodes[nodeIdB]; // for easier debugging
+
+		for ( Uint32 dep_i=0; dep_i<RNDT_MAX; ++dep_i )
+		{
+			if ( HasDependency( nodeIdB, nodeIdA, (ERenderNodeDependencyType)dep_i ) )
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+void CRenderNodeGraph::Execute( const SRenderNodeImplContext &rctx, job::Builder& builder ) const
+{
+	PC_SCOPE( RenderGraphExecute );
+	RED_ASSERT( m_isBuilt );
+
+	// Prepare nodes array
+	red::DynArray<ItemId> orderedNodes{ rend::PoolRenderGraph() };
+	BuildFlattenedNodesArray( orderedNodes, RNDT_Gpu );
+
+	// Prepare execution context (needs to have some parameters setup per node)
+	SRenderNodeImplContext execRenderNodeContext = rctx;
+	execRenderNodeContext.ResetNodeData();
+
+	// Execute nodes
+	for ( Uint32 i=0; i<orderedNodes.Size(); ++i )
+	{
+		const SRenderNodeData &node = m_nodes[orderedNodes[i]];
+		CRenderNodeBase *impl = node.m_renderNodeParams.m_impl;
+		if ( !impl )
+		{
+			continue;
+		}
+
+		execRenderNodeContext.SetupNodeData( node.m_renderNodeContext, node.m_renderNodeParams );
+
+		impl->Process( execRenderNodeContext, &builder );
+	}
+}
+
+void CRenderNodeGraph::ExecuteParallel( const SRenderNodeImplContext &rctx, job::Builder& builder ) const
+{
+	PC_SCOPE( RenderGraphExecuteParallel );
+	RED_ASSERT( m_isBuilt );
+
+	// Prepare nodes array
+	auto orderedNodes = red::CreateSharedPtr< red::DynArray<ItemId>, rend::PoolRenderGraph >( red::DynArray< ItemId >( rend::PoolRenderGraph() ) );
+	orderedNodes->Resize( m_nodes.GetNumItems() );
+
+	// Init with invalid item id
+	for ( Uint32 i = 0; i < orderedNodes->Size(); ++i )
+	{
+		(*orderedNodes.Get())[ i ] = INVALID_ITEM_ID;
+	}
+
+	// Insert nodes to the array in a non-sequential order but deterministic between calls.
+	// This step is needed in order to have proper balance between requests processed in each
+	// of the parallel batches. Nodes can have variable number of requests and processing them in 	
+	// order of submission to GPU yields unbalanced results. Quasi random index picked by trial 
+	// and error and tested on PS4 and PC.  
+	const Uint32 primeNumber = 1021;
+	RED_ASSERT( primeNumber > m_nodes.GetNumItems() );
+	Uint32 quasiRandomIndex = primeNumber % m_nodes.GetNumItems();
+	for ( Uint32 i = 0; i < m_nodes.GetNumItems(); ++i )
+	{
+		const ItemId nodeId = m_nodes.GetItemIdByUsageIndex( i );
+		const TRenderFlowGroup flowGroup = m_nodes[ nodeId ].m_renderNodeContext.m_renderFlowGroups[ RNDT_Gpu ];
+		RED_FATAL_ASSERT( flowGroup < orderedNodes->Size(), "Expected order group to be in specified range" );
+		RED_FATAL_ASSERT( INVALID_ITEM_ID == ( *orderedNodes.Get() )[ quasiRandomIndex ], "Multiple groups with the same order?" );
+
+		( *orderedNodes.Get() )[ quasiRandomIndex ] = nodeId;
+		quasiRandomIndex = ( quasiRandomIndex + primeNumber ) % m_nodes.GetNumItems();
+	}
+
+	
+	// Prepare execution context (needs to have some parameters setup per node)
+	SRenderNodeImplContext execRenderNodeContext = rctx;
+	execRenderNodeContext.ResetNodeData();
+
+	// Kick off parallel butches.
+	const Uint32 nodeBucketSize = 8;
+	const Uint32 nodeBucketCount = ( orderedNodes->Size() + nodeBucketSize -1 ) / nodeBucketSize;
+	builder.DispatchParallelForJob< job::Fence::None >( "FlowAllocator_PreConsume_Batch", { nodeBucketCount }, [ this, rctx, orderedNodes, nodeBucketSize ] ( Uint32 bucket_i, const job::RunContext& context ) /*mutable*/
+	{
+		SRenderNodeImplContext nodeCtx = rctx;
+		nodeCtx.ResetNodeData();
+
+		const Uint32 nodeStart_i = bucket_i * nodeBucketSize;
+		const Uint32 nodeEnd_i = nodeStart_i + nodeBucketSize;
+
+		for ( Uint32 k = nodeStart_i; k < nodeEnd_i && k < orderedNodes->Size(); k++ )
+		{
+			const SRenderNodeData &node = m_nodes[ ( *orderedNodes.Get() )[ k ] ];
+			if ( CRenderNodeBase *impl = node.m_renderNodeParams.m_impl )
+			{
+				nodeCtx.SetupNodeData( node.m_renderNodeContext, node.m_renderNodeParams );
+
+				job::Builder builder{ context };
+				impl->Process( nodeCtx, &builder );
+			}
+		}
+	} );
+
+	builder.DispatchFenceExplicitly();
+
+}
+
+void CRenderNodeGraph::DebugLog()
+{
+	RED_ASSERT( m_isBuilt );
+
+	RED_LOG( "CRenderNodeGraph: --- nodes (%i) ---------------------------------", (Int32)m_nodes.GetNumItems() );
+	for ( Uint32 node_usage_i=0; node_usage_i<m_nodes.GetNumItems(); ++node_usage_i )
+	{
+		const ItemId nodeId = m_nodes.GetItemIdByUsageIndex( node_usage_i );
+		const SRenderNodeData &node = m_nodes[nodeId];
+		RED_LOG( "CRenderNodeGraph: %u) type=%u impl=%p cameraIndex=%i cpuGroup=%u gpuGroup=%u nodeId=%u depsParentCpu=%u depsParentGpu=%u depsChildCpu=%u depsChildGpu=%u", 
+			(Uint32)node_usage_i, 
+			(Uint32)node.m_renderNodeParams.m_type, 
+			(void*)node.m_renderNodeParams.m_impl, 
+			(Uint32)node.m_renderNodeContext.m_cameraIndex,
+			(Uint32)node.m_renderNodeContext.m_renderFlowGroups[RNDT_Cpu],
+			(Uint32)node.m_renderNodeContext.m_renderFlowGroups[RNDT_Gpu],
+			(Uint32)nodeId,
+			(Uint32)node.GetNumDependencies( *this, RELTYPE_Parent, RNDT_Cpu ),
+			(Uint32)node.GetNumDependencies( *this, RELTYPE_Parent, RNDT_Gpu ),
+			(Uint32)node.GetNumDependencies( *this, RELTYPE_Child, RNDT_Cpu ),
+			(Uint32)node.GetNumDependencies( *this, RELTYPE_Child, RNDT_Gpu ) );
+	}
+
+	RED_LOG( "CRenderNodeGraph: --- dependencies (%i) --------------------------", (Int32)m_dependencies.GetNumItems() );
+	for ( Uint32 dep_usage_i=0; dep_usage_i<m_dependencies.GetNumItems(); ++dep_usage_i )
+	{
+		const ItemId depId = m_dependencies.GetItemIdByUsageIndex( dep_usage_i );
+		const SDependencyData &dep = m_dependencies[depId];
+		RED_LOG( "CRenderNodeGraph: %u) type=%u parentIndex=%u childIndex=%u parentId=%u parentId=%u depId=%u", 
+			(Uint32)dep_usage_i, 
+			(Uint32)dep.m_type, 
+			(Uint32)m_nodes.GetItemUsageIndex( dep.m_parentNode ), 
+			(Uint32)m_nodes.GetItemUsageIndex( dep.m_childNode ), 
+			(Uint32)dep.m_parentNode, 
+			(Uint32)dep.m_childNode,
+			(Uint32)depId );
+	}
+
+	RED_LOG( "CRenderNodeGraph: ------------------------------------------------" );
+}
+
+void CRenderNodeGraph::Reset()
+{
+	red::UpdateFlagGuard guard{ m_updateFlag, red::UpdateFlagGuard::Exclusive };
+
+	m_isBuilt = false;
+	m_nodes.Reset();
+	m_dependencies.Reset();
+}
+
+void CRenderNodeGraph::AcquireExclusiveUpdateFlag()
+{
+	m_updateFlag.AcquireExclusive();
+}
+
+void CRenderNodeGraph::ReleaseExclusiveUpdateFlag()
+{
+	m_updateFlag.ReleaseExclusive();
+}

@@ -1,0 +1,169 @@
+
+  redCompressionThirdPartyCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redCompressionThirdPartyCompat.lib
+  packagesCompat.vcxproj -> D:\ENGINE\build\output\Shipping\packagesCompat.lib
+  redSystemCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redSystemCompat.lib
+  serializationCompat.vcxproj -> D:\ENGINE\build\output\Shipping\serializationCompat.lib
+  system.vcxproj -> D:\ENGINE\build\output\Shipping\system.lib
+  memory.vcxproj -> D:\ENGINE\build\output\Shipping\memory.lib
+  redCompressionCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redCompressionCompat.lib
+          1 file(s) copied.
+  redMathCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redMathCompat.lib
+  redContainersCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redContainersCompat.lib
+  redIOCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redIOCompat.lib
+  redCoreCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redCoreCompat.lib
+          1 file(s) copied.
+  redFileSystemCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redFileSystemCompat.lib
+  filesystemCompat.vcxproj -> D:\ENGINE\build\output\Shipping\filesystemCompat.lib
+  ioCompat.vcxproj -> D:\ENGINE\build\output\Shipping\ioCompat.lib
+  diagnosticsCompat.vcxproj -> D:\ENGINE\build\output\Shipping\diagnosticsCompat.lib
+  diagnostics.vcxproj -> D:\ENGINE\build\output\Shipping\diagnostics.lib
+  containersCompat.vcxproj -> D:\ENGINE\build\output\Shipping\containersCompat.lib
+  containers.vcxproj -> D:\ENGINE\build\output\Shipping\containers.lib
+  io.vcxproj -> D:\ENGINE\build\output\Shipping\io.lib
+  filesystem.vcxproj -> D:\ENGINE\build\output\Shipping\filesystem.lib
+  serialization.vcxproj -> D:\ENGINE\build\output\Shipping\serialization.lib
+  crypto.vcxproj -> D:\ENGINE\build\output\Shipping\crypto.lib
+  concurrencyCompat.vcxproj -> D:\ENGINE\build\output\Shipping\concurrencyCompat.lib
+  concurrency.vcxproj -> D:\ENGINE\build\output\Shipping\concurrency.lib
+  redJobsCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redJobsCompat.lib
+  jobsCompat.vcxproj -> D:\ENGINE\build\output\Shipping\jobsCompat.lib
+  jobs.vcxproj -> D:\ENGINE\build\output\Shipping\jobs.lib
+  resources.vcxproj -> D:\ENGINE\build\output\Shipping\resources.lib
+  packages.vcxproj -> D:\ENGINE\build\output\Shipping\packages.lib
+  assets.vcxproj -> D:\ENGINE\build\output\Shipping\assets.lib
+  shaders.vcxproj -> D:\ENGINE\build\output\Shipping\shaders.lib
+  shaderTools.vcxproj -> D:\ENGINE\build\output\Shipping\shaderTools.lib
+  window_manager.cpp
+  window.vcxproj -> D:\ENGINE\build\output\Shipping\window.lib
+  sdl_window_backend.cpp
+LINK : fatal error LNK1181: cannot open input file '..\..\output\Shipping\SDL3.lib' [D:\ENGINE\build\projects\vs2022\windowSdl.vcxproj]
+  application.vcxproj -> D:\ENGINE\build\output\Shipping\application.lib
+  input.cpp
+  input.vcxproj -> D:\ENGINE\build\output\Shipping\input.lib
+  game_input.cpp
+  mapping_resource.cpp
+  gameInput.vcxproj -> D:\ENGINE\build\output\Shipping\gameInput.lib
+  pipelines.cpp
+  pipelines.vcxproj -> D:\ENGINE\build\output\Shipping\pipelines.lib
+  pipelineCache.vcxproj -> D:\ENGINE\build\output\Shipping\pipelineCache.lib
+  gpu_counters.cpp
+  rhi.cpp
+  rhi.vcxproj -> D:\ENGINE\build\output\Shipping\rhi.lib
+  redConfigCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redConfigCompat.lib
+  commProtocolCompat.vcxproj -> D:\ENGINE\build\output\Shipping\commProtocolCompat.lib
+  redNetworkCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redNetworkCompat.lib
+  commChannelCompat.vcxproj -> D:\ENGINE\build\output\Shipping\commChannelCompat.lib
+  redLexerCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redLexerCompat.lib
+  redReflectionCompat.vcxproj -> D:\ENGINE\build\output\Shipping\redReflectionCompat.lib
+  reflectionCompat.vcxproj -> D:\ENGINE\build\output\Shipping\reflectionCompat.lib
+  reflection.vcxproj -> D:\ENGINE\build\output\Shipping\reflection.lib
+  schemas.vcxproj -> D:\ENGINE\build\output\Shipping\schemas.lib
+  streaming.vcxproj -> D:\ENGINE\build\output\Shipping\streaming.lib
+  meshes.vcxproj -> D:\ENGINE\build\output\Shipping\meshes.lib
+  textures.vcxproj -> D:\ENGINE\build\output\Shipping\textures.lib
+  materials.cpp
+  materials.vcxproj -> D:\ENGINE\build\output\Shipping\materials.lib
+  custom_data.cpp
+  frame_renderer.cpp
+  geometry_allocator.cpp
+  geometry_diagnostics.cpp
+  geometry_frame_work.cpp
+  geometry_graph_nodes.cpp
+  geometry_upload.cpp
+  gpu_scene_definitions.cpp
+  gpu_scene_lifetime.cpp
+  gpu_scene_placement.cpp
+  gpu_scene_runtime.cpp
+  gpu_scene_tables.cpp
+  gpu_scene_upload.cpp
+  gpu_scene_view.cpp
+  gpu_scene_visibility.cpp
+  material_materializer.cpp
+  material_program_layout.cpp
+  material_residency_runtime.cpp
+  material_resource_resolver.cpp
+  material_scene_binding.cpp
+  mesh_draw_layout.cpp
+  mesh_geometry_upload.cpp
+  mesh_lod_definitions.cpp
+  mesh_lod_geometry_uploader.cpp
+  mesh_residency.cpp
+  pipeline_cache.cpp
+  presentation_service.cpp
+  render_camera.cpp
+  render_command_system.cpp
+  render_flow_resource_allocator.cpp
+  render_flow_resource_execution.cpp
+  render_flow_resource_placed.cpp
+  render_flow_resource_pool.cpp
+  render_flow_resource_resolve.cpp
+  render_geometry_batcher.cpp
+  render_graph_cache.cpp
+  render_graph_nodes.cpp
+  render_node_graph.cpp
+  render_node_graph_factory.cpp
+  render_node_impl_context.cpp
+  render_node_job.cpp
+  render_pipeline_factory.cpp
+  render_scene.cpp
+  render_scene_gpu.cpp
+  render_scene_spatial.cpp
+  render_shader.cpp
+  render_shader_map.cpp
+  render_view.cpp
+  texture_residency.cpp
+  texture_residency_runtime.cpp
+  texture_upload_candidate.cpp
+  texture_uploader.cpp
+  viewport.cpp
+  visibility_feedback.cpp
+  rendering.vcxproj -> D:\ENGINE\build\output\Shipping\rendering.lib
+  flecs.vcxproj -> D:\ENGINE\build\output\Shipping\flecs.lib
+  ecs.vcxproj -> D:\ENGINE\build\output\Shipping\ecs.lib
+  gameWorld.vcxproj -> D:\ENGINE\build\output\Shipping\gameWorld.lib
+  prefabs.vcxproj -> D:\ENGINE\build\output\Shipping\prefabs.lib
+  world.vcxproj -> D:\ENGINE\build\output\Shipping\world.lib
+  math.vcxproj -> D:\ENGINE\build\output\Shipping\math.lib
+  cell_streaming_system.cpp
+  component.cpp
+  component_directory.cpp
+  component_registry.cpp
+  component_runtime.cpp
+  hard_attachment.cpp
+  materializer.cpp
+  placed_component.cpp
+  reference_registry.cpp
+  rendering_runtime.cpp
+  root_transform_component.cpp
+  scene_components.cpp
+  static_mesh_component.cpp
+  transform_attachment.cpp
+  transform_binding.cpp
+  transform_component.cpp
+  transform_runtime.cpp
+  transform_system.cpp
+  visual_component.cpp
+  entities.vcxproj -> D:\ENGINE\build\output\Shipping\entities.lib
+  game_input_service.cpp
+  game_world_service.cpp
+  input_service.cpp
+  rendering_service.cpp
+  resource_streaming_service.cpp
+  streaming_observer_service.cpp
+  window_service.cpp
+  world_session_service.cpp
+  engine.vcxproj -> D:\ENGINE\build\output\Shipping\engine.lib
+  nvrhiCore.vcxproj -> D:\ENGINE\build\output\Shipping\nvrhiCore.lib
+  directXGuids.vcxproj -> D:\ENGINE\build\output\Shipping\directXGuids.lib
+  nvrhiD3D12.vcxproj -> D:\ENGINE\build\output\Shipping\nvrhiD3D12.lib
+  common_backend.cpp
+  d3d12_backend.cpp
+  resource_lifetime.cpp
+  rhiNvrhi.vcxproj -> D:\ENGINE\build\output\Shipping\rhiNvrhi.lib
+  project.cpp
+  projects.vcxproj -> D:\ENGINE\build\output\Shipping\projects.lib
+  imgui.cpp
+  imgui_draw.cpp
+  imgui_tables.cpp
+  imgui_widgets.cpp
+  imgui.vcxproj -> D:\ENGINE\build\output\Shipping\imgui.lib

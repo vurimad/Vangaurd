@@ -1,0 +1,54 @@
+/**
+* Copyright (c) 2016 CD Projekt Red. All Rights Reserved.
+*/
+
+#include "build.h"
+#include "renderNodeJob.h"
+#include "renderNodeGraph.h"
+#include "renderNodeImplContext.h"
+#include "renderInterface.h"
+#include "renderScene.h"
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#ifdef USE_PROFILER
+
+CDynamicPerfScope::CDynamicPerfScope( CRenderNodeBase* node, Bool cmdListBucketOpen )
+	: m_renderNodeImpl( node )
+	, m_cmdListOpen( cmdListBucketOpen && m_renderNodeImpl->AllowGpuScope() )
+	, m_gpuProfilerID( CRenderGpuProfiler::MAX_ENTRIES )
+{
+	// Put GPU profiler scope if we can
+	if ( m_cmdListOpen )
+	{
+		if ( IRenderGpuProfiler* gpuProfiler = GetRenderer()->GetGpuProfiler() )
+		{
+			CName name = m_renderNodeImpl->GetName();
+			// Start gpu annotation
+			GpuApi::BeginProfilerBlock( name.AsChar() );
+
+			m_gpuProfilerEntryIndex = gpuProfiler->AddEntry( name );
+			m_gpuProfilerID = gpuProfiler->StartEntry( m_gpuProfilerEntryIndex );
+		}
+	}
+}
+
+CDynamicPerfScope::~CDynamicPerfScope()
+{
+	if ( m_cmdListOpen )
+	{
+		if ( IRenderGpuProfiler* gpuProfiler = GetRenderer()->GetGpuProfiler() )
+		{
+			// Close GPU profiler entry
+			RED_FATAL_ASSERT( m_gpuProfilerEntryIndex != CRenderGpuProfiler::MAX_ENTRIES, "Assume gpu profiler entry was created successfully." );
+			GetRenderer()->GetGpuProfiler()->EndEntry( m_gpuProfilerID );
+
+			// Close annotation
+			GpuApi::EndProfilerBlock();
+		}
+	}
+}
+#endif
+
+//////////////////////////////////////////////////////////////////////////
+
+TRenderPtr< IRenderFrame > CRenderNodeJob::ms_jobInitFrame;

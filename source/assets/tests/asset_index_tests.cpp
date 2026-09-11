@@ -16,9 +16,12 @@ namespace
         resources::ResourceReference sharedSource;
         resources::ResourceReference leftSource;
         resources::ResourceReference rootSource;
+        resources::ResourceReference softSource;
         resources::ResourceReference sharedOutput;
         resources::ResourceReference leftOutput;
         resources::ResourceReference rootOutput;
+        resources::ResourceReference softOutput;
+        assets::DependencyRequirement softRequirement = assets::DependencyRequirement::Soft;
     };
 
     int g_failures = 0;
@@ -48,6 +51,11 @@ namespace
         if (request.source.identity == fixture.rootSource)
         {
             return collector.Add({fixture.leftOutput, {}, assets::DependencyRole::Generated, assets::DependencyRequirement::Required}) ==
+                   assets::Result::Success;
+        }
+        if (request.source.identity == fixture.softSource)
+        {
+            return collector.Add({fixture.sharedOutput, {}, assets::DependencyRole::Generated, fixture.softRequirement}) ==
                    assets::Result::Success;
         }
         return request.source.identity == fixture.sharedSource;
@@ -126,16 +134,20 @@ int main()
     fixture.sharedSource = Reference("source/index/shared.asset", SourceType);
     fixture.leftSource = Reference("source/index/left.asset", SourceType);
     fixture.rootSource = Reference("source/index/root.asset", SourceType);
+    fixture.softSource = Reference("source/index/soft.asset", SourceType);
     fixture.sharedOutput = Reference("cooked/index/shared.asset", OutputType);
     fixture.leftOutput = Reference("cooked/index/left.asset", OutputType);
     fixture.rootOutput = Reference("cooked/index/root.asset", OutputType);
+    fixture.softOutput = Reference("cooked/index/soft.asset", OutputType);
 
     const u8 sharedBytes[] = {1};
     const u8 leftBytes[] = {2};
     const u8 rootBytes[] = {3};
+    const u8 softBytes[] = {4};
     const assets::BuildRequest sharedRequest = Request(fixture.sharedSource, fixture.sharedOutput, sharedBytes);
     const assets::BuildRequest leftRequest = Request(fixture.leftSource, fixture.leftOutput, leftBytes);
     const assets::BuildRequest rootRequest = Request(fixture.rootSource, fixture.rootOutput, rootBytes);
+    const assets::BuildRequest softRequest = Request(fixture.softSource, fixture.softOutput, softBytes);
 
     assets::BuildSystem buildSystem;
     Check(buildSystem.Initialize(), "build-system initialization");
@@ -181,6 +193,33 @@ int main()
     Check(leftPlan.SetGeneratedDependencyContent(fixture.sharedOutput, changedDependency) == assets::Result::Success &&
               index.Evaluate(leftRequest, leftPlan) == assets::DirtyReason::DependenciesChanged,
           "dependency change is classified");
+
+    Check(BuildAndPublish(buildSystem, index, softRequest), "publish identity-only soft dependency record");
+    assets::DependencyRecord softRecord;
+    Check(index.Find(fixture.softOutput, softRecord) == assets::IndexResult::Success && softRecord.dependencies.Size() == 1 &&
+              softRecord.dependencies[0].identity == fixture.sharedOutput &&
+              softRecord.dependencies[0].requirement == assets::DependencyRequirement::Soft && softRecord.dependencies[0].content.IsEmpty(),
+          "soft dependency is indexed without content identity");
+    Check(index.GetDirectDependants(fixture.sharedOutput, references) == assets::IndexResult::Success && references.Size() == 1 &&
+              references[0] == fixture.leftOutput,
+          "soft dependency creates no reverse build invalidation edge");
+    Check(index.CollectAffected(fixture.sharedSource, references) == assets::IndexResult::Success && references.Size() == 3 &&
+              references[0] == fixture.sharedOutput && references[1] == fixture.leftOutput && references[2] == fixture.rootOutput,
+          "soft dependency does not expand incremental-recook closure");
+    assets::BuildPlan softPlan;
+    assets::BuildFingerprint forbiddenSoftContent;
+    forbiddenSoftContent.bytes[0] = 1;
+    Check(buildSystem.Prepare(softRequest, softPlan) == assets::Result::Success &&
+              index.Evaluate(softRequest, softPlan) == assets::DirtyReason::UpToDate &&
+              softPlan.SetGeneratedDependencyContent(fixture.sharedOutput, forbiddenSoftContent) == assets::Result::InvalidArgument,
+          "soft dependency cache identity remains identity-only");
+    fixture.softRequirement = assets::DependencyRequirement::Optional;
+    assets::BuildPlan optionalPlan;
+    Check(buildSystem.Prepare(softRequest, optionalPlan) == assets::Result::Success &&
+              index.Evaluate(softRequest, optionalPlan) == assets::DirtyReason::DependenciesChanged,
+          "dependency requirement kind participates in dirty checking");
+    fixture.softRequirement = assets::DependencyRequirement::Soft;
+
     Check(buildSystem.UnregisterCompiler(compiler.id) == assets::Result::Success, "replace compiler for version invalidation");
     compiler.version = 2;
     Check(buildSystem.RegisterCompiler(compiler) == assets::Result::Success, "register new compiler version");
@@ -200,6 +239,11 @@ int main()
     Check(restarted.Find(fixture.rootOutput, persisted) == assets::IndexResult::Success && persisted.dependencies.Size() == 1 &&
               persisted.artifacts.Size() == 1,
           "records survive restart");
+    assets::DependencyRecord persistedSoft;
+    Check(restarted.Find(fixture.softOutput, persistedSoft) == assets::IndexResult::Success && persistedSoft.dependencies.Size() == 1 &&
+              persistedSoft.dependencies[0].identity == fixture.sharedOutput &&
+              persistedSoft.dependencies[0].requirement == assets::DependencyRequirement::Soft && persistedSoft.dependencies[0].content.IsEmpty(),
+          "soft dependency kind and empty content survive restart");
 
     assets::BuildGraph graph;
     Check(graph.Initialize(buildSystem, nullptr, nullptr, {}, &restarted), "indexed build-graph initialization");
@@ -208,6 +252,7 @@ int main()
     Check(graphRequest.HasSucceeded(), "graph build with index publication");
     graphRequest.Reset();
     Check(graph.Shutdown(), "indexed build-graph shutdown");
+    Check(jobs::GetOutstandingJobCount() == 0, "build-graph shutdown drains dispatched job wrappers");
     Check(restarted.GetStats().replacements >= 1, "graph publishes successful operation");
     Check(restarted.Save() == assets::IndexResult::Success, "save graph publication");
     Check(restarted.Shutdown(), "graph-published index shutdown");

@@ -5,6 +5,7 @@
 namespace vanguard::rhi
 {
     struct GpuFence;
+    class IBackend;
 
     inline constexpr u32 InvalidReferenceIndex = 0xffffffffu;
     inline constexpr u32 MaximumResourceReferenceIndex = 0x0fffffffu;
@@ -172,7 +173,37 @@ namespace vanguard::rhi
         }
     };
 
+    // Non-owning ticket for one exact ResourceRef generation. The ticket does not
+    // keep the resource alive; completion is published only when the lifetime
+    // manager has destroyed the native payload and advanced the slot generation.
+    // Tickets are scoped to one initialized backend and must be reset before RHI
+    // shutdown; they are deliberately not cross-device identities.
+    class NativeReleaseObservation
+    {
+    public:
+        constexpr NativeReleaseObservation() noexcept = default;
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return m_resource.IsValid();
+        }
+        [[nodiscard]] constexpr explicit operator bool() const noexcept
+        {
+            return IsValid();
+        }
+        constexpr void Reset() noexcept
+        {
+            m_resource = {};
+        }
+        [[nodiscard]] friend constexpr bool operator==(const NativeReleaseObservation&, const NativeReleaseObservation&) noexcept = default;
+
+    private:
+        friend class IBackend;
+        explicit constexpr NativeReleaseObservation(const ResourceRef resource) noexcept : m_resource(resource) {}
+        ResourceRef m_resource;
+    };
+
     static_assert(sizeof(ResourceRef) == sizeof(TextureRef));
+    static_assert(sizeof(NativeReleaseObservation) == sizeof(ResourceRef));
 
     template <typename ReferenceType> [[nodiscard]] constexpr ResourceKind GetResourceKind() noexcept;
     template <> [[nodiscard]] constexpr ResourceKind GetResourceKind<TextureRef>() noexcept
@@ -359,6 +390,28 @@ namespace vanguard::rhi
         Upload,
         Readback
     };
+
+    // A heap category is a native-placement compatibility boundary, not a
+    // resource usage hint. Stage 3 deliberately keeps buffers and textures in
+    // separate categories even on D3D12 heap-tier-2 hardware.
+    enum class PlacedHeapCategory : u8
+    {
+        None,
+        Buffer,
+        Texture
+    };
+
+    enum class PlacedAliasDiscardLowering : u8
+    {
+        Unsupported,
+        LegacyBarrierAndDiscard,
+        EnhancedBarrierAndDiscard
+    };
+
+    inline constexpr u64 DeviceLocalBufferCompatibilityClass = 1;
+    inline constexpr u64 DeviceLocalTextureCompatibilityClass = 2;
+    inline constexpr u64 UploadBufferCompatibilityClass = 3;
+    inline constexpr u64 ReadbackBufferCompatibilityClass = 4;
     enum class MemorySegment : u8
     {
         Local,
@@ -582,6 +635,40 @@ namespace vanguard::rhi
 
     struct Capabilities
     {
+        struct PlacedResourceClass
+        {
+            PlacedHeapCategory heapCategory = PlacedHeapCategory::None;
+            u64 compatibilityClass = 0;
+            bool deferredBinding = false;
+            // Largest caller-requested heap alignment that the native heap
+            // creation path guarantees. Smaller power-of-two alignments are
+            // satisfied by the same native guarantee.
+            u64 maximumHeapAlignment = 0;
+
+            [[nodiscard]] constexpr bool IsSupported() const noexcept
+            {
+                return deferredBinding && heapCategory != PlacedHeapCategory::None && compatibilityClass != 0 && maximumHeapAlignment != 0 &&
+                       (maximumHeapAlignment & (maximumHeapAlignment - 1)) == 0;
+            }
+        };
+
+        struct PlacedResourceProfile
+        {
+            PlacedResourceClass buffers;
+            PlacedResourceClass textures;
+            PlacedAliasDiscardLowering aliasDiscard = PlacedAliasDiscardLowering::Unsupported;
+            bool sameQueueGraphics = false;
+            bool sameQueueCompute = false;
+            bool sameQueueCopy = false;
+            bool graphicsComputeHandoff = false;
+            bool copyQueueHandoff = false;
+
+            [[nodiscard]] constexpr bool IsSupported() const noexcept
+            {
+                return buffers.IsSupported() || textures.IsSupported();
+            }
+        };
+
         BackendKind backend = BackendKind::Unknown;
         DeviceVendor vendor = DeviceVendor::Unknown;
         u32 vendorId = 0;
@@ -600,8 +687,7 @@ namespace vanguard::rhi
         bool descriptorIndexing = false;
         bool asyncCompute = false;
         bool copyQueue = false;
-        bool transientHeaps = false;
-        bool resourceAliasing = false;
+        PlacedResourceProfile placedResources;
         bool rayTracing = false;
         bool rayTracingPipeline = false;
         bool meshShaders = false;
@@ -640,6 +726,17 @@ namespace vanguard::rhi
         u64 graphics = 0;
         u64 compute = 0;
         u64 copy = 0;
+        // Set only by the joined RHI submission snapshot for queues which have
+        // never submitted since device initialization. Zero-valued fences alone
+        // remain incomplete coverage. This is evidence of no work, not a fence.
+        u8 neverSubmittedQueues = 0;
+
+        [[nodiscard]] constexpr bool Covers(const QueueType queue) const noexcept
+        {
+            const u64 fence = queue == QueueType::Graphics ? graphics : queue == QueueType::Compute ? compute : queue == QueueType::Copy ? copy : 0;
+            return (queue == QueueType::Graphics || queue == QueueType::Compute || queue == QueueType::Copy) &&
+                   (fence != 0 || (neverSubmittedQueues & (1u << static_cast<u32>(queue))) != 0);
+        }
 
         void Include(GpuFence fence) noexcept;
     };
@@ -684,6 +781,8 @@ namespace vanguard::rhi
         TextureUsage usage = TextureUsage::ShaderResource;
         ResourceState initialState = ResourceState::Common;
         bool virtualResource = false;
+        // Restore initialState when a command list closes. False requires explicit entry-state tracking and caller-owned exit states.
+        bool keepInitialState = true;
     };
 
     struct BufferDesc
@@ -695,6 +794,8 @@ namespace vanguard::rhi
         ResourceState initialState = ResourceState::Common;
         MemoryType memoryType = MemoryType::DeviceLocal;
         bool virtualResource = false;
+        // Explicitly tracked buffers currently require DeviceLocal memory and Common creation state.
+        bool keepInitialState = true;
     };
 
     struct BufferInitData
@@ -721,6 +822,13 @@ namespace vanguard::rhi
         u16 mipLevel = 0;
         u16 arraySlice = 0;
     };
+    struct CommandListEntryState
+    {
+        ResourceRef resource;
+        ResourceState state = ResourceState::Unknown;
+        // One texture mip/slice; buffers use zero/zero and track the entire buffer.
+        TextureSubresource subresource;
+    };
     struct TextureCopyRegion
     {
         TextureSubresource source;
@@ -744,6 +852,8 @@ namespace vanguard::rhi
         u64 size = 0;
         u64 alignment = 0;
         u64 compatibilityClass = 0;
+        MemoryType memoryType = MemoryType::DeviceLocal;
+        PlacedHeapCategory heapCategory = PlacedHeapCategory::None;
     };
     struct HeapDesc
     {
@@ -751,6 +861,25 @@ namespace vanguard::rhi
         u64 alignment = 0;
         u64 compatibilityClass = 0;
         MemoryType memoryType = MemoryType::DeviceLocal;
+        PlacedHeapCategory heapCategory = PlacedHeapCategory::None;
+    };
+
+    struct PlacementRecord
+    {
+        HeapRef heap;
+        u64 offset = 0;
+        u64 size = 0;
+        u64 alignment = 0;
+        u64 compatibilityClass = 0;
+        u64 generation = 0;
+        MemoryType memoryType = MemoryType::DeviceLocal;
+        PlacedHeapCategory heapCategory = PlacedHeapCategory::None;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return heap.IsValid() && size != 0 && alignment != 0 && compatibilityClass != 0 && generation != 0 &&
+                   heapCategory != PlacedHeapCategory::None;
+        }
     };
 
     enum class FilterMode : u8
@@ -1563,6 +1692,38 @@ namespace vanguard::rhi
             return IsValid();
         }
         [[nodiscard]] friend constexpr bool operator==(const GpuFence&, const GpuFence&) noexcept = default;
+    };
+
+    // Full fence evidence produced by a submission. `completion` retains the
+    // legacy synchronization-point meaning; `residency` contains every queue
+    // fence that can protect submitted resources.
+    struct SubmissionReceipt
+    {
+        ResidencyFenceSet residency;
+        GpuFence completion;
+        // True once native command execution has been issued, even if the
+        // backend subsequently loses the device while signaling its fence.
+        // A false API result with this bit set must be recovered as submitted
+        // work with unknown completion, never as an unsubmitted discard.
+        bool workSubmitted = false;
+
+        [[nodiscard]] constexpr bool WasSubmitted() const noexcept
+        {
+            return workSubmitted;
+        }
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            if (!workSubmitted || !completion.IsValid())
+                return false;
+            if (completion.queue == QueueType::Graphics)
+                return residency.graphics >= completion.value;
+            if (completion.queue == QueueType::Compute)
+                return residency.compute >= completion.value;
+            if (completion.queue == QueueType::Copy)
+                return residency.copy >= completion.value;
+            return false;
+        }
     };
 
     // A readback request copies one mip and one array slice into owned CPU-visible staging storage. The source

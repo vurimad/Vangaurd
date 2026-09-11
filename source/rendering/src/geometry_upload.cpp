@@ -74,8 +74,7 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(GeometryUploadFailure* const failure, const GeometryUploadFailureCode code, const char* const message,
-                                const u32 request = 0xffffffffu, const rhi::Failure& rhiFailure = {},
+        [[nodiscard]] bool Fail(GeometryUploadFailure* const failure, const GeometryUploadFailureCode code, const char* const message, const u32 request = 0xffffffffu, const rhi::Failure& rhiFailure = {},
                                 const GeometryAllocatorFailure& allocatorFailure = {}) noexcept
         {
             if (failure != nullptr)
@@ -85,12 +84,11 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool SameReservation(const GeometryUploadReservation& left, const GeometryUploadReservation& right) noexcept
         {
-            if (left.bindingCount != right.bindingCount || left.ticket != right.ticket || left.batch != right.batch ||
-                left.indices.destination != right.indices.destination || left.indices.size != right.indices.size)
+            if (left.bindingCount != right.bindingCount || left.ticket != right.ticket || left.batch != right.batch || left.indices.destination != right.indices.destination ||
+                left.indices.size != right.indices.size)
                 return false;
             for (u32 binding = 0; binding < left.bindingCount; ++binding)
-                if (left.vertexStreams[binding].destination != right.vertexStreams[binding].destination ||
-                    left.vertexStreams[binding].size != right.vertexStreams[binding].size)
+                if (left.vertexStreams[binding].destination != right.vertexStreams[binding].destination || left.vertexStreams[binding].size != right.vertexStreams[binding].size)
                     return false;
             return true;
         }
@@ -107,9 +105,8 @@ namespace vanguard::rendering
         };
 
         Impl() noexcept
-            : uploads(memory::pools::Rendering::GetInstance()), pieces(memory::pools::Rendering::GetInstance()),
-              copies(memory::pools::Rendering::GetInstance()), affectedBuffers(memory::pools::Rendering::GetInstance()),
-              commitReservations(memory::pools::Rendering::GetInstance())
+            : uploads(memory::pools::Rendering::GetInstance()), pieces(memory::pools::Rendering::GetInstance()), copies(memory::pools::Rendering::GetInstance()),
+              affectedBuffers(memory::pools::Rendering::GetInstance()), commitReservations(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -173,8 +170,7 @@ namespace vanguard::rendering
             if (!copies.Empty())
             {
                 PlannedCopy& previous = copies.Back();
-                if (previous.destination == copy.destination && previous.destinationOffset + previous.size == copy.destinationOffset &&
-                    previous.sourceOffset + previous.size == copy.sourceOffset)
+                if (previous.destination == copy.destination && previous.destinationOffset + previous.size == copy.destinationOffset && previous.sourceOffset + previous.size == copy.sourceOffset)
                 {
                     previous.size += copy.size;
                     return true;
@@ -193,8 +189,7 @@ namespace vanguard::rendering
             static_cast<void>(Shutdown());
     }
 
-    bool GeometryUploader::Initialize(GeometryAllocator& allocator, const GeometryUploadConfig& config,
-                                      GeometryUploadFailure* const failure) noexcept
+    bool GeometryUploader::Initialize(GeometryAllocator& allocator, const GeometryUploadConfig& config, GeometryUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl != nullptr)
@@ -202,8 +197,7 @@ namespace vanguard::rendering
         if (!concurrency::IsMainThread())
             return Fail(failure, GeometryUploadFailureCode::WrongThread, "geometry uploader must initialize on the main thread");
         if (!allocator.IsInitialized() || !rhi::IsInitialized() || config.bytesPerSegment == 0 || config.maximumOverflowBytes < config.bytesPerSegment || config.segmentCount != 3 ||
-            config.segmentCount > MaximumGeometryUploadSegments || config.maximumGeometriesPerBatch == 0 ||
-            config.maximumCopiesPerBatch < config.maximumGeometriesPerBatch || config.stagingAlignment == 0)
+            config.segmentCount > MaximumGeometryUploadSegments || config.maximumGeometriesPerBatch == 0 || config.maximumCopiesPerBatch < config.maximumGeometriesPerBatch || config.stagingAlignment == 0)
             return Fail(failure, GeometryUploadFailureCode::InvalidConfiguration, "geometry uploader configuration is invalid");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
@@ -257,8 +251,7 @@ namespace vanguard::rendering
         {
             concurrency::ScopedSharedLock<concurrency::RWLock> guard(impl->batchLock);
             if (impl->batchState != BatchState::None)
-                return Fail(failure, GeometryUploadFailureCode::BatchAlreadyOpen,
-                            "geometry uploader cannot shut down while an upload batch owns staging reservations");
+                return Fail(failure, GeometryUploadFailureCode::BatchAlreadyOpen, "geometry uploader cannot shut down while an upload batch owns staging reservations");
         }
         for (u32 index = 0; index < impl->config.segmentCount; ++index)
         {
@@ -277,13 +270,34 @@ namespace vanguard::rendering
         return true;
     }
 
+    void GeometryUploader::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        Impl* const impl = m_impl;
+        {
+            concurrency::ScopedLock<concurrency::RWLock> guard(impl->batchLock);
+            impl->ResetBatch();
+        }
+        for (u32 index = 0; index < impl->config.segmentCount; ++index)
+        {
+            Impl::Segment& segment = impl->segments[index];
+            if (segment.mapped != nullptr)
+                rhi::UnlockBuffer(segment.buffer);
+            static_cast<void>(rhi::SafeRelease(segment.buffer));
+        }
+        m_impl = nullptr;
+        impl->~Impl();
+        memory::MemoryBlock block{impl, sizeof(Impl), memory::PoolId::Rendering};
+        memory::Free(block);
+    }
+
     bool GeometryUploader::IsInitialized() const noexcept
     {
         return m_impl != nullptr;
     }
 
-    bool GeometryUploader::Begin(const containers::ArraySpan<const GeometryUploadRequest> requests,
-                                 containers::ArraySpan<GeometryUploadReservation> reservations, GeometryUploadFailure* const failure) noexcept
+    bool GeometryUploader::Begin(const containers::ArraySpan<const GeometryUploadRequest> requests, containers::ArraySpan<GeometryUploadReservation> reservations, GeometryUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -307,28 +321,24 @@ namespace vanguard::rendering
             if (!m_impl->allocator->ValidateReservation(geometry))
             {
                 m_impl->ResetBatch();
-                return Fail(failure, GeometryUploadFailureCode::InvalidAllocationState,
-                            "geometry upload request is not the exact live reservation", requestIndex);
+                return Fail(failure, GeometryUploadFailureCode::InvalidAllocationState, "geometry upload request is not the exact live reservation", requestIndex);
             }
             for (u32 previous = 0; previous < requestIndex; ++previous)
                 if (requests[previous].geometry.allocation == geometry.allocation)
                 {
                     m_impl->ResetBatch();
-                    return Fail(failure, GeometryUploadFailureCode::DuplicateAllocation,
-                                "geometry upload batch contains the same allocation twice", requestIndex);
+                    return Fail(failure, GeometryUploadFailureCode::DuplicateAllocation, "geometry upload batch contains the same allocation twice", requestIndex);
                 }
 
             GeometryVertexArenaView vertexArena;
             GeometryIndexArenaView indexArena;
-            if (!m_impl->allocator->GetVertexArena(geometry.vertex.arena, vertexArena) ||
-                !m_impl->allocator->GetIndexArena(geometry.index.arena, indexArena) || vertexArena.bindingCount == 0)
+            if (!m_impl->allocator->GetVertexArena(geometry.vertex.arena, vertexArena) || !m_impl->allocator->GetIndexArena(geometry.index.arena, indexArena) || vertexArena.bindingCount == 0)
             {
                 m_impl->ResetBatch();
                 return Fail(failure, GeometryUploadFailureCode::InvalidAllocationState, "geometry upload arena identity is stale", requestIndex);
             }
             const u32 pieceCount = vertexArena.bindingCount + 1u;
-            if (pieceCount > m_impl->config.maximumCopiesPerBatch ||
-                m_impl->pieces.Size() > m_impl->config.maximumCopiesPerBatch - pieceCount)
+            if (pieceCount > m_impl->config.maximumCopiesPerBatch || m_impl->pieces.Size() > m_impl->config.maximumCopiesPerBatch - pieceCount)
             {
                 m_impl->ResetBatch();
                 return Fail(failure, GeometryUploadFailureCode::CopyCapacityExceeded, "geometry upload batch exceeds its copy capacity", requestIndex);
@@ -341,15 +351,14 @@ namespace vanguard::rendering
                 const u64 stride = vertexArena.bindings[binding].stride;
                 const u64 size = static_cast<u64>(geometry.vertex.vertexCount) * stride;
                 const u64 destinationOffset = static_cast<u64>(geometry.vertex.firstVertex) * stride;
-                m_impl->pieces.PushBack({vertexArena.buffers[binding], rhi::ResourceState::VertexBuffer, destinationOffset, 0, size, requestIndex,
-                                         binding, false});
+                m_impl->pieces.PushBack({vertexArena.buffers[binding], rhi::ResourceState::VertexBuffer, destinationOffset, 0, size, requestIndex, binding, false});
             }
             const u64 indexStride = geometry.index.format == rhi::IndexFormat::UInt32 ? 4u : 2u;
-            m_impl->pieces.PushBack({indexArena.buffer, rhi::ResourceState::IndexBuffer, geometry.index.ByteOffset(), 0,
-                                     static_cast<u64>(geometry.index.indexCount) * indexStride, requestIndex, 0, true});
+            m_impl->pieces.PushBack({indexArena.buffer, rhi::ResourceState::IndexBuffer, geometry.index.ByteOffset(), 0, static_cast<u64>(geometry.index.indexCount) * indexStride, requestIndex, 0, true});
         }
 
-        std::sort(m_impl->pieces.Begin(), m_impl->pieces.End(), [](const PlannedPiece& left, const PlannedPiece& right) noexcept
+        std::sort(m_impl->pieces.Begin(), m_impl->pieces.End(),
+                  [](const PlannedPiece& left, const PlannedPiece& right) noexcept
                   {
                       if (left.destination.index != right.destination.index)
                           return left.destination.index < right.destination.index;
@@ -384,8 +393,7 @@ namespace vanguard::rendering
                 return Fail(failure, GeometryUploadFailureCode::StagingExhausted, "geometry upload batch exceeds its bounded overflow capacity", piece.request);
             }
             piece.sourceOffset = stagingOffset;
-            if (!m_impl->AddAffectedBuffer(piece.destination, piece.finalState) ||
-                !m_impl->AddCopy({piece.destination, piece.destinationOffset, piece.sourceOffset, piece.size}))
+            if (!m_impl->AddAffectedBuffer(piece.destination, piece.finalState) || !m_impl->AddCopy({piece.destination, piece.destinationOffset, piece.sourceOffset, piece.size}))
             {
                 m_impl->ResetBatch();
                 return Fail(failure, GeometryUploadFailureCode::CopyCapacityExceeded, "geometry upload batch exceeds its copy capacity", piece.request);
@@ -486,14 +494,12 @@ namespace vanguard::rendering
             return Fail(failure, GeometryUploadFailureCode::InvalidRequest, "geometry upload reservation is stale");
         PlannedUpload& upload = m_impl->uploads[reservation.ticket];
         if (upload.ready || !SameReservation(reservation, upload.staging))
-            return Fail(failure, GeometryUploadFailureCode::InvalidRequest, "geometry upload reservation does not match its planned upload",
-                        reservation.ticket);
+            return Fail(failure, GeometryUploadFailureCode::InvalidRequest, "geometry upload reservation does not match its planned upload", reservation.ticket);
         upload.ready = true;
         return true;
     }
 
-    bool GeometryUploader::Submit(const containers::ArraySpan<GeometryPlacement> placements, GeometryUploadResult& result,
-                                  GeometryUploadFailure* const failure) noexcept
+    bool GeometryUploader::Submit(const containers::ArraySpan<GeometryPlacement> placements, GeometryUploadResult& result, GeometryUploadFailure* const failure) noexcept
     {
         ClearFailure(failure);
         result = {};
@@ -515,8 +521,7 @@ namespace vanguard::rendering
                 {
                     ++m_impl->stats.rejectedOperations;
                     m_impl->ResetBatch();
-                    return Fail(failure, GeometryUploadFailureCode::InvalidAllocationState,
-                                "geometry allocation changed state before upload submission", request);
+                    return Fail(failure, GeometryUploadFailureCode::InvalidAllocationState, "geometry allocation changed state before upload submission", request);
                 }
             }
             m_impl->batchState = BatchState::Submitting;
@@ -582,8 +587,7 @@ namespace vanguard::rendering
                 m_impl->nextSegment = (m_impl->currentSegment + 1u) % m_impl->config.segmentCount;
             }
             m_impl->ResetBatch();
-            return Fail(failure, GeometryUploadFailureCode::AllocatorFailure, "geometry upload commit failed after submission", 0xffffffffu, {},
-                        allocatorFailure);
+            return Fail(failure, GeometryUploadFailureCode::AllocatorFailure, "geometry upload commit failed after submission", 0xffffffffu, {}, allocatorFailure);
         }
 
         result = {completion, m_impl->uploads.Size(), m_impl->copies.Size(), m_impl->affectedBuffers.Size(), m_impl->payloadBytes, m_impl->usedBytes};

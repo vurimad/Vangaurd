@@ -1,0 +1,399 @@
+/**
+* Copyright (c) 2016 CD Projekt Red. All Rights Reserved.
+*/
+#pragma once
+#include "renderNodeGraphArray.h"
+#include "renderCommon.h"
+#include "../../redContainers/include/fixedArray.h"
+
+namespace job
+{
+	class Builder;
+}
+
+struct SRenderNodeImplContext;
+
+//********************************************************************************//
+//********************************************************************************//
+
+enum ERenderNodeType
+{	
+	// Unique types (there can be at most one node of these types, so they will get merged in case of multiple instances coming for instance from different renderView's)
+	// Each unique node has a subType value in order to be able to distinguish between different kind of nodes.
+	RNT_Unique,
+
+	// Helper nodes
+	RNT_Range_HelperFirst,
+
+		// Sequence types (when merging graphs nodes between in these nodes will form a sequence)
+		// Note that you have to declare them in pairs in { aaaBegin, aaaEnd, bbbBegin, bbbEnd etc }
+		// Each sequence node has a subType value in order to be able to distinguish between different kind of nodes.
+		RNT_SequenceBegin			= RNT_Range_HelperFirst,
+		RNT_SequenceEnd,
+
+		// Helper non-sequence nodes
+		RNT_Temporary,
+
+	RNT_Range_HelperLast			= RNT_Temporary,
+
+	// Regular nodes
+	RNT_Stage,
+	
+	RNT_MAX
+};
+
+enum ERenderNodeDependencyType
+{
+	RNDT_Cpu,
+	RNDT_Gpu,
+
+	RNDT_MAX
+};
+
+//********************************************************************************//
+//********************************************************************************//
+
+namespace rend
+{
+	class NodeGraphFactory;
+
+	namespace node
+	{
+		struct GlobalBindingsMod
+		{
+			Uint64		m_slots;
+
+			template <typename ... Args>
+			GlobalBindingsMod( Args&& ... args )
+				: m_slots( 0 )
+			{
+				Setup( args... );
+			}
+
+			void Setup() {}
+
+			template <typename ... Args>
+			void Setup( Uint64 slot, Args&& ... args )
+			{
+				m_slots |= RED_FLAG64( slot );
+				Setup( args... );
+			}
+		};
+
+		struct RenderTargetBinder
+		{
+		};
+
+		struct GPUSubmit
+		{
+			static constexpr Bool gpuSubmit		= true;
+			static constexpr Bool gpuScope		= false;
+		};
+		struct SimpleNode	
+		{
+			static constexpr Bool gpuSubmit		= false;
+			static constexpr Bool gpuScope		= true;
+		};
+		struct SimpleNoGPUScope
+		{
+			static constexpr Bool gpuSubmit		= false;
+			static constexpr Bool gpuScope		= false;
+		};
+	}
+}
+
+//********************************************************************************//
+//********************************************************************************//
+
+
+enum class RenderNodeCommandListUsage
+{
+	None,				// Render node does not use a command list for anything.
+	Require,			// Render node requires a command list to already be set in the rctx.
+	Own,				// Render node should create a command list, and submit it when done.
+	Sync,				// Doesn't use a command list directly, but is responsible for synchronizing gpu work.
+};
+
+class CRenderNodeBase
+{
+	RED_USE_MEMORY_POOL( rend::PoolRenderGraph );
+
+	friend class rend::NodeGraphFactory;
+
+	Uint64				m_globalBindingMod;
+	Bool				m_rtBinder : 1;
+
+#ifdef USE_PROFILER
+	mutable Uint32 m_gpuProfilerID;
+#endif
+
+public:
+
+	template <typename ... Args>
+	CRenderNodeBase( Args&& ... args )
+		: m_globalBindingMod( 0 )
+		, m_rtBinder( false )
+#ifdef USE_PROFILER
+		, m_gpuProfilerID( CRenderGpuProfiler::MAX_ENTRIES )
+#endif
+	{
+		CRenderNodeBase::Setup( args... );
+	}
+
+	RED_FORCE_INLINE Uint64		GetGlobalBindingMod() const { return m_globalBindingMod; }
+
+	virtual ~CRenderNodeBase() {}
+	virtual void Execute( const SRenderNodeImplContext& rctx, job::Builder* builder ) const = 0;
+	virtual CName GetName() const { return CName::NONE(); };
+
+	// Called by CRenderNodeBase when the node's command list mode is 'Own', to create the command list. Will not be
+	// called for any other command list mode.
+	virtual GpuApi::CommandListRef CreateCommandList() const;
+
+	virtual Bool GetJobBuilderUsage() const { return false; }
+	virtual RenderNodeCommandListUsage GetCommandListUsage() const = 0;
+
+	RED_FORCE_INLINE Bool HasCommandList( RenderNodeCommandListUsage clUsage ) const
+	{
+		return clUsage != RenderNodeCommandListUsage::None && clUsage != RenderNodeCommandListUsage::Sync;
+	}
+
+
+	void Process( const SRenderNodeImplContext& rctx, job::Builder* builder ) const;
+	void ProcessEpilogue( const SRenderNodeImplContext& rctx ) const;
+
+#ifdef USE_PROFILER
+public:
+	virtual Bool AllowGpuScope() const { return true; }
+	virtual red::InstrumentationObject* GetInstrumentationObject() const = 0;
+#endif
+
+	void Setup() {}
+
+	template <typename ... Args>
+	void Setup( const rend::node::RenderTargetBinder& mod, Args&& ... args )
+	{
+		m_rtBinder = true;
+		Setup( args... );
+	}
+	
+
+	template <typename ... Args>
+	void Setup( const rend::node::GlobalBindingsMod& mod, Args&& ... args )
+	{
+		m_globalBindingMod = mod.m_slots;
+		Setup( args... );
+	}
+
+	void BeginProfilerBlock() const;
+	void EndProfilerBlock() const;
+};
+
+class CRenderNode_Dummy : public CRenderNodeBase
+{
+public:
+	virtual void Execute( const SRenderNodeImplContext& rctx, job::Builder* builder ) const override { /*empty*/ }
+	virtual RenderNodeCommandListUsage GetCommandListUsage() const override { return RenderNodeCommandListUsage::None; }
+
+#ifdef USE_PROFILER
+	virtual red::InstrumentationObject* GetInstrumentationObject() const override final { return &sm_instrumentationObject;  }
+	static red::InstrumentationObject sm_instrumentationObject;
+#endif
+};
+
+//********************************************************************************//
+//********************************************************************************//
+
+struct RenderNodeSubtype
+{
+	typedef Uint32 ValueType;
+	explicit RenderNodeSubtype ( ValueType value = 0 ) : m_value ( value ) {}
+	void SetValue( ValueType value ) { m_value = value; }
+	ValueType GetValue() const { return m_value; }
+	Bool operator==( RenderNodeSubtype other ) const { return m_value == other.m_value; }
+	Bool operator!=( RenderNodeSubtype other ) const { return m_value != other.m_value; }
+
+private:
+	ValueType m_value;
+};
+
+//********************************************************************************//
+//********************************************************************************//
+
+struct SRenderNodeParameters
+{
+	SRenderNodeParameters ()
+	{
+		Set( RNT_Stage, RenderNodeSubtype(0), nullptr );
+	}
+
+	SRenderNodeParameters& Set( ERenderNodeType type, RenderNodeSubtype subType, CRenderNodeBase *impl )
+	{
+		m_type = type;
+		m_subType = subType;
+		m_impl = impl;
+		return *this;
+	}
+
+	ERenderNodeType m_type;
+	RenderNodeSubtype m_subType;
+	CRenderNodeBase* m_impl;
+};
+
+struct SRenderNodeContext
+{
+	SRenderNodeContext ()
+	{
+		Set( -1, 0, 0 );
+	}
+
+	SRenderNodeContext& Set( Int32 cameraIndex, TRenderFlowGroup gpuRenderFlowGroup, TRenderFlowGroup cpuRenderFlowGroup )
+	{
+		m_cameraIndex = cameraIndex;
+		m_renderFlowGroups[RNDT_Gpu] = gpuRenderFlowGroup;
+		m_renderFlowGroups[RNDT_Cpu] = cpuRenderFlowGroup;
+		return *this;
+	}
+
+	Int32			 m_cameraIndex;
+	TRenderFlowGroup m_renderFlowGroups[RNDT_MAX];
+};
+
+//********************************************************************************//
+//********************************************************************************//
+
+class CRenderNodeGraph
+{
+	RED_USE_MEMORY_POOL( rend::PoolRenderGraph );
+
+public:
+	// - - - - - - - - - - - - - - - //
+	typedef Uint32 ItemId;
+	// - - - - - - - - - - - - - - - //
+	static constexpr ItemId INVALID_ITEM_ID = (1 << 31);
+	// - - - - - - - - - - - - - - - //
+	enum ERelationType
+	{
+		RELTYPE_Parent,		/// Don't change the order
+		RELTYPE_Child,		//
+
+		RELTYPE_MAX
+	};
+	static ERelationType GetInvertedRelation( ERelationType relType ) { return RELTYPE_Parent == relType ? RELTYPE_Child : RELTYPE_Parent; }
+	// - - - - - - - - - - - - - - - //
+
+private:
+	// - - - - - - - - - - - - - - - //
+	struct SRenderNodeData
+	{
+		SRenderNodeData ();
+		Bool HasAnyDependency() const;
+		Bool HasAnyDependency( ERelationType relationType, ERenderNodeDependencyType depType ) const;
+		Uint32 GetNumDependencies( const CRenderNodeGraph &graph, ERelationType relationType, ERenderNodeDependencyType depType ) const;
+
+		SRenderNodeParameters m_renderNodeParams;
+		SRenderNodeContext m_renderNodeContext;
+		union
+		{
+			struct  
+			{
+				ItemId m_firstParentDep[RNDT_MAX];
+				ItemId m_firstChildDep[RNDT_MAX];
+			};
+
+			struct
+			{
+				ItemId m_deps[RELTYPE_MAX][RNDT_MAX];
+			};
+		};
+	};
+	// - - - - - - - - - - - - - - - //
+public:
+	// - - - - - - - - - - - - - - - //
+	struct SDependencyData
+	{
+		ERenderNodeDependencyType m_type;		
+		union
+		{
+			struct
+			{
+				ItemId m_parentNode;
+				ItemId m_childNode;
+				ItemId m_parentNodeNextDep;
+				ItemId m_childNodeNextDep;
+			};
+
+			struct
+			{
+				ItemId m_nodes[RELTYPE_MAX];
+				ItemId m_nextDep[RELTYPE_MAX];
+			};
+		};		
+	};	
+	// - - - - - - - - - - - - - - - //
+
+private:
+	// - - - - - - - - - - - - - - - //
+	typedef TRenderNodeGraphArray< SRenderNodeData, 1<<29 > NodesArray;
+	typedef TRenderNodeGraphArray< SDependencyData, 1<<30 > DependenciesArray;
+	// - - - - - - - - - - - - - - - //
+
+public:
+	CRenderNodeGraph ();
+	Bool IsAllocated( ItemId id ) const;
+	ItemId AddNode( const SRenderNodeParameters &nodeParams, Int32 cameraIndex );
+	ItemId AddDependency( ItemId parentNodeId, ItemId childNodeId, ERenderNodeDependencyType depType, Bool swapParentChild = false );
+	ItemId FindDependency( ItemId parentNodeId, ItemId childNodeId, ERenderNodeDependencyType depType, Bool swapParentChild = false ) const;
+	Bool HasDependency( ItemId parentNodeId, ItemId childNodeId, ERenderNodeDependencyType depType, Bool swapParentChild = false ) const;
+	void RemoveNode( ItemId id, Bool mergeDependencies );
+	void RemoveDependency( ItemId id );
+	void Remove( ItemId id ); //< remove dependency or node with all attached dependencies		
+	void AddGraph( const CRenderNodeGraph &graph, Bool enableForceCameraIndex, TRenderFlowSpace forcedCameraIndex, Bool performMerge );
+	void RemoveHelperNodes();
+	void BuildRenderFlowGroups();
+	void Execute( const SRenderNodeImplContext &rctx, job::Builder& builder ) const;
+	void ExecuteParallel( const SRenderNodeImplContext &rctx, job::Builder& builder ) const;
+	void DebugLog();
+	void Reset();
+
+	void AcquireExclusiveUpdateFlag();
+	void ReleaseExclusiveUpdateFlag();
+
+public:
+	void CopyDependencies( ItemId sourceNodeId, ItemId targetNodeId, ERelationType relationType, ERenderNodeDependencyType depType ); //< copies all dependencies without producing redundant deps in case some already exist in target node
+	void CopyDependencies( ItemId sourceNodeId, ItemId targetNodeId, ERelationType relationType ); //< copies all dependencies without producing redundant deps in case some already exist in target node
+	void CopyDependencies( ItemId sourceNodeId, ItemId targetNodeId ); //< copies all dependencies without producing redundant deps in case some already exist in target node
+	void RemoveNodeDependencies( ItemId nodeId, ERelationType relationType, ERenderNodeDependencyType depType );
+	void RemoveNodeDependencies( ItemId nodeId, ERelationType relationType );
+	void RemoveNodeDependencies( ItemId nodeId );
+
+	Uint32 GetNumNodes() const												{ return m_nodes.GetNumItems(); }
+	ItemId GetNode( Uint32 nodeIndex ) const								{ return m_nodes.GetItemIdByUsageIndex( nodeIndex ); }
+	Uint32 GetNumDependencies() const										{ return m_dependencies.GetNumItems(); }
+	const SDependencyData& GetDependency( Uint32 depIndex ) const			{ return m_dependencies[ m_dependencies.GetItemIdByUsageIndex( depIndex ) ]; }
+	Uint32 GetNodeIndex( ItemId nodeId ) const								{ return m_nodes.GetItemUsageIndex( nodeId ); }
+
+	const SRenderNodeParameters& GetNodeParameters( ItemId nodeId ) const	{ return m_nodes[nodeId].m_renderNodeParams; }
+	SRenderNodeParameters& RefNodeParameters( ItemId nodeId )				{ return m_nodes[nodeId].m_renderNodeParams; }
+	const SRenderNodeContext& GetNodeContext( ItemId nodeId ) const			{ return m_nodes[nodeId].m_renderNodeContext; }
+	SRenderNodeContext& RefNodeContext( ItemId nodeId )						{ return m_nodes[nodeId].m_renderNodeContext; }
+
+private:
+	void MergeNodes( Uint32 numOriginalUsedNodeIndices );
+	void CalculateNodeLevelInRenderFlowGroup_Recursive( ERenderNodeDependencyType depType, ItemId nodeItemId, red::DynArray< Uint32 >& levelsNodesCount );
+	void BuildFlattenedNodesArray( red::DynArray<ItemId> &outNodes, ERenderNodeDependencyType depType ) const;
+	Bool IsFlattenedNodesArrayDepsValid( const red::DynArray<ItemId> &flattenedNodes ) const;
+	
+private:	
+	red::UpdateFlag m_updateFlag;
+
+	static const Uint32 c_maxNodes = 512;
+	typedef red::FixedArray< Uint8, c_maxNodes > NodeIndexToBucketId;
+	
+	NodesArray m_nodes;
+	DependenciesArray m_dependencies;	
+	Bool m_isBuilt;
+};
+
+//********************************************************************************//
+//********************************************************************************//

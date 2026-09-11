@@ -9,6 +9,8 @@ project "nanovanguard"
     targetdir(tools_output_root)
     objdir(object_root)
     debugdir(tools_output_root)
+    includedirs { "../../source/assets/include", "../../source/resources/include", "../../source/crypto/include", "../../source/serialization/include", "../../source/concurrency/include", "../../source/jobs/include" }
+    links { "assets", "resources", "crypto", "serialization", "serializationCompat", "diagnostics", "diagnosticsCompat", "concurrency", "concurrencyCompat", "jobs", "jobsCompat", "redJobsCompat" }
     files { "private/**.hpp", "src/**.cpp", "platform/windows/**.cpp", "README.md" }
     includedirs { "private", "../../source/projects/include", "../../source/filesystem/include", "../../source/io/include",
                   "../../source/containers/include", "../../source/memory/include", "../../source/system/include" }

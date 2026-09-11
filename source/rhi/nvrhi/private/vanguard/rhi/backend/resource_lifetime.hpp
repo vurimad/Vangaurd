@@ -25,6 +25,7 @@ namespace vanguard::rhi::backend
         u32 heapCapacity = 8192;
         u32 samplerStateCapacity = 4096;
         u32 shaderCapacity = 32768;
+        u32 vertexLayoutCapacity = 4096;
         u32 pipelineCapacity = 32768;
         u32 bindingLayoutCapacity = 16384;
         u32 descriptorDomainCapacity = 64;
@@ -59,6 +60,9 @@ namespace vanguard::rhi::backend
         [[nodiscard]] ResourceRef Create(ResourceKind kind, void* payload, DestroyResourceCallback destroy, void* destroyContext = nullptr,
                                          u32 initialReferences = 1) noexcept;
         [[nodiscard]] bool IsValid(ResourceRef resource) const noexcept;
+        // Does not retain the resource. Returns true only after FinishDestroy has
+        // published a new slot generation for the observed native payload.
+        [[nodiscard]] bool IsNativeReleaseComplete(ResourceRef resource) const noexcept;
         [[nodiscard]] bool AddRef(ResourceRef resource) noexcept;
         [[nodiscard]] i32 Release(ResourceRef resource) noexcept;
         [[nodiscard]] i32 GetRefCount(ResourceRef resource) const noexcept;

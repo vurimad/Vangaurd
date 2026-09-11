@@ -2,6 +2,7 @@
 
 #include <vanguard/application/application.hpp>
 #include <vanguard/engine/rendering_service.hpp>
+#include <vanguard/engine/resource_streaming_service.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 
 namespace vanguard::runtime
@@ -44,6 +45,7 @@ namespace vanguard::runtime
     private:
         filesystem::Config m_filesystemConfig;
         engine::RenderingServiceConfig m_renderingConfig;
+        engine::ResourceStreamingServiceConfig m_streamingConfig;
         StartupSessionState m_startupSessionState;
         RunningState m_runningState;
     };

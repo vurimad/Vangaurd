@@ -1,0 +1,42 @@
+[2026.09.11 04:53:02][editor][Info] Profiler: 67108864 bytes buffer initiated [$0000019FEE630000-$000001A00E630000]..
+[2026.09.11 04:53:02][editor][Warning] Waiting for DispatcherThreads: 1/15 ready...
+[2026.09.11 04:53:03][editor][Info] D3D12 RHI initialized on NVIDIA GeForce RTX 4080 Laptop GPU (11997 MiB dedicated VRAM)
+[2026.09.11 04:53:17][editor][Warning] DXGI Present stall: 2001.38 ms interval=0 result=0 mainThread=0
+[2026.09.11 04:53:17][editor][Warning] UI stall: previous render-chain join 2001.07 ms
+[2026.09.11 04:53:17][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 2001.11 ms
+[2026.09.11 04:53:17][editor][Warning] UI stall: entire editor running tick 2007.21 ms
+[2026.09.11 04:53:19][editor][Warning] DXGI Present stall: 2000.73 ms interval=0 result=0 mainThread=0
+[2026.09.11 04:53:19][editor][Warning] UI stall: previous render-chain join 2014.77 ms
+[2026.09.11 04:53:19][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 2014.82 ms
+[2026.09.11 04:53:20][editor][Warning] Acquire back-buffer GPU fence: 388.14 ms
+[2026.09.11 04:53:20][editor][Warning] UI stall: host BeginFrame/Acquire/SubmitFrame 388.27 ms
+[2026.09.11 04:53:20][editor][Warning] UI stall: SubmitHost including buffers/descriptors 388.28 ms
+[2026.09.11 04:53:20][editor][Warning] UI stall: entire editor running tick 2409.52 ms
+[2026.09.11 04:53:28][editor][Warning] UI stall: previous render-chain join 111.00 ms
+[2026.09.11 04:53:28][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 111.05 ms
+[2026.09.11 04:53:28][editor][Warning] UI stall: entire editor running tick 117.86 ms
+[2026.09.11 04:53:35][editor][Warning] UI stall: previous render-chain join 113.34 ms
+[2026.09.11 04:53:35][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 113.39 ms
+[2026.09.11 04:53:35][editor][Warning] UI stall: entire editor running tick 119.44 ms
+[2026.09.11 04:53:40][editor][Warning] UI stall: previous render-chain join 118.07 ms
+[2026.09.11 04:53:40][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 118.12 ms
+[2026.09.11 04:53:41][editor][Warning] UI stall: entire editor running tick 124.27 ms
+[2026.09.11 04:53:49][editor][Warning] DXGI Present stall: 1999.89 ms interval=0 result=0 mainThread=0
+[2026.09.11 04:53:49][editor][Warning] UI stall: previous render-chain join 2001.43 ms
+[2026.09.11 04:53:49][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 2001.48 ms
+[2026.09.11 04:53:49][editor][Warning] UI stall: entire editor running tick 2007.50 ms
+[2026.09.11 04:53:51][editor][Warning] DXGI Present stall: 1299.81 ms interval=0 result=0 mainThread=0
+[2026.09.11 04:53:51][editor][Warning] UI stall: previous render-chain join 1308.25 ms
+[2026.09.11 04:53:51][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 1308.30 ms
+[2026.09.11 04:53:51][editor][Warning] UI stall: entire editor running tick 1319.25 ms
+[2026.09.11 04:53:59][editor][Warning] DXGI Present stall: 1999.85 ms interval=0 result=0 mainThread=0
+[2026.09.11 04:53:59][editor][Warning] UI stall: previous render-chain join 1997.57 ms
+[2026.09.11 04:53:59][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 1997.64 ms
+[2026.09.11 04:53:59][editor][Warning] UI stall: entire editor running tick 2003.51 ms
+[2026.09.11 04:54:01][editor][Warning] DXGI Present stall: 1999.97 ms interval=0 result=0 mainThread=0
+[2026.09.11 04:54:01][editor][Warning] UI stall: previous render-chain join 2009.96 ms
+[2026.09.11 04:54:01][editor][Warning] UI stall: renderer BeginFrame including join/reconciliation 2010.00 ms
+[2026.09.11 04:54:02][editor][Warning] Acquire back-buffer GPU fence: 660.22 ms
+[2026.09.11 04:54:02][editor][Warning] UI stall: host BeginFrame/Acquire/SubmitFrame 660.41 ms
+[2026.09.11 04:54:02][editor][Warning] UI stall: SubmitHost including buffers/descriptors 660.42 ms
+[2026.09.11 04:54:02][editor][Warning] UI stall: entire editor running tick 2676.30 ms

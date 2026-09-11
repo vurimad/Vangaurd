@@ -15,10 +15,15 @@
 #include <vanguard/memory/pool.hpp>
 
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <utility>
+
+#include <Windows.h>
 void RunRenderCameraTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
 void RunRenderFlowResourceAllocatorTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
+void RunRenderGraphTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
+int RunRenderGraphFatalCase(const char* name) noexcept;
 void RunTextureUploadCandidateTests(void (*check)(bool condition, const char* message) noexcept) noexcept;
 
 namespace
@@ -32,6 +37,7 @@ namespace
     namespace window = vanguard::window;
     using vanguard::u32;
     using vanguard::u64;
+    using vanguard::usize;
 
     int g_failures = 0;
 
@@ -59,12 +65,13 @@ namespace
         concurrency::Atomic<u32> nextOrder{0};
         concurrency::Atomic<u32> orderFailures{0};
         concurrency::Atomic<u32> frameTickSceneCount{0};
-        concurrency::Atomic<u32> preparedViewFamilies{0};
-        concurrency::Atomic<u32> lastPreparedViewCount{0};
+        concurrency::Atomic<u32> retainedViewSetups{0};
+        concurrency::Atomic<u32> lastRootCameraCount{0};
         concurrency::Atomic<u64> frameTickMutationEpoch{~u64{0}};
-        concurrency::Atomic<u64> lastPreparedSceneVersion{0};
+        concurrency::Atomic<u32> lastViewSetupSceneGeneration{0};
         concurrency::Atomic<u64> lastSerial{0};
         concurrency::Atomic<bool> failFrameTick{false};
+        rendering::RenderViewport* expectedViewport = nullptr;
     };
 
     class TestResource final : public resources::ResourceObject
@@ -125,24 +132,25 @@ namespace
             static_cast<void>(execution->orderFailures.Increment());
         static_cast<void>(execution->executions.Increment());
         execution->lastSerial.SetValue(frame.GetSerial());
-        if (!context.IsValid())
+        if (!context.IsValid() || context.GetViewport() == nullptr || context.GetViewport() != execution->expectedViewport ||
+            context.GetViewport() != frame.GetViewport())
             static_cast<void>(execution->orderFailures.Increment());
         if (frame.HasViewSetup())
         {
-            if (!frame.GetViewFamily().IsValid())
+            const rendering::RenderFrameViewSetup setup = frame.GetViewSetup();
+            if (frame.GetViewFamily().IsValid() || !setup.scene.IsValid() || setup.rootCameras.Empty())
                 static_cast<void>(execution->orderFailures.Increment());
             else
             {
-                const rendering::RenderViewFamily& family = frame.GetViewFamily().GetFamily();
-                static_cast<void>(execution->preparedViewFamilies.Increment());
-                execution->lastPreparedViewCount.SetValue(family.viewCount);
-                execution->lastPreparedSceneVersion.SetValue(family.sceneVersion);
+                static_cast<void>(execution->retainedViewSetups.Increment());
+                execution->lastRootCameraCount.SetValue(setup.rootCameras.Size());
+                execution->lastViewSetupSceneGeneration.SetValue(setup.scene.generation);
             }
         }
         static jobs::JobName continuationName{"RenderingTests.RenderFrameContinuation"};
         jobs::Task continuation =
             jobs::Task::Create([execution](const jobs::JobContext&) noexcept { static_cast<void>(execution->continuationExecutions.Increment()); });
-        if (!continuation || !context.GetJobs().Dispatch(continuationName, std::move(continuation)))
+        if (!continuation || !context.GetBuilder().Dispatch(continuationName, std::move(continuation)))
             return rendering::RenderFrameExecutionStatus::Failure("render frame continuation dispatch failed");
         return payload != nullptr && payload->fail ? rendering::RenderFrameExecutionStatus::Failure("intentional viewport test failure")
                                                    : rendering::RenderFrameExecutionStatus::Success();
@@ -159,7 +167,7 @@ namespace
         static jobs::JobName continuationName{"RenderingTests.FrameTickContinuation"};
         jobs::Task continuation =
             jobs::Task::Create([execution](const jobs::JobContext&) noexcept { static_cast<void>(execution->tickContinuationExecutions.Increment()); });
-        if (!continuation || !context.GetJobs().Dispatch(continuationName, std::move(continuation)))
+        if (!continuation || !context.GetBuilder().Dispatch(continuationName, std::move(continuation)))
             return rendering::RenderFrameExecutionStatus::Failure("render FrameTick continuation dispatch failed");
         return execution->failFrameTick.GetValue() ? rendering::RenderFrameExecutionStatus::Failure("intentional FrameTick test failure")
                                                    : rendering::RenderFrameExecutionStatus::Success();
@@ -184,20 +192,55 @@ namespace
         Check(viewport.BeginFrame(setup, frame, &failure), "begin render frame through EngineViewport");
         return frame;
     }
+
+    [[nodiscard]] bool RunFatalRenderGraphCase(const char* const name) noexcept
+    {
+        char executable[MAX_PATH]{};
+        const DWORD executableLength = GetModuleFileNameA(nullptr, executable, MAX_PATH);
+        if (executableLength == 0 || executableLength == MAX_PATH)
+            return false;
+        char commandLine[MAX_PATH + 128]{};
+        const int commandLength = std::snprintf(commandLine, sizeof(commandLine), "\"%s\" --render-graph-fatal %s", executable, name);
+        if (commandLength <= 0 || static_cast<usize>(commandLength) >= sizeof(commandLine))
+            return false;
+
+        STARTUPINFOA startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessA(executable, commandLine, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+            return false;
+        const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+        DWORD exitCode = 0;
+        const bool exited = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exitCode) != FALSE;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return exited && exitCode == 0xc0000602u;
+    }
 } // namespace
 
-int main()
+int main(const int argumentCount, char** const arguments)
 {
     Check(memory::Initialize(), "memory initialization");
     Check(vanguard::containers::Initialize(), "containers initialization");
     jobs::Config jobsConfig = jobs::ToolConfig();
     jobsConfig.maxWorkers = 2;
     Check(jobs::Initialize(jobsConfig), "Jobs initialization");
+    if (argumentCount == 3 && std::strcmp(arguments[1], "--render-graph-fatal") == 0)
+        return RunRenderGraphFatalCase(arguments[2]);
+    Check(RunFatalRenderGraphCase("cpu-cycle"), "CPU dependency cycles terminate in Shipping-active graph validation");
+    Check(RunFatalRenderGraphCase("gpu-cycle"), "GPU dependency cycles terminate in Shipping-active graph validation");
+    Check(RunFatalRenderGraphCase("invalid-group"), "out-of-range dependency groups terminate before indexing factory storage");
+    Check(RunFatalRenderGraphCase("unbalanced-occurrence"), "scheduled node execution terminates when it does not match declared resource occurrences");
+    Check(RunFatalRenderGraphCase("invalid-submission-sync"), "invalid compiled submission synchronization terminates in the ordered submission continuation");
     RunRenderCameraTests(&Check);
+    const int failuresBeforeRenderGraph = g_failures;
+    RunRenderGraphTests(&Check);
+    if (g_failures == failuresBeforeRenderGraph)
+        std::printf("Vanguard Render Graph tests passed.\n");
     const int failuresBeforeResourceFlowAllocator = g_failures;
     RunRenderFlowResourceAllocatorTests(&Check);
     if (g_failures == failuresBeforeResourceFlowAllocator)
-        std::printf("Vanguard Resource Flow Allocator Stage 1 tests passed.\n");
+        std::printf("Vanguard Resource Flow Allocator tests passed.\n");
 
     {
         rendering::RenderPhaseRegistry phases;
@@ -285,8 +328,10 @@ int main()
             rendering::DecodeGpuSceneIndex<rendering::GpuInstance>(rendering::GpuSceneElementsPerPage<rendering::GpuInstance>() * 2u + 7u);
         Check(firstInstancePageTwo.page == 2 && firstInstancePageTwo.element == 7 &&
                   rendering::GpuSceneElementsPerPage<rendering::GpuMaterialIndex>() == 262'144 && sizeof(rendering::GpuSceneTableDirectory) == 32 &&
-                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16 && rendering::GpuSceneLayoutVersion == 6 &&
+                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16 && rendering::GpuSceneLayoutVersion == 7 &&
                   static_cast<u32>(rendering::GpuSceneTableKind::TextureResidency) == 18 &&
+                  static_cast<u32>(rendering::GpuSceneTableKind::MaterialParameterWord) == 19 &&
+                  rendering::GpuSceneElementsPerPage<rendering::GpuMaterialParameterWord>() == 262'144 &&
                   sizeof(rendering::GpuTextureResidency) == 16,
               "GPU Scene paged addressing is stable and shader-compatible");
         constexpr rendering::GpuSceneAllocation allocation{rendering::GpuSceneTableKind::Instance, 19, 1, 7};
@@ -762,33 +807,66 @@ int main()
     rendering::EngineViewportHandle gameViewport;
     Check(manager.CreateEngineViewport(engineDesc, gameViewport, &failure), "game engine viewport creation");
 
-    rendering::EngineViewport game;
-    rendering::RenderViewport renderOutput;
-    Check(manager.Resolve(gameViewport, game) && game.IsValid(), "resolve generation-checked EngineViewport facade");
-    Check(manager.Resolve(output, renderOutput) && renderOutput.IsValid(), "resolve generation-checked RenderViewport facade");
+    rendering::EngineViewport* const game = manager.Resolve(gameViewport);
+    rendering::RenderViewport* const renderOutput = manager.Resolve(output);
+    Check(game != nullptr && game->IsValid(), "resolve generation-checked EngineViewport object");
+    Check(renderOutput != nullptr && renderOutput->IsValid(), "resolve generation-checked RenderViewport object");
+    Check(renderOutput != nullptr && renderOutput->GetOutputKind() == rendering::RenderViewportOutputKind::Headless &&
+              renderOutput->GetRenderExtent() == rendering::ViewportExtent{1920, 1080} && renderOutput->GetOutputExtent() == rendering::ViewportExtent{1920, 1080} &&
+              renderOutput->GetRenderWidth() == 1920 && renderOutput->GetRenderHeight() == 1080 && renderOutput->GetOutputWidth() == 1920 &&
+              renderOutput->GetOutputHeight() == 1080 && renderOutput->IsVisible() && !renderOutput->IsOccluded() && !renderOutput->GetSwapChain().IsValid() &&
+              !renderOutput->GetOutputTexture().IsValid(),
+          "manager-owned RenderViewport exposes its applied live output state directly");
+    u32 visitedRenderViewports = 0;
+    manager.VisitRenderViewports([](const rendering::RenderViewport& viewport, void* const userData) noexcept
+                                 {
+                                     if (viewport.IsValid())
+                                         ++*static_cast<u32*>(userData);
+                                 },
+                                 &visitedRenderViewports);
+    u32 visitedEngineViewports = 0;
+    manager.VisitEngineViewports([](const rendering::EngineViewport& viewport, void* const userData) noexcept
+                                 {
+                                     if (viewport.IsValid())
+                                         ++*static_cast<u32*>(userData);
+                                 },
+                                 &visitedEngineViewports);
+    Check(visitedRenderViewports == 1 && visitedEngineViewports == 1, "viewport enumeration visits live owned objects without copied state");
+    execution.expectedViewport = renderOutput;
 
-    rendering::RenderFrameInfo first = Begin(game);
-    Check(first.GetSerial() != 0 && first.GetRenderExtent() == rendering::ViewportExtent{1920, 1080}, "begin frame captures immutable viewport dimensions");
+    rendering::RenderFrameInfo first = Begin(*game);
+    Check(first.GetSerial() != 0 && first.GetViewport() == renderOutput && first.GetRenderExtent() == rendering::ViewportExtent{1920, 1080},
+          "begin frame retains the manager-owned output object and immutable frame dimensions");
     Check(!first.ShouldPresent(), "headless output never requests presentation");
+    Check(!renderOutput->RequestRenderExtent({1600, 900}, &failure) && failure.code == rendering::ViewportFailureCode::FrameAlreadyBuilding,
+          "viewport mutation is rejected after frame construction has begun");
     rendering::RenderFrameInfo duplicate;
-    Check(!game.BeginFrame({}, duplicate, &failure) && failure.code == rendering::ViewportFailureCode::FrameAlreadyBuilding,
+    Check(!game->BeginFrame({}, duplicate, &failure) && failure.code == rendering::ViewportFailureCode::FrameAlreadyBuilding,
           "second building frame is rejected explicitly");
 
     const rendering::RenderCameraHandle commandRoots[]{commandCamera};
     rendering::RenderFrameViewSetup commandViewSetup;
     commandViewSetup.scene = commandScene;
     commandViewSetup.rootCameras = commandRoots;
-    Check(game.ConfigureViews(first, commandViewSetup, &failure) && first.HasViewSetup() && !first.GetViewFamily().IsValid(),
+    Check(game->ConfigureViews(first, commandViewSetup, &failure) && first.HasViewSetup() && !first.GetViewFamily().IsValid(),
           "building frame retains camera roots without preparing renderer-owned views early");
-    Check(!game.ConfigureViews(first, commandViewSetup, &failure) && failure.code == rendering::ViewportFailureCode::InvalidState,
+    Check(!game->ConfigureViews(first, commandViewSetup, &failure) && failure.code == rendering::ViewportFailureCode::InvalidState,
           "building frame view setup is configured exactly once");
 
     PayloadState firstPayload;
     firstPayload.expectedOrder = 0;
     Check(first.SetPayload({&firstPayload, RetainPayload, ReleasePayload}), "valid retained frame payload");
     rendering::RenderFrameSubmission firstSubmission;
-    Check(game.SubmitFrame(first, firstSubmission, &failure) && firstSubmission.IsValid(), "first frame submission");
+    Check(game->SubmitFrame(first, firstSubmission, &failure) && firstSubmission.IsValid(), "first frame submission");
     Check(first.GetSerial() == 0, "submitted caller frame is invalidated");
+    const u64 flushesBeforeViewportUpdate = commands.GetStats().explicitFlushes;
+    Check(renderOutput->RequestRenderExtent({1920, 1080}, &failure) && commands.GetStats().explicitFlushes == flushesBeforeViewportUpdate,
+          "unchanged viewport state does not join the active render tail");
+    Check(renderOutput->RequestRenderExtent({1600, 900}, &failure) && commands.GetStats().explicitFlushes == flushesBeforeViewportUpdate + 1,
+          "changed viewport state joins the prior render tail before mutation");
+    Check(renderOutput->GetRenderExtent() == rendering::ViewportExtent{1600, 900} && renderOutput->GetRenderWidth() == 1600 &&
+              renderOutput->GetRenderHeight() == 900,
+          "applied viewport mutation is immediately observable through the owned viewport object");
 
     rendering::EngineViewportDesc previewDesc;
     previewDesc.contextName = "EditorPreview";
@@ -798,6 +876,7 @@ int main()
     Check(manager.CreateEngineViewport(previewDesc, previewViewport, &failure), "second engine viewport creation");
 
     rendering::RenderFrameInfo second = Begin(manager, previewViewport);
+    Check(second.GetRenderExtent() == rendering::ViewportExtent{1600, 900}, "the next frame captures the applied viewport extent");
     Check(manager.ConfigureViews(previewViewport, second, commandViewSetup, &failure), "second viewport configures the same scene camera independently");
     PayloadState secondPayload;
     secondPayload.expectedOrder = 1;
@@ -807,7 +886,7 @@ int main()
     Check(!manager.SubmitFrame(gameViewport, second, secondSubmission, &failure) && failure.code == rendering::ViewportFailureCode::ForeignFrame,
           "foreign engine viewport cannot submit a frame");
     Check(manager.SubmitFrame(previewViewport, second, secondSubmission, &failure), "second frame submission");
-    Check(!game.FlushFrame(&failure) && failure.code == rendering::ViewportFailureCode::SubmissionFailure,
+    Check(!game->FlushFrame(&failure) && failure.code == rendering::ViewportFailureCode::SubmissionFailure,
           "render submission barrier reports asynchronous execution failure through EngineViewport");
 
     const rendering::RenderCommandSystemStats commandStats = commands.GetStats();
@@ -817,9 +896,9 @@ int main()
           "render command chain records and consumes the first asynchronous render execution failure");
     Check(execution.tickContinuationExecutions.GetValue() == 1 && execution.frameTickSceneCount.GetValue() == 1 &&
               execution.frameTickMutationEpoch.GetValue() == 1 && execution.executions.GetValue() == 2 && execution.continuationExecutions.GetValue() == 2 &&
-              execution.preparedViewFamilies.GetValue() == 2 && execution.lastPreparedViewCount.GetValue() == 1 &&
-              execution.lastPreparedSceneVersion.GetValue() == 1 && execution.orderFailures.GetValue() == 0,
-          "RenderPath submissions prepare exact-epoch view families and retain deterministic dependency order");
+              execution.retainedViewSetups.GetValue() == 2 && execution.lastRootCameraCount.GetValue() == 1 &&
+              execution.lastViewSetupSceneGeneration.GetValue() == commandScene.generation && execution.orderFailures.GetValue() == 0,
+          "RenderPath submissions retain deferred view setup and deterministic dependency order");
     Check(firstPayload.retains.GetValue() == 1 && firstPayload.releases.GetValue() == 1 && secondPayload.retains.GetValue() == 1 &&
               secondPayload.releases.GetValue() == 1,
           "frame payload ownership spans asynchronous execution exactly once");
@@ -834,15 +913,13 @@ int main()
           "asynchronous failure latch preserves renderer stage and serial identity");
     execution.failFrameTick.SetValue(false);
 
-    rendering::RenderFrameInfo abandoned = Begin(game, false);
-    Check(game.ConfigureViews(abandoned, commandViewSetup, &failure), "abandoned frame can retain an unprepared view request");
-    Check(game.AbandonFrame(abandoned, &failure) && abandoned.GetSerial() == 0, "building frame can be explicitly abandoned");
+    rendering::RenderFrameInfo abandoned = Begin(*game, false);
+    Check(game->ConfigureViews(abandoned, commandViewSetup, &failure), "abandoned frame can retain an unprepared view request");
+    Check(game->AbandonFrame(abandoned, &failure) && abandoned.GetSerial() == 0, "building frame can be explicitly abandoned");
 
-    rendering::RenderViewportSnapshot outputSnapshot;
-    rendering::EngineViewportSnapshot gameSnapshot;
-    Check(manager.GetSnapshot(output, outputSnapshot) && outputSnapshot.renderedFrames == 2 && outputSnapshot.engineViewportReferences == 2,
+    Check(renderOutput->GetRenderedFrameCount() == 2 && renderOutput->GetEngineViewportReferenceCount() == 2,
           "render output tracks submissions and engine viewport references");
-    Check(manager.GetSnapshot(gameViewport, gameSnapshot) && gameSnapshot.begunFrames == 2 && gameSnapshot.submittedFrames == 1,
+    Check(game->GetBegunFrameCount() == 2 && game->GetSubmittedFrameCount() == 1,
           "engine viewport tracks begun, submitted, and abandoned frames");
     Check(!manager.DestroyRenderViewport(output, &failure) && failure.code == rendering::ViewportFailureCode::OutputStillReferenced,
           "render output cannot be destroyed while engine viewports reference it");
@@ -862,32 +939,30 @@ int main()
     Check(!manager.BeginFrame(detached, {}, unavailable, &failure) && failure.code == rendering::ViewportFailureCode::OutputUnavailable,
           "presentation viewport does not render before swapchain binding");
 
-    window::PresentationAttachmentSnapshot presentationState;
-    presentationState.handle = presentationDesc.presentation;
-    presentationState.surfaceKind = window::PresentationSurfaceKind::PlatformNative;
+    rendering::RenderViewportPresentationUpdate presentationState;
+    presentationState.attachment = presentationDesc.presentation;
     presentationState.pixelExtent = {1600, 900};
     presentationState.requiredPixelExtentRevision = 4;
     presentationState.requiredSurfaceRevision = 2;
     presentationState.visible = true;
-    Check(renderOutput.GetHandle() != presentation, "resolved facade remains tied to its original render viewport");
-    rendering::RenderViewport detachedOutput;
-    Check(manager.Resolve(presentation, detachedOutput) && detachedOutput.UpdatePresentation(presentationState, &failure),
+    Check(renderOutput->GetHandle() != presentation, "resolved object remains tied to its original render viewport");
+    rendering::RenderViewport* const detachedOutput = manager.Resolve(presentation);
+    rendering::RenderViewportPresentationResult presentationResult;
+    Check(detachedOutput != nullptr && detachedOutput->UpdatePresentation(presentationState, presentationResult, &failure),
           "presentation state reaches the detached render viewport");
-    rendering::RenderViewportSnapshot presentationSnapshot;
-    Check(detachedOutput.GetSnapshot(presentationSnapshot) && presentationSnapshot.state == rendering::RenderViewportState::AwaitingOutput &&
-              presentationSnapshot.requestedOutputExtent == rendering::ViewportExtent{1600, 900} &&
-              presentationSnapshot.outputExtent == presentationDesc.outputExtent && presentationSnapshot.requiredPixelExtentRevision == 4 &&
-              presentationSnapshot.appliedPixelExtentRevision == 0 && presentationSnapshot.requiredSurfaceRevision == 2 &&
-              presentationSnapshot.appliedSurfaceRevision == 0,
+    Check(detachedOutput->GetState() == rendering::RenderViewportState::AwaitingOutput &&
+              detachedOutput->GetRequestedOutputExtent() == rendering::ViewportExtent{1600, 900} && detachedOutput->GetOutputExtent() == presentationDesc.outputExtent &&
+              detachedOutput->GetRequiredPixelExtentRevision() == 4 && detachedOutput->GetAppliedPixelExtentRevision() == 0 &&
+              detachedOutput->GetRequiredSurfaceRevision() == 2 && detachedOutput->GetAppliedSurfaceRevision() == 0 && !presentationResult.resizeApplied &&
+              !presentationResult.surfaceReplaced,
           "presentation viewport separates requested and successfully applied swapchain state");
     window::PresentationAcknowledgement acknowledgement;
-    Check(!detachedOutput.GetPresentationAcknowledgement(acknowledgement), "unbound presentation viewport does not acknowledge unapplied work");
-    const u64 reconciledOutputRevision = presentationSnapshot.outputRevision;
-    Check(detachedOutput.UpdatePresentation(presentationState, &failure) && detachedOutput.GetSnapshot(presentationSnapshot) &&
-              presentationSnapshot.outputRevision == reconciledOutputRevision,
-          "reconciling an unchanged presentation snapshot is idempotent");
+    Check(!detachedOutput->GetPresentationAcknowledgement(acknowledgement), "unbound presentation viewport does not acknowledge unapplied work");
+    const u64 reconciledOutputRevision = detachedOutput->GetOutputRevision();
+    Check(detachedOutput->UpdatePresentation(presentationState, presentationResult, &failure) && detachedOutput->GetOutputRevision() == reconciledOutputRevision,
+          "reconciling an unchanged presentation update is idempotent");
     presentationState.requiredPixelExtentRevision = 3;
-    Check(!detachedOutput.UpdatePresentation(presentationState, &failure) && failure.code == rendering::ViewportFailureCode::InvalidDescriptor,
+    Check(!detachedOutput->UpdatePresentation(presentationState, presentationResult, &failure) && failure.code == rendering::ViewportFailureCode::InvalidDescriptor,
           "stale presentation revisions are rejected explicitly");
 
     Check(manager.DestroyEngineViewport(detached, &failure), "destroy detached engine viewport");
@@ -895,14 +970,15 @@ int main()
     const rendering::RenderViewportHandle staleOutput = output;
     Check(manager.DestroyEngineViewport(previewViewport, &failure), "destroy preview engine viewport");
     Check(manager.DestroyEngineViewport(gameViewport, &failure), "destroy game engine viewport");
-    Check(!game.IsValid(), "engine viewport facade detects destroyed generation");
+    Check(!game->IsValid(), "engine viewport object is invalidated on destruction");
     Check(manager.DestroyRenderViewport(output, &failure), "destroy headless render viewport");
+    Check(!renderOutput->IsValid(), "render viewport object is invalidated after the drained command tail");
 
     rendering::RenderViewportHandle replacement;
     Check(manager.CreateRenderViewport(outputDesc, replacement, &failure) && replacement.index == staleOutput.index &&
               replacement.generation != staleOutput.generation,
           "reused render viewport slot advances its generation");
-    Check(!manager.GetSnapshot(staleOutput, outputSnapshot), "stale render viewport handle is rejected");
+    Check(manager.Resolve(staleOutput) == nullptr, "stale render viewport handle is rejected");
     Check(manager.DestroyRenderViewport(replacement, &failure), "destroy replacement viewport");
 
     const rendering::ViewportManagerStats managerStats = manager.GetStats();

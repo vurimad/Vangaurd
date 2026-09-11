@@ -32,9 +32,13 @@ namespace
         resources::ResourceReference admissionSourceA;
         resources::ResourceReference admissionSourceB;
         resources::ResourceReference oversizedSource;
+        resources::ResourceReference softParentSource;
+        resources::ResourceReference softDependencySource;
         resources::ResourceReference admissionOutputA;
         resources::ResourceReference admissionOutputB;
         resources::ResourceReference oversizedOutput;
+        resources::ResourceReference softParentOutput;
+        resources::ResourceReference softDependencyOutput;
         u8 rootBytes[1] = {0x10};
         u8 leftBytes[1] = {0x20};
         u8 rightBytes[1] = {0x30};
@@ -43,6 +47,9 @@ namespace
         Mode mode = Mode::Success;
         concurrency::Atomic<u32> completedMask;
         concurrency::Atomic<u32> compileCalls;
+        concurrency::Atomic<u32> dependencyViewMask;
+        concurrency::Atomic<u32> softResolverCalls;
+        concurrency::Atomic<u32> softDependencyCompileCalls;
         concurrency::Atomic<u32> admissionStarts;
         concurrency::Atomic<bool> releaseAdmission;
     };
@@ -63,9 +70,10 @@ namespace
         return resources::ResourceReference(resources::ResourcePath::FromString(path), type);
     }
 
-    [[nodiscard]] bool AddGenerated(assets::DependencyCollector& collector, const resources::ResourceReference identity) noexcept
+    [[nodiscard]] bool AddGenerated(assets::DependencyCollector& collector, const resources::ResourceReference identity,
+                                    const assets::DependencyRequirement requirement = assets::DependencyRequirement::Required) noexcept
     {
-        return collector.Add({identity, {}, assets::DependencyRole::Generated, assets::DependencyRequirement::Required}) == assets::Result::Success;
+        return collector.Add({identity, {}, assets::DependencyRole::Generated, requirement}) == assets::Result::Success;
     }
 
     [[nodiscard]] bool Discover(const assets::BuildRequest& request, assets::DependencyCollector& collector, void* const userData) noexcept
@@ -88,8 +96,12 @@ namespace
         {
             return AddGenerated(collector, fixture.sharedOutput);
         }
+        if (source == fixture.softParentSource)
+        {
+            return AddGenerated(collector, fixture.softDependencyOutput, assets::DependencyRequirement::Soft);
+        }
         return source == fixture.sharedSource || source == fixture.admissionSourceA || source == fixture.admissionSourceB ||
-               source == fixture.oversizedSource;
+               source == fixture.oversizedSource || source == fixture.softDependencySource;
     }
 
     [[nodiscard]] bool Compile(const assets::CompileContext& context, assets::ArtifactWriter& writer, void* const userData) noexcept
@@ -98,6 +110,24 @@ namespace
         static_cast<void>(fixture.compileCalls.Increment());
         const resources::ResourceReference source = context.request.source.identity;
         u32 completionBit = 0;
+        if (source == fixture.softParentSource)
+        {
+            if (context.dependencies.Count() != 1 || context.dependencies[0].requirement != assets::DependencyRequirement::Soft ||
+                !context.dependencies[0].content.IsEmpty() || !context.generatedDependencies.Empty())
+            {
+                return false;
+            }
+            const u8 payload[] = {context.request.source.content[0], fixture.generation, static_cast<u8>(context.dependencies.Count())};
+            return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, payload,
+                              sizeof(payload)) == assets::Result::Success;
+        }
+        if (source == fixture.softDependencySource)
+        {
+            static_cast<void>(fixture.softDependencyCompileCalls.Increment());
+            const u8 payload[] = {context.request.source.content[0], fixture.generation, 0};
+            return writer.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, payload,
+                              sizeof(payload)) == assets::Result::Success;
+        }
         if (source == fixture.admissionSourceA || source == fixture.admissionSourceB)
         {
             static_cast<void>(fixture.admissionStarts.Increment());
@@ -119,6 +149,13 @@ namespace
         {
             if (fixture.mode == Mode::Failure)
             {
+                if (context.report != nullptr)
+                {
+                    const assets::BuildDiagnosticLocation location{fixture.sharedSource};
+                    const assets::BuildDiagnosticDescription diagnostic{assets::BuildDiagnosticSeverity::Error, 9001, {&location, 1},
+                                                                         "shared dependency compile failure"};
+                    static_cast<void>(context.report->Add(diagnostic));
+                }
                 return false;
             }
             if (fixture.mode == Mode::Cancellation)
@@ -133,6 +170,11 @@ namespace
         }
         else if (source == fixture.leftSource)
         {
+            if (context.generatedDependencies.Count() != 1 || context.generatedDependencies[0].artifacts.Count() != 1)
+            {
+                return false;
+            }
+            static_cast<void>(fixture.dependencyViewMask.Or(1u << 0u));
             if ((fixture.completedMask.GetValue() & 1u) == 0)
             {
                 return false;
@@ -141,6 +183,11 @@ namespace
         }
         else if (source == fixture.rightSource)
         {
+            if (context.generatedDependencies.Count() != 1 || context.generatedDependencies[0].artifacts.Count() != 1)
+            {
+                return false;
+            }
+            static_cast<void>(fixture.dependencyViewMask.Or(1u << 1u));
             if ((fixture.completedMask.GetValue() & 1u) == 0)
             {
                 return false;
@@ -149,6 +196,12 @@ namespace
         }
         else if (source == fixture.rootSource)
         {
+            if (context.generatedDependencies.Count() != 2 || context.generatedDependencies[0].artifacts.Count() != 1 ||
+                context.generatedDependencies[1].artifacts.Count() != 1)
+            {
+                return false;
+            }
+            static_cast<void>(fixture.dependencyViewMask.Or(1u << 2u));
             if ((fixture.completedMask.GetValue() & 0x6u) != 0x6u)
             {
                 return false;
@@ -214,6 +267,12 @@ namespace
             request = MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedBytes, fixture);
             return true;
         }
+        if (dependency.identity == fixture.softDependencyOutput)
+        {
+            static_cast<void>(fixture.softResolverCalls.Increment());
+            request = MakeRequest(fixture.softDependencySource, fixture.softDependencyOutput, fixture.sharedBytes, fixture);
+            return true;
+        }
         return false;
     }
 } // namespace
@@ -243,6 +302,10 @@ int main()
     fixture.admissionOutputA = Reference("cooked/graph/admission-a.asset", OutputType);
     fixture.admissionOutputB = Reference("cooked/graph/admission-b.asset", OutputType);
     fixture.oversizedOutput = Reference("cooked/graph/oversized.asset", OutputType);
+    fixture.softParentSource = Reference("source/graph/soft-parent.asset", SourceType);
+    fixture.softDependencySource = Reference("source/graph/soft-dependency.asset", SourceType);
+    fixture.softParentOutput = Reference("cooked/graph/soft-parent.asset", OutputType);
+    fixture.softDependencyOutput = Reference("cooked/graph/soft-dependency.asset", OutputType);
 
     assets::BuildSystem buildSystem;
     Check(buildSystem.Initialize(), "build-system initialization");
@@ -252,7 +315,10 @@ int main()
 
     assets::BuildGraph graph;
     assets::BuildGraphConfig graphConfig;
+    // Execution working memory and completed dependency artifacts have
+    // independent limits. Sharing one counter can deadlock this fan-in graph.
     graphConfig.maximumActiveExecutionBytes = 60;
+    graphConfig.maximumRetainedOutputBytes = 12;
     graphConfig.maximumQueuedRequestBytes = 8;
     Check(graph.Initialize(buildSystem, &ResolveGenerated, &fixture, graphConfig), "build-graph initialization");
 
@@ -264,17 +330,40 @@ int main()
     second.Wait();
     assets::BuildOutput output;
     Check(first.HasSucceeded() && second.HasSucceeded() && first.CopyOutput(output) && output.artifacts.Size() == 1 && fixture.compileCalls.GetValue() == 4 &&
-              fixture.completedMask.GetValue() == 0x0fu,
+              fixture.completedMask.GetValue() == 0x0fu && fixture.dependencyViewMask.GetValue() == 0x7u,
           "diamond graph builds in dependency order");
     assets::BuildGraphStats stats = graph.GetStats();
     Check(stats.knownOperations == 4 && stats.dependencyEdges == 4 && stats.issuedRequests == 2 && stats.coalescedRequests >= 2 &&
               stats.completedOperations == 4 && stats.queuedRequestBytes == 0 && stats.peakQueuedRequestBytes == 8 &&
-              stats.peakActiveExecutionBytes <= graphConfig.maximumActiveExecutionBytes && stats.retainedOutputBytes == 3,
+               stats.peakActiveExecutionBytes <= graphConfig.maximumActiveExecutionBytes &&
+               stats.peakRetainedOutputBytes <= graphConfig.maximumRetainedOutputBytes && stats.retainedOutputBytes == 3,
           "graph coalescing and edge telemetry");
     Check(!graph.Shutdown(), "shutdown refuses live requests");
     first.Reset();
     second.Reset();
     Check(graph.GetStats().retainedOutputBytes == 0, "last external interest releases retained root artifacts");
+
+    const assets::BuildRequest softParentRequest =
+        MakeRequest(fixture.softParentSource, fixture.softParentOutput, fixture.rootBytes, fixture);
+    assets::BuildPlan softPlan;
+    assets::BuildFingerprint forbiddenSoftContent;
+    forbiddenSoftContent.bytes[0] = 1;
+    Check(buildSystem.Prepare(softParentRequest, softPlan) == assets::Result::Success && softPlan.GetDependencies().Count() == 1 &&
+              softPlan.GetDependencies()[0].requirement == assets::DependencyRequirement::Soft &&
+              softPlan.GetDependencies()[0].content.IsEmpty() &&
+              softPlan.SetGeneratedDependencyContent(fixture.softDependencyOutput, forbiddenSoftContent) == assets::Result::InvalidArgument,
+          "soft dependency remains identity-only in the prepared build plan");
+    const u32 softResolverCallsBefore = fixture.softResolverCalls.GetValue();
+    const u32 softDependencyCompileCallsBefore = fixture.softDependencyCompileCalls.GetValue();
+    const u32 softParentCompileCallsBefore = fixture.compileCalls.GetValue();
+    const u64 softEdgesBefore = graph.GetStats().dependencyEdges;
+    assets::GraphRequest softParent = graph.Request(softParentRequest);
+    softParent.Wait();
+    Check(softParent.HasSucceeded() && fixture.compileCalls.GetValue() == softParentCompileCallsBefore + 1u &&
+              fixture.softResolverCalls.GetValue() == softResolverCallsBefore &&
+              fixture.softDependencyCompileCalls.GetValue() == softDependencyCompileCallsBefore && graph.GetStats().dependencyEdges == softEdgesBefore,
+          "soft dependency creates no graph resolution, child execution, edge, or artifact view");
+    softParent.Reset();
 
     fixture.mode = Mode::Admission;
     ++fixture.generation;
@@ -326,8 +415,10 @@ int main()
     const u32 failureCallsBefore = fixture.compileCalls.GetValue();
     assets::GraphRequest failed = graph.Request(MakeRequest(fixture.rootSource, fixture.rootOutput, fixture.rootBytes, fixture));
     failed.Wait();
+    assets::BuildReport failureReport;
     Check(failed.GetStatus() == assets::BuildState::Failed && failed.GetError() == assets::BuildFailure::DependencyFailed &&
-              fixture.compileCalls.GetValue() == failureCallsBefore + 1,
+              fixture.compileCalls.GetValue() == failureCallsBefore + 1 && failed.CopyReport(failureReport) && failureReport.GetDiagnostics().Count() == 1 &&
+              failureReport.GetDiagnostics()[0].code == 9001 && failureReport.GetMessage(failureReport.GetDiagnostics()[0]) == "shared dependency compile failure",
           "required dependency failure prevents dependants");
     failed.Reset();
 
@@ -353,6 +444,24 @@ int main()
     Check(stats.externalRequests == 0 && stats.activeOperations == 0 && stats.failedOperations >= 3 && stats.cancelledOperations >= 1,
           "terminal graph telemetry");
     Check(graph.Shutdown(), "build-graph shutdown");
+
+    fixture.mode = Mode::Admission;
+    ++fixture.generation;
+    fixture.releaseAdmission.SetValue(true);
+    assets::BuildGraphConfig retainedLimitConfig;
+    retainedLimitConfig.maximumActiveExecutionBytes = 60;
+    retainedLimitConfig.maximumRetainedOutputBytes = 2;
+    assets::BuildGraph retainedLimitGraph;
+    Check(retainedLimitGraph.Initialize(buildSystem, &ResolveGenerated, &fixture, retainedLimitConfig), "retained-limit graph initialization");
+    assets::GraphRequest retainedOverflow =
+        retainedLimitGraph.Request(MakeRequest(fixture.admissionSourceA, fixture.admissionOutputA, fixture.leftBytes, fixture));
+    retainedOverflow.Wait();
+    Check(retainedOverflow.GetStatus() == assets::BuildState::Failed && retainedOverflow.GetError() == assets::BuildFailure::LimitExceeded &&
+              retainedOverflow.BuildError() == assets::Result::LimitExceeded && retainedLimitGraph.GetStats().retainedOutputBytes == 0,
+          "completed artifact exceeding the retained-output budget fails before it is retained");
+    retainedOverflow.Reset();
+    Check(retainedLimitGraph.Shutdown(), "retained-limit graph shutdown");
+
     Check(buildSystem.UnregisterCompiler(compiler.id) == assets::Result::Success, "compiler unregistration");
 
     assets::CompilerDescriptor unestimatedCompiler = compiler;

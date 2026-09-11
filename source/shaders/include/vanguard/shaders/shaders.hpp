@@ -5,6 +5,11 @@
 #include <vanguard/resources/resources.hpp>
 #include <vanguard/serialization/serialization.hpp>
 
+namespace vanguard::resources
+{
+    class LoadContext;
+}
+
 namespace vanguard::shaders
 {
     inline constexpr u32 ShaderMagic = serialization::MakeFourCC('V', 'S', 'H', 'D');
@@ -32,6 +37,10 @@ namespace vanguard::shaders
     };
 
     [[nodiscard]] const char* ToString(Result result) noexcept;
+    /// Canonical, case-sensitive identity used by shader reflection and every
+    /// cooker that addresses reflected interface members.
+    [[nodiscard]] u64 HashInterfaceName(const char* name) noexcept;
+    [[nodiscard]] u64 HashInterfaceChildName(u64 parent, const char* name) noexcept;
 
     enum class ProgramKind : u8
     {
@@ -212,6 +221,208 @@ namespace vanguard::shaders
         bool rowMajor = false;
     };
 
+    enum class MaterialResourceKind : u8
+    {
+        Texture,
+        Buffer,
+        Sampler,
+        AccelerationStructure
+    };
+
+    enum class MaterialResourceFlags : u8
+    {
+        None = 0,
+        Required = 1u << 0u
+    };
+
+    [[nodiscard]] constexpr bool HasFlag(const MaterialResourceFlags value, const MaterialResourceFlags flag) noexcept
+    {
+        return (static_cast<u8>(value) & static_cast<u8>(flag)) != 0;
+    }
+
+    enum class MaterialResourceAccess : u8
+    {
+        None,
+        Read,
+        Write,
+        ReadWrite
+    };
+
+    enum class MaterialTextureDimension : u8
+    {
+        None,
+        D1,
+        D2,
+        D3,
+        Cube
+    };
+
+    enum class MaterialBufferKind : u8
+    {
+        None,
+        Typed,
+        Structured,
+        ByteAddress
+    };
+
+    enum class MaterialSamplerKind : u8
+    {
+        None,
+        Filtering,
+        Comparison
+    };
+
+    enum class MaterialResourceShapeFlags : u8
+    {
+        None = 0,
+        Arrayed = 1u << 0u,
+        Multisampled = 1u << 1u
+    };
+
+    [[nodiscard]] constexpr bool HasFlag(const MaterialResourceShapeFlags value, const MaterialResourceShapeFlags flag) noexcept
+    {
+        return (static_cast<u8>(value) & static_cast<u8>(flag)) != 0;
+    }
+
+    /// Canonical reconstructable portion of an opaque reflected resource type.
+    /// The full type fingerprint remains the compatibility authority; this
+    /// record exists so runtime code can create an exact view or typed fallback
+    /// without depending on Slang reflection objects.
+    struct MaterialResourceShape
+    {
+        MaterialResourceAccess access = MaterialResourceAccess::None;
+        MaterialTextureDimension textureDimension = MaterialTextureDimension::None;
+        MaterialBufferKind bufferKind = MaterialBufferKind::None;
+        MaterialSamplerKind samplerKind = MaterialSamplerKind::None;
+        ScalarType scalarType = ScalarType::F32;
+        u8 componentCount = 0;
+        MaterialResourceShapeFlags flags = MaterialResourceShapeFlags::None;
+        u8 reserved = 0;
+        u32 elementStride = 0;
+
+        [[nodiscard]] friend constexpr bool operator==(const MaterialResourceShape&, const MaterialResourceShape&) noexcept = default;
+    };
+
+    [[nodiscard]] constexpr bool IsValidMaterialResourceShape(const MaterialResourceKind kind, const MaterialResourceShape& shape) noexcept
+    {
+        const bool validAccess = shape.access == MaterialResourceAccess::Read || shape.access == MaterialResourceAccess::Write || shape.access == MaterialResourceAccess::ReadWrite;
+        const bool validScalar = shape.scalarType <= ScalarType::F64;
+        const u8 flags = static_cast<u8>(shape.flags);
+        constexpr u8 knownFlags = static_cast<u8>(MaterialResourceShapeFlags::Arrayed) | static_cast<u8>(MaterialResourceShapeFlags::Multisampled);
+        if (!validScalar || shape.reserved != 0 || (flags & ~knownFlags) != 0)
+            return false;
+        if (kind == MaterialResourceKind::Texture)
+            return validAccess && shape.textureDimension != MaterialTextureDimension::None && shape.textureDimension <= MaterialTextureDimension::Cube && shape.bufferKind == MaterialBufferKind::None &&
+                   shape.samplerKind == MaterialSamplerKind::None && shape.componentCount >= 1 && shape.componentCount <= 4 && shape.elementStride == 0 &&
+                   (!HasFlag(shape.flags, MaterialResourceShapeFlags::Arrayed) || shape.textureDimension != MaterialTextureDimension::D3) &&
+                   (!HasFlag(shape.flags, MaterialResourceShapeFlags::Multisampled) || shape.textureDimension == MaterialTextureDimension::D2);
+        if (kind == MaterialResourceKind::Buffer)
+        {
+            if (!validAccess || shape.textureDimension != MaterialTextureDimension::None || shape.samplerKind != MaterialSamplerKind::None || shape.flags != MaterialResourceShapeFlags::None ||
+                shape.bufferKind == MaterialBufferKind::None || shape.bufferKind > MaterialBufferKind::ByteAddress)
+                return false;
+            if (shape.bufferKind == MaterialBufferKind::Typed)
+                return shape.componentCount >= 1 && shape.componentCount <= 4 && shape.elementStride == 0;
+            if (shape.bufferKind == MaterialBufferKind::Structured)
+                return shape.componentCount == 0 && shape.elementStride != 0;
+            return shape.componentCount == 0 && shape.elementStride == 0;
+        }
+        if (kind == MaterialResourceKind::Sampler)
+            return shape.access == MaterialResourceAccess::Read && shape.textureDimension == MaterialTextureDimension::None && shape.bufferKind == MaterialBufferKind::None &&
+                   shape.samplerKind != MaterialSamplerKind::None && shape.samplerKind <= MaterialSamplerKind::Comparison && shape.componentCount == 0 && shape.flags == MaterialResourceShapeFlags::None &&
+                   shape.elementStride == 0;
+        if (kind == MaterialResourceKind::AccelerationStructure)
+            return shape.access == MaterialResourceAccess::Read && shape.textureDimension == MaterialTextureDimension::None && shape.bufferKind == MaterialBufferKind::None &&
+                   shape.samplerKind == MaterialSamplerKind::None && shape.componentCount == 0 && shape.flags == MaterialResourceShapeFlags::None && shape.elementStride == 0;
+        return false;
+    }
+
+    /// Offline shader features required by a material domain. This is a cooked
+    /// shader ABI contract, not a query of the active runtime device.
+    enum class MaterialShaderCapability : u32
+    {
+        Numeric16Bit = 1u << 0u,
+        Integer64Bit = 1u << 1u,
+        FloatingPoint64Bit = 1u << 2u,
+        WritableResources = 1u << 3u,
+        MultisampledTextures = 1u << 4u,
+        ComparisonSampling = 1u << 5u,
+        AccelerationStructure = 1u << 6u
+    };
+
+    using MaterialShaderCapabilityMask = u32;
+
+    inline constexpr MaterialShaderCapabilityMask KnownMaterialShaderCapabilityMask =
+        static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::Numeric16Bit) | static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::Integer64Bit) |
+        static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::FloatingPoint64Bit) | static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::WritableResources) |
+        static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::MultisampledTextures) | static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::ComparisonSampling) |
+        static_cast<MaterialShaderCapabilityMask>(MaterialShaderCapability::AccelerationStructure);
+
+    [[nodiscard]] constexpr MaterialShaderCapabilityMask MaterialShaderCapabilityBit(const MaterialShaderCapability capability) noexcept
+    {
+        return static_cast<MaterialShaderCapabilityMask>(capability);
+    }
+
+    [[nodiscard]] constexpr bool HasMaterialShaderCapability(const MaterialShaderCapabilityMask capabilities, const MaterialShaderCapability capability) noexcept
+    {
+        return (capabilities & MaterialShaderCapabilityBit(capability)) != 0;
+    }
+
+    [[nodiscard]] constexpr bool IsValidMaterialShaderCapabilityMask(const MaterialShaderCapabilityMask capabilities) noexcept
+    {
+        return (capabilities & ~KnownMaterialShaderCapabilityMask) == 0;
+    }
+
+    /// Shader-authored ABI for one extensible material domain. The input and output
+    /// digests describe the complete canonical Slang type trees, not only type names.
+    struct MaterialDomainContract
+    {
+        u64 name = 0;
+        u32 schemaVersion = 0;
+        StageMask legalStages = 0;
+        MaterialShaderCapabilityMask requiredCapabilities = 0;
+        crypto::Digest256 inputType;
+        crypto::Digest256 outputType;
+    };
+
+    [[nodiscard]] inline bool MaterialDomainContractsEqual(const MaterialDomainContract& left, const MaterialDomainContract& right) noexcept
+    {
+        return left.name == right.name && left.schemaVersion == right.schemaVersion && left.legalStages == right.legalStages && left.requiredCapabilities == right.requiredCapabilities &&
+               left.inputType == right.inputType && left.outputType == right.outputType;
+    }
+
+    /// One logical resource position in the renderer-global material resource array.
+    /// Descriptor spaces and bindings are intentionally absent.
+    struct MaterialResourceRole
+    {
+        u64 name = 0;
+        u32 arrayIndex = 0;
+        u32 slot = 0;
+        MaterialResourceKind kind = MaterialResourceKind::Texture;
+        MaterialResourceFlags flags = MaterialResourceFlags::None;
+        u16 reserved = 0;
+        crypto::Digest256 typeFingerprint;
+        MaterialResourceShape shape;
+    };
+
+    struct MaterialContractBuildDescription
+    {
+        MaterialDomainContract domain;
+        u32 accessorAbiVersion = 0;
+        u32 parameterByteSize = 0;
+        containers::ArraySpan<const ConstantMember> parameters;
+        containers::ArraySpan<const MaterialResourceRole> resources;
+    };
+
+    struct MaterialContract
+    {
+        MaterialDomainContract domain;
+        u32 accessorAbiVersion = 0;
+        u32 parameterByteSize = 0;
+        crypto::Digest256 domainFingerprint;
+        crypto::Digest256 layoutFingerprint;
+    };
+
     struct VertexInput
     {
         u64 semantic = 0;
@@ -265,6 +476,7 @@ namespace vanguard::shaders
         containers::ArraySpan<const VertexInput> vertexInputs;
         containers::ArraySpan<const FragmentOutput> fragmentOutputs;
         containers::ArraySpan<const SpecializationConstant> specializationConstants;
+        const MaterialContractBuildDescription* materialContract = nullptr;
     };
 
     struct ReadLimits
@@ -278,6 +490,8 @@ namespace vanguard::shaders
         u32 maximumVertexInputs = 256;
         u32 maximumFragmentOutputs = 32;
         u32 maximumSpecializationConstants = 4096;
+        u32 maximumMaterialParameters = 16384;
+        u32 maximumMaterialResources = 256;
     };
 
     enum class PipelineKind : u8
@@ -329,6 +543,10 @@ namespace vanguard::shaders
         [[nodiscard]] containers::ArraySpan<const VertexInput> GetVertexInputs() const noexcept;
         [[nodiscard]] containers::ArraySpan<const FragmentOutput> GetFragmentOutputs() const noexcept;
         [[nodiscard]] containers::ArraySpan<const SpecializationConstant> GetSpecializationConstants() const noexcept;
+        [[nodiscard]] bool HasMaterialContract() const noexcept;
+        [[nodiscard]] const MaterialContract* GetMaterialContract() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ConstantMember> GetMaterialParameters() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const MaterialResourceRole> GetMaterialResources() const noexcept;
         [[nodiscard]] containers::ArraySpan<const u8> GetBytecode(const StageRecord& stage) const noexcept;
 
     private:
@@ -347,11 +565,44 @@ namespace vanguard::shaders
         containers::DynamicArray<VertexInput> m_vertexInputs;
         containers::DynamicArray<FragmentOutput> m_fragmentOutputs;
         containers::DynamicArray<SpecializationConstant> m_specializationConstants;
+        MaterialContract m_materialContract;
+        containers::DynamicArray<ConstantMember> m_materialParameters;
+        containers::DynamicArray<MaterialResourceRole> m_materialResources;
         containers::DynamicArray<u8> m_bytecode;
         bool m_open = false;
     };
 
+    /// Immutable CPU-side resource produced by the ordinary loose/VPAK
+    /// ResourceStreamer decoder path. Native shader creation is renderer-owned.
+    class ShaderResourceObject final : public resources::ResourceObject
+    {
+    public:
+        ShaderResourceObject() noexcept = default;
+        ~ShaderResourceObject() override = default;
+
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
+        [[nodiscard]] bool IsOpen() const noexcept;
+        [[nodiscard]] const ShaderFile& GetFile() const noexcept;
+
+    private:
+        ShaderFile m_file;
+
+        friend resources::ResourceObject* DecodeShaderResource(resources::ResourceReference, const void*, usize, const resources::LoadContext&, resources::Failure&, void*) noexcept;
+    };
+
+    struct ShaderResourceDecoderConfig
+    {
+        ReadLimits limits;
+    };
+
+    /// ResourceStreamer-compatible callbacks. The optional user data points to a
+    /// ShaderResourceDecoderConfig and must outlive decoder registration.
+    [[nodiscard]] resources::ResourceObject* DecodeShaderResource(resources::ResourceReference reference, const void* data, usize size, const resources::LoadContext& context, resources::Failure& failure,
+                                                                  void* userData) noexcept;
+    void DestroyShaderResource(resources::ResourceObject* resource, void* userData) noexcept;
+
     [[nodiscard]] Result WriteShader(filesystem::IFile& writer, const BuildDescription& description) noexcept;
+    [[nodiscard]] Result CalculateMaterialDomainFingerprint(const MaterialDomainContract& domain, crypto::Digest256& fingerprint) noexcept;
     [[nodiscard]] Result CalculateLayoutFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
     [[nodiscard]] Result CalculateBindingLayoutFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
     [[nodiscard]] Result CalculatePipelineInterfaceFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;

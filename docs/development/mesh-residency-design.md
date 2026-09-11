@@ -1803,7 +1803,7 @@ study only read them.
   one resolved renderable handle per mesh proxy and explicit binding clear.
 - `source/rendering/include/vanguard/rendering/gpu_scene_visibility.hpp:9-185`,
   `source/rendering/src/gpu_scene_visibility.cpp:27-193`, and
-  `source/rendering/shaders/gpu_scene_visibility.slang:1-187` — bounded
+  `source/rendering/shaders/gpu_scene_visibility.vsl:1-187` — bounded
   per-view candidate/result partitions and current frustum-only compaction.
 - `source/rendering/include/vanguard/rendering/render_phase.hpp:7-210` — stable
   phase keys, compact sealed IDs, four sort modes, and the 64-phase limit.

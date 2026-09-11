@@ -47,6 +47,9 @@ namespace vanguard::assets
         u32 maximumKnownOperations = 65536;
         u32 maximumGeneratedDependenciesPerOperation = 4096;
         u64 maximumActiveExecutionBytes = 8ull * 1024ull * 1024ull * 1024ull;
+        // Completed child artifacts are immutable inputs to their parents and
+        // therefore have a lifetime independent from compiler working memory.
+        u64 maximumRetainedOutputBytes = 8ull * 1024ull * 1024ull * 1024ull;
         u64 maximumQueuedRequestBytes = 8ull * 1024ull * 1024ull * 1024ull;
     };
 
@@ -72,6 +75,7 @@ namespace vanguard::assets
         u64 activeExecutionBytes = 0;
         u64 peakActiveExecutionBytes = 0;
         u64 retainedOutputBytes = 0;
+        u64 peakRetainedOutputBytes = 0;
     };
 
     class GraphRequest final
@@ -96,6 +100,7 @@ namespace vanguard::assets
         void Wait() const noexcept;
         [[nodiscard]] bool TryWait(u32 timeoutMilliseconds = 0) const noexcept;
         [[nodiscard]] bool CopyOutput(BuildOutput& output) const noexcept;
+        [[nodiscard]] bool CopyReport(BuildReport& report) const noexcept;
         [[nodiscard]] bool Cancel() noexcept;
         void Reset() noexcept;
 
@@ -137,6 +142,7 @@ namespace vanguard::assets
     private:
         void ReleaseInterest(BuildOperation* operation, bool explicitCancellation) noexcept;
         [[nodiscard]] bool CopyOperationOutput(const BuildOperation* operation, BuildOutput& output) const noexcept;
+        [[nodiscard]] bool CopyOperationReport(const BuildOperation* operation, BuildReport& report) const noexcept;
 
         Impl* m_impl = nullptr;
 

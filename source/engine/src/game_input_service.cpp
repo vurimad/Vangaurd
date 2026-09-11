@@ -84,6 +84,16 @@ namespace
             return mapping.IsOpen() ? mapping.Install(m_mappings, true) : game_input::MappingResult::InvalidState;
         }
 
+        [[nodiscard]] bool Clear() noexcept override
+        {
+            game_input::ActionMap empty;
+            const game_input::Result compiled = empty.Compile();
+            if (compiled != game_input::Result::Success)
+                return false;
+            m_mappings = static_cast<game_input::ActionMap&&>(empty);
+            return true;
+        }
+
     protected:
         app::LifecycleStatus OnInitialize(app::ServiceContext& context) noexcept override
         {

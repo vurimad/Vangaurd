@@ -6,6 +6,13 @@
 
 namespace vanguard::rendering
 {
+    class FrameRenderer;
+
+    namespace detail
+    {
+        struct DedicatedResourceProviderTestAccess;
+    }
+
     inline constexpr u32 InvalidRenderFlowResourceIndex = 0xffffffffu;
 
     template <typename Tag> struct RenderFlowStableId
@@ -165,12 +172,141 @@ namespace vanguard::rendering
         Clear
     };
 
+    enum class TextureClearValueKind : u8
+    {
+        None,
+        ColorFloat,
+        ColorUint,
+        Depth,
+        Stencil,
+        DepthStencil
+    };
+
+    struct TextureClearValue
+    {
+        TextureClearValueKind kind = TextureClearValueKind::None;
+        rhi::ColorValue color;
+        u32 uintValue = 0;
+        f32 depth = 1.0f;
+        u8 stencil = 0;
+
+        [[nodiscard]] static constexpr TextureClearValue Color(const rhi::ColorValue value) noexcept
+        {
+            TextureClearValue result;
+            result.kind = TextureClearValueKind::ColorFloat;
+            result.color = value;
+            return result;
+        }
+
+        [[nodiscard]] static constexpr TextureClearValue Uint(const u32 value) noexcept
+        {
+            TextureClearValue result;
+            result.kind = TextureClearValueKind::ColorUint;
+            result.uintValue = value;
+            return result;
+        }
+
+        [[nodiscard]] static constexpr TextureClearValue Depth(const f32 value) noexcept
+        {
+            TextureClearValue result;
+            result.kind = TextureClearValueKind::Depth;
+            result.depth = value;
+            return result;
+        }
+
+        [[nodiscard]] static constexpr TextureClearValue Stencil(const u8 value) noexcept
+        {
+            TextureClearValue result;
+            result.kind = TextureClearValueKind::Stencil;
+            result.stencil = value;
+            return result;
+        }
+
+        [[nodiscard]] static constexpr TextureClearValue DepthStencil(const f32 depthValue, const u8 stencilValue) noexcept
+        {
+            TextureClearValue result;
+            result.kind = TextureClearValueKind::DepthStencil;
+            result.depth = depthValue;
+            result.stencil = stencilValue;
+            return result;
+        }
+    };
+
+    enum class BufferClearValueKind : u8
+    {
+        None,
+        Uint
+    };
+
+    struct BufferClearValue
+    {
+        BufferClearValueKind kind = BufferClearValueKind::None;
+        u32 value = 0;
+
+        [[nodiscard]] static constexpr BufferClearValue Uint(const u32 clearValue) noexcept
+        {
+            BufferClearValue result;
+            result.kind = BufferClearValueKind::Uint;
+            result.value = clearValue;
+            return result;
+        }
+    };
+
+    enum class ImportReadinessKind : u8
+    {
+        SameQueueContinuation,
+        // incomingWait is an already submitted fence from initialQueue. The
+        // consumer may use another queue; initialState must be legal there.
+        // Copy-to-consumer handoffs must publish Common state.
+        ExplicitFenceWait
+    };
+
+    enum class ExportReadinessKind : u8
+    {
+        SameQueueContinuation,
+        ExplicitFenceSignal
+    };
+
+    struct TerminalResourceExportDesc
+    {
+        rhi::ResourceState terminalState = rhi::ResourceState::Common;
+        rhi::QueueType terminalQueue = rhi::QueueType::Graphics;
+        ExportReadinessKind readiness = ExportReadinessKind::SameQueueContinuation;
+    };
+
+    struct RetainedTextureImportDesc
+    {
+        ExternalResourceToken token;
+        rhi::TextureRef texture;
+        rhi::TextureDesc expected;
+        rhi::ResourceState initialState = rhi::ResourceState::Common;
+        rhi::ResourceState terminalState = rhi::ResourceState::Common;
+        rhi::QueueType initialQueue = rhi::QueueType::Graphics;
+        rhi::QueueType terminalQueue = rhi::QueueType::Graphics;
+        ImportReadinessKind readiness = ImportReadinessKind::SameQueueContinuation;
+        rhi::GpuFence incomingWait;
+    };
+
+    struct RetainedBufferImportDesc
+    {
+        ExternalResourceToken token;
+        rhi::BufferRef buffer;
+        rhi::BufferDesc expected;
+        rhi::ResourceState initialState = rhi::ResourceState::Common;
+        rhi::ResourceState terminalState = rhi::ResourceState::Common;
+        rhi::QueueType initialQueue = rhi::QueueType::Graphics;
+        rhi::QueueType terminalQueue = rhi::QueueType::Graphics;
+        ImportReadinessKind readiness = ImportReadinessKind::SameQueueContinuation;
+        rhi::GpuFence incomingWait;
+    };
+
     struct FrameTextureDesc
     {
         rhi::TextureDesc active;
         rhi::Extent3D maximumExtent;
         u16 maximumMipCount = 0;
         FrameResourceInitialization initialization = FrameResourceInitialization::Undefined;
+        TextureClearValue clearValue;
     };
 
     struct FrameBufferDesc
@@ -178,6 +314,7 @@ namespace vanguard::rendering
         rhi::BufferDesc active;
         u64 maximumSize = 0;
         FrameResourceInitialization initialization = FrameResourceInitialization::Undefined;
+        BufferClearValue clearValue;
     };
 
     struct FrameResourceDesc
@@ -209,6 +346,7 @@ namespace vanguard::rendering
         rhi::SubresourceRange subresources;
         LogicalAccessIntent access = LogicalAccessIntent::Read;
         ResourceContentIntent content = ResourceContentIntent::Preserve;
+        TextureClearValue clearValue;
     };
 
     struct BufferUseDesc
@@ -216,6 +354,7 @@ namespace vanguard::rendering
         rhi::ResourceState requiredState = rhi::ResourceState::ShaderResourceGraphics;
         LogicalAccessIntent access = LogicalAccessIntent::Read;
         ResourceContentIntent content = ResourceContentIntent::Preserve;
+        BufferClearValue clearValue;
     };
 
     struct LogicalResourceKey
@@ -252,6 +391,9 @@ namespace vanguard::rendering
         CapacityExceeded,
         IncompletePlanning,
         IncompleteExecution,
+        BudgetExceeded,
+        NativeOutOfMemory,
+        BackendContractViolation,
         DeviceLostOrBackendFailure
     };
 
@@ -273,11 +415,31 @@ namespace vanguard::rendering
         u32 maximumViews = 65'536;
         u32 maximumTrackedTextureSubresources = 1'048'576;
         u32 maximumExecutionPackets = 4096;
+        u32 maximumCompiledResourceActions = 1'048'576;
+        u32 maximumCommandScopeEntryStates = 1'048'576;
+        u32 maximumRetainedImports = 4096;
+        u32 maximumTerminalExports = 4096;
+        u32 maximumOutstandingPublishedExports = 4096;
+        // One hard ledger for every allocator-owned dedicated resource and
+        // placed heap. Pending GPU retirement and native destruction remain charged.
+        u64 hardNativeByteLimit = ~u64{0};
+        // Allocator-wide projected targets shared by dedicated resources and
+        // placed heaps. Pending native destruction remains physically charged.
+        u64 textureSoftTargetBytes = ~u64{0};
+        u64 bufferSoftTargetBytes = ~u64{0};
+        // Explicit planning/execution validation seam for allocator tests that
+        // run without an RHI device. Production must leave this disabled: a
+        // resolved use then requires a real dedicated-resource assignment.
+        bool allowLogicalOnlyValidation = false;
+        // Optional shared bindless domain. Resolve creates whole-resource
+        // descriptors; the execution generation retires them with its receipts.
+        rhi::DescriptorDomainRef resourceDescriptors;
     };
 
     struct FrameResourcePolicy
     {
         bool enablePlacedResources = false;
+        bool processEviction = true;
     };
 
     struct RenderFlowResourceAllocatorStats
@@ -288,9 +450,25 @@ namespace vanguard::rendering
         u64 abortedFrames = 0;
         u64 rejectedOperations = 0;
         u64 compiledOperations = 0;
+        u64 compiledResourceActions = 0;
         u32 planningWriters = 0;
         u32 logicalAllocations = 0;
         u32 compiledPackets = 0;
+        u32 retainedImports = 0;
+        u32 outstandingPublishedExports = 0;
+        u64 chargedNativeBytes = 0;
+        u64 chargedTextureBytes = 0;
+        u64 chargedBufferBytes = 0;
+        u64 dedicatedResourcePoolHits = 0;
+        u64 dedicatedResourcePoolMisses = 0;
+        u64 placedHeapPoolHits = 0;
+        u64 placedHeapPoolMisses = 0;
+        u64 placedObjectPoolHits = 0;
+        u64 placedObjectPoolMisses = 0;
+        u64 pendingRetirementResources = 0;
+        u64 pendingNativeDestructionResources = 0;
+        u64 pendingRetirementPlacedHeaps = 0;
+        u64 pendingNativeDestructionPlacedHeaps = 0;
         RenderFlowResourceSessionState state = RenderFlowResourceSessionState::Idle;
     };
 
@@ -314,14 +492,6 @@ namespace vanguard::rendering
         bool m_ready = false;
     };
 
-    struct SurvivingGraphOverlay
-    {
-        containers::ArraySpan<const RenderFlowNodeId> nodes;
-        bool allNodesSurvive = false;
-
-        [[nodiscard]] bool Contains(RenderFlowNodeId node) const noexcept;
-    };
-
     struct CompiledCommandScope
     {
         CommandScopeId scope;
@@ -329,15 +499,20 @@ namespace vanguard::rendering
         u32 stableOrder = 0;
     };
 
-    struct CompiledQueueSchedule
+    // Executable graphics/async-compute dependency compiled from the allocator's
+    // explicit queue request stream. The authored synchronization submission
+    // follows the producer and orders the subsequent consumer queue work.
+    struct CompiledQueueDependency
     {
-        containers::ArraySpan<const CompiledCommandScope> scopes;
+        CommandScopeId producerScope;
+        CommandScopeId consumerScope;
+        rhi::CommandListSyncType sync = rhi::CommandListSyncType::None;
     };
 
     class ExecutionGenerationRef;
     class CompiledExecutionPacketView;
+    class PublishedResourceExport;
     struct TerminalExecutionReceipt;
-    class FrameResourceSession;
 
     class ResourcePlanningWriter final
     {
@@ -364,6 +539,10 @@ namespace vanguard::rendering
         [[nodiscard]] bool DeclareTemporaryBuffer(containers::StringView displayName, const FrameBufferDesc& desc, LogicalResourceId& resource,
                                                   RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool DeclareLike(LogicalResourceKey key, LogicalResourceId source, LogicalResourceId& resource, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ImportTexture(LogicalResourceKey key, ImportedResourceId imported, LogicalResourceId& resource,
+                                         RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ImportBuffer(LogicalResourceKey key, ImportedResourceId imported, LogicalResourceId& resource,
+                                        RenderFlowResourceFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] bool CreateTextureView(LogicalResourceId resource, const rhi::TextureViewDesc& desc, LogicalTextureViewId& view, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool CreateBufferView(LogicalResourceId resource, const rhi::BufferViewDesc& desc, LogicalBufferViewId& view, RenderFlowResourceFailure* failure = nullptr) noexcept;
@@ -374,53 +553,29 @@ namespace vanguard::rendering
         [[nodiscard]] bool BeginBufferViewUse(LogicalBufferViewId view, const BufferUseDesc& desc, ResourceUseId& use, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool EndUse(ResourceUseId use, RenderFlowResourceFailure* failure = nullptr) noexcept;
 
+        [[nodiscard]] bool OpenResourceScope(LogicalResourceId resource, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool CloseResourceScope(LogicalResourceId resource, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool OpenResourceScope(LogicalResourceId resource, ResourceScopeId scope, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool CloseResourceScope(ResourceScopeId scope, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool DeclareTemporaryLike(containers::StringView displayName, LogicalResourceId source, LogicalResourceId& resource,
+                                                RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool SwapLogicalMappings(LogicalResourceId left, LogicalResourceId right, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool CaptureDecision(bool value, DecisionId& decision, RenderFlowResourceFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool RequestExport(LogicalResourceId resource, ExportSlotId slot, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestExport(LogicalResourceId resource, ExportSlotId slot, const TerminalResourceExportDesc& desc,
+                                         RenderFlowResourceFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] bool Close(RenderFlowResourceFailure* failure = nullptr) noexcept;
         void Abandon() noexcept;
 
     private:
         Impl* m_impl = nullptr;
-        friend class FrameResourceSession;
-    };
-
-    class FrameResourceSession final
-    {
-    public:
-        FrameResourceSession() noexcept = default;
-        ~FrameResourceSession();
-        FrameResourceSession(FrameResourceSession&& other) noexcept;
-        FrameResourceSession& operator=(FrameResourceSession&& other) noexcept;
-
-        FrameResourceSession(const FrameResourceSession&) = delete;
-        FrameResourceSession& operator=(const FrameResourceSession&) = delete;
-
-        [[nodiscard]] bool IsValid() const noexcept;
-        [[nodiscard]] RenderFlowResourceSessionState GetState() const noexcept;
-        [[nodiscard]] bool CreatePlanningWriter(RenderFlowNodeId node, GpuFlowGroupId flowGroup, CommandScopeId commandScope, ResourcePlanningWriter& writer,
-                                                RenderFlowResourceFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool SealCandidates(PlanningJoinToken join, RenderFlowResourceFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Resolve(const SurvivingGraphOverlay& surviving, const CompiledQueueSchedule& schedule, ExecutionGenerationRef& generation, jobs::Builder* creationJobs = nullptr,
-                                   RenderFlowResourceFailure* failure = nullptr) noexcept;
-        // Coordinator-only transition. Packet lookup and execution are illegal
-        // until this succeeds exactly once for the published generation.
-        [[nodiscard]] bool BeginExecution(RenderFlowResourceFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool PacketFor(RenderFlowNodeId node, CompiledExecutionPacketView& packet, RenderFlowResourceFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Finish(const TerminalExecutionReceipt& receipt, RenderFlowResourceFailure* failure = nullptr) noexcept;
-        // Idempotent only while planning or resolving. A published generation
-        // must leave through Finish with terminal join evidence.
-        void CancelBeforePublication() noexcept;
-
-    private:
-        void* m_owner = nullptr;
-        u32 m_generation = 0;
         friend class RenderFlowResourceAllocator;
     };
 
+    // Coordinator lifetime operations are externally serialized. Recording jobs
+    // and their continuations must be joined before Finish, destruction, or
+    // abandonment; teardown never cancels concurrently running packet owners.
+    // Parallel declaration writers retain their separate writer/join contract.
     class RenderFlowResourceAllocator final
     {
     public:
@@ -434,11 +589,51 @@ namespace vanguard::rendering
         [[nodiscard]] bool Initialize(const RenderFlowResourceAllocatorConfig& config = {}, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
-        [[nodiscard]] bool BeginFrame(u64 frameSerial, const FrameResourcePolicy& policy, FrameResourceSession& session, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] RenderFlowResourceSessionState GetState() const noexcept;
+        [[nodiscard]] ExecutionGenerationId GetExecutionGeneration() const noexcept;
+        // Non-blocking cache release. Only allocator-owned persistent pool
+        // entries are cleared; published exports remain caller-visible owners.
+        // Native bytes stay charged internally until destruction is observed.
+        [[nodiscard]] bool ClearPersistentCaches(RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginFrame(u64 frameSerial, const FrameResourcePolicy& policy, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RegisterPresentationImport(const rhi::AcquiredBackBuffer& acquisition, ImportedResourceId& imported,
+                                                      RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RegisterImport(const RetainedTextureImportDesc& desc, ImportedResourceId& imported, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RegisterImport(const RetainedBufferImportDesc& desc, ImportedResourceId& imported, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ReserveExportSlot(ExportSlotId& slot, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Each writer owns a stable publication slot. The renderer creates writers before dispatch;
+        // declaration, Close and Abandon remain exclusive to that writer's job chain.
+        [[nodiscard]] bool CreatePlanningWriter(RenderFlowNodeId node, GpuFlowGroupId flowGroup, CommandScopeId commandScope, ResourcePlanningWriter& writer,
+                                                RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestBeginQueue(rhi::QueueType queue, GpuFlowGroupId flowGroup, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestEndQueue(GpuFlowGroupId flowGroup, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestQueueSync(GpuFlowGroupId flowGroup, rhi::CommandListSyncType sync, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Requires the actual declaration join before reading writer-owned completion slots.
+        [[nodiscard]] bool SealPlanning(PlanningJoinToken join, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Resolve(jobs::Builder* creationJobs = nullptr, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginExecution(RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool PacketFor(RenderFlowNodeId node, CompiledExecutionPacketView& packet, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Caller has joined all recording work, closed/canceled every cursor,
+        // and guarantees no queued job can claim a packet. GPU completion is
+        // separate and remains described by the submission/fence receipts.
+        [[nodiscard]] bool Finish(const TerminalExecutionReceipt& receipt, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Idempotent only while planning or resolving. A published generation
+        // must leave through Finish with terminal join evidence.
+        void CancelBeforePublication() noexcept;
         [[nodiscard]] RenderFlowResourceAllocatorStats GetStats() const noexcept;
+        [[nodiscard]] bool TakeExport(ExportSlotId slot, PublishedResourceExport& resource, RenderFlowResourceFailure* failure = nullptr) noexcept;
 
     private:
+        [[nodiscard]] bool PreparePlanningGroups(u32 groupCount, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] containers::ArraySpan<const CompiledCommandScope> GetExecutionCommandScopes() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const CompiledQueueDependency> GetExecutionQueueDependencies() const noexcept;
+        // Terminal fallback only, with the same CPU quiescence requirement as Finish.
+        void AbandonPublishedExecution() noexcept;
+
         Impl* m_impl = nullptr;
-        friend class FrameResourceSession;
+        friend class FrameRenderer;
+        friend class ResourcePlanningWriter;
+        friend class RenderNodeGraph;
+        friend struct detail::DedicatedResourceProviderTestAccess;
     };
 } // namespace vanguard::rendering

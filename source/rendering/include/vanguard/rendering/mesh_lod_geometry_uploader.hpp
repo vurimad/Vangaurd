@@ -100,8 +100,7 @@ namespace vanguard::rendering
 
     /// Retires every unpublished placement. The ranges remain unavailable until the allocator's normal
     /// comprehensive retirement-fence epoch completes.
-    [[nodiscard]] bool AbortPendingMeshLodGeometry(PendingMeshLodGeometry& geometry, GeometryAllocator& allocator,
-                                                   GeometryAllocatorFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool AbortPendingMeshLodGeometry(PendingMeshLodGeometry& geometry, GeometryAllocator& allocator, GeometryAllocatorFailure* failure = nullptr) noexcept;
 
     struct MeshLodGeometryUploaderStats
     {
@@ -139,6 +138,7 @@ namespace vanguard::rendering
         /// Refuses shutdown while requests remain. Call Cancel for pending/failed requests and TakeCompleted for
         /// completed ownership; this prevents unpublished active geometry from being silently leaked.
         [[nodiscard]] bool Shutdown(MeshLodGeometryUploadFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Idempotent for the same resource generation and LOD: repeated demand returns the existing request id.

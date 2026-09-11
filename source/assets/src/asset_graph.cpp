@@ -166,14 +166,16 @@ namespace
         return true;
     }
 
-    [[nodiscard]] u64 ArtifactByteCount(const BuildOutput& output) noexcept
+    [[nodiscard]] bool ArtifactByteCount(const BuildOutput& output, u64& bytes) noexcept
     {
-        u64 bytes = 0;
+        bytes = 0;
         for (const Artifact& artifact : output.artifacts)
         {
+            if (artifact.bytes.Size() > ~u64{0} - bytes)
+                return false;
             bytes += artifact.bytes.Size();
         }
-        return bytes;
+        return true;
     }
 
     [[nodiscard]] bool ExecutionReservation(const BuildResourceEstimate& estimate, u64& bytes) noexcept
@@ -209,6 +211,7 @@ namespace vanguard::assets
         BuildPlan plan;
         containers::DynamicArray<BuildEdge> edges;
         BuildOutput output;
+        BuildReport report;
         concurrency::Atomic<u32> state{static_cast<u32>(BuildState::Resolving)};
         concurrency::Atomic<u32> failure{static_cast<u32>(BuildFailure::None)};
         concurrency::Atomic<u32> buildError{static_cast<u32>(Result::Success)};
@@ -339,6 +342,48 @@ namespace vanguard::assets
             return operation;
         }
 
+        void ReleaseTrackedOutputIfUnreferencedLocked(BuildOperation& operation) noexcept
+        {
+            const BuildState state = static_cast<BuildState>(operation.state.GetValue());
+            const bool terminal = state == BuildState::Succeeded || state == BuildState::Failed || state == BuildState::Cancelled;
+            if (!terminal || operation.externalInterests != 0 || operation.dependencyInterests != 0 || !operation.outputBytesTracked)
+            {
+                return;
+            }
+            operation.outputBytesTracked = false;
+            stats.retainedOutputBytes -= operation.outputBytes;
+            operation.outputBytes = 0;
+            ReleaseOutputArtifacts(operation.output);
+        }
+
+        [[nodiscard]] bool CanReserveExecutionLocked(const u64 bytes) const noexcept
+        {
+            return stats.activeExecutionBytes <= config.maximumActiveExecutionBytes &&
+                   bytes <= config.maximumActiveExecutionBytes - stats.activeExecutionBytes;
+        }
+
+        [[nodiscard]] bool ReserveRetainedOutputLocked(BuildOperation& operation, const u64 bytes) noexcept
+        {
+            if (bytes == 0)
+            {
+                operation.outputBytes = 0;
+                return true;
+            }
+            if (stats.retainedOutputBytes > config.maximumRetainedOutputBytes ||
+                bytes > config.maximumRetainedOutputBytes - stats.retainedOutputBytes)
+            {
+                return false;
+            }
+            operation.outputBytes = bytes;
+            operation.outputBytesTracked = true;
+            stats.retainedOutputBytes += bytes;
+            if (stats.retainedOutputBytes > stats.peakRetainedOutputBytes)
+            {
+                stats.peakRetainedOutputBytes = stats.retainedOutputBytes;
+            }
+            return true;
+        }
+
         void ReleaseDependenciesLocked(BuildOperation& operation) noexcept
         {
             if (operation.dependenciesReleased)
@@ -352,6 +397,7 @@ namespace vanguard::assets
                 {
                     --edge.operation->dependencyInterests;
                 }
+                ReleaseTrackedOutputIfUnreferencedLocked(*edge.operation);
                 if (edge.operation->externalInterests == 0 && edge.operation->dependencyInterests == 0 && !edge.operation->finished.TryWait())
                 {
                     edge.operation->cancelRequested.SetValue(true);
@@ -407,13 +453,14 @@ namespace vanguard::assets
             operation.buildError.SetValue(static_cast<u32>(buildError));
             operation.state.SetValue(static_cast<u32>(state));
             ReleaseDependenciesLocked(operation);
-            if (state == BuildState::Succeeded && operation.externalInterests != 0 && operation.outputBytes != 0)
+            if (state != BuildState::Succeeded || (operation.externalInterests == 0 && operation.dependencyInterests == 0) ||
+                operation.outputBytes == 0)
             {
-                operation.outputBytesTracked = true;
-                stats.retainedOutputBytes += operation.outputBytes;
-            }
-            else
-            {
+                if (operation.outputBytesTracked)
+                {
+                    operation.outputBytesTracked = false;
+                    stats.retainedOutputBytes -= operation.outputBytes;
+                }
                 operation.outputBytes = 0;
                 ReleaseOutputArtifacts(operation.output);
             }
@@ -520,6 +567,10 @@ namespace vanguard::assets
                 {
                     continue;
                 }
+                if (dependency.requirement == DependencyRequirement::Soft)
+                {
+                    continue;
+                }
                 if (operation.edges.Size() >= config.maximumGeneratedDependenciesPerOperation)
                 {
                     failure = BuildFailure::LimitExceeded;
@@ -565,7 +616,8 @@ namespace vanguard::assets
                 ++stats.dependencyEdges;
                 lock.Release();
                 const BuildState childState = static_cast<BuildState>(child->state.GetValue());
-                if (childFailure == BuildFailure::DependencyCycle || childState == BuildState::Failed)
+                if (childFailure == BuildFailure::DependencyCycle ||
+                    (childState == BuildState::Failed && dependency.requirement == DependencyRequirement::Required))
                 {
                     failure = childFailure == BuildFailure::DependencyCycle ? childFailure : BuildFailure::DependencyFailed;
                     Complete(operation, BuildState::Failed, failure, Result::InvalidState);
@@ -607,7 +659,7 @@ namespace vanguard::assets
                         cancelled = true;
                         break;
                     }
-                    if (candidate->executionBytes > config.maximumActiveExecutionBytes - stats.activeExecutionBytes)
+                    if (!CanReserveExecutionLocked(candidate->executionBytes))
                     {
                         continue;
                     }
@@ -666,7 +718,7 @@ namespace vanguard::assets
                 Complete(operation, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled);
                 return;
             }
-            if (operation.executionBytes <= config.maximumActiveExecutionBytes - stats.activeExecutionBytes)
+            if (CanReserveExecutionLocked(operation.executionBytes))
             {
                 operation.executionReserved = true;
                 stats.activeExecutionBytes += operation.executionBytes;
@@ -724,23 +776,100 @@ namespace vanguard::assets
                 }
                 else if (edge.requirement == DependencyRequirement::Required)
                 {
+                    static_cast<void>(operation.report.CopyFrom(edge.operation->report));
                     Complete(operation, BuildState::Failed, BuildFailure::DependencyFailed, static_cast<Result>(edge.operation->buildError.GetValue()));
                     return;
                 }
             }
 
+            u32 artifactViewCount = 0;
+            for (const BuildEdge& edge : operation.edges)
+            {
+                if (static_cast<BuildState>(edge.operation->state.GetValue()) == BuildState::Succeeded)
+                {
+                    if (edge.operation->output.artifacts.Size() > ~u32{0} - artifactViewCount)
+                    {
+                        Complete(operation, BuildState::Failed, BuildFailure::LimitExceeded, Result::LimitExceeded);
+                        return;
+                    }
+                    artifactViewCount += edge.operation->output.artifacts.Size();
+                }
+            }
+            containers::DynamicArray<ArtifactView> artifactViews{memory::pools::Assets::GetInstance()};
+            containers::DynamicArray<GeneratedDependencyView> dependencyViews{memory::pools::Assets::GetInstance()};
+            artifactViews.Reserve(artifactViewCount);
+            dependencyViews.Reserve(operation.edges.Size());
+            if (artifactViews.Capacity() < artifactViewCount || dependencyViews.Capacity() < operation.edges.Size())
+            {
+                Complete(operation, BuildState::Failed, BuildFailure::OutOfMemory, Result::OutOfMemory);
+                return;
+            }
+            for (const BuildEdge& edge : operation.edges)
+            {
+                if (static_cast<BuildState>(edge.operation->state.GetValue()) != BuildState::Succeeded)
+                {
+                    continue;
+                }
+                const u32 firstArtifact = artifactViews.Size();
+                for (const Artifact& artifact : edge.operation->output.artifacts)
+                {
+                    artifactViews.PushBack({artifact.resource, artifact.segment, artifact.flags, artifact.alignmentLog2,
+                                            {artifact.bytes.TypedData(), artifact.bytes.Size()}});
+                }
+                const BuildDependency* resolvedDependency = nullptr;
+                for (const BuildDependency& dependency : operation.plan.GetDependencies())
+                {
+                    if (dependency.role == DependencyRole::Generated && dependency.identity == edge.identity)
+                    {
+                        resolvedDependency = &dependency;
+                        break;
+                    }
+                }
+                if (resolvedDependency == nullptr)
+                {
+                    Complete(operation, BuildState::Failed, BuildFailure::DependencyFailed, Result::InvalidState);
+                    return;
+                }
+                dependencyViews.PushBack({*resolvedDependency, edge.operation->output.buildFingerprint, edge.operation->output.contentFingerprint,
+                                          {artifactViews.TypedData() + firstArtifact, artifactViews.Size() - firstArtifact}});
+            }
+
             const BuildRequest request = operation.request.View();
             const IsCancellationRequestedFunction cancellation = [](void* const userData) noexcept
             { return static_cast<BuildOperation*>(userData)->cancelRequested.GetValue(); };
-            const Result result = buildSystem->Execute(request, operation.plan, operation.output, cancellation, &operation);
+            const Result result = buildSystem->Execute(request, operation.plan, operation.output, cancellation, &operation,
+                                                       {dependencyViews.TypedData(), dependencyViews.Size()}, &operation.report);
             if (result == Result::Success)
             {
+                u64 outputBytes = 0;
+                if (!ArtifactByteCount(operation.output, outputBytes))
+                {
+                    Complete(operation, BuildState::Failed, BuildFailure::LimitExceeded, Result::LimitExceeded);
+                    return;
+                }
+                lock.Acquire();
+                // Reaching this point is the commit boundary. Cancellation
+                // after the compiler returned cannot expose a half-installed
+                // cache/index entry; the completed result is either retained
+                // in full or rejected before publication.
+                const bool cancelledBeforeCommit = operation.cancelRequested.GetValue();
+                const bool retained = !cancelledBeforeCommit && ReserveRetainedOutputLocked(operation, outputBytes);
+                lock.Release();
+                if (cancelledBeforeCommit)
+                {
+                    Complete(operation, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled);
+                    return;
+                }
+                if (!retained)
+                {
+                    Complete(operation, BuildState::Failed, BuildFailure::LimitExceeded, Result::LimitExceeded);
+                    return;
+                }
                 if (dependencyIndex != nullptr && dependencyIndex->Publish(request, operation.plan, operation.output) != IndexResult::Success)
                 {
                     Complete(operation, BuildState::Failed, BuildFailure::IndexPublicationFailed, Result::InvalidState);
                     return;
                 }
-                operation.outputBytes = ArtifactByteCount(operation.output);
                 Complete(operation, BuildState::Succeeded, BuildFailure::None, Result::Success);
             }
             else if (result == Result::Cancelled || operation.cancelRequested.GetValue())
@@ -876,6 +1005,11 @@ namespace vanguard::assets
         return m_graph != nullptr && m_operation != nullptr && m_graph->CopyOperationOutput(m_operation, output);
     }
 
+    bool GraphRequest::CopyReport(BuildReport& report) const noexcept
+    {
+        return m_graph != nullptr && m_operation != nullptr && m_graph->CopyOperationReport(m_operation, report);
+    }
+
     bool GraphRequest::Cancel() noexcept
     {
         if (!m_hasInterest || m_graph == nullptr || m_operation == nullptr)
@@ -911,7 +1045,8 @@ namespace vanguard::assets
             return true;
         }
         if (!memory::IsInitialized() || !jobs::IsInitialized() || !buildSystem.IsInitialized() || config.maximumKnownOperations == 0 ||
-            config.maximumGeneratedDependenciesPerOperation == 0 || config.maximumActiveExecutionBytes == 0 || config.maximumQueuedRequestBytes == 0)
+            config.maximumGeneratedDependenciesPerOperation == 0 || config.maximumActiveExecutionBytes == 0 ||
+            config.maximumRetainedOutputBytes == 0 || config.maximumQueuedRequestBytes == 0)
         {
             return false;
         }
@@ -933,21 +1068,54 @@ namespace vanguard::assets
         {
             return true;
         }
-        m_impl->lock.Acquire();
-        if (m_impl->stats.externalRequests != 0 || m_impl->stats.activeOperations != 0 || !m_impl->readyOperations.Empty() ||
-            m_impl->stats.queuedRequestBytes != 0 || m_impl->stats.activeExecutionBytes != 0)
+        Impl* const impl = m_impl;
+        impl->requestLock.Acquire();
+        const auto canShutdownLocked = [impl]() noexcept
         {
-            m_impl->lock.Release();
+            return impl->stats.externalRequests == 0 && impl->stats.activeOperations == 0 && impl->readyOperations.Empty() &&
+                   impl->stats.queuedRequestBytes == 0 && impl->stats.activeExecutionBytes == 0 && impl->stats.retainedOutputBytes == 0;
+        };
+        impl->lock.Acquire();
+        if (!canShutdownLocked())
+        {
+            impl->lock.Release();
+            impl->requestLock.Release();
             return false;
         }
-        for (BuildOperation* operation : m_impl->operations)
+        impl->lock.Release();
+
+        // Complete() publishes logical completion from inside the dispatched
+        // task. Its manual event and graph counters can therefore become idle
+        // before the jobs backend has returned from the task and released the
+        // Impl-owned JobName. Drain the operation counters without the graph
+        // lock: completion tails can still enter DrainAdmissionQueue().
+        for (BuildOperation* operation : impl->operations)
+        {
+            if ((operation->stageCounter.IsValid() && !operation->stageCounter.Wait()) ||
+                (operation->executionCounter.IsValid() && !operation->executionCounter.Wait()) ||
+                (operation->completion.IsValid() && !operation->completion.Wait()))
+            {
+                impl->requestLock.Release();
+                return false;
+            }
+        }
+
+        impl->lock.Acquire();
+        if (!canShutdownLocked())
+        {
+            impl->lock.Release();
+            impl->requestLock.Release();
+            return false;
+        }
+        for (BuildOperation* operation : impl->operations)
         {
             VANGUARD_DELETE(operation);
         }
-        m_impl->operations.Clear();
-        m_impl->lock.Release();
-        VANGUARD_DELETE(m_impl);
+        impl->operations.Clear();
         m_impl = nullptr;
+        impl->lock.Release();
+        impl->requestLock.Release();
+        VANGUARD_DELETE(impl);
         return true;
     }
 
@@ -1017,13 +1185,7 @@ namespace vanguard::assets
         }
         const BuildState state = static_cast<BuildState>(operation->state.GetValue());
         const bool terminal = state == BuildState::Succeeded || state == BuildState::Failed || state == BuildState::Cancelled;
-        if (operation->externalInterests == 0 && operation->outputBytesTracked)
-        {
-            operation->outputBytesTracked = false;
-            m_impl->stats.retainedOutputBytes -= operation->outputBytes;
-            operation->outputBytes = 0;
-            ReleaseOutputArtifacts(operation->output);
-        }
+        m_impl->ReleaseTrackedOutputIfUnreferencedLocked(*operation);
         if (operation->externalInterests == 0 && operation->dependencyInterests == 0 && !terminal)
         {
             operation->cancelRequested.SetValue(true);
@@ -1049,5 +1211,21 @@ namespace vanguard::assets
         output.buildFingerprint = operation->output.buildFingerprint;
         output.contentFingerprint = operation->output.contentFingerprint;
         return CopyArtifacts({operation->output.artifacts.TypedData(), operation->output.artifacts.Size()}, output.artifacts);
+    }
+
+    bool BuildGraph::CopyOperationReport(const BuildOperation* const operation, BuildReport& report) const noexcept
+    {
+        report.Reset();
+        if (m_impl == nullptr || operation == nullptr)
+        {
+            return false;
+        }
+        const BuildState state = static_cast<BuildState>(operation->state.GetValue());
+        if (state != BuildState::Succeeded && state != BuildState::Failed && state != BuildState::Cancelled)
+        {
+            return false;
+        }
+        concurrency::ScopedLock guard(m_impl->lock);
+        return report.CopyFrom(operation->report);
     }
 } // namespace vanguard::assets

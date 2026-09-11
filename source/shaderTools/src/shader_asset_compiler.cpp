@@ -506,6 +506,13 @@ namespace vanguard::shader_tools
             const Result result = implementation.compiler.Compile(request, compiled);
             if (result != Result::Success)
             {
+                if (context.report != nullptr)
+                {
+                    const assets::BuildDiagnosticLocation location{context.request.source.identity};
+                    const char* const message = compiled.GetDiagnostics()[0] != '\0' ? compiled.GetDiagnostics() : ToString(result);
+                    const assets::BuildDiagnosticDescription diagnostic{assets::BuildDiagnosticSeverity::Error, 0x53484452u, {&location, 1}, message};
+                    static_cast<void>(context.report->Add(diagnostic));
+                }
                 VG_LOG_ERROR(diagnostics::Category::Rendering, "Shader build failed for %s: %s\n%s", settings.sourceName, ToString(result),
                              compiled.GetDiagnostics());
                 return false;
@@ -516,8 +523,19 @@ namespace vanguard::shader_tools
             filesystem::MemoryFileWriter writer(bytes);
             if (compiled.WriteShader(writer, settings.program, settings.permutation) != Result::Success)
                 return false;
+            if (bytes.Size() > implementation.config.maximumArtifactBytes)
+                return false;
             return artifacts.Add(context.request.output, 0, assets::ArtifactFlags::Primary | assets::ArtifactFlags::MemoryResident, 4, bytes.Data(),
                                  bytes.Size()) == assets::Result::Success;
+        }
+
+        [[nodiscard]] bool EstimateAsset(const assets::BuildRequest&, containers::ArraySpan<const assets::BuildDependency>,
+                                         assets::BuildResourceEstimate& estimate, void* userData) noexcept
+        {
+            const ShaderAssetCompiler::Impl& implementation = *static_cast<const ShaderAssetCompiler::Impl*>(userData);
+            estimate.compilerTransientBytes = implementation.config.estimatedCompilerTransientBytes;
+            estimate.artifactBytes = implementation.config.maximumArtifactBytes;
+            return estimate.IsValid();
         }
     } // namespace
 
@@ -528,7 +546,8 @@ namespace vanguard::shader_tools
 
     bool ShaderAssetCompiler::Initialize(const ShaderAssetCompilerConfig& config) noexcept
     {
-        if (m_impl != nullptr || config.loadSource == nullptr || config.maximumIncludeFiles == 0 || config.maximumIncludeDepth == 0)
+        if (m_impl != nullptr || config.loadSource == nullptr || config.maximumIncludeFiles == 0 || config.maximumIncludeDepth == 0 ||
+            config.maximumArtifactBytes == 0 || config.estimatedCompilerTransientBytes == 0)
             return false;
         Impl* const implementation = VANGUARD_NEW(Impl, memory::pools::Tools);
         if (implementation == nullptr || implementation->compiler.Initialize() != Result::Success)
@@ -565,7 +584,7 @@ namespace vanguard::shader_tools
         if (m_impl == nullptr)
             return {};
         return {m_impl->compilerId, CompilerName, ShaderAssetCompilerVersion, ShaderSourceResourceType, shaders::ShaderResourceType, Discover,
-                CompileAsset,       m_impl};
+                CompileAsset,       m_impl,        EstimateAsset};
     }
 
     assets::Result ShaderAssetCompiler::Register(assets::BuildSystem& buildSystem) noexcept

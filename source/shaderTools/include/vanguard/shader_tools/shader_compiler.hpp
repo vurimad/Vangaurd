@@ -130,6 +130,12 @@ namespace vanguard::shader_tools
         [[nodiscard]] containers::ArraySpan<const shaders::VertexInput> GetVertexInputs() const noexcept;
         [[nodiscard]] containers::ArraySpan<const shaders::FragmentOutput> GetFragmentOutputs() const noexcept;
         [[nodiscard]] containers::ArraySpan<const shaders::SpecializationConstant> GetSpecializationConstants() const noexcept;
+        [[nodiscard]] bool HasMaterialContract() const noexcept;
+        [[nodiscard]] const shaders::MaterialDomainContract& GetMaterialDomain() const noexcept;
+        [[nodiscard]] u32 GetMaterialAccessorAbiVersion() const noexcept;
+        [[nodiscard]] u32 GetMaterialParameterByteSize() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::ConstantMember> GetMaterialParameters() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const shaders::MaterialResourceRole> GetMaterialResources() const noexcept;
 
         /// Emits the compiled program as a complete platform-specific .vshader document.
         [[nodiscard]] Result WriteShader(filesystem::IFile& output, u64 program, const crypto::Digest256& permutation = {}) const noexcept;
@@ -151,6 +157,12 @@ namespace vanguard::shader_tools
         containers::DynamicArray<shaders::VertexInput> m_vertexInputs;
         containers::DynamicArray<shaders::FragmentOutput> m_fragmentOutputs;
         containers::DynamicArray<shaders::SpecializationConstant> m_specializationConstants;
+        bool m_hasMaterialContract = false;
+        shaders::MaterialDomainContract m_materialDomain;
+        u32 m_materialAccessorAbiVersion = 0;
+        u32 m_materialParameterByteSize = 0;
+        containers::DynamicArray<shaders::ConstantMember> m_materialParameters;
+        containers::DynamicArray<shaders::MaterialResourceRole> m_materialResources;
 
         friend class ShaderCompiler;
     };
@@ -170,9 +182,13 @@ namespace vanguard::shader_tools
         void Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
         [[nodiscard]] const crypto::Digest256& CompilerFingerprint() const noexcept;
+        /// Performs parsing, linking, dependency collection, and reflection without
+        /// requesting native target bytecode from Slang.
+        [[nodiscard]] Result Reflect(const CompileRequest& request, CompileOutput& output) noexcept;
         [[nodiscard]] Result Compile(const CompileRequest& request, CompileOutput& output) noexcept;
 
     private:
+        [[nodiscard]] Result Process(const CompileRequest& request, CompileOutput& output, bool generateNativeCode) noexcept;
         Impl* m_impl = nullptr;
     };
 } // namespace vanguard::shader_tools

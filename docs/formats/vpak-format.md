@@ -84,7 +84,9 @@ package-set flag and offset must either both be absent or both be present. In VP
 not require mounting the package, reading its resource index, or invoking a resource decoder. Ordinary VPAKs remain valid and have no boot
 record.
 
-The boot header is exactly 96 bytes. Package-set schema 1.1 adds the project-default input mapping; this is a package-set metadata revision, not a new VPAK container version:
+The boot header remains 96 bytes. Schema 1.2 adds a renderer bootstrap reference
+in the payload; readers also accept schema 1.1, which has no renderer reference.
+This is a package-set metadata revision, not a new VPAK container version:
 
 | Offset | Size | Field |
 |---:|---:|---|
@@ -93,7 +95,7 @@ The boot header is exactly 96 bytes. Package-set schema 1.1 adds the project-def
 | 5 | 1 | Boot encoding (`1`) |
 | 6 | 2 | Boot-header size (`96`) |
 | 8 | 2 | Boot major version (`1`) |
-| 10 | 2 | Boot minor version (`1`) |
+| 10 | 2 | Boot minor version (`2`; readers also accept `1`) |
 | 12 | 4 | Boot flags, currently zero |
 | 16 | 8 | Exact boot-record size |
 | 24 | 8 | Stable game ID |
@@ -106,10 +108,18 @@ The boot header is exactly 96 bytes. Package-set schema 1.1 adds the project-def
 | 68 | 4 | External package count |
 | 72 | 2 | Package-entry size (`80`) |
 | 74 | 2 | Reserved, zero |
-| 76 | 8 | CRC-64/XZ of all package entries |
+| 76 | 8 | CRC-64/XZ of the complete payload after the header |
 | 84 | 4 | Reserved, zero |
 | 88 | 4 | CRC-32/ISO-HDLC of bytes 0-87 |
 | 92 | 4 | Reserved, zero |
+
+In schema 1.2, the payload starts with a 16-byte prefix: renderer catalog
+ResourceId (`u64`), ResourceTypeId (`u32`, `VRCT` for the geometry renderer), and
+reserved zero (`u32`). ID and type must both be zero or both be present. The
+prefix is included in the payload CRC and record size. Schema 1.1 starts directly
+with the package entries. The catalog and its required dependency closure are
+placed in DATA000 by the package-set planner; resource decoding remains the
+streamer's responsibility.
 
 The root package is implicit package number zero and is not repeated in its own catalog. External package entries are strictly ordered by
 package number from `1` through `999`. Their filenames are derived canonically as `DATA001.vpak` through `DATA999.vpak`; arbitrary paths

@@ -7,7 +7,7 @@ authoritative Vanguard V1 synthesis is complete in Sections 81 through 90.
 Unreal U1 replaces RED's full Consume request replay with a compile-once,
 per-use execution-packet model while preserving the same lifecycle, temporal
 semantics, process wrapper, and publication gates. U2 adds optional placed-heap
-aliasing above Vanguard's existing RHI primitives, with whole-resource reuse as
+aliasing above Vanguard's existing RHI primitives, with dedicated-resource reuse as
 the mandatory fallback.
 Production implementation remains blocked until this synthesis and the separate
 execution plan are reviewed.
@@ -44,7 +44,7 @@ Study Set 2 adds:
 
 Study Set 3 adds:
 
-- exact whole-resource reuse versus true placed-resource aliasing semantics;
+- exact dedicated-resource reuse versus true placed-resource aliasing semantics;
 - active-shape resource objects and maximum-shape backing requirements;
 - deterministic interval packing and explicit physical action scheduling;
 - placed texture/buffer activation and safe-retirement requirements;
@@ -66,7 +66,7 @@ Unreal Set U1 adds:
 - culling before first/last-use and physical-allocation compilation;
 - per-use compiled execution packets for temporal mappings and boundary actions;
 - explicit import, extraction, and final-access ownership contracts;
-- whole-resource pooled fallback using the same RHI object, not placed aliasing;
+- dedicated-resource pooled fallback using the same RHI object, not placed aliasing;
 - cache-policy and validation corrections that Vanguard should apply.
 
 Unreal Set U2 adds:
@@ -1299,7 +1299,7 @@ No GPU texture, buffer, heap, alias barrier, or pool is needed for these tests.
 
 1. How does each `LogicalAllocationPlan` obtain size, alignment, heap class, and
    a physical resource object?
-2. Which descriptor fields define whole-resource reuse, and which define placed
+2. Which descriptor fields define dedicated-resource reuse, and which define placed
    memory compatibility?
 3. Does RED use conservative retention spans directly for interval packing, and
    how are simultaneous endpoints treated?
@@ -1860,7 +1860,7 @@ The essential mechanisms already exist. The flow allocator belongs above them.
 | Query size/alignment/class | `GetMemoryRequirements` | Reuse the type, but make all fields authoritative. |
 | Create backing memory | `CreateHeap` | Reuse after alignment/class lowering is corrected. |
 | Place object in heap | `BindMemory(texture/buffer, heap, offset)` | Reuse after structured range/class validation is corrected. |
-| Alias activation | `BarrierTextureAliasing`, `BarrierBufferAliasing` | Reuse; executor supplies ordering and exact operands. |
+| Alias activation | `ActivateAliasedResource(destination, predecessors)` | Use the Stage 3B semantic boundary; executor supplies canonical exact predecessor coverage and RHI validates it before lowering. |
 | Safe retirement state | `MakeStateSafeToRetire` | Reuse; it is a state transition, not a fence. |
 | Deferred native destruction | existing RHI resource lifetime manager | Reuse; no second retirement queue. |
 | Heap residency | existing D3D12 residency maps and command-resource retention | Reuse; frame allocator does not own general residency policy. |
@@ -1925,14 +1925,14 @@ is safe whenever normal resource creation is available.
 True placed aliasing is enabled only when the active backend profile proves:
 
 ```text
-resourceAliasing capability is truthful
+placedResources profile is truthful for the active resource class and queue
 requirements size/alignment/class are authoritative
 heap creation honors those requirements
 BindMemory validates the placement
 typed alias barriers and safe retirement are available
 ```
 
-Until those conditions hold, Resolve selects standalone whole-resource reuse.
+Until those conditions hold, Resolve selects dedicated-resource reuse.
 It must not interpret `compatibilityClass == 0` as proof that every resource can
 share a heap. A runtime placement failure may fall back to standalone allocation
 only through an explicit policy, diagnostic, and counter; it must not be silent.
@@ -2120,7 +2120,7 @@ Required RHI/backend cases before general aliasing is enabled:
 - no new RHI abstraction: reuse current placed resource, heap, barrier, and
   retirement APIs;
 - no duplicate generation/fence lifetime manager;
-- whole-resource reuse is the universal safe path;
+- dedicated-resource reuse is the universal safe path;
 - true aliasing is capability/profile gated until current RHI requirement,
   alignment, class, and binding-validation gaps are corrected;
 - `compatibilityClass == 0` is not wildcard compatibility;
@@ -2854,7 +2854,7 @@ through 80.
 ## 56. Unreal U1 Source Snapshot
 
 Unreal U1 was restricted to RDG logical resources, declared access, culling,
-first/last use, import/extraction ownership, and the whole-resource pooled
+first/last use, import/extraction ownership, and the dedicated-resource pooled
 fallback. Transient heap allocation, placed-resource aliasing, and backend alias
 barriers remain U2.
 
@@ -2920,7 +2920,7 @@ Engine/Source/Runtime/RenderCore/Private/RenderTargetPool.cpp
 ```
 
 One U2 file was inspected only at lines 14-67 to interpret the lifetime-fence
-predicate used by both whole-resource pools:
+predicate used by both dedicated-resource pools:
 
 ```text
 Engine/Source/Runtime/RHI/Public/RHITransientResourceAllocator.h
@@ -3278,7 +3278,7 @@ Evidence:
 - texture use-age updates: `689-708`
 - texture RHI teardown: `650-655`
 
-Unreal's two whole-resource pools have different retention policies. Buffers are
+Unreal's two dedicated-resource pools have different retention policies. Buffers are
 released when the pool is their only owner and they have not been requested for
 more than 30 frames. There is no byte target or allocation-admission limit.
 Textures track consecutive unused frames and use `r.RenderTargetPoolMin` as a
@@ -3301,7 +3301,7 @@ May a new physical allocation be admitted?
   -> checked size + hard limit + eviction attempt + structured failure
 ```
 
-Vanguard should use one allocator-owned whole-resource pool framework with
+Vanguard should use one allocator-owned dedicated-resource pool framework with
 texture and buffer policy objects. Every entry stores an immutable canonical
 creation descriptor, physical capacity, byte cost, cached views, last-use age,
 retirement state, and keyed free-list membership. Texture policy requires exact
@@ -3580,7 +3580,7 @@ Required focused tests before physical allocator rollout include:
 - Use typed generation-checked ids instead of raw pointers and unchecked access.
 - Make external physical descriptors authoritative while reporting conflicting
   caller expectations as structured errors.
-- Use a generic allocator-owned whole-resource pool with texture/buffer policies,
+- Use a generic allocator-owned dedicated-resource pool with texture/buffer policies,
   immutable physical capacity, explicit logical active shape, budgets, pressure
   handling, and diagnostics.
 - Keep static use-slot schemas cacheable but compile current decisions, imports,
@@ -3641,7 +3641,7 @@ U1 is complete. The study can now explain:
 
 - how Unreal derives logical dependencies, culls work, and computes surviving
   lifetimes before allocating resources;
-- how imports, exports, views, subresources, and whole-resource reuse work;
+- how imports, exports, views, subresources, and dedicated-resource reuse work;
 - why pooled fallback is not placed aliasing and needs no shader lookup;
 - which Unreal cache and validation defects Vanguard must not copy;
 - how Vanguard keeps RED's lifecycle and virtual process wrapper while executing
@@ -3700,7 +3700,7 @@ the RHI and driver.
 The initial Vanguard implementation is therefore locked to:
 
 ```text
-WholeResourceReuse       always available
+DedicatedResourceReuse       always available
 PlacedHeapAliasing       capability-selected
 ReservedPageRemapping    deferred until a measured backend/workload need exists
 ```
@@ -3883,7 +3883,7 @@ Vanguard's authoritative policy is:
 - distinguish requested bytes, aliased peak, heap capacity, resident/committed
   bytes, cached bytes, and pending-retirement bytes;
 - check soft pressure before growing and a hard budget before native creation;
-- trim reusable object entries, then empty heaps, then use U1 whole-resource
+- trim reusable object entries, then empty heaps, then use U1 dedicated-resource
   fallback or return a structured error according to policy;
 - use CPU age/LRU only to select cache victims;
 - use the existing queue-completion lifetime system to prove native object/heap
@@ -3905,22 +3905,23 @@ CreateTexture/CreateBuffer(virtualResource = true)
   -> GetMemoryRequirements
   -> CreateHeap
   -> BindMemory(resource, heap, offset)
-  -> BarrierTextureAliasing / BarrierBufferAliasing
-  -> DiscardTexture / DiscardBuffer
+  -> ActivateAliasedResource(destination, exact ordered predecessors)
+  -> one backend-selected alias/undefined-content package
   -> MakeStateSafeToRetire
 ```
 
 It also already has graphics/compute/copy submission fences, command-list
 resource retention, heap retention by placed objects, and fence-safe deferred
-destruction. The D3D12 conformance test demonstrates two deferred-binding
-buffers placed at offset zero in one heap and activated in sequence
-(`d3d12_backend_tests.cpp:511-524,900-901`).
+destruction. The D3D12 conformance test demonstrates exact multi-fragment
+coverage, invalid gap/overlap/heap/kind/order rejection, one buffer activation,
+and render-target texture activation through the legacy alias-plus-discard
+lowering.
 
 The missing or incomplete parts are narrower:
 
 | Existing area | What U2 found |
 | --- | --- |
-| Capabilities | `transientHeaps` and `resourceAliasing` exist, but both mirror one coarse NVRHI virtual-resource feature. |
+| Capabilities (pre-Stage 3) | Two coarse booleans mirrored one NVRHI virtual-resource feature instead of describing the usable placed-resource profile. |
 | Heap description | Vanguard exposes alignment and compatibility class, but `CreateHeap` forwards neither. |
 | Memory requirements | Size/alignment are native; compatibility class is always zero. |
 | Binding | One-time binding and retain rollback exist, but release validation lacks virtual-kind, checked bounds, alignment, memory type/class, and a stored placement record. |
@@ -3949,7 +3950,7 @@ After U1 culling and lifetime finalization, Resolve performs placed allocation
 entirely in scratch state:
 
 ```text
-1. Select WholeResourceReuse or PlacedHeapAliasing from truthful capabilities.
+1. Select DedicatedResourceReuse or PlacedHeapAliasing from truthful capabilities.
 2. Canonicalize each surviving physical requirement and heap class.
 3. Walk resources in deterministic first-acquire order with a stable tie-break.
 4. Query checked native size/alignment once per canonical resource requirement.
@@ -4033,7 +4034,7 @@ Required focused tests include:
 - alias barrier for an unbound, different-heap, non-overlapping, or wrong-kind
   pair;
 - native heap/resource failure at every transaction step and complete rollback;
-- budget pressure, fallback to whole-resource reuse, cache trim, and fence-safe
+- budget pressure, fallback to dedicated-resource reuse, cache trim, and fence-safe
   heap retirement;
 - one real D3D12 validation-layer test that writes owner A, activates owner B at
   the same range, and verifies B after queue completion.
@@ -4096,7 +4097,7 @@ study.
 - Use existing submission fences for destruction safety and CPU age only for
   victim choice.
 - Roll out same-queue aliasing first, then validated graphics/compute handoffs.
-- Keep U1 whole-resource reuse as the mandatory fallback.
+- Keep U1 dedicated-resource reuse as the mandatory fallback.
 
 ### Reject
 
@@ -4134,7 +4135,7 @@ U2 is complete. The study can now explain:
 - how D3D12 creates and activates placed resources without shader lookup;
 - which cache, budget, validation, and failure behaviors Vanguard must improve;
 - which low-level Vanguard/NVRHI primitives already exist and must be reused;
-- why V1 keeps whole-resource fallback, enables placed aliasing conservatively,
+- why V1 keeps dedicated-resource fallback, enables placed aliasing conservatively,
   and defers page remapping.
 
 No production code was changed at the U2 checkpoint. The authoritative final
@@ -4190,7 +4191,7 @@ both PreConsume and Consume.
 RenderingServiceImpl
   -> FrameRenderer
        -> RenderFlowResourceAllocator             device lifetime
-            -> whole-resource pools               persistent
+            -> dedicated-resource pools               persistent
             -> placed-object and heap caches       persistent, optional
             -> one FrameResourceSession            frame-local
 
@@ -4540,7 +4541,7 @@ Every used logical allocation resolves to exactly one assignment:
 ```cpp
 PhysicalAssignment =
     ImportedRetained
-  | WholeResourceAssignment
+  | DedicatedResourceAssignment
   | PlacedResourceAssignment
 ```
 
@@ -4636,7 +4637,7 @@ PlacedAliasHandoff
 A cached placed object matches the exact canonical descriptor, heap, and offset
 after hash lookup and may be assigned at most once per frame.
 
-Capability absence or resource ineligibility selects the whole-resource provider
+Capability absence or resource ineligibility selects the dedicated-resource provider
 and records the reason. Fragmentation may select whole fallback only if the same
 allocator-wide hard-byte ledger admits it. `BudgetExceeded`, device loss, and
 native OOM cannot be hidden by trying another provider outside the budget.
@@ -5012,7 +5013,7 @@ The allocator supplies:
   retained import, and terminal export;
 - culling-aware logical lifetime compilation;
 - per-subresource texture and whole-buffer state planning;
-- mandatory whole-resource pooling;
+- mandatory dedicated-resource pooling;
 - optional same-kind/same-queue placed-heap aliasing after RHI hardening;
 - persistent caches, shared budgets, diagnostics, atomic Resolve, and abort;
 - compiled per-use packets consumed through virtual node execution once.
@@ -5051,7 +5052,7 @@ The allocator supplies:
     atomic terminal success and carry an explicit readiness contract.
 11. Resolve is scratch-built, fallible, fully joined, validated, and atomically
     published.
-12. The whole-resource provider always exists, but hard budget/native failure is
+12. The dedicated-resource provider always exists, but hard budget/native failure is
     still reported rather than hidden.
 13. Placed aliasing stays disabled until requirements, heap classes, binding
     validation, placement records, barriers, and tests are truthful.
@@ -5085,3 +5086,15 @@ The authoritative V1 design is complete. It now defines one coherent answer for:
 No production code was changed. The next permitted task is the separate
 file-level execution plan after review. Implementation remains blocked until
 that plan is explicitly approved.
+
+## 91. Post-V1 Render Graph Integration Correction
+
+This section supersedes conflicting public integration wording in Sections 81 through 90; the implemented allocator has not yet been migrated to this direct-frame surface.
+
+The RED-faithful Render Graph study supersedes the public session-and-survivor handoff described above without changing the allocator's physical planning, packet, generation, receipt, pooling, or failure semantics.
+
+`FrameRenderer` owns one allocator and the RenderPath frame chain is serialized. `RenderFlowResourceAllocator` therefore owns the active frame generation, collected planning requests, published execution generation, and terminal phase internally. `BeginFrame`, import/export registration, planning-writer creation, Resolve, BeginExecution, PacketFor, Finish, and pre-publication cancellation are direct allocator operations; `FrameResourceSession` is removed from the public integration surface.
+
+The selected RED-style graph definition is already the executable graph. Its preparation step registers every resource declaration and explicit queue-sync request into the allocator, tagged with GPU flow group, queue, and command scope. `Resolve` consumes every collected request and receives neither `SurvivingGraphOverlay` nor graph topology. Cross-queue correctness remains explicit: Sync declarations become allocator lifetime inputs and real RHI submission waits/signals with truthful receipts. The allocator knows only resource execution positions and synchronization requests.
+
+Generation safety remains mandatory and internal. Writers, packet views, resolved-use witnesses, IDs, and receipts remain generation stamped; overlapping `BeginFrame`, stale access, incomplete terminal evidence, and destruction with a published generation continue to fail closed. Removing the proxy and survivor filter is an ownership simplification, not a relaxation of lifecycle validation.

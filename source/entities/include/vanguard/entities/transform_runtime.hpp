@@ -122,6 +122,7 @@ namespace vanguard::entities
         [[nodiscard]] PlaceholderComponent* GetRoot(ecs::EntityId entity) noexcept;
         [[nodiscard]] const PlaceholderComponent* GetRoot(ecs::EntityId entity) const noexcept;
         [[nodiscard]] TransformRuntimeStats GetStats() const noexcept;
+        [[nodiscard]] bool IsProcessing() const noexcept;
 
     protected:
         [[nodiscard]] bool OnInitialize(game::GameWorld& world) noexcept override;

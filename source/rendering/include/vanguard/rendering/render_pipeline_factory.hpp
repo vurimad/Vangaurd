@@ -38,6 +38,10 @@ namespace vanguard::rendering
         const pipelines::AttachmentSignature* attachments = nullptr;
         PipelineInterfaceResources interfaceResources;
         pipeline_cache::Priority priority = pipeline_cache::Priority::Normal;
+        // Geometry changes winding without changing the cooked material program.
+        // These graphics-only variants participate in the existing native cache key.
+        bool mirrored = false;
+        bool twoSided = false;
     };
 
     [[nodiscard]] RenderPipelineResult RequestRenderPipeline(const RenderPipelineRequest& request, PipelineCache& cache, PipelineRequest& output) noexcept;

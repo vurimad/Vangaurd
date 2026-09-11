@@ -1,4 +1,5 @@
 #include <vanguard/editor/editor_project_service.hpp>
+#include <vanguard/projects/project_workspace.hpp>
 
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/engine/engine_services.hpp>
@@ -17,7 +18,10 @@ namespace
         explicit ManagedProjectWorkspaceService(const editor::ProjectWorkspaceConfig* const config) noexcept
         {
             if (config != nullptr)
+            {
                 m_projectFile = config->projectFile;
+                m_project = config->project;
+            }
         }
 
         [[nodiscard]] const vanguard::projects::ProjectDescriptor& GetProject() const noexcept override
@@ -30,35 +34,46 @@ namespace
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetProjectRoot() const noexcept override
         {
-            return m_projectRoot;
+            return m_workspace.root;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetAssetsRoot() const noexcept override
         {
-            return m_assetsRoot;
+            return m_workspace.assets;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetDerivedDataRoot() const noexcept override
         {
-            return m_derivedDataRoot;
+            return m_workspace.derivedData;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetIntermediateRoot() const noexcept override
         {
-            return m_intermediateRoot;
+            return m_workspace.intermediate;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetSavedRoot() const noexcept override
         {
-            return m_savedRoot;
+            return m_workspace.saved;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetBuildsRoot() const noexcept override
         {
-            return m_buildsRoot;
+            return m_workspace.builds;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetConfigRoot() const noexcept override
         {
-            return m_configRoot;
+            return m_workspace.config;
         }
         [[nodiscard]] const vanguard::filesystem::AbsolutePath& GetPluginsRoot() const noexcept override
         {
-            return m_pluginsRoot;
+            return m_workspace.plugins;
+        }
+
+        const vanguard::assets::SourceDatabase& GetSources() const noexcept override { return m_sources; }
+        vanguard::assets::SourceDatabaseResult RescanSources(vanguard::filesystem::ScanResult* const failure = nullptr) noexcept override
+        {
+            const vanguard::assets::SourceRoot root{m_workspace.assets, false};
+            return m_sources.Rescan(vanguard::filesystem::GetManager(), {&root, 1}, failure);
+        }
+        bool ClassifySources(vanguard::containers::ArraySpan<const vanguard::assets::CompilerDescriptor> compilers) noexcept override
+        {
+            return m_sources.ClassifySources(compilers);
         }
 
     protected:
@@ -67,47 +82,23 @@ namespace
             if (!m_projectFile.IsFilePath() || !vanguard::filesystem::IsInitialized())
                 return app::LifecycleStatus::Failure("Project Workspace received an invalid project file or unavailable filesystem");
 
-            auto reader = vanguard::filesystem::GetManager().CreateFileReader(m_projectFile, vanguard::filesystem::FOF_Buffered);
-            if (!reader)
-                return app::LifecycleStatus::Failure("Project Workspace could not open the project document");
-
             vanguard::projects::Diagnostic diagnostic;
-            if (vanguard::projects::Read(*reader, m_project, &diagnostic) != vanguard::projects::Result::Success)
-            {
-                VG_LOG_ERROR(vanguard::diagnostics::Category::Engine, "project workspace validation failed: result=%u line=%u column=%u field=%s message=%s",
-                             static_cast<vanguard::u32>(diagnostic.result), diagnostic.line, diagnostic.column,
-                             diagnostic.field != nullptr ? diagnostic.field : "<none>", diagnostic.message != nullptr ? diagnostic.message : "<none>");
-                return app::LifecycleStatus::Failure(diagnostic.message != nullptr ? diagnostic.message : "Project Workspace validation failed");
-            }
-
-            m_projectRoot = vanguard::filesystem::paths::ParentAbsolutePath(m_projectFile);
-            if (m_projectRoot.Empty())
-                return app::LifecycleStatus::Failure("Project Workspace has no project root");
-            m_assetsRoot = m_projectRoot.AddDirPath(m_project.assets);
-            m_derivedDataRoot = m_projectRoot.AddDirPath(m_project.derivedData);
-            m_intermediateRoot = m_projectRoot.AddDirPath(m_project.intermediate);
-            m_savedRoot = m_projectRoot.AddDirPath(m_project.saved);
-            m_buildsRoot = m_projectRoot.AddDirPath(m_project.builds);
-            m_configRoot = m_projectRoot.AddDirPath(m_project.config);
-            m_pluginsRoot = m_projectRoot.AddDirPath(m_project.pluginsRoot);
+            if (vanguard::projects::ResolveWorkspace(m_projectFile, m_project, m_workspace, &diagnostic) != vanguard::projects::Result::Success)
+                return app::LifecycleStatus::Failure(diagnostic.message != nullptr ? diagnostic.message : "Project Workspace resolution failed");
 
             const vanguard::filesystem::Manager& files = vanguard::filesystem::GetManager();
-            if (files.GetGameRoot() != m_projectRoot || files.GetCacheDirectory() != m_derivedDataRoot)
+            if (files.GetGameRoot() != m_workspace.root || files.GetCacheDirectory() != m_workspace.derivedData)
                 return app::LifecycleStatus::Failure("Project Workspace roots disagree with the managed filesystem configuration");
+            if (RescanSources() != vanguard::assets::SourceDatabaseResult::Success)
+                return app::LifecycleStatus::Failure("Project Workspace source inventory failed");
             return app::LifecycleStatus::Success();
         }
 
     private:
         vanguard::projects::ProjectDescriptor m_project;
+        vanguard::assets::SourceDatabase m_sources;
+        vanguard::projects::ProjectWorkspace m_workspace;
         vanguard::filesystem::AbsolutePath m_projectFile;
-        vanguard::filesystem::AbsolutePath m_projectRoot;
-        vanguard::filesystem::AbsolutePath m_assetsRoot;
-        vanguard::filesystem::AbsolutePath m_derivedDataRoot;
-        vanguard::filesystem::AbsolutePath m_intermediateRoot;
-        vanguard::filesystem::AbsolutePath m_savedRoot;
-        vanguard::filesystem::AbsolutePath m_buildsRoot;
-        vanguard::filesystem::AbsolutePath m_configRoot;
-        vanguard::filesystem::AbsolutePath m_pluginsRoot;
     };
 
     app::Service* CreateProjectWorkspaceService(void* const userData) noexcept

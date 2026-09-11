@@ -6,6 +6,8 @@ namespace vanguard::rhi
 {
     [[nodiscard]] bool Initialize(IBackend& backend, const DeviceParams& params = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool Shutdown(Failure* failure = nullptr) noexcept;
+    /// Terminal device-loss teardown. Always detaches global RHI state and never waits for GPU completion.
+    [[nodiscard]] bool AbandonDevice(Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
     [[nodiscard]] const Capabilities& GetCapabilities() noexcept;
     [[nodiscard]] DeviceState TestDeviceState() noexcept;
@@ -26,15 +28,11 @@ namespace vanguard::rhi
     [[nodiscard]] BindingLayoutRef RequestBindingLayout(const BindingLayoutDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] DescriptorDomainRef CreateDescriptorDomain(const DescriptorDomainDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] DescriptorHandle AllocateDescriptor(DescriptorDomainRef domain, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, TextureRef texture, BindingType type,
-                                       const TextureViewDesc& view = {}, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, BufferRef buffer, BindingType type,
-                                       const BufferViewDesc& view = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, TextureRef texture, BindingType type, const TextureViewDesc& view = {}, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, BufferRef buffer, BindingType type, const BufferViewDesc& view = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, SamplerStateRef sampler, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, AccelerationStructureRef accelerationStructure,
-                                       Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RetireDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, const DescriptorRetirement& retirement,
-                                        Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool WriteDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, AccelerationStructureRef accelerationStructure, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool RetireDescriptor(DescriptorDomainRef domain, DescriptorHandle descriptor, const DescriptorRetirement& retirement, Failure* failure = nullptr) noexcept;
     [[nodiscard]] DescriptorDomainStats GetDescriptorDomainStats(DescriptorDomainRef domain) noexcept;
     [[nodiscard]] SamplerStateRef RequestSamplerState(const SamplerStateDesc& desc, Failure* failure = nullptr) noexcept;
     [[nodiscard]] ShaderRef CreateShader(const ShaderDesc& desc, Failure* failure = nullptr) noexcept;
@@ -57,10 +55,21 @@ namespace vanguard::rhi
     [[nodiscard]] bool GetQueryResult(QueryPoolRef queryPool, u32 index, PipelineStatistics& result, Failure* failure = nullptr) noexcept;
     [[nodiscard]] u64 GetTimestampFrequency(QueueType queue, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool CalibrateTimestamps(QueueType queue, TimestampCalibration& calibration, Failure* failure = nullptr) noexcept;
+    // Binding is a one-time publication operation. The caller exclusively owns the unbound resource until this call returns; a successful placement is immutable for the resource's lifetime.
     [[nodiscard]] bool BindMemory(TextureRef texture, HeapRef heap, u64 offset, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BindMemory(BufferRef buffer, HeapRef heap, u64 offset, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetHeapDesc(HeapRef heap, HeapDesc& desc, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetPlacement(TextureRef texture, PlacementRecord& placement, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetPlacement(BufferRef buffer, PlacementRecord& placement, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetTextureDesc(TextureRef texture, TextureDesc& desc, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetBufferDesc(BufferRef buffer, BufferDesc& desc, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetMemoryRequirements(const TextureDesc& desc, MemoryRequirements& requirements, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool GetMemoryRequirements(const BufferDesc& desc, MemoryRequirements& requirements, Failure* failure = nullptr) noexcept;
     [[nodiscard]] MemoryRequirements GetMemoryRequirements(TextureRef texture) noexcept;
     [[nodiscard]] MemoryRequirements GetMemoryRequirements(BufferRef buffer) noexcept;
+    [[nodiscard]] NativeReleaseObservation ObserveNativeRelease(ResourceRef resource, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool IsNativeReleaseComplete(NativeReleaseObservation observation) noexcept;
+    void ReleaseNativeReleaseObservation(NativeReleaseObservation& observation) noexcept;
     [[nodiscard]] bool IsResourceReferenceValid(ResourceRef resource) noexcept;
     [[nodiscard]] ResourceLifetimeStats GetResourceLifetimeStats() noexcept;
 
@@ -132,9 +141,19 @@ namespace vanguard::rhi
     void UnbindCommandList() noexcept;
     [[nodiscard]] CommandListRef GetBoundCommandList() noexcept;
     [[nodiscard]] CommandListType GetBoundCommandListType() noexcept;
-    [[nodiscard]] bool CloseAndSubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists, CommandListSyncType sync,
-                                                  GpuFence& completion, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CloseCommandList(CommandListRef commandList, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool SubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists, CommandListSyncType sync, SubmissionReceipt& receipt,
+                                          Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CloseAndSubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists, CommandListSyncType sync, SubmissionReceipt& receipt,
+                                                  Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CloseAndSubmitCommandLists(const char* scopeName, containers::ArraySpan<const CommandListRef> commandLists, CommandListSyncType sync, GpuFence& completion,
+                                                  Failure* failure = nullptr) noexcept;
     [[nodiscard]] GpuFence GetGpuFence() noexcept;
+    // Snapshot of actual receipts since device initialization. Read after the
+    // renderer submission tail joins. Explicit coverage identifies never-used
+    // queues; zero-valued fences without that evidence remain incomplete.
+    // False means submitted work lost its completion proof; abandonment is needed.
+    [[nodiscard]] bool GetSubmittedResidencyFences(ResidencyFenceSet& fences) noexcept;
     [[nodiscard]] bool IsGpuFenceComplete(GpuFence fence) noexcept;
     [[nodiscard]] bool WaitForGpuFence(GpuFence fence, u64 timeoutNanoseconds, Failure* failure = nullptr) noexcept;
     // Declares a resource reached indirectly by GPU-visible data, such as a bindless descriptor index.
@@ -150,19 +169,14 @@ namespace vanguard::rhi
     [[nodiscard]] bool BindIndexBuffer(const IndexBufferBinding& binding, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BindIndirectArguments(BufferRef arguments, BufferRef count = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetPushConstants(const void* data, u32 size, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearColorTarget(TextureRef target, const ColorValue& value, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
-                                        Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearDepthTarget(TextureRef target, f32 depth, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
-                                        Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearStencilTarget(TextureRef target, u8 stencil, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
-                                          Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool ClearDepthStencilTarget(TextureRef target, f32 depth, u8 stencil, const SubresourceRange& range = {}, const Rect* rectangle = nullptr,
-                                               Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearColorTarget(TextureRef target, const ColorValue& value, const SubresourceRange& range = {}, const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearDepthTarget(TextureRef target, f32 depth, const SubresourceRange& range = {}, const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearStencilTarget(TextureRef target, u8 stencil, const SubresourceRange& range = {}, const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ClearDepthStencilTarget(TextureRef target, f32 depth, u8 stencil, const SubresourceRange& range = {}, const Rect* rectangle = nullptr, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool ClearTextureUav(TextureRef texture, const ColorValue& value, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool ClearTextureUav(TextureRef texture, u32 value, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool ClearBufferUav(BufferRef buffer, u32 value = 0, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DiscardTexture(TextureRef texture, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool DiscardBuffer(BufferRef buffer, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetStencilRefValue(u8 value, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetBlendFactor(const ColorValue& value, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BeginGpuEvent(const char* name, Failure* failure = nullptr) noexcept;
@@ -175,26 +189,19 @@ namespace vanguard::rhi
     [[nodiscard]] bool DrawIndexedPrimitiveIndirectCount(u64 argumentsOffset, u64 countOffset, u32 maximumCommandCount, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DispatchCompute(u32 groupCountX, u32 groupCountY = 1, u32 groupCountZ = 1, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DispatchIndirectCompute(u64 argumentsOffset, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BuildBottomLevelAccelerationStructure(AccelerationStructureRef destination,
-                                                             containers::ArraySpan<const RayTracingGeometryDesc> geometries,
-                                                             AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
-                                                             Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BuildBottomLevelAccelerationStructure(AccelerationStructureRef destination, containers::ArraySpan<const RayTracingGeometryDesc> geometries,
+                                                             AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BuildTopLevelAccelerationStructure(AccelerationStructureRef destination, containers::ArraySpan<const RayTracingInstanceDesc> instances,
-                                                          AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
-                                                          Failure* failure = nullptr) noexcept;
+                                                          AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build, Failure* failure = nullptr) noexcept;
     /// The source buffer contains tightly packed RayTracingGpuInstanceDesc records starting at offset.
     [[nodiscard]] bool BuildTopLevelAccelerationStructureIndirect(AccelerationStructureRef destination, BufferRef instanceBuffer, u64 offset, u32 instanceCount,
-                                                                  AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build,
-                                                                  Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool CopyAccelerationStructure(AccelerationStructureRef destination, AccelerationStructureRef source, AccelerationStructureCopyMode mode,
-                                                 Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool WriteAccelerationStructureCompactedSize(AccelerationStructureRef accelerationStructure, QueryPoolRef queryPool, u32 queryIndex,
-                                                               Failure* failure = nullptr) noexcept;
+                                                                  AccelerationStructureBuildMode mode = AccelerationStructureBuildMode::Build, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CopyAccelerationStructure(AccelerationStructureRef destination, AccelerationStructureRef source, AccelerationStructureCopyMode mode, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool WriteAccelerationStructureCompactedSize(AccelerationStructureRef accelerationStructure, QueryPoolRef queryPool, u32 queryIndex, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool DispatchRays(ShaderTableRef shaderTable, const DispatchRaysArguments& arguments, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool WriteBuffer(BufferRef buffer, const void* data, u64 size, u64 destinationOffset = 0, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool WriteTexture(TextureRef texture, const TextureSubresourceData& data, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool CopyBuffer(BufferRef destination, u64 destinationOffset, BufferRef source, u64 sourceOffset, u64 size,
-                                  Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool CopyBuffer(BufferRef destination, u64 destinationOffset, BufferRef source, u64 sourceOffset, u64 size, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool CopyTexture(TextureRef destination, TextureRef source, const TextureCopyRegion& region = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool ResolveTexture(TextureRef destination, TextureRef source, const TextureResolveRegion& region = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] TextureReadbackRef RequestTextureReadback(TextureRef source, const TextureReadbackRegion& region = {}, Failure* failure = nullptr) noexcept;
@@ -205,13 +212,23 @@ namespace vanguard::rhi
     void UnlockBuffer(BufferRef buffer) noexcept;
 
     // A concrete before state is an assertion against command-list-local tracking. Unknown deliberately skips that assertion.
-    [[nodiscard]] bool TransitionTexture(TextureRef texture, ResourceState before, ResourceState after, const SubresourceRange& range = {},
-                                         Failure* failure = nullptr) noexcept;
+    // Seed once, before resource recording. Entries are ordered by ResourceRef::value, then slice/mip and cover every subresource of each listed texture.
+    // This records no barriers or queue waits. The caller proves entry state and GPU ordering; keepInitialState still controls close-time restoration.
+    // Unknown, missing cells, duplicates, stale identities and late/repeated seeding fail. Discard the command list after a seeding failure.
+    // Record an already submitted fence dependency. Submission merges requirements
+    // by producer queue and inserts GPU waits; this never waits on the CPU.
+    [[nodiscard]] bool AddCommandListWait(GpuFence fence, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool SeedCommandListStates(containers::ArraySpan<const CommandListEntryState> entries, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] bool TransitionTexture(TextureRef texture, ResourceState before, ResourceState after, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool TransitionBuffer(BufferRef buffer, ResourceState before, ResourceState after, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BarrierTextureUav(TextureRef texture, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BarrierBufferUav(BufferRef buffer, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BarrierTextureAliasing(bool discardAfter, TextureRef textureAfter, TextureRef textureBefore = {}, Failure* failure = nullptr) noexcept;
-    [[nodiscard]] bool BarrierBufferAliasing(bool discardAfter, BufferRef bufferAfter, BufferRef bufferBefore = {}, Failure* failure = nullptr) noexcept;
+    // Activates one placed destination whose complete heap range is covered by
+    // the clipped, non-overlapping ranges of the immediate predecessors. The
+    // predecessors must be in ascending clipped heap-offset order.
+    // Every resource must have completed its one-time BindMemory operation before its reference is published to recording workers.
+    // Successful activation makes the destination contents undefined.
+    [[nodiscard]] bool ActivateAliasedResource(ResourceRef destination, containers::ArraySpan<const ResourceRef> predecessors, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool FlushPendingBarriers(Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool MakeStateSafeToRetire(TextureRef texture, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool MakeStateSafeToRetire(BufferRef buffer, Failure* failure = nullptr) noexcept;

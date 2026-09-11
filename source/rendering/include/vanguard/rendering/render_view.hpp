@@ -128,6 +128,7 @@ namespace vanguard::rendering
         f32 nearPlane = 0.1f;
         /// Zero when InfiniteFarPlane is set; otherwise strictly greater than nearPlane.
         f32 farPlane = 1000.0f;
+        /// Positive values select coarser LODs; negative values select finer LODs.
         f32 lodBias = 0.0f;
         f32 jitter[2]{};
         f32 previousJitter[2]{};

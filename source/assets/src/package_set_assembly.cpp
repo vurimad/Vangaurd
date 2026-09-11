@@ -201,6 +201,8 @@ namespace
         HashU32(hash, plan.startupWorld.ExpectedType());
         HashU64(hash, plan.defaultInput.GetPath().Id());
         HashU32(hash, plan.defaultInput.ExpectedType());
+        HashU64(hash, plan.rendererBootstrap.GetPath().Id());
+        HashU32(hash, plan.rendererBootstrap.ExpectedType());
         HashU32(hash, plan.packages.Size());
         for (const PlannedDataPackage& package : plan.packages)
         {
@@ -537,6 +539,7 @@ namespace vanguard::assets
         targetPlatformId = 0;
         startupWorld = {};
         defaultInput = {};
+        rendererBootstrap = {};
         maximumPackageBytes = 0;
         packages.Clear();
     }
@@ -595,6 +598,9 @@ namespace vanguard::assets
 
         const i32 startupIndex = FindResourceIndex(source, options.startupWorld);
         const i32 inputIndex = FindResourceIndex(source, options.defaultInput);
+        const i32 rendererIndex = options.rendererBootstrap.IsValid() ? FindResourceIndex(source, options.rendererBootstrap) : -1;
+        if (options.rendererBootstrap.IsValid() && (!options.rendererBootstrap.IsTyped() || rendererIndex < 0))
+            return PackagingResult::MissingResource;
         if (startupIndex < 0 || inputIndex < 0)
         {
             return PackagingResult::MissingResource;
@@ -620,6 +626,14 @@ namespace vanguard::assets
                 return PackagingResult::OutOfMemory;
             }
             bootstrap[static_cast<u32>(inputIndex)] = 1;
+        }
+        if (rendererIndex >= 0 && bootstrap[static_cast<u32>(rendererIndex)] == 0)
+        {
+            bootstrap[static_cast<u32>(rendererIndex)] = 1;
+            const u32 previousCount = pending.Size();
+            pending.PushBack(static_cast<u32>(rendererIndex));
+            if (pending.Size() != previousCount + 1u)
+                return PackagingResult::OutOfMemory;
         }
         for (u32 pendingIndex = 0; pendingIndex < pending.Size(); ++pendingIndex)
         {
@@ -653,6 +667,7 @@ namespace vanguard::assets
         plan.targetPlatformId = GetTargetPlatformId(source.target);
         plan.startupWorld = options.startupWorld;
         plan.defaultInput = options.defaultInput;
+        plan.rendererBootstrap = options.rendererBootstrap;
         plan.maximumPackageBytes = options.maximumPackageBytes;
         PlannedDataPackage* addedPackage = nullptr;
         PackagingResult added = AddDataPackage(plan, 0, addedPackage);
@@ -759,7 +774,8 @@ namespace vanguard::assets
 
         SortPackages(plan);
         PlannedDataPackage& rootPackage = plan.packages[0];
-        const u64 packageSetBytes = packages::PackageSet::HeaderWireSize + static_cast<u64>(plan.packages.Size() - 1u) * packages::PackageSetEntry::WireSize;
+        const u64 packageSetBytes = packages::PackageSet::HeaderWireSize + packages::PackageSet::BootstrapReferenceWireSize +
+            static_cast<u64>(plan.packages.Size() - 1u) * packages::PackageSetEntry::WireSize;
         if (packageSetBytes > options.maximumBootstrapBytes || packageSetBytes > options.maximumPackageBytes ||
             rootPackage.estimatedBytes > options.maximumBootstrapBytes - packageSetBytes ||
             rootPackage.estimatedBytes > options.maximumPackageBytes - packageSetBytes)
@@ -901,6 +917,8 @@ namespace vanguard::assets
         packageSet.startupWorldType = plan.startupWorld.ExpectedType();
         packageSet.defaultInput = plan.defaultInput.GetPath().Id();
         packageSet.defaultInputType = plan.defaultInput.ExpectedType();
+        packageSet.rendererBootstrap = plan.rendererBootstrap.GetPath().Id();
+        packageSet.rendererBootstrapType = plan.rendererBootstrap.ExpectedType();
         packageSet.packages = catalog;
 
         const PlannedDataPackage& rootPlanned = plan.packages[0];

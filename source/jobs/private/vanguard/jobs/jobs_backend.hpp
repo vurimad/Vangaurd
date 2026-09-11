@@ -32,8 +32,10 @@ namespace vanguard::jobs::backend
                                         u32 maximumBatchSize, Fence fence) noexcept;
 
     void AddDependency(void* builder, const void* dependency) noexcept;
+    void AddBuilderDependency(void* builder, void* branch) noexcept;
     void DispatchFence(void* builder) noexcept;
     [[nodiscard]] void* ExtractCounter(void* builder) noexcept;
+    [[nodiscard]] bool WaitForBuilder(void* builder) noexcept;
 
     void DestroyCounter(void* counter) noexcept;
     [[nodiscard]] bool CounterIsReady(const void* counter) noexcept;

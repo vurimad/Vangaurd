@@ -63,8 +63,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool FencesComplete(const rhi::ResidencyFenceSet& fences) noexcept
         {
             return (fences.graphics == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Graphics, fences.graphics})) &&
-                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) &&
-                   (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
+                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) && (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
         }
 
         [[nodiscard]] constexpr bool HasQueue(const GeometryQueueMask mask, const GeometryQueueMask queue) noexcept
@@ -74,9 +73,8 @@ namespace vanguard::rendering
 
         [[nodiscard]] constexpr bool CoversQueues(const rhi::ResidencyFenceSet& fences, const GeometryQueueMask queues) noexcept
         {
-            return (!HasQueue(queues, GeometryQueueMask::Graphics) || fences.graphics != 0) &&
-                   (!HasQueue(queues, GeometryQueueMask::Compute) || fences.compute != 0) &&
-                   (!HasQueue(queues, GeometryQueueMask::Copy) || fences.copy != 0);
+            return (!HasQueue(queues, GeometryQueueMask::Graphics) || fences.Covers(rhi::QueueType::Graphics)) && (!HasQueue(queues, GeometryQueueMask::Compute) || fences.Covers(rhi::QueueType::Compute)) &&
+                   (!HasQueue(queues, GeometryQueueMask::Copy) || fences.Covers(rhi::QueueType::Copy));
         }
 
         void ClearFailure(GeometryAllocatorFailure* const failure) noexcept
@@ -85,8 +83,8 @@ namespace vanguard::rendering
                 *failure = {};
         }
 
-        [[nodiscard]] bool Fail(GeometryAllocatorFailure* const failure, const GeometryAllocatorFailureCode code, const char* const message,
-                                const GeometryAllocationId allocation = {}, const rhi::Failure& rhiFailure = {}) noexcept
+        [[nodiscard]] bool Fail(GeometryAllocatorFailure* const failure, const GeometryAllocatorFailureCode code, const char* const message, const GeometryAllocationId allocation = {},
+                                const rhi::Failure& rhiFailure = {}) noexcept
         {
             if (failure != nullptr)
                 *failure = {code, allocation, message, rhiFailure};
@@ -220,9 +218,9 @@ namespace vanguard::rendering
         };
 
         explicit Impl(const GeometryAllocatorConfig& allocatorConfig) noexcept
-            : vertexArenas(memory::pools::Rendering::GetInstance()), indexArenas(memory::pools::Rendering::GetInstance()),
-              recycledVertexArenas(memory::pools::Rendering::GetInstance()), recycledIndexArenas(memory::pools::Rendering::GetInstance()),
-              allocationRecords(memory::pools::Rendering::GetInstance()), recycledAllocations(memory::pools::Rendering::GetInstance()), config(allocatorConfig)
+            : vertexArenas(memory::pools::Rendering::GetInstance()), indexArenas(memory::pools::Rendering::GetInstance()), recycledVertexArenas(memory::pools::Rendering::GetInstance()),
+              recycledIndexArenas(memory::pools::Rendering::GetInstance()), allocationRecords(memory::pools::Rendering::GetInstance()), recycledAllocations(memory::pools::Rendering::GetInstance()),
+              config(allocatorConfig)
         {
             vertexArenas.Reserve(config.maximumVertexArenas);
             indexArenas.Reserve(config.maximumIndexArenas);
@@ -252,8 +250,7 @@ namespace vanguard::rendering
             return format == rhi::IndexFormat::UInt32 ? 4u : 2u;
         }
 
-        [[nodiscard]] bool ValidateLayout(const GeometryVertexLayoutDesc& layout, u32& alignmentVertices,
-                                          GeometryAllocatorFailure* const failure) noexcept
+        [[nodiscard]] bool ValidateLayout(const GeometryVertexLayoutDesc& layout, u32& alignmentVertices, GeometryAllocatorFailure* const failure) noexcept
         {
             if (layout.fingerprint.IsEmpty() || layout.bindings.Empty() || layout.bindings.Size() > rhi::MaximumVertexBindings)
                 return Fail(failure, GeometryAllocatorFailureCode::InvalidRequest, "geometry vertex layout is empty or exceeds fixed-function bindings");
@@ -262,8 +259,7 @@ namespace vanguard::rendering
             {
                 const rhi::VertexBindingDesc binding = layout.bindings[index];
                 if (binding.binding != index || binding.stride == 0 || binding.inputRate != rhi::VertexInputRate::PerVertex)
-                    return Fail(failure, GeometryAllocatorFailureCode::InvalidRequest,
-                                "geometry vertex bindings must be contiguous nonzero per-vertex streams");
+                    return Fail(failure, GeometryAllocatorFailureCode::InvalidRequest, "geometry vertex bindings must be contiguous nonzero per-vertex streams");
                 const u64 bindingQuantum = config.rangeAlignmentBytes / GreatestCommonDivisor(config.rangeAlignmentBytes, binding.stride);
                 if (!LeastCommonMultiple(quantum, bindingQuantum, quantum) || quantum > 0xffffffffu)
                     return Fail(failure, GeometryAllocatorFailureCode::ArithmeticOverflow, "geometry vertex alignment quantum overflowed");
@@ -278,14 +274,12 @@ namespace vanguard::rendering
                 return false;
             for (u32 index = 0; index < arena.bindingCount; ++index)
                 if (arena.bindings[index].binding != layout.bindings[index].binding || arena.bindings[index].stride != layout.bindings[index].stride ||
-                    arena.bindings[index].inputRate != layout.bindings[index].inputRate ||
-                    arena.bindings[index].instanceStepRate != layout.bindings[index].instanceStepRate)
+                    arena.bindings[index].inputRate != layout.bindings[index].inputRate || arena.bindings[index].instanceStepRate != layout.bindings[index].instanceStepRate)
                     return false;
             return true;
         }
 
-        [[nodiscard]] bool CreateVertexArena(const GeometryVertexLayoutDesc& layout, const u32 minimumCount, const u32 alignmentVertices,
-                                             u32& arenaIndex, GeometryAllocatorFailure* const failure) noexcept
+        [[nodiscard]] bool CreateVertexArena(const GeometryVertexLayoutDesc& layout, const u32 minimumCount, const u32 alignmentVertices, u32& arenaIndex, GeometryAllocatorFailure* const failure) noexcept
         {
             if (recycledVertexArenas.Empty() && vertexArenas.Size() >= config.maximumVertexArenas)
             {
@@ -304,8 +298,7 @@ namespace vanguard::rendering
                     return Fail(failure, GeometryAllocatorFailureCode::ArithmeticOverflow, "geometry vertex arena byte size overflowed");
                 committedBytes += capacity64 * binding.stride;
             }
-            if (committedBytes > config.maximumCommittedVertexBytes ||
-                committedVertexBytes > config.maximumCommittedVertexBytes - committedBytes)
+            if (committedBytes > config.maximumCommittedVertexBytes || committedVertexBytes > config.maximumCommittedVertexBytes - committedBytes)
             {
                 ++lifetimeStats.capacityFailures;
                 return Fail(failure, GeometryAllocatorFailureCode::CapacityExceeded, "geometry vertex memory budget is exhausted");
@@ -375,8 +368,7 @@ namespace vanguard::rendering
             recycledVertexArenas.PushBack(arenaIndex);
         }
 
-        [[nodiscard]] bool CreateIndexArena(const rhi::IndexFormat format, const u32 minimumCount, const u32 alignmentIndices, u32& arenaIndex,
-                                            GeometryAllocatorFailure* const failure) noexcept
+        [[nodiscard]] bool CreateIndexArena(const rhi::IndexFormat format, const u32 minimumCount, const u32 alignmentIndices, u32& arenaIndex, GeometryAllocatorFailure* const failure) noexcept
         {
             if (recycledIndexArenas.Empty() && indexArenas.Size() >= config.maximumIndexArenas)
             {
@@ -393,8 +385,7 @@ namespace vanguard::rendering
                 return Fail(failure, GeometryAllocatorFailureCode::CapacityExceeded, "geometry index arena exceeds its fixed-function binding limit");
             }
             const u64 committedBytes = capacity64 * stride;
-            if (committedBytes > config.maximumCommittedIndexBytes ||
-                committedIndexBytes > config.maximumCommittedIndexBytes - committedBytes)
+            if (committedBytes > config.maximumCommittedIndexBytes || committedIndexBytes > config.maximumCommittedIndexBytes - committedBytes)
             {
                 ++lifetimeStats.capacityFailures;
                 return Fail(failure, GeometryAllocatorFailureCode::CapacityExceeded, "geometry index memory budget is exhausted");
@@ -450,8 +441,7 @@ namespace vanguard::rendering
             recycledIndexArenas.PushBack(arenaIndex);
         }
 
-        [[nodiscard]] bool ReserveVertex(const GeometryAllocationRequest& request, GeometryVertexAllocation& allocation,
-                                         GeometryAllocatorFailure* const failure) noexcept
+        [[nodiscard]] bool ReserveVertex(const GeometryAllocationRequest& request, GeometryVertexAllocation& allocation, GeometryAllocatorFailure* const failure) noexcept
         {
             u32 alignment = 0;
             if (!ValidateLayout(request.vertexLayout, alignment, failure))
@@ -481,8 +471,7 @@ namespace vanguard::rendering
             return true;
         }
 
-        [[nodiscard]] bool ReserveIndex(const GeometryAllocationRequest& request, GeometryIndexAllocation& allocation,
-                                        GeometryAllocatorFailure* const failure) noexcept
+        [[nodiscard]] bool ReserveIndex(const GeometryAllocationRequest& request, GeometryIndexAllocation& allocation, GeometryAllocatorFailure* const failure) noexcept
         {
             const u32 stride = IndexStride(request.indexFormat);
             const u64 quantum64 = config.rangeAlignmentBytes / GreatestCommonDivisor(config.rangeAlignmentBytes, stride);
@@ -530,10 +519,9 @@ namespace vanguard::rendering
         [[nodiscard]] static bool IsExactReservation(const AllocationRecord& record, const GeometryReservation reservation) noexcept
         {
             return record.reservation.allocation == reservation.allocation && record.reservation.vertex.arena == reservation.vertex.arena &&
-                   record.reservation.vertex.firstVertex == reservation.vertex.firstVertex &&
-                   record.reservation.vertex.vertexCount == reservation.vertex.vertexCount && record.reservation.index.arena == reservation.index.arena &&
-                   record.reservation.index.firstIndex == reservation.index.firstIndex && record.reservation.index.indexCount == reservation.index.indexCount &&
-                   record.reservation.index.format == reservation.index.format;
+                   record.reservation.vertex.firstVertex == reservation.vertex.firstVertex && record.reservation.vertex.vertexCount == reservation.vertex.vertexCount &&
+                   record.reservation.index.arena == reservation.index.arena && record.reservation.index.firstIndex == reservation.index.firstIndex &&
+                   record.reservation.index.indexCount == reservation.index.indexCount && record.reservation.index.format == reservation.index.format;
         }
 
         [[nodiscard]] static bool IsExactPlacement(const AllocationRecord& record, const GeometryPlacement placement) noexcept
@@ -589,12 +577,10 @@ namespace vanguard::rendering
             return Fail(failure, GeometryAllocatorFailureCode::AlreadyInitialized, "geometry allocator is already initialized");
         if (!concurrency::IsMainThread())
             return Fail(failure, GeometryAllocatorFailureCode::WrongThread, "geometry allocator must initialize on the main thread");
-        if (!rhi::IsInitialized() || config.verticesPerArena == 0 || config.indexBytesPerArena < 4 || config.maximumCommittedVertexBytes == 0 ||
-            config.maximumCommittedIndexBytes < config.indexBytesPerArena || config.rangeAlignmentBytes == 0 ||
-            config.maximumIndexArenaBytes < config.indexBytesPerArena || config.maximumIndexArenaBytes > 0xffffffffu || config.maximumVertexArenas == 0 ||
-            config.maximumIndexArenas == 0 || config.maximumAllocations == 0 || config.retirementEpochCount < 2 ||
-            config.retirementEpochCount > MaximumGeometryRetirementEpochs || config.initialRetirementsPerEpoch == 0 ||
-            config.retirementQueues == GeometryQueueMask::None)
+        if (!rhi::IsInitialized() || config.verticesPerArena == 0 || config.indexBytesPerArena < 4 || config.maximumCommittedVertexBytes == 0 || config.maximumCommittedIndexBytes < config.indexBytesPerArena ||
+            config.rangeAlignmentBytes == 0 || config.maximumIndexArenaBytes < config.indexBytesPerArena || config.maximumIndexArenaBytes > 0xffffffffu || config.maximumVertexArenas == 0 ||
+            config.maximumIndexArenas == 0 || config.maximumAllocations == 0 || config.retirementEpochCount < 2 || config.retirementEpochCount > MaximumGeometryRetirementEpochs ||
+            config.initialRetirementsPerEpoch == 0 || config.retirementQueues == GeometryQueueMask::None)
             return Fail(failure, GeometryAllocatorFailureCode::InvalidConfiguration, "geometry allocator configuration is invalid");
 
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(Impl), alignof(Impl));
@@ -613,8 +599,7 @@ namespace vanguard::rendering
             return Fail(failure, GeometryAllocatorFailureCode::WrongThread, "geometry allocator must shutdown on the main thread");
         for (const Impl::AllocationRecord& record : m_impl->allocationRecords)
             if (record.state != GeometryAllocationState::Invalid)
-                return Fail(failure, GeometryAllocatorFailureCode::LiveAllocationsRemain, "geometry allocator still owns live allocations",
-                            record.reservation.allocation);
+                return Fail(failure, GeometryAllocatorFailureCode::LiveAllocationsRemain, "geometry allocator still owns live allocations", record.reservation.allocation);
         for (u32 index = 0; index < m_impl->config.retirementEpochCount; ++index)
             if (!m_impl->epochs[index].allocations.Empty())
                 return Fail(failure, GeometryAllocatorFailureCode::LiveAllocationsRemain, "geometry allocator still owns retirement records");
@@ -633,13 +618,29 @@ namespace vanguard::rendering
         return true;
     }
 
+    void GeometryAllocator::AbandonDevice() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        Impl* const impl = m_impl;
+        for (Impl::VertexArena& arena : impl->vertexArenas)
+            if (arena.alive)
+                impl->DestroyVertexArena(arena);
+        for (Impl::IndexArena& arena : impl->indexArenas)
+            if (arena.alive)
+                impl->DestroyIndexArena(arena);
+        m_impl = nullptr;
+        impl->~Impl();
+        memory::MemoryBlock block{impl, sizeof(Impl), memory::PoolId::Rendering};
+        memory::Free(block);
+    }
+
     bool GeometryAllocator::IsInitialized() const noexcept
     {
         return m_impl != nullptr;
     }
 
-    bool GeometryAllocator::Reserve(const GeometryAllocationRequest& request, GeometryReservation& reservation,
-                                    GeometryAllocatorFailure* const failure) noexcept
+    bool GeometryAllocator::Reserve(const GeometryAllocationRequest& request, GeometryReservation& reservation, GeometryAllocatorFailure* const failure) noexcept
     {
         ClearFailure(failure);
         reservation = {};
@@ -692,8 +693,8 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GeometryAllocator::ReserveBatch(const containers::ArraySpan<const GeometryAllocationRequest> requests,
-                                         containers::ArraySpan<GeometryReservation> reservations, GeometryAllocatorFailure* const failure) noexcept
+    bool GeometryAllocator::ReserveBatch(const containers::ArraySpan<const GeometryAllocationRequest> requests, containers::ArraySpan<GeometryReservation> reservations,
+                                         GeometryAllocatorFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -728,8 +729,7 @@ namespace vanguard::rendering
         if (record == nullptr || record->state != GeometryAllocationState::Reserved || !Impl::IsExactReservation(*record, reservation))
         {
             ++m_impl->lifetimeStats.staleOperations;
-            return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "only the exact reserved geometry allocation can be cancelled",
-                        reservation.allocation);
+            return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "only the exact reserved geometry allocation can be cancelled", reservation.allocation);
         }
         m_impl->ReleaseRanges(record->reservation);
         m_impl->RecycleRecord(*record);
@@ -737,8 +737,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GeometryAllocator::CancelBatch(const containers::ArraySpan<const GeometryReservation> reservations,
-                                        GeometryAllocatorFailure* const failure) noexcept
+    bool GeometryAllocator::CancelBatch(const containers::ArraySpan<const GeometryReservation> reservations, GeometryAllocatorFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (reservations.Empty())
@@ -751,8 +750,7 @@ namespace vanguard::rendering
         {
             const Impl::AllocationRecord* const record = m_impl->FindRecord(reservation.allocation);
             if (record == nullptr || record->state != GeometryAllocationState::Reserved || !Impl::IsExactReservation(*record, reservation))
-                return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "geometry cancellation batch contains a non-reserved allocation",
-                            reservation.allocation);
+                return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "geometry cancellation batch contains a non-reserved allocation", reservation.allocation);
         }
         for (const GeometryReservation reservation : reservations)
             if (!Cancel(reservation, failure))
@@ -760,8 +758,7 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool GeometryAllocator::Commit(const GeometryReservation reservation, GeometryPlacement& placement,
-                                   GeometryAllocatorFailure* const failure) noexcept
+    bool GeometryAllocator::Commit(const GeometryReservation reservation, GeometryPlacement& placement, GeometryAllocatorFailure* const failure) noexcept
     {
         ClearFailure(failure);
         placement = {};
@@ -773,16 +770,15 @@ namespace vanguard::rendering
         if (record == nullptr || record->state != GeometryAllocationState::Reserved || !Impl::IsExactReservation(*record, reservation))
         {
             ++m_impl->lifetimeStats.staleOperations;
-            return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "only the exact reserved geometry allocation can be committed",
-                        reservation.allocation);
+            return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "only the exact reserved geometry allocation can be committed", reservation.allocation);
         }
         record->state = GeometryAllocationState::Active;
         placement = {reservation.allocation, reservation.vertex, reservation.index};
         return true;
     }
 
-    bool GeometryAllocator::CommitBatch(const containers::ArraySpan<const GeometryReservation> reservations,
-                                        containers::ArraySpan<GeometryPlacement> placements, GeometryAllocatorFailure* const failure) noexcept
+    bool GeometryAllocator::CommitBatch(const containers::ArraySpan<const GeometryReservation> reservations, containers::ArraySpan<GeometryPlacement> placements,
+                                        GeometryAllocatorFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr)
@@ -798,12 +794,10 @@ namespace vanguard::rendering
             const GeometryReservation reservation = reservations[index];
             const Impl::AllocationRecord* const record = m_impl->FindRecord(reservation.allocation);
             if (record == nullptr || record->state != GeometryAllocationState::Reserved || !Impl::IsExactReservation(*record, reservation))
-                return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "geometry commit batch contains a stale reservation",
-                            reservation.allocation);
+                return Fail(failure, GeometryAllocatorFailureCode::InvalidState, "geometry commit batch contains a stale reservation", reservation.allocation);
             for (u32 previous = 0; previous < index; ++previous)
                 if (reservations[previous].allocation == reservation.allocation)
-                    return Fail(failure, GeometryAllocatorFailureCode::InvalidRequest, "geometry commit batch contains a duplicate reservation",
-                                reservation.allocation);
+                    return Fail(failure, GeometryAllocatorFailureCode::InvalidRequest, "geometry commit batch contains a duplicate reservation", reservation.allocation);
         }
         for (u32 index = 0; index < reservations.Size(); ++index)
         {
@@ -845,8 +839,7 @@ namespace vanguard::rendering
         if (epoch.allocations.Empty())
             return true;
         if (!CoversQueues(safeAfter, m_impl->config.retirementQueues))
-            return Fail(failure, GeometryAllocatorFailureCode::MissingRetirementFence,
-                        "geometry retirement epoch does not cover every configured queue");
+            return Fail(failure, GeometryAllocatorFailureCode::MissingRetirementFence, "geometry retirement epoch does not cover every configured queue");
         const u32 next = (m_impl->openEpoch + 1u) % m_impl->config.retirementEpochCount;
         if (m_impl->epochs[next].state != Impl::EpochState::Available)
             return Fail(failure, GeometryAllocatorFailureCode::RetirementEpochsExhausted, "geometry retirement epoch ring is full");
@@ -882,8 +875,7 @@ namespace vanguard::rendering
                 Impl::AllocationRecord* const record = m_impl->FindRecord(allocation);
                 if (record == nullptr || record->state != GeometryAllocationState::Retiring)
                 {
-                    static_cast<void>(Fail(failure, GeometryAllocatorFailureCode::InvalidState,
-                                           "geometry retirement epoch contains a stale allocation", allocation));
+                    static_cast<void>(Fail(failure, GeometryAllocatorFailureCode::InvalidState, "geometry retirement epoch contains a stale allocation", allocation));
                     return reclaimed;
                 }
             }

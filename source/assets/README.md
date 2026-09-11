@@ -1,5 +1,9 @@
 # Vanguard Assets
 
+`source_database.hpp` provides the headless source inventory table and identity queries. `Rescan` uses checked physical enumeration and existing filesystem readers; failed directory enumeration does not become asset deletion. Source/sidecar pairs and orphan sidecars share one source row. Rebuild/rescan/classification are exclusive owner operations and queries borrow records until the next update. `ClassifySources` consumes existing compiler descriptors without retaining callbacks; optional filename hints identify candidates, not successful imports. `VisitResources` filters borrowed records by folder, types, issues and classification with no I/O or result-array allocation. The editor workspace and nanovanguard source inspection now consume this database; executable validation and full compiler composition remain deferred.
+
+Source metadata: `asset_metadata.hpp` provides the headless VMETA 1 codec, persistent 128-bit source identity and stable named-output mapping to existing runtime resource references. See [VMETA format](../../docs/formats/vmeta-format.md). Project-wide identity checks and safe file publication remain separate integration work.
+
 `assets` owns Vanguard's headless authoring-to-runtime build contracts. It is
 a tool-side module; runtime resource loading does not depend on it.
 

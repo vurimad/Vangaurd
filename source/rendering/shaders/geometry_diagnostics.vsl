@@ -1,0 +1,56 @@
+struct GeometryCounters { uint4 work; uint4 bins; };
+struct ShellPlan { uint4 identity; uint4 range; };
+struct DiagnosticSummary { uint4 visibility; uint4 work; uint4 bins; uint4 arguments; };
+struct DiagnosticConstants
+{
+    uint visibilityDescriptor;
+    uint geometryDescriptor;
+    uint shellCounterDescriptor;
+    uint shellPlanDescriptor;
+    uint outputDescriptor;
+    uint viewIndex;
+    uint firstShell;
+    uint shellCount;
+};
+[[push_constant]] ConstantBuffer<DiagnosticConstants> diagnostics;
+groupshared uint3 shellTotals[64];
+
+// Diagnostic-only: one group owns one view record, after argument generation.
+// No atomics. Each lane reduces disjoint shell ordinals; the group tree has a
+// barrier at every level. Work is O(admitted shells), not O(scene capacity).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void GeometryDiagnosticsMain(uint lane : SV_GroupIndex)
+{
+    StructuredBuffer<uint4> counters = ResourceDescriptorHeap[diagnostics.shellCounterDescriptor];
+    StructuredBuffer<ShellPlan> plans = ResourceDescriptorHeap[diagnostics.shellPlanDescriptor];
+    uint3 totals = 0;
+    for (uint ordinal = lane; ordinal < diagnostics.shellCount; ordinal += 64u)
+    {
+        uint index = diagnostics.firstShell + ordinal;
+        ShellPlan plan = plans[index];
+        uint4 count = counters[plan.range.z];
+        uint emitted = min(count.x, plan.range.y);
+        totals += uint3(emitted, count.y, emitted != 0u ? 1u : 0u);
+    }
+    shellTotals[lane] = totals;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint offset = 32u; offset != 0u; offset >>= 1u)
+    {
+        if (lane < offset) shellTotals[lane] += shellTotals[lane + offset];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane == 0u)
+    {
+        StructuredBuffer<uint4> visibility = ResourceDescriptorHeap[diagnostics.visibilityDescriptor];
+        StructuredBuffer<GeometryCounters> geometry = ResourceDescriptorHeap[diagnostics.geometryDescriptor];
+        RWStructuredBuffer<DiagnosticSummary> output = ResourceDescriptorHeap[diagnostics.outputDescriptor];
+        GeometryCounters counts = geometry[diagnostics.viewIndex];
+        DiagnosticSummary summary;
+        summary.visibility = visibility[diagnostics.viewIndex];
+        summary.work = counts.work;
+        summary.bins = counts.bins;
+        summary.arguments = uint4(shellTotals[0], 0u);
+        output[diagnostics.viewIndex] = summary;
+    }
+}

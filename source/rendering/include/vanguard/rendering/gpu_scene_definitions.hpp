@@ -4,6 +4,9 @@
 
 namespace vanguard::rendering
 {
+    class GpuSceneRuntime;
+    struct GpuSceneContributionToken;
+
     /// Content identity supplied by the resource resolver. Reimporting or changing runtime resolution
     /// produces a new key; equal keys must describe byte-identical GPU definitions.
     struct GpuSceneDefinitionKey
@@ -32,6 +35,26 @@ namespace vanguard::rendering
         GpuSceneDefinitionKey key;
         GpuMaterial material;
         containers::ArraySpan<const GpuMaterialResource> resources;
+        containers::ArraySpan<const u8> parameterBytes;
+    };
+
+    struct GpuMaterialDefinitionBatch
+    {
+        u32 serial = 0;
+        u32 definitionCount = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return serial != 0 && definitionCount != 0;
+        }
+    };
+
+    enum class GpuMaterialDefinitionBatchState : u8
+    {
+        Invalid,
+        Prepared,
+        Staged,
+        Accepted
     };
 
     /// CPU registration image of one primitive. Table indices are resolved from generational definition
@@ -41,7 +64,8 @@ namespace vanguard::rendering
         GpuMaterialHandle material;
         u32 firstPhaseParticipation = 0;
         u32 phaseParticipationCount = 0;
-        u32 stableSubmesh = 0;
+        /// Ordinal in the source VMESH submesh table. The authored stable ID remains 64-bit CPU metadata.
+        u32 sourceSubmesh = 0;
         GpuPrimitiveFlags flags = GpuPrimitiveFlags::None;
     };
 
@@ -62,6 +86,17 @@ namespace vanguard::rendering
         u32 maximumRenderables = 65'536;
         u32 maximumDefinitionsPerBatch = 4'096;
         u32 maximumAllocationsPerBatch = 16'384;
+        u32 maximumMaterialResourcesPerBatch = 65'536;
+        u32 maximumMaterialParameterBytesPerBatch = 16u * 1024u * 1024u;
+    };
+
+    // Borrowed allocation identities for parallel placement publication. The
+    // caller must retain the renderable definition throughout publication/use.
+    struct GpuRenderableAllocationView
+    {
+        GpuSceneAllocation renderable;
+        GpuSceneAllocation primitives;
+        GpuSceneAllocation phases;
     };
 
     enum class GpuSceneDefinitionFailureCode : u8
@@ -77,8 +112,11 @@ namespace vanguard::rendering
         CapacityExceeded,
         ReferenceUnderflow,
         LiveDefinitionsRemain,
+        Busy,
+        InvalidBatch,
         LifetimeFailure,
-        UploadFailure
+        UploadFailure,
+        ContributionFailure
     };
 
     struct GpuSceneDefinitionFailure
@@ -126,17 +164,29 @@ namespace vanguard::rendering
         GpuSceneDefinitions(const GpuSceneDefinitions&) = delete;
         GpuSceneDefinitions& operator=(const GpuSceneDefinitions&) = delete;
 
-        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, GpuSceneUploader& uploader, const GpuSceneDefinitionsConfig& config = {},
-                                      GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Initialize(GpuSceneLifetime& lifetime, GpuSceneUploader& uploader, const GpuSceneDefinitionsConfig& config = {}, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] bool AcquireGeometries(containers::ArraySpan<const GpuGeometryDefinition> definitions, containers::ArraySpan<GpuGeometryHandle> handles,
-                                             GpuSceneDefinitionPublication& publication, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AcquireMaterials(containers::ArraySpan<const GpuMaterialDefinition> definitions, containers::ArraySpan<GpuMaterialHandle> handles,
-                                            GpuSceneDefinitionPublication& publication, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool AcquireRenderables(containers::ArraySpan<const GpuRenderableDefinition> definitions,
-                                              containers::ArraySpan<GpuRenderableHandle> handles, GpuSceneDefinitionPublication& publication,
+        [[nodiscard]] bool AcquireGeometries(containers::ArraySpan<const GpuGeometryDefinition> definitions, containers::ArraySpan<GpuGeometryHandle> handles, GpuSceneDefinitionPublication& publication,
+                                             GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        /// Freezes one all-or-nothing material/resource/parameter compound. New
+        /// definitions remain invisible until the shared GPU Scene contribution
+        /// is accepted; a reused-only batch is accepted immediately.
+        [[nodiscard]] bool PrepareMaterials(containers::ArraySpan<const GpuMaterialDefinition> definitions, GpuMaterialDefinitionBatch& batch, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        /// Stages the frozen material batch into the renderer-wide GPU Scene
+        /// publication. This never records or submits a private command list.
+        [[nodiscard]] bool StageMaterials(GpuSceneRuntime& runtime, const GpuMaterialDefinitionBatch& batch, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        /// Cancels an unstaged prepared batch and rolls back every allocation and
+        /// reused reference. A staged batch first returns here through retry.
+        [[nodiscard]] bool CancelMaterials(const GpuMaterialDefinitionBatch& batch, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        /// Copies handles only after shared publication acceptance, then releases
+        /// the batch result storage. No handle is exposed while publication is partial.
+        [[nodiscard]] bool ConsumeMaterials(const GpuMaterialDefinitionBatch& batch, containers::ArraySpan<GpuMaterialHandle> handles, GpuSceneDefinitionPublication& publication,
+                                            GpuSceneDefinitionFailure* failure = nullptr) noexcept;
+        [[nodiscard]] GpuMaterialDefinitionBatchState GetMaterialBatchState(const GpuMaterialDefinitionBatch& batch) const noexcept;
+        [[nodiscard]] bool AcquireRenderables(containers::ArraySpan<const GpuRenderableDefinition> definitions, containers::ArraySpan<GpuRenderableHandle> handles, GpuSceneDefinitionPublication& publication,
                                               GpuSceneDefinitionFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] bool AddReference(GpuGeometryHandle handle, GpuSceneDefinitionFailure* failure = nullptr) noexcept;
@@ -150,9 +200,15 @@ namespace vanguard::rendering
         [[nodiscard]] bool IsValid(GpuGeometryHandle handle) const noexcept;
         [[nodiscard]] bool IsValid(GpuMaterialHandle handle) const noexcept;
         [[nodiscard]] bool IsValid(GpuRenderableHandle handle) const noexcept;
+        [[nodiscard]] bool GetRenderableAllocations(GpuRenderableHandle handle, GpuRenderableAllocationView& output) const noexcept;
         [[nodiscard]] GpuSceneDefinitionsStats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] static bool WriteMaterialContribution(void* owner, GpuSceneContributionToken token, containers::ArraySpan<const GpuSceneUploadReservation> reservations,
+                                                            const char*& failureMessage) noexcept;
+        static void AcceptMaterialContribution(void* owner, GpuSceneContributionToken token, rhi::GpuFence sharedCompletion) noexcept;
+        [[nodiscard]] static bool RetryMaterialContribution(void* owner, GpuSceneContributionToken token, const char*& failureMessage) noexcept;
+
         Impl* m_impl = nullptr;
     };
 } // namespace vanguard::rendering

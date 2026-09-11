@@ -256,6 +256,8 @@ namespace vanguard::pipelines
         crypto::Digest256 permutation;
         crypto::Digest256 bindingLayout;
         crypto::Digest256 pipelineInterface;
+        crypto::Digest256 materialDomain;
+        crypto::Digest256 materialLayout;
     };
 
     struct AttachmentFormat
@@ -452,9 +454,46 @@ namespace vanguard::pipelines
         bool m_open = false;
     };
 
+    /// Immutable CPU-side pipeline artifact plus the exact shader generations
+    /// retained while it remains published. Cross-artifact compatibility is
+    /// sealed by Phase 3A.2; this object seals the load/dependency boundary.
+    class PipelineResourceObject final : public resources::ResourceObject
+    {
+    public:
+        PipelineResourceObject() noexcept;
+        ~PipelineResourceObject() override = default;
+
+        [[nodiscard]] resources::ResourceTypeId GetType() const noexcept override;
+        [[nodiscard]] bool IsOpen() const noexcept;
+        [[nodiscard]] const PipelineFile& GetFile() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const resources::ResourceHandle> GetShaderDependencies() const noexcept;
+
+    private:
+        PipelineFile m_file;
+        containers::DynamicArray<resources::ResourceHandle> m_shaderDependencies;
+
+        friend resources::ResourceObject* DecodePipelineResource(resources::ResourceReference, const void*, usize,
+                                                                 const resources::LoadContext&, resources::Failure&, void*) noexcept;
+    };
+
+    struct PipelineResourceDecoderConfig
+    {
+        ReadLimits limits;
+    };
+
+    /// ResourceStreamer-compatible callbacks. The optional user data points to a
+    /// PipelineResourceDecoderConfig and must outlive decoder registration.
+    [[nodiscard]] resources::ResourceObject* DecodePipelineResource(resources::ResourceReference reference, const void* data, usize size,
+                                                                    const resources::LoadContext& context, resources::Failure& failure,
+                                                                    void* userData) noexcept;
+    void DestroyPipelineResource(resources::ResourceObject* resource, void* userData) noexcept;
+
     [[nodiscard]] Result WritePipeline(filesystem::IFile& writer, const BuildDescription& description) noexcept;
     [[nodiscard]] Result CalculateTemplateFingerprint(const BuildDescription& description, crypto::Digest256& fingerprint) noexcept;
     [[nodiscard]] Result CalculateConcretePipelineKey(const PipelineFile& pipeline, const AttachmentSignature* attachments, crypto::Digest256& key) noexcept;
     [[nodiscard]] Result ValidateShaderCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader,
                                                      const AttachmentSignature* attachments = nullptr) noexcept;
+    [[nodiscard]] Result ValidateShaderResourceCompatibility(const PipelineFile& pipeline, const shaders::ShaderFile& shader,
+                                                             resources::ResourceId shaderResource,
+                                                             const AttachmentSignature* attachments = nullptr) noexcept;
 } // namespace vanguard::pipelines

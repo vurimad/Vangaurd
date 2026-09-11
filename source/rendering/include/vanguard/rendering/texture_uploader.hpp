@@ -153,24 +153,20 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool Initialize(const TextureUploaderConfig& config = {}, TextureUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(TextureUploadFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Low-level candidate-only path used by tooling/tests that take the submitted texture directly. Normal
         /// residency streaming must use the manager-owned overload below.
-        [[nodiscard]] bool RequestMipTail(const resources::ResourceHandle& resource, GpuTextureResidencyHandle residency,
-                                          TextureUploadRequestId& request, io::AsyncPriority priority = io::eAsyncPriority_Streaming,
-                                          TextureUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestMipTail(const resources::ResourceHandle& resource, GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
+                                          io::AsyncPriority priority = io::eAsyncPriority_Streaming, TextureUploadFailure* failure = nullptr) noexcept;
         /// Requests the guaranteed tail as the initial manager-owned residency transition.
-        [[nodiscard]] bool RequestMipTail(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager,
-                                          GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
-                                          io::AsyncPriority priority = io::eAsyncPriority_Streaming,
-                                          TextureUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestMipTail(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
+                                          io::AsyncPriority priority = io::eAsyncPriority_Streaming, TextureUploadFailure* failure = nullptr) noexcept;
         /// Requests one explicit compact suffix. The target is clamped so the guaranteed mip tail is never
         /// omitted. A target equal to the current first mip succeeds as a no-op and returns an invalid request.
-        [[nodiscard]] bool RequestMipTransition(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager,
-                                                GpuTextureResidencyHandle residency, u32 targetFirstResidentMip,
-                                                TextureUploadRequestId& request, io::AsyncPriority priority = io::eAsyncPriority_Streaming,
-                                                TextureUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestMipTransition(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, GpuTextureResidencyHandle residency, u32 targetFirstResidentMip,
+                                                TextureUploadRequestId& request, io::AsyncPriority priority = io::eAsyncPriority_Streaming, TextureUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Cancel(TextureUploadRequestId request, TextureUploadFailure* failure = nullptr) noexcept;
 
         /// Advances acquisitions, stages ready windows, releases their CPU bytes immediately, and submits one
@@ -178,27 +174,26 @@ namespace vanguard::rendering
         /// prerequisiteFences identify prior readers of current textures. Copies are deferred until every
         /// supplied fence is complete; Tick only polls and never waits.
         [[nodiscard]] bool Tick(const rhi::ResidencyFenceSet& prerequisiteFences, TextureUploadFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Tick(TextureUploadFailure* failure = nullptr) noexcept { return Tick({}, failure); }
+        [[nodiscard]] bool Tick(TextureUploadFailure* failure = nullptr) noexcept
+        {
+            return Tick({}, failure);
+        }
 
         /// Admits up to maximumInstallations completed physical textures into the existing residency manager.
         /// This only creates pending descriptor/table installations; the renderer still contributes and submits
         /// them through its shared GpuSceneUploader batch.
-        [[nodiscard]] bool InstallReadyCandidates(TextureResidencyManager& residencyManager, u32 maximumInstallations,
-                                                  u32& installed, TextureUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool InstallReadyCandidates(TextureResidencyManager& residencyManager, u32 maximumInstallations, u32& installed, TextureUploadFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] TextureUploadState GetState(TextureUploadRequestId request) const noexcept;
         [[nodiscard]] bool GetRequestFailure(TextureUploadRequestId request, TextureUploadFailure& failure) const noexcept;
         /// Low-level ownership escape hatch. The caller must honor copyCompletion if the request is still
         /// Submitted; normal streaming should use InstallReadyCandidates.
-        [[nodiscard]] bool TakeSubmitted(TextureUploadRequestId request, SubmittedTextureCandidate& candidate,
-                                         TextureUploadFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool TakeSubmitted(TextureUploadRequestId request, SubmittedTextureCandidate& candidate, TextureUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] TextureUploaderStats GetStats() const noexcept;
 
     private:
-        [[nodiscard]] bool RequestInternal(const resources::ResourceHandle& resource, TextureResidencyManager* residencyManager,
-                                           GpuTextureResidencyHandle residency, u32 targetFirstResidentMip,
-                                           TextureUploadRequestId& request, io::AsyncPriority priority,
-                                           TextureUploadFailure* failure) noexcept;
+        [[nodiscard]] bool RequestInternal(const resources::ResourceHandle& resource, TextureResidencyManager* residencyManager, GpuTextureResidencyHandle residency, u32 targetFirstResidentMip,
+                                           TextureUploadRequestId& request, io::AsyncPriority priority, TextureUploadFailure* failure) noexcept;
         Impl* m_impl = nullptr;
     };
 } // namespace vanguard::rendering

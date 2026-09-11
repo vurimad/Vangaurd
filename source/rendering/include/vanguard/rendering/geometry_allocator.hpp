@@ -245,24 +245,19 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool Initialize(const GeometryAllocatorConfig& config = {}, GeometryAllocatorFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(GeometryAllocatorFailure* failure = nullptr) noexcept;
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] bool Reserve(const GeometryAllocationRequest& request, GeometryReservation& reservation,
-                                   GeometryAllocatorFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool ReserveBatch(containers::ArraySpan<const GeometryAllocationRequest> requests,
-                                        containers::ArraySpan<GeometryReservation> reservations,
+        [[nodiscard]] bool Reserve(const GeometryAllocationRequest& request, GeometryReservation& reservation, GeometryAllocatorFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ReserveBatch(containers::ArraySpan<const GeometryAllocationRequest> requests, containers::ArraySpan<GeometryReservation> reservations,
                                         GeometryAllocatorFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Cancel(GeometryReservation reservation, GeometryAllocatorFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool CancelBatch(containers::ArraySpan<const GeometryReservation> reservations,
-                                       GeometryAllocatorFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool CancelBatch(containers::ArraySpan<const GeometryReservation> reservations, GeometryAllocatorFailure* failure = nullptr) noexcept;
 
         /// Called only after the corresponding geometry copy submission succeeded.
-        [[nodiscard]] bool Commit(GeometryReservation reservation, GeometryPlacement& placement,
-                                  GeometryAllocatorFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool Commit(GeometryReservation reservation, GeometryPlacement& placement, GeometryAllocatorFailure* failure = nullptr) noexcept;
         /// Atomically validates and commits a complete submitted upload batch. No reservation changes state if validation fails.
-        [[nodiscard]] bool CommitBatch(containers::ArraySpan<const GeometryReservation> reservations,
-                                       containers::ArraySpan<GeometryPlacement> placements,
-                                       GeometryAllocatorFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool CommitBatch(containers::ArraySpan<const GeometryReservation> reservations, containers::ArraySpan<GeometryPlacement> placements, GeometryAllocatorFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Retire(GeometryPlacement placement, GeometryAllocatorFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool SealRetirements(const rhi::ResidencyFenceSet& safeAfter, GeometryAllocatorFailure* failure = nullptr) noexcept;
         [[nodiscard]] u32 Collect(GeometryAllocatorFailure* failure = nullptr) noexcept;

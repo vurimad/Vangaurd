@@ -365,6 +365,10 @@ namespace vanguard::input
                 f32 y;
                 f32 deltaX;
                 f32 deltaY;
+                // Desktop coordinates captured by the platform before deferred input consumption.
+                f32 desktopX;
+                f32 desktopY;
+                bool hasDesktopPosition;
             } mouseMotion;
             struct
             {

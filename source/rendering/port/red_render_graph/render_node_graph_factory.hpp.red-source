@@ -1,0 +1,188 @@
+/**
+* Copyright (c) 2018 CD Projekt Red. All Rights Reserved.
+*/
+
+#pragma once
+
+#include "renderNodeGraph.h"
+
+namespace rend
+{
+
+	class CRenderNodeCommandListGroup;
+
+
+	// ctremblay: This is glorify wrapper around a dynarray. Should probably be removed.
+	struct NodesContainer
+	{
+		NodesContainer();
+		~NodesContainer();
+
+		void Reset();
+
+		red::DynArray< red::UniquePtr< CRenderNodeBase > > m_nodes{ rend::PoolRenderGraph() };
+	};
+
+	enum class NodeGroupID : Uint8 { None = 0 };
+
+	class NodeGraphFactory
+	{
+		RED_USE_MEMORY_POOL( rend::PoolRenderGraph );
+
+	public:
+		// - - - - - - - - - - - - - - - - - - -
+		enum { MAX_GROUPS_COUNT = 16 };
+		// - - - - - - - - - - - - - - - - - - -
+
+		NodeGraphFactory( CRenderNodeGraph* graphPtr, NodesContainer *nodes );
+		~NodeGraphFactory();
+
+		CRenderNodeGraph::ItemId Register( NodeGroupID groupId, const SRenderNodeParameters &nodeParameters );
+		CRenderNodeGraph::ItemId CreateCustom( NodeGroupID groupId, const SRenderNodeParameters &nodeParameters );
+
+		template <class Node, typename... Args>
+		CRenderNodeGraph::ItemId Create( NodeGroupID groupId, ERenderNodeType type, RenderNodeSubtype subType, Args&&... args );
+
+
+		// While group is open, Create() will add nodes to that group, instead of adding to the graph itself. Only one
+		// group can be open at a time, nesting is not supported.
+		CRenderNodeGraph::ItemId BeginCommandListGroup( NodeGroupID groupId, ERenderNodeType type, RenderNodeSubtype subType, const char* name, GpuApi::CommandListType commandListType = GpuApi::CommandListType::Default );
+		void EndCommandListGroup();
+
+		
+		void Link( CRenderNodeGraph::ItemId parent, CRenderNodeGraph::ItemId child, ERenderNodeDependencyType depType );
+		void Link( CRenderNodeGraph::ItemId parent, NodeGroupID childId, ERenderNodeDependencyType depType );
+		void Link( NodeGroupID parentId, CRenderNodeGraph::ItemId child, ERenderNodeDependencyType depType );
+		void Link( NodeGroupID parentId, NodeGroupID childId, ERenderNodeDependencyType depType );
+
+		template <ERenderNodeDependencyType depType, typename Func>
+		void LinkIf( CRenderNodeGraph::ItemId parent, const Func& func );
+
+		// This is just a temp shit for setting dependencies based on order of adding nodes
+		void LinkGPU();
+		void LinkCPU();
+
+		// Add CPU dependency from 'parent' to all GPU-related nodes coming after it.
+		void LinkCPUToNextGPU( CRenderNodeGraph::ItemId parent );
+
+		// Add CPU dependency from all GPU-related nodes coming before 'child' to child.
+		void LinkCPUToPreviousGPU( CRenderNodeGraph::ItemId child );
+
+	private:
+
+		struct SGroupData
+		{
+			SGroupData()
+				: m_firstGroupTagIndex(-1)
+				, m_dummyInputNode( CRenderNodeGraph::INVALID_ITEM_ID)
+				, m_dummyOutputNode( CRenderNodeGraph::INVALID_ITEM_ID)
+			{}
+
+			Int32 m_firstGroupTagIndex;
+			CRenderNodeGraph::ItemId m_dummyInputNode;	// all child nodes are dependent on this node
+			CRenderNodeGraph::ItemId m_dummyOutputNode;	// this nodes is dependent on all child nodes
+		};
+
+		struct SGroupTag
+		{
+			RED_USE_MEMORY_POOL( rend::PoolRenderGraph );
+
+			CRenderNodeGraph::ItemId	m_nodeId;
+			Int32						m_nextIndex;
+		};
+
+		void LinkImpl( CRenderNodeGraph::ItemId parent, CRenderNodeGraph::ItemId child, ERenderNodeDependencyType depType );
+
+		CRenderNodeGraph::ItemId GetDummyInputNodeForGroup( NodeGroupID groupID );
+		CRenderNodeGraph::ItemId GetDummyOutputNodeForGroup( NodeGroupID groupID );
+
+		Int32 FindGroupFirstTagIndex( NodeGroupID groupId ) const;
+
+		CRenderNodeGraph* m_graphPtr;
+		NodesContainer*	m_nodes;
+		red::DynArray<CRenderNodeGraph::ItemId>	m_nodeIds{ rend::PoolRenderGraph() };
+		red::FixedArray<SGroupData, MAX_GROUPS_COUNT> m_groupData;
+		red::DynArray<SGroupTag> m_groupTags{ rend::PoolRenderGraph() };
+
+		CRenderNodeCommandListGroup* m_currentGroup;
+	};
+
+	template <class Node, typename... Args>
+	CRenderNodeGraph::ItemId NodeGraphFactory::Create( NodeGroupID groupId, ERenderNodeType type, RenderNodeSubtype subType, Args&&... args )
+	{
+		CRenderNodeBase* nodeImpl = RED_NEW(Node)(std::forward<Args>( args )...);
+		return Register( groupId, SRenderNodeParameters().Set( type, subType, nodeImpl ) );
+	}
+
+	template <ERenderNodeDependencyType depType, typename Func>
+	void NodeGraphFactory::LinkIf( CRenderNodeGraph::ItemId parent, const Func& func )
+	{
+		for( Uint32 i = 0, end = m_graphPtr->GetNumNodes(); i < end; ++i )
+		{
+			const CRenderNodeGraph::ItemId nodeId = m_graphPtr->GetNode( i );
+			if( func( m_graphPtr->GetNodeParameters( nodeId ).m_impl ) )
+			{
+				Link( parent, nodeId, depType );
+			}
+		}
+	}
+
+	class ScopedCloseCommandList
+	{
+	public:
+		NodeGraphFactory& factory;
+
+		ScopedCloseCommandList( rend::NodeGraphFactory& factory )
+			: factory( factory )
+		{
+		}
+
+		~ScopedCloseCommandList()
+		{
+			factory.EndCommandListGroup();
+		}
+
+		// Just so it works with 'if' scope
+		operator Bool() const { return true; }
+	};
+}
+
+
+#define ADD_NODE(groupId, name, impl, ...)					factory.Create<impl>(groupId, RNT_Stage, RenderNodeSubtype(0), ##__VA_ARGS__ )
+#define ADD_UNIQUE(groupId, name, subtype, impl, ...)		factory.Create<impl>(groupId, RNT_Unique, RenderNodeSubtype(subtype), ##__VA_ARGS__ )
+#define ADD_SEQ_BEGIN(groupId, name, subtype, ...)			factory.Create<CRenderNode_Dummy>(groupId, RNT_SequenceBegin, RenderNodeSubtype(subtype), ##__VA_ARGS__ )
+#define ADD_SEQ_END(groupId, name, subtype, ...)			factory.Create<CRenderNode_Dummy>(groupId, RNT_SequenceEnd, RenderNodeSubtype(subtype), ##__VA_ARGS__ )
+
+
+#define RENDER_COMMAND_LIST( groupId, name ) \
+	factory.BeginCommandListGroup( groupId, RNT_Stage, RenderNodeSubtype(0), name ); \
+	if ( auto scopedCL = rend::ScopedCloseCommandList(factory) )
+
+#define COMPUTE_COMMAND_LIST( groupId, name ) \
+	factory.BeginCommandListGroup( groupId, RNT_Stage, RenderNodeSubtype(0), name, GpuApi::CommandListType::Compute ); \
+	if ( auto scopedCL = rend::ScopedCloseCommandList(factory) )
+
+#define RENDER_UNIQUE_COMMAND_LIST( groupId, subtype, name ) \
+	factory.BeginCommandListGroup( groupId, RNT_Unique, RenderNodeSubtype(subtype), name ); \
+	if ( auto scopedCL = rend::ScopedCloseCommandList(factory) )
+
+// Only valid within a RENDER_COMMAND_LIST block
+#define ADD_SUBNODE( name, impl, ... ) \
+	scopedCL.factory.Create<impl>(rend::NodeGroupID::None, RNT_Stage, RenderNodeSubtype(0), ##__VA_ARGS__ )
+
+
+#define RENDER_SIMPLE_COMMAND_LIST( groupId, name, impl, ... ) \
+	RENDER_COMMAND_LIST( groupId, name ) { \
+		ADD_SUBNODE( name, impl, ##__VA_ARGS__ ); \
+	}
+
+#define RENDER_UNIQUE_SIMPLE_COMMAND_LIST( groupId, name, subtype, impl, ... ) \
+	RENDER_UNIQUE_COMMAND_LIST( groupId, subtype, name ) { \
+		ADD_SUBNODE( name, impl, ##__VA_ARGS__ ); \
+	}
+
+#define SYNC_SUBMIT(group, name, waitType)																		\
+	{																													\
+		auto ecl = ADD_NODE( group, name "_Flush", CRenderNode_Synchronize, waitType, "Submit_" name );					\
+		factory.LinkCPUToPreviousGPU(ecl);																				\
+	}

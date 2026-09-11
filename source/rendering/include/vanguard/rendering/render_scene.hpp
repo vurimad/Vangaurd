@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vanguard/rendering/render_light.hpp>
+
 #include <vanguard/rendering/gpu_scene_visibility.hpp>
 #include <vanguard/rendering/render_view.hpp>
 
@@ -10,7 +12,9 @@
 namespace vanguard::rendering
 {
     class RenderCameraStorage;
+    class FrameRenderer;
     class RenderSceneGpuPublisher;
+    class MeshDrawableBinding;
     class VisibilityFeedbackService;
     struct RenderSceneGpuReadView;
     inline constexpr u32 MaximumRenderScenes = 64;
@@ -143,7 +147,9 @@ namespace vanguard::rendering
     enum class RenderProxySpatialMode : u8
     {
         None,
-        Bounds
+        Bounds,
+        /// Collected independently of bounds/frustum; visibility and layer filters still apply.
+        Global
     };
 
     enum class RenderProxyPayloadKind : u8
@@ -176,6 +182,8 @@ namespace vanguard::rendering
 
     struct RenderProxyTransform
     {
+        // XYZ stores the transformed X/Y/Z basis vectors, respectively.
+        // Translation X/Y/Z occupies row0/row1/row2 W, not a fourth matrix row.
         f32 row0[4]{1.0f, 0.0f, 0.0f, 0.0f};
         f32 row1[4]{0.0f, 1.0f, 0.0f, 0.0f};
         f32 row2[4]{0.0f, 0.0f, 1.0f, 0.0f};
@@ -205,13 +213,6 @@ namespace vanguard::rendering
         const char* debugName = nullptr;
     };
 
-    enum class RenderLightKind : u8
-    {
-        Directional,
-        Point,
-        Spot
-    };
-
     struct MeshProxyDesc
     {
         RenderProxyDesc proxy;
@@ -219,6 +220,8 @@ namespace vanguard::rendering
         resources::ResourceReference material;
         resources::ResourceHandle meshHandle;
         resources::ResourceHandle materialHandle;
+        /// Retained by RenderScene; caller ownership is independent after admission.
+        const MeshDrawableBinding* drawable = nullptr;
         u32 submeshMask = ~0u;
         u32 renderFlags = 0;
     };
@@ -229,6 +232,8 @@ namespace vanguard::rendering
         Resources = 1u << 0u,
         SubmeshSelection = 1u << 1u,
         RenderFlags = 1u << 2u,
+        Drawable = 1u << 3u,
+        // Legacy payload fields; drawable replacement is always explicit.
         All = (1u << 0u) | (1u << 1u) | (1u << 2u)
     };
 
@@ -249,6 +254,8 @@ namespace vanguard::rendering
         resources::ResourceReference material;
         resources::ResourceHandle meshHandle;
         resources::ResourceHandle materialHandle;
+        /// Null with Drawable set requests a revision-safe clear.
+        const MeshDrawableBinding* drawable = nullptr;
         u32 submeshMask = ~0u;
         u32 renderFlags = 0;
     };
@@ -296,6 +303,11 @@ namespace vanguard::rendering
         f32 innerConeRadians = 0.0f;
         f32 outerConeRadians = 0.0f;
         bool castsShadow = false;
+        // Optional filtering transaction; false preserves legacy property-only updates.
+        bool updateFiltering = false;
+        RenderProxyVisibilityFlags visibility = RenderProxyVisibilityFlags::Visible;
+        u32 visibilityMask = ~0u;
+        u64 layerMask = ~0ull;
     };
 
     struct DecalProxyDesc
@@ -495,10 +507,11 @@ namespace vanguard::rendering
         u32 requiredCandidateCapacity = 0;
         u32 requiredWorkRangeCapacity = 0;
         u32 batchCount = 0;
+        u32 targetCandidatesPerBatch = 0;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return scene.IsValid() && serial != 0;
+            return scene.IsValid() && serial != 0 && targetCandidatesPerBatch != 0;
         }
     };
 
@@ -533,6 +546,7 @@ namespace vanguard::rendering
         u32 maximumViews = 0;
         u32 activeProxies = 0;
         u32 pendingProxyMutations = 0;
+        u32 pendingMeshBindings = 0;
         u64 createdSerial = 0;
         u64 lifecycleRevision = 0;
         u64 currentMutationEpoch = 0;
@@ -622,7 +636,14 @@ namespace vanguard::rendering
                                                  RenderSceneFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool UpdateProxyLayerMask(RenderProxyHandle proxy, u64 layerMask, RenderSceneFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool UpdateProxyUserDataEpoch(RenderProxyHandle proxy, u64 userDataEpoch, RenderSceneFailure* failure = nullptr) noexcept;
+        /// Owner-thread hide and one-time claim for delayed world retirement.
+        /// The marker belongs to this exact proxy generation and dies with it.
+        [[nodiscard]] bool BeginProxyRetirement(RenderProxyHandle proxy, RenderSceneFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool UpdateMeshProxy(RenderProxyHandle proxy, const MeshProxyUpdate& update, RenderSceneFailure* failure = nullptr) noexcept;
+        /// Resolves only changed mesh bindings, rotating pending work under a bounded budget.
+        [[nodiscard]] bool ResolveMeshBindings(u32 maximumChecks = 256u, RenderSceneFailure* failure = nullptr) noexcept;
+        /// Owner-thread frame handoff. The exact accepted drawable is retained into output.
+        [[nodiscard]] bool RetainMeshDrawable(RenderProxyHandle proxy, MeshDrawableBinding& output, RenderSceneFailure* failure = nullptr) const noexcept;
         [[nodiscard]] bool UpdateLightProxy(RenderProxyHandle proxy, const LightProxyUpdate& update, RenderSceneFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool UpdateDecalProxy(RenderProxyHandle proxy, const DecalProxyUpdate& update, RenderSceneFailure* failure = nullptr) noexcept;
 
@@ -678,6 +699,28 @@ namespace vanguard::rendering
         [[nodiscard]] RenderSceneManagerStats GetStats() const noexcept;
 
     private:
+        /// Render-path planning seam used to allocate exact retained-frame storage
+        /// without first allocating for the scene's maximum proxy capacity.
+        /// Called at the serialized scene/render boundary; one family seal stays
+        /// active until all of its view writers join. This is not concurrent scene mutation access.
+        [[nodiscard]] bool PrepareGpuVisibilityCandidatePlan(const VisibilityQueryRequest& request, u32 targetCandidatesPerBatch,
+                                                             containers::ArraySpan<const RenderView> views, RenderSceneGpuCandidatePlan& plan,
+                                                             RenderSceneFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BuildGpuVisibilityCandidateBatches(const RenderSceneGpuCandidatePlan& plan,
+                                                              containers::ArraySpan<RenderSceneGpuCandidateBatch> batchStorage,
+                                                              RenderSceneFailure* failure = nullptr) const noexcept;
+        /// Reuses the sealed spatial layout with one prevalidated view query.
+        /// Each (view, batch) owns a separate reservation slice and result slot.
+        [[nodiscard]] bool WriteGpuVisibilityCandidateBatch(const RenderSceneGpuCandidatePlan& plan, const VisibilityQueryRequest& request,
+                                                            const RenderSceneGpuCandidateBatch& batch, const GpuVisibilityCandidateReservation& reservation,
+                                                            GpuVisibilityCandidateRange& range, RenderSceneGpuCandidateBatchResult& result,
+                                                            RenderSceneFailure* failure) const noexcept;
+
+        friend class FrameRenderer;
+        // Reuses the family scene seal and exclusive Global spatial membership.
+        // One family traversal, no per-light locks or copied light properties.
+        [[nodiscard]] bool CollectDirectionalLights(const RenderSceneGpuCandidatePlan& plan, containers::ArraySpan<const RenderView> views,
+                                                     containers::ArraySpan<GpuDirectionalLightSelection> selections, RenderSceneFailure* failure) const noexcept;
         friend class RenderCameraStorage;
         friend class RenderSceneGpuPublisher;
         friend class VisibilityFeedbackService;

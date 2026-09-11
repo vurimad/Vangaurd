@@ -1,0 +1,79 @@
+StaticSurfaceInput BeginStaticSurface(StaticSurfaceVarying varying)
+{
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[surfaceDraw.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[surfaceDraw.pageDirectoryDescriptor];
+    surfaceMaterial = LoadGpuMaterial(varying.material, tables, pages);
+    StaticSurfaceInput input;
+    input.uv = varying.uv;
+    // Material evaluation uses the same geometric normal in depth and GBuffer.
+    input.worldNormal = normalize(varying.normal);
+    input.viewRelativePosition = varying.viewRelativePosition;
+    return input;
+}
+
+struct StaticSurfaceGBuffer
+{
+    float4 baseColor : SV_Target0;
+    float4 normalRoughness : SV_Target1;
+    float4 emissiveMetallic : SV_Target2;
+};
+
+// Both masked passes evaluate the same generated closure with the same inputs.
+// Equality survives, matching clip's strictly-negative discard rule. Keep this
+// decision shared and evaluate its inputs identically before calling it.
+void ApplyStaticSurfaceCoverage(StaticSurfaceOutput surface)
+{
+    clip(surface.baseColor.a - surface.opacityCutoff);
+}
+
+StaticSurfaceGBuffer BuildStaticSurfaceGBuffer(StaticSurfaceVarying varying, StaticSurfaceInput input, StaticSurfaceOutput surface, bool frontFace)
+{
+    float3 normal = input.worldNormal;
+    float3 tangent = normalize(varying.tangent.xyz - normal * dot(normal, varying.tangent.xyz));
+    float3 bitangent = cross(normal, tangent) * varying.tangent.w;
+    normal = normalize(tangent * surface.normalTS.x + bitangent * surface.normalTS.y + normal * surface.normalTS.z);
+    StaticSurfaceGBuffer output;
+    output.baseColor = surface.baseColor;
+    // Orient the completed normal-map result once for the back side. Mirrored
+    // PSOs preserve authored front-face identity even with culling disabled.
+    output.normalRoughness = float4(frontFace ? normal : -normal, surface.roughness);
+    output.emissiveMetallic = float4(surface.emissive, surface.metallic);
+    return output;
+}
+
+[VanguardMaterialProgram("EvaluateStaticSurface", "StaticSurfaceParameters", "StaticSurfaceResources", 1)]
+[shader("fragment")]
+StaticSurfaceGBuffer StaticSurfaceGBufferMain(StaticSurfaceVarying varying, bool frontFace : SV_IsFrontFace)
+{
+    StaticSurfaceInput input = BeginStaticSurface(varying);
+    StaticSurfaceOutput surface = EvaluateStaticSurface(input);
+    // Opaque coverage is independent of material alpha and opacityCutoff.
+    return BuildStaticSurfaceGBuffer(varying, input, surface, frontFace);
+}
+
+[VanguardMaterialProgram("EvaluateStaticSurface", "StaticSurfaceParameters", "StaticSurfaceResources", 1)]
+[shader("fragment")]
+void StaticSurfaceDepthMain(StaticSurfaceVarying varying)
+{
+    // Opaque depth needs no material-table reads or material evaluation. The
+    // annotation still exposes the complete reflected material ABI to the cook.
+}
+
+[VanguardMaterialProgram("EvaluateStaticSurface", "StaticSurfaceParameters", "StaticSurfaceResources", 1)]
+[shader("fragment")]
+StaticSurfaceGBuffer StaticSurfaceMaskedGBufferMain(StaticSurfaceVarying varying, bool frontFace : SV_IsFrontFace)
+{
+    StaticSurfaceInput input = BeginStaticSurface(varying);
+    StaticSurfaceOutput surface = EvaluateStaticSurface(input);
+    ApplyStaticSurfaceCoverage(surface);
+    return BuildStaticSurfaceGBuffer(varying, input, surface, frontFace);
+}
+
+[VanguardMaterialProgram("EvaluateStaticSurface", "StaticSurfaceParameters", "StaticSurfaceResources", 1)]
+[shader("fragment")]
+void StaticSurfaceMaskedDepthMain(StaticSurfaceVarying varying)
+{
+    StaticSurfaceInput input = BeginStaticSurface(varying);
+    StaticSurfaceOutput surface = EvaluateStaticSurface(input);
+    ApplyStaticSurfaceCoverage(surface);
+}

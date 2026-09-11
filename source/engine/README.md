@@ -10,9 +10,10 @@ and `root/cache` as the derived-data root. Jobs starts after Filesystem when it 
 profile, publishes the scheduler capability, and rejects shutdown with outstanding work, deferrals, builders, or
 counters. Resources requires Filesystem and Jobs, owns the registry followed by the asynchronous pipeline, publishes
 typed registry and pipeline capabilities, and refuses quiesce or shutdown while requests, handles, jobs, preparations,
-or resident resources remain live. Resource Streaming requires Resources, Filesystem, I/O, and Jobs; it owns decoder,
-loose-source, and VPAK mount registration plus the bounded staging layer, while mounted readers and callback state remain
-caller-owned. It refuses quiesce or shutdown while loads, reads, or staging allocations remain active. World registers the
+or resident resources remain live. Resource Streaming requires Resources, Filesystem, I/O, and Jobs; it owns the VSHADER,
+VPPL, and VMAT decoders in dependency order, the mesh/texture metadata loaders, loose-source and VPAK mount registration,
+and the bounded staging layer, while externally registered readers and callback state remain caller-owned. Artifact decoders
+are rolled back and shut down in reverse dependency order. It refuses quiesce or shutdown while loads, reads, or staging allocations remain active. World registers the
 `vworld` decoder, owns the startup-world request and handle, and creates the world streaming grid and asynchronous executor
 after the startup resource is ready. The service explicitly rejects shutdown until the application releases that state, so
 its reverse dependency ordering is guaranteed rather than hidden in a product loop. Runtime and editor use the same adapters;
@@ -26,7 +27,15 @@ Game World depends on World and Resource Streaming. Once the startup world is re
 
 Streaming Observer is the producer-facing layer above Game World's low-level streaming input. Cameras, players, vehicles, editor viewports, or dedicated-server interest sources register fixed-capacity generational handles and publish position, velocity, validity, and an observer class. During `PreSimulation`, the service copies all enabled and positioned observers into one immutable snapshot, predicts their streaming positions with configurable class speed caps, selects an explicit primary observer for camera-relative priority, and passes the snapshot to Game World before its `Simulation` participant runs. It allocates nothing per frame, rejects stale handles and non-finite state, retains no caller memory, and requires registrations to be explicitly released. Until a producer is available, a loaded world's origin is used as a clearly reported bootstrap fallback rather than embedding a permanent camera in Game World.
 
-World Session is the transaction coordinator above those engine-wide services. It owns no service instance; it owns the active relationship between a mounted package set, the installed project input mapping, one loaded world, and one Flecs Game World. `Begin` optionally mounts the package set, requests the catalog's default `vinput` at critical priority, chooses an explicit world reference or the catalog startup world, and does not publish `Running` until the mapping is installed and the world is ready for Game World materialization. `RequestStop(ReleaseWorld)` drains Game World and releases the world while retaining packages and the project mapping in the stable `Mounted` state. `RequestStop(ReleaseEverything)` additionally cancels outstanding startup work, unmounts the package set, and returns to `Idle`. Failed starts also require this explicit cleanup path. EngineHost rejects shutdown while a session remains live.
+World Session owns one loaded world, its Flecs Game World and its input mapping. `Begin` requires an explicit typed world and either a typed input mapping or the explicit `None` input policy. Runtime derives these choices from the validated boot record; an edit-only world supplies `None`. `Running` means Game World initialization succeeded, not that asynchronous cells or drawable resources are all ready. `RequestStop()` cancels outstanding input work, drains the world and clears its mapping/listeners after component teardown, returning to `Idle`. Failed starts require the same explicit cleanup. Session replacement cannot retain a previous mapping implicitly.
+
+Resource Streaming owns process-lived sources independently of World Session. `ResourceStreamingServiceConfig` optionally supplies a required package directory and committed loose-resource descriptors. Sources are installed during service initialization before dependent renderer/world services and removed during shutdown after those consumers. An empty package directory requires no DATA image. Loose descriptors contain explicit typed identities, physical paths, runtime dependencies, priority and optional integrity checks; startup arrays survive initialization and immutable files survive their readers. Later project asset providers use the same `ResourceStreamer::RegisterLoose` API and arrange their service dependency before catalog consumers. There is no DDC directory scan or editor-specific resource decoder. The loose-source table is indexed by ResourceId, retaining existing source-priority and synchronization rules without a full loose-table scan on each lookup.
+
+Rendering owns the RHI/device lifetime, global resource and sampler descriptor
+domains, GPU Scene runtime, material program-layout registry, mesh and texture
+residency, frame renderer, command chain, and viewports. The public service does
+not expose raw descriptor domains; material resolution consumes them through
+renderer-owned runtime machinery so descriptor allocation has one authority.
 
 ## Frame Pipeline
 

@@ -59,7 +59,7 @@ namespace
         case win::WindowRelationship::Owned:
         case win::WindowRelationship::Modal:
         case win::WindowRelationship::Embedded:
-        case win::WindowRelationship::ImGuiViewport:
+        case win::WindowRelationship::EditorPlatformViewport:
             return true;
         default:
             return false;
@@ -1018,6 +1018,7 @@ namespace vanguard::window
         }
         BackendWindowRequest backendRequest{};
         backendRequest.fields = request.fields;
+        backendRequest.activateWhenShown = request.activateWhenShown;
         backendRequest.placement.position = requested.position;
         backendRequest.placement.logicalExtent = requested.logicalExtent;
         backendRequest.placement.display = display->backend;
@@ -1109,6 +1110,245 @@ namespace vanguard::window
         ++record->snapshot.stateRevision;
         m_impl->lock.Release();
         return true;
+    }
+
+    bool WindowManager::SetOpacity(const WindowHandle window, const f32 opacity, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "window opacity mutation requires the owner thread", window);
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter opacity mutation", window);
+            return false;
+        }
+        if (!(opacity >= 0.0f && opacity <= 1.0f))
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window opacity must be finite and between zero and one", window);
+            return false;
+        }
+        concurrency::ScopedLock guard(m_impl->lock);
+        Impl::WindowRecord* const record = m_impl->FindWindow(window);
+        if (record == nullptr || record->snapshot.lifecycle != WindowLifecycleState::Alive)
+        {
+            m_impl->Reject(failure, record == nullptr ? FailureCode::InvalidHandle : FailureCode::InvalidState,
+                           record == nullptr ? "window handle is stale or invalid" : "window does not accept opacity changes", window);
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->SetWindowOpacity(record->backend, opacity);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend rejected opacity", window, {}, status.code);
+        return static_cast<bool>(status);
+    }
+
+    bool WindowManager::RequestFocus(const WindowHandle window, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "window focus mutation requires the owner thread", window);
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter focus mutation", window);
+            return false;
+        }
+        m_impl->lock.Acquire();
+        Impl::WindowRecord* const record = m_impl->FindWindow(window);
+        if (record == nullptr || record->snapshot.lifecycle != WindowLifecycleState::Alive)
+        {
+            m_impl->Reject(failure, record == nullptr ? FailureCode::InvalidHandle : FailureCode::InvalidState,
+                           record == nullptr ? "window handle is stale or invalid" : "window does not accept focus requests", window);
+            m_impl->lock.Release();
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->RequestWindowFocus(record->backend);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend rejected the focus request", window,
+                           {}, status.code);
+        m_impl->lock.Release();
+        return static_cast<bool>(status);
+    }
+
+    bool WindowManager::SetCursor(const CursorShape shape, const bool visible, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "cursor mutation requires the owner thread");
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter cursor mutation");
+            return false;
+        }
+        if (shape >= CursorShape::Count)
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "cursor shape is invalid");
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->SetCursor(shape, visible);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend rejected the cursor request", {}, {},
+                           status.code);
+        return static_cast<bool>(status);
+    }
+
+    bool WindowManager::ReadClipboardText(char* const destination, const u32 capacity, u32& requiredCapacity, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        requiredCapacity = 0;
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "clipboard access requires the owner thread");
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter clipboard access");
+            return false;
+        }
+        if ((destination == nullptr) != (capacity == 0))
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "clipboard destination and capacity disagree");
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->ReadClipboardText(destination, capacity, requiredCapacity);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend could not read clipboard text", {}, {},
+                           status.code);
+        return static_cast<bool>(status);
+    }
+
+    bool WindowManager::WriteClipboardText(const char* const text, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, {}, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "clipboard mutation requires the owner thread");
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter clipboard mutation");
+            return false;
+        }
+        if (text == nullptr)
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "clipboard text is null");
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->WriteClipboardText(text);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend could not write clipboard text", {}, {},
+                           status.code);
+        return static_cast<bool>(status);
+    }
+
+    bool WindowManager::SetTextInput(const WindowHandle window, const TextInputRequest& request, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "text-input mutation requires the owner thread", window);
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter text-input mutation", window);
+            return false;
+        }
+        if (request.showIme && (!request.enabled || request.lineHeight == 0))
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "visible IME input requires enabled text input and a nonzero line height", window);
+            return false;
+        }
+        m_impl->lock.Acquire();
+        Impl::WindowRecord* const record = m_impl->FindWindow(window);
+        if (record == nullptr || record->snapshot.lifecycle != WindowLifecycleState::Alive)
+        {
+            m_impl->Reject(failure, record == nullptr ? FailureCode::InvalidHandle : FailureCode::InvalidState,
+                           record == nullptr ? "window handle is stale or invalid" : "window does not accept text input", window);
+            m_impl->lock.Release();
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->SetTextInput(record->backend, request);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure, status.message != nullptr ? status.message : "window backend rejected the text-input request",
+                           window, {}, status.code);
+        m_impl->lock.Release();
+        return static_cast<bool>(status);
     }
 
     bool WindowManager::ResolveCloseRequest(const WindowHandle window, const u64 closeRequestSerial, const CloseDecision decision,

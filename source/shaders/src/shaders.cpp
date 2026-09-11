@@ -1,6 +1,10 @@
 #include <vanguard/shaders/shaders.hpp>
 
+#include <vanguard/memory/memory.hpp>
+#include <vanguard/resources/resource_pipeline.hpp>
+
 #include <algorithm>
+#include <new>
 
 namespace
 {
@@ -8,14 +12,56 @@ namespace
     namespace shader = vanguard::shaders;
     namespace serialization = vanguard::serialization;
 
-    constexpr serialization::Version FileVersion{1, 1};
+    constexpr serialization::Version FileVersion{1, 4};
     constexpr u32 MetadataSection = serialization::MakeFourCC('M', 'E', 'T', 'A');
     constexpr u32 BytecodeSection = serialization::MakeFourCC('C', 'O', 'D', 'E');
-    constexpr u32 MetadataWireVersion = 2;
+    constexpr u32 MetadataWireVersion = 5;
     constexpr u64 MaximumMetadataBytes = 64ull * 1024ull * 1024ull;
     constexpr u32 InvalidIndex = 0xffffffffu;
 
     using ByteArray = containers::DynamicArray<u8>;
+
+    [[nodiscard]] resources::Failure ToResourceFailure(const shader::Result result) noexcept
+    {
+        switch (result)
+        {
+        case shader::Result::Success:
+            return resources::Failure::None;
+        case shader::Result::UnsupportedVersion:
+            return resources::Failure::UnsupportedVersion;
+        case shader::Result::LimitExceeded:
+            return resources::Failure::OutOfMemory;
+        case shader::Result::IoFailure:
+            return resources::Failure::IoFailure;
+        case shader::Result::InvalidMagic:
+        case shader::Result::InvalidLayout:
+        case shader::Result::IntegrityFailure:
+        case shader::Result::DuplicateStage:
+        case shader::Result::DuplicateBinding:
+        case shader::Result::OverlappingBinding:
+        case shader::Result::DuplicateInput:
+        case shader::Result::DuplicateOutput:
+        case shader::Result::InvalidBytecode:
+            return resources::Failure::IntegrityFailure;
+        default:
+            return resources::Failure::DeserializationFailure;
+        }
+    }
+
+    template <typename T> [[nodiscard]] T* AllocateResourceObject() noexcept
+    {
+        memory::MemoryBlock block = memory::Allocate(memory::PoolId::Resources, sizeof(T), alignof(T));
+        return block ? new (block.address) T() : nullptr;
+    }
+
+    template <typename T> void DeleteResourceObject(T* const object) noexcept
+    {
+        if (object == nullptr)
+            return;
+        object->~T();
+        memory::MemoryBlock block{object, sizeof(T), memory::PoolId::Resources};
+        memory::Free(block);
+    }
 
     [[nodiscard]] u32 StringLength(const char* const value, const u32 capacity) noexcept
     {
@@ -48,7 +94,8 @@ namespace
             : stages(memory::pools::Rendering::GetInstance()), bindings(memory::pools::Rendering::GetInstance()),
               constantBuffers(memory::pools::Rendering::GetInstance()), constantMembers(memory::pools::Rendering::GetInstance()),
               vertexInputs(memory::pools::Rendering::GetInstance()), fragmentOutputs(memory::pools::Rendering::GetInstance()),
-              specializationConstants(memory::pools::Rendering::GetInstance())
+              specializationConstants(memory::pools::Rendering::GetInstance()), materialParameters(memory::pools::Rendering::GetInstance()),
+              materialResources(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -59,6 +106,12 @@ namespace
         containers::DynamicArray<shader::VertexInput> vertexInputs;
         containers::DynamicArray<shader::FragmentOutput> fragmentOutputs;
         containers::DynamicArray<shader::SpecializationConstant> specializationConstants;
+        bool hasMaterialContract = false;
+        shader::MaterialDomainContract materialDomain;
+        u32 materialAccessorAbiVersion = 0;
+        u32 materialParameterByteSize = 0;
+        containers::DynamicArray<shader::ConstantMember> materialParameters;
+        containers::DynamicArray<shader::MaterialResourceRole> materialResources;
     };
 
     [[nodiscard]] shader::Result ConvertSerializationResult(const serialization::Result result) noexcept
@@ -129,6 +182,39 @@ namespace
     [[nodiscard]] bool IsValidScalarType(const shader::ScalarType type) noexcept
     {
         return type <= shader::ScalarType::F64;
+    }
+
+    // Slang reports each leaf of an array-of-structs as a strided member whose
+    // byteSize spans every array element. Those bounding ranges overlap even
+    // though the actual leaf storage does not. Accept only the canonical case:
+    // equal-stride/equal-count leaves that partition one repeated element.
+    [[nodiscard]] bool ConstantMembersAreDisjoint(const shader::ConstantMember& left,
+                                                  const shader::ConstantMember& right) noexcept
+    {
+        const u64 leftEnd = static_cast<u64>(left.byteOffset) + left.byteSize;
+        const u64 rightEnd = static_cast<u64>(right.byteOffset) + right.byteSize;
+        if (leftEnd <= right.byteOffset || rightEnd <= left.byteOffset)
+            return true;
+        if (left.arrayStride == 0 || left.arrayStride != right.arrayStride)
+            return false;
+        const u32 stride = left.arrayStride;
+        const u32 leftElementSize = (left.byteSize - 1u) % stride + 1u;
+        const u32 rightElementSize = (right.byteSize - 1u) % stride + 1u;
+        const u32 leftCount = (left.byteSize - leftElementSize) / stride + 1u;
+        const u32 rightCount = (right.byteSize - rightElementSize) / stride + 1u;
+        if (leftCount != rightCount)
+            return false;
+        const shader::ConstantMember& first = left.byteOffset < right.byteOffset ? left : right;
+        const shader::ConstantMember& second = left.byteOffset < right.byteOffset ? right : left;
+        const u32 firstSize = left.byteOffset < right.byteOffset ? leftElementSize : rightElementSize;
+        const u32 secondSize = left.byteOffset < right.byteOffset ? rightElementSize : leftElementSize;
+        return static_cast<u64>(first.byteOffset) + firstSize <= second.byteOffset &&
+               static_cast<u64>(second.byteOffset) + secondSize <= static_cast<u64>(first.byteOffset) + stride;
+    }
+
+    [[nodiscard]] bool IsValidMaterialResourceKind(const shader::MaterialResourceKind kind) noexcept
+    {
+        return kind <= shader::MaterialResourceKind::AccelerationStructure;
     }
 
     [[nodiscard]] bool IsValidNumericClass(const shader::NumericClass type) noexcept
@@ -241,6 +327,15 @@ namespace
         CopySpan(description.vertexInputs, output.vertexInputs);
         CopySpan(description.fragmentOutputs, output.fragmentOutputs);
         CopySpan(description.specializationConstants, output.specializationConstants);
+        if (description.materialContract != nullptr)
+        {
+            output.hasMaterialContract = true;
+            output.materialDomain = description.materialContract->domain;
+            output.materialAccessorAbiVersion = description.materialContract->accessorAbiVersion;
+            output.materialParameterByteSize = description.materialContract->parameterByteSize;
+            CopySpan(description.materialContract->parameters, output.materialParameters);
+            CopySpan(description.materialContract->resources, output.materialResources);
+        }
 
         std::sort(output.stages.Begin(), output.stages.End(),
                   [](const shader::StageBuildRecord& left, const shader::StageBuildRecord& right) { return left.stage < right.stage; });
@@ -263,6 +358,11 @@ namespace
                   { return left.location != right.location ? left.location < right.location : left.blendSource < right.blendSource; });
         std::sort(output.specializationConstants.Begin(), output.specializationConstants.End(),
                   [](const shader::SpecializationConstant& left, const shader::SpecializationConstant& right) { return left.id < right.id; });
+        std::sort(output.materialParameters.Begin(), output.materialParameters.End(), [](const shader::ConstantMember& left, const shader::ConstantMember& right)
+                  { return left.byteOffset != right.byteOffset ? left.byteOffset < right.byteOffset : left.name < right.name; });
+        std::sort(output.materialResources.Begin(), output.materialResources.End(), [](const shader::MaterialResourceRole& left,
+                                                                                       const shader::MaterialResourceRole& right)
+                  { return left.slot != right.slot ? left.slot < right.slot : left.arrayIndex < right.arrayIndex; });
 
         containers::DynamicArray<u32> bufferOrder{memory::pools::Rendering::GetInstance()};
         bufferOrder.Reserve(description.constantBuffers.Size());
@@ -405,6 +505,58 @@ namespace
                 (constant.stages & ~description.pipelineInterface.stages) != 0 || (index != 0 && output.specializationConstants[index - 1].id == constant.id))
             {
                 return shader::Result::InvalidLayout;
+            }
+        }
+
+        if (output.hasMaterialContract)
+        {
+            const shader::StageMask validStages = (1u << static_cast<u32>(shader::ShaderStage::Count)) - 1u;
+            if (output.materialDomain.name == 0 || output.materialDomain.schemaVersion == 0 || output.materialDomain.legalStages == 0 ||
+                (output.materialDomain.legalStages & ~validStages) != 0 ||
+                (output.materialDomain.legalStages & description.pipelineInterface.stages) == 0 || output.materialDomain.inputType.IsEmpty() ||
+                output.materialDomain.outputType.IsEmpty() ||
+                !shader::IsValidMaterialShaderCapabilityMask(output.materialDomain.requiredCapabilities) || output.materialAccessorAbiVersion == 0)
+            {
+                return shader::Result::InvalidLayout;
+            }
+
+            for (u32 parameterIndex = 0; parameterIndex < output.materialParameters.Size(); ++parameterIndex)
+            {
+                const shader::ConstantMember& parameter = output.materialParameters[parameterIndex];
+                if (parameter.name == 0 || parameter.byteSize == 0 || !IsValidScalarType(parameter.scalarType) || parameter.rows == 0 ||
+                    parameter.rows > 4 || parameter.columns == 0 || parameter.columns > 4 ||
+                    parameter.byteOffset > output.materialParameterByteSize ||
+                    parameter.byteSize > output.materialParameterByteSize - parameter.byteOffset)
+                {
+                    return shader::Result::InvalidLayout;
+                }
+                for (u32 previousIndex = 0; previousIndex < parameterIndex; ++previousIndex)
+                    if (!ConstantMembersAreDisjoint(output.materialParameters[previousIndex], parameter))
+                        return shader::Result::InvalidLayout;
+            }
+            if (output.materialParameters.Empty() != (output.materialParameterByteSize == 0))
+            {
+                return shader::Result::InvalidLayout;
+            }
+
+            for (u32 index = 0; index < output.materialResources.Size(); ++index)
+            {
+                const shader::MaterialResourceRole& resource = output.materialResources[index];
+                const u8 flags = static_cast<u8>(resource.flags);
+                if (resource.name == 0 || resource.slot != index || !IsValidMaterialResourceKind(resource.kind) ||
+                    (flags & ~static_cast<u8>(shader::MaterialResourceFlags::Required)) != 0 || resource.reserved != 0 ||
+                    resource.typeFingerprint.IsEmpty() || !shader::IsValidMaterialResourceShape(resource.kind, resource.shape))
+                {
+                    return shader::Result::InvalidLayout;
+                }
+                for (u32 previousIndex = 0; previousIndex < index; ++previousIndex)
+                {
+                    const shader::MaterialResourceRole& previous = output.materialResources[previousIndex];
+                    if (previous.name == resource.name && previous.arrayIndex == resource.arrayIndex)
+                    {
+                        return shader::Result::DuplicateBinding;
+                    }
+                }
             }
         }
         return shader::Result::Success;
@@ -558,12 +710,66 @@ namespace
         return true;
     }
 
+    [[nodiscard]] bool WriteMaterialDomain(serialization::BinaryWriter& writer, const shader::MaterialDomainContract& value) noexcept
+    {
+        return writer.WriteU64(value.name) && writer.WriteU32(value.schemaVersion) && writer.WriteU32(value.legalStages) &&
+               writer.WriteU32(value.requiredCapabilities) &&
+               WriteDigest(writer, value.inputType) && WriteDigest(writer, value.outputType);
+    }
+
+    [[nodiscard]] bool ReadMaterialDomain(serialization::BinaryReader& reader, shader::MaterialDomainContract& value) noexcept
+    {
+        return reader.ReadU64(value.name) && reader.ReadU32(value.schemaVersion) && reader.ReadU32(value.legalStages) &&
+               reader.ReadU32(value.requiredCapabilities) &&
+               ReadDigest(reader, value.inputType) && ReadDigest(reader, value.outputType);
+    }
+
+    [[nodiscard]] bool WriteMaterialResource(serialization::BinaryWriter& writer, const shader::MaterialResourceRole& value) noexcept
+    {
+        return writer.WriteU64(value.name) && writer.WriteU32(value.arrayIndex) && writer.WriteU32(value.slot) &&
+               writer.WriteU8(static_cast<u8>(value.kind)) && writer.WriteU8(static_cast<u8>(value.flags)) && writer.WriteU16(value.reserved) &&
+               WriteDigest(writer, value.typeFingerprint) && writer.WriteU8(static_cast<u8>(value.shape.access)) &&
+               writer.WriteU8(static_cast<u8>(value.shape.textureDimension)) && writer.WriteU8(static_cast<u8>(value.shape.bufferKind)) &&
+               writer.WriteU8(static_cast<u8>(value.shape.samplerKind)) && writer.WriteU8(static_cast<u8>(value.shape.scalarType)) &&
+               writer.WriteU8(value.shape.componentCount) && writer.WriteU8(static_cast<u8>(value.shape.flags)) &&
+               writer.WriteU8(value.shape.reserved) && writer.WriteU32(value.shape.elementStride);
+    }
+
+    [[nodiscard]] bool ReadMaterialResource(serialization::BinaryReader& reader, shader::MaterialResourceRole& value) noexcept
+    {
+        u8 kind = 0;
+        u8 flags = 0;
+        u8 access = 0;
+        u8 textureDimension = 0;
+        u8 bufferKind = 0;
+        u8 samplerKind = 0;
+        u8 scalarType = 0;
+        u8 shapeFlags = 0;
+        if (!reader.ReadU64(value.name) || !reader.ReadU32(value.arrayIndex) || !reader.ReadU32(value.slot) || !reader.ReadU8(kind) ||
+            !reader.ReadU8(flags) || !reader.ReadU16(value.reserved) || !ReadDigest(reader, value.typeFingerprint) || !reader.ReadU8(access) ||
+            !reader.ReadU8(textureDimension) || !reader.ReadU8(bufferKind) || !reader.ReadU8(samplerKind) || !reader.ReadU8(scalarType) ||
+            !reader.ReadU8(value.shape.componentCount) || !reader.ReadU8(shapeFlags) || !reader.ReadU8(value.shape.reserved) ||
+            !reader.ReadU32(value.shape.elementStride))
+        {
+            return false;
+        }
+        value.kind = static_cast<shader::MaterialResourceKind>(kind);
+        value.flags = static_cast<shader::MaterialResourceFlags>(flags);
+        value.shape.access = static_cast<shader::MaterialResourceAccess>(access);
+        value.shape.textureDimension = static_cast<shader::MaterialTextureDimension>(textureDimension);
+        value.shape.bufferKind = static_cast<shader::MaterialBufferKind>(bufferKind);
+        value.shape.samplerKind = static_cast<shader::MaterialSamplerKind>(samplerKind);
+        value.shape.scalarType = static_cast<shader::ScalarType>(scalarType);
+        value.shape.flags = static_cast<shader::MaterialResourceShapeFlags>(shapeFlags);
+        return true;
+    }
+
     [[nodiscard]] shader::Result WriteLayoutBytes(serialization::BinaryWriter& writer, const shader::BuildDescription& description,
                                                   const CanonicalData& data) noexcept
     {
         if (!WriteInterface(writer, description.pipelineInterface) || !writer.WriteU32(data.bindings.Size()) || !writer.WriteU32(data.constantBuffers.Size()) ||
             !writer.WriteU32(data.constantMembers.Size()) || !writer.WriteU32(data.vertexInputs.Size()) || !writer.WriteU32(data.fragmentOutputs.Size()) ||
-            !writer.WriteU32(data.specializationConstants.Size()))
+            !writer.WriteU32(data.specializationConstants.Size()) || !writer.WriteBool(data.hasMaterialContract) || !writer.WriteU8(0) || !writer.WriteU16(0))
         {
             return WriterResult(writer);
         }
@@ -607,6 +813,29 @@ namespace
             if (!WriteSpecializationConstant(writer, value))
             {
                 return WriterResult(writer);
+            }
+        }
+        if (data.hasMaterialContract)
+        {
+            if (!WriteMaterialDomain(writer, data.materialDomain) || !writer.WriteU32(data.materialAccessorAbiVersion) ||
+                !writer.WriteU32(data.materialParameterByteSize) || !writer.WriteU32(data.materialParameters.Size()) ||
+                !writer.WriteU32(data.materialResources.Size()))
+            {
+                return WriterResult(writer);
+            }
+            for (const shader::ConstantMember& value : data.materialParameters)
+            {
+                if (!WriteConstantMember(writer, value))
+                {
+                    return WriterResult(writer);
+                }
+            }
+            for (const shader::MaterialResourceRole& value : data.materialResources)
+            {
+                if (!WriteMaterialResource(writer, value))
+                {
+                    return WriterResult(writer);
+                }
             }
         }
         return shader::Result::Success;
@@ -694,6 +923,51 @@ namespace
         for (const shader::FragmentOutput& value : data.fragmentOutputs)
         {
             if (!WriteFragmentOutput(writer, value))
+            {
+                return WriterResult(writer);
+            }
+        }
+        fingerprint = crypto::Sha256(bytes.Data(), bytes.Size());
+        return shader::Result::Success;
+    }
+
+    [[nodiscard]] shader::Result BuildMaterialDomainFingerprint(const CanonicalData& data, crypto::Digest256& fingerprint) noexcept
+    {
+        fingerprint = {};
+        if (!data.hasMaterialContract)
+        {
+            return shader::Result::Success;
+        }
+        return shader::CalculateMaterialDomainFingerprint(data.materialDomain, fingerprint);
+    }
+
+    [[nodiscard]] shader::Result BuildMaterialLayoutFingerprint(const CanonicalData& data, const crypto::Digest256& domainFingerprint,
+                                                                 crypto::Digest256& fingerprint) noexcept
+    {
+        fingerprint = {};
+        if (!data.hasMaterialContract)
+        {
+            return shader::Result::Success;
+        }
+        ByteArray bytes{memory::pools::Serialization::GetInstance()};
+        filesystem::MemoryFileWriter file(bytes);
+        serialization::BinaryWriter writer(file);
+        if (!WriteDigest(writer, domainFingerprint) || !writer.WriteU32(data.materialAccessorAbiVersion) ||
+            !writer.WriteU32(data.materialParameterByteSize) || !writer.WriteU32(data.materialParameters.Size()) ||
+            !writer.WriteU32(data.materialResources.Size()))
+        {
+            return WriterResult(writer);
+        }
+        for (const shader::ConstantMember& value : data.materialParameters)
+        {
+            if (!WriteConstantMember(writer, value))
+            {
+                return WriterResult(writer);
+            }
+        }
+        for (const shader::MaterialResourceRole& value : data.materialResources)
+        {
+            if (!WriteMaterialResource(writer, value))
             {
                 return WriterResult(writer);
             }
@@ -859,6 +1133,54 @@ namespace
 
 namespace vanguard::shaders
 {
+    u64 HashInterfaceName(const char* name) noexcept
+    {
+        if (name == nullptr || name[0] == '\0')
+            return 0;
+        u64 hash = 14695981039346656037ull;
+        while (*name != '\0')
+        {
+            hash ^= static_cast<u8>(*name++);
+            hash *= 1099511628211ull;
+        }
+        return hash != 0 ? hash : 1;
+    }
+
+    u64 HashInterfaceChildName(u64 parent, const char* name) noexcept
+    {
+        if (parent == 0 || name == nullptr || name[0] == '\0')
+            return 0;
+        parent ^= static_cast<u8>('.');
+        parent *= 1099511628211ull;
+        while (*name != '\0')
+        {
+            parent ^= static_cast<u8>(*name++);
+            parent *= 1099511628211ull;
+        }
+        return parent != 0 ? parent : 1;
+    }
+
+    Result CalculateMaterialDomainFingerprint(const MaterialDomainContract& domain, crypto::Digest256& fingerprint) noexcept
+    {
+        fingerprint = {};
+        const StageMask validStages = (1u << static_cast<u32>(ShaderStage::Count)) - 1u;
+        if (domain.name == 0 || domain.schemaVersion == 0 || domain.legalStages == 0 || (domain.legalStages & ~validStages) != 0 ||
+            !IsValidMaterialShaderCapabilityMask(domain.requiredCapabilities) || domain.inputType.IsEmpty() || domain.outputType.IsEmpty())
+        {
+            return Result::InvalidLayout;
+        }
+
+        ByteArray bytes{memory::pools::Serialization::GetInstance()};
+        filesystem::MemoryFileWriter file(bytes);
+        serialization::BinaryWriter writer(file);
+        if (!WriteMaterialDomain(writer, domain))
+        {
+            return WriterResult(writer);
+        }
+        fingerprint = crypto::Sha256(bytes.Data(), bytes.Size());
+        return Result::Success;
+    }
+
     const char* ToString(const Result result) noexcept
     {
         switch (result)
@@ -903,7 +1225,8 @@ namespace vanguard::shaders
         : m_stages(memory::pools::Rendering::GetInstance()), m_bindings(memory::pools::Rendering::GetInstance()),
           m_constantBuffers(memory::pools::Rendering::GetInstance()), m_constantMembers(memory::pools::Rendering::GetInstance()),
           m_vertexInputs(memory::pools::Rendering::GetInstance()), m_fragmentOutputs(memory::pools::Rendering::GetInstance()),
-          m_specializationConstants(memory::pools::Rendering::GetInstance()), m_bytecode(memory::pools::Rendering::GetInstance())
+          m_specializationConstants(memory::pools::Rendering::GetInstance()), m_materialParameters(memory::pools::Rendering::GetInstance()),
+          m_materialResources(memory::pools::Rendering::GetInstance()), m_bytecode(memory::pools::Rendering::GetInstance())
     {
     }
 
@@ -915,7 +1238,7 @@ namespace vanguard::shaders
         serialization::ReadLimits documentLimits;
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 2;
-        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, ShaderMagic, {1, 1, 1}, documentLimits, header);
+        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, ShaderMagic, {1, 4, 4}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
         {
             return ConvertSerializationResult(headerResult);
@@ -1026,6 +1349,15 @@ namespace vanguard::shaders
                 return ReaderResult(metadataReader);
             }
         }
+        bool hasMaterialContract = false;
+        u8 layoutReserved8 = 0;
+        u16 layoutReserved16 = 0;
+        if (!metadataReader.ReadBool(hasMaterialContract) || !metadataReader.ReadU8(layoutReserved8) || !metadataReader.ReadU16(layoutReserved16) ||
+            layoutReserved8 != 0 || layoutReserved16 != 0)
+        {
+            Close();
+            return metadataReader.IsGood() ? Result::InvalidLayout : ReaderResult(metadataReader);
+        }
         if (!ResizeChecked(m_bindings, counts[0], limits.maximumBindings) || !ResizeChecked(m_constantBuffers, counts[1], limits.maximumConstantBuffers) ||
             !ResizeChecked(m_constantMembers, counts[2], limits.maximumConstantMembers) ||
             !ResizeChecked(m_vertexInputs, counts[3], limits.maximumVertexInputs) ||
@@ -1083,6 +1415,40 @@ namespace vanguard::shaders
                 return ReaderResult(metadataReader);
             }
         }
+        if (hasMaterialContract)
+        {
+            u32 parameterCount = 0;
+            u32 resourceCount = 0;
+            if (!ReadMaterialDomain(metadataReader, m_materialContract.domain) || !metadataReader.ReadU32(m_materialContract.accessorAbiVersion) ||
+                !metadataReader.ReadU32(m_materialContract.parameterByteSize) || !metadataReader.ReadU32(parameterCount) ||
+                !metadataReader.ReadU32(resourceCount))
+            {
+                Close();
+                return ReaderResult(metadataReader);
+            }
+            if (!ResizeChecked(m_materialParameters, parameterCount, limits.maximumMaterialParameters) ||
+                !ResizeChecked(m_materialResources, resourceCount, limits.maximumMaterialResources))
+            {
+                Close();
+                return Result::LimitExceeded;
+            }
+            for (ConstantMember& value : m_materialParameters)
+            {
+                if (!ReadConstantMember(metadataReader, value))
+                {
+                    Close();
+                    return ReaderResult(metadataReader);
+                }
+            }
+            for (MaterialResourceRole& value : m_materialResources)
+            {
+                if (!ReadMaterialResource(metadataReader, value))
+                {
+                    Close();
+                    return ReaderResult(metadataReader);
+                }
+            }
+        }
         if (metadataReader.Position() != metadataReader.Size() || m_interface.stages != actualStages)
         {
             Close();
@@ -1107,11 +1473,23 @@ namespace vanguard::shaders
         validation.vertexInputs = m_vertexInputs;
         validation.fragmentOutputs = m_fragmentOutputs;
         validation.specializationConstants = m_specializationConstants;
+        MaterialContractBuildDescription materialValidation;
+        if (hasMaterialContract)
+        {
+            materialValidation.domain = m_materialContract.domain;
+            materialValidation.accessorAbiVersion = m_materialContract.accessorAbiVersion;
+            materialValidation.parameterByteSize = m_materialContract.parameterByteSize;
+            materialValidation.parameters = m_materialParameters;
+            materialValidation.resources = m_materialResources;
+            validation.materialContract = &materialValidation;
+        }
         CanonicalData canonical;
         Result result = Canonicalize(validation, canonical);
         crypto::Digest256 actualLayout;
         crypto::Digest256 actualBindingLayout;
         crypto::Digest256 actualPipelineInterface;
+        crypto::Digest256 actualMaterialDomain;
+        crypto::Digest256 actualMaterialLayout;
         if (result == Result::Success)
         {
             result = BuildLayoutFingerprint(validation, canonical, actualLayout);
@@ -1124,12 +1502,22 @@ namespace vanguard::shaders
         {
             result = BuildPipelineInterfaceFingerprint(validation, canonical, actualPipelineInterface);
         }
+        if (result == Result::Success)
+        {
+            result = BuildMaterialDomainFingerprint(canonical, actualMaterialDomain);
+        }
+        if (result == Result::Success)
+        {
+            result = BuildMaterialLayoutFingerprint(canonical, actualMaterialDomain, actualMaterialLayout);
+        }
         if (result != Result::Success || !DigestsEqual(actualLayout, m_layoutFingerprint) || !DigestsEqual(actualBindingLayout, m_bindingLayoutFingerprint) ||
             !DigestsEqual(actualPipelineInterface, m_pipelineInterfaceFingerprint))
         {
             Close();
             return result == Result::Success ? Result::IntegrityFailure : result;
         }
+        m_materialContract.domainFingerprint = actualMaterialDomain;
+        m_materialContract.layoutFingerprint = actualMaterialLayout;
         m_open = true;
         return Result::Success;
     }
@@ -1151,6 +1539,9 @@ namespace vanguard::shaders
         m_vertexInputs.Clear();
         m_fragmentOutputs.Clear();
         m_specializationConstants.Clear();
+        m_materialContract = {};
+        m_materialParameters.Clear();
+        m_materialResources.Clear();
         m_bytecode.Clear();
         m_open = false;
     }
@@ -1218,6 +1609,26 @@ namespace vanguard::shaders
     containers::ArraySpan<const SpecializationConstant> ShaderFile::GetSpecializationConstants() const noexcept
     {
         return m_specializationConstants;
+    }
+
+    bool ShaderFile::HasMaterialContract() const noexcept
+    {
+        return m_open && m_materialContract.domain.name != 0;
+    }
+
+    const MaterialContract* ShaderFile::GetMaterialContract() const noexcept
+    {
+        return HasMaterialContract() ? &m_materialContract : nullptr;
+    }
+
+    containers::ArraySpan<const ConstantMember> ShaderFile::GetMaterialParameters() const noexcept
+    {
+        return m_materialParameters;
+    }
+
+    containers::ArraySpan<const MaterialResourceRole> ShaderFile::GetMaterialResources() const noexcept
+    {
+        return m_materialResources;
     }
 
     containers::ArraySpan<const u8> ShaderFile::GetBytecode(const StageRecord& stage) const noexcept
@@ -1331,5 +1742,65 @@ namespace vanguard::shaders
             return Result::IncompatiblePipeline;
         }
         return Result::Success;
+    }
+
+    resources::ResourceTypeId ShaderResourceObject::GetType() const noexcept
+    {
+        return ShaderResourceType;
+    }
+
+    bool ShaderResourceObject::IsOpen() const noexcept
+    {
+        return m_file.IsOpen();
+    }
+
+    const ShaderFile& ShaderResourceObject::GetFile() const noexcept
+    {
+        return m_file;
+    }
+
+    resources::ResourceObject* DecodeShaderResource(const resources::ResourceReference reference, const void* const data, const usize size,
+                                                    const resources::LoadContext& context, resources::Failure& failure, void* const userData) noexcept
+    {
+        failure = resources::Failure::None;
+        if (context.IsCancellationRequested())
+        {
+            failure = resources::Failure::Cancelled;
+            return nullptr;
+        }
+        if (!reference.IsTyped() || reference.ExpectedType() != ShaderResourceType || context.Reference() != reference || data == nullptr || size == 0 ||
+            size > ~u32{0})
+        {
+            failure = resources::Failure::DeserializationFailure;
+            return nullptr;
+        }
+        if (context.GetDependencyCount() != 0)
+        {
+            failure = resources::Failure::IntegrityFailure;
+            return nullptr;
+        }
+
+        ShaderResourceObject* const object = AllocateResourceObject<ShaderResourceObject>();
+        if (object == nullptr)
+        {
+            failure = resources::Failure::OutOfMemory;
+            return nullptr;
+        }
+        filesystem::MemoryFileReader reader(static_cast<const u8*>(data), static_cast<u32>(size), 0);
+        const ShaderResourceDecoderConfig defaults;
+        const auto& config = userData != nullptr ? *static_cast<const ShaderResourceDecoderConfig*>(userData) : defaults;
+        const Result result = object->m_file.Open(reader, config.limits);
+        if (result != Result::Success)
+        {
+            failure = ToResourceFailure(result);
+            DeleteResourceObject(object);
+            return nullptr;
+        }
+        return object;
+    }
+
+    void DestroyShaderResource(resources::ResourceObject* const resource, void*) noexcept
+    {
+        DeleteResourceObject(static_cast<ShaderResourceObject*>(resource));
     }
 } // namespace vanguard::shaders

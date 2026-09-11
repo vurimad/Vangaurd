@@ -1,10 +1,15 @@
 #include <vanguard/rendering/render_command_system.hpp>
 
+#include <vanguard/rendering/render_node_impl_context.hpp>
+#include <vanguard/rendering/render_node_job.hpp>
+
 #include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/synchronization.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/pool.hpp>
+#include <vanguard/system/assert.hpp>
 
+#include <new>
 #include <utility>
 
 namespace vanguard::rendering
@@ -66,60 +71,552 @@ namespace vanguard::rendering
             return false;
         }
 
-        class RetainedFrame final
-        {
-        public:
-            explicit RetainedFrame(const RenderFrameInfo& source) noexcept : m_frame(source), m_preparedViewFamilyRequired(source.GetViewFamily().IsValid())
-            {
-                if (m_frame.GetPayload().data != nullptr)
-                {
-                    m_frame.GetPayload().retain(m_frame.GetPayload().data);
-                    m_payloadRetained = true;
-                }
-            }
-
-            RetainedFrame(RetainedFrame&& other) noexcept
-                : m_frame(std::move(other.m_frame)), m_payloadRetained(other.m_payloadRetained),
-                  m_preparedViewFamilyRequired(other.m_preparedViewFamilyRequired)
-            {
-                other.m_payloadRetained = false;
-                other.m_preparedViewFamilyRequired = false;
-            }
-
-            RetainedFrame(const RetainedFrame&) = delete;
-            RetainedFrame& operator=(const RetainedFrame&) = delete;
-            RetainedFrame& operator=(RetainedFrame&&) = delete;
-
-            ~RetainedFrame()
-            {
-                Release();
-            }
-
-            [[nodiscard]] RenderFrameInfo& GetFrame() noexcept
-            {
-                return m_frame;
-            }
-
-            [[nodiscard]] bool IsValid() const noexcept
-            {
-                return !m_preparedViewFamilyRequired || m_frame.GetViewFamily().IsValid();
-            }
-
-        private:
-            void Release() noexcept
-            {
-                if (m_payloadRetained)
-                {
-                    m_frame.GetPayload().release(m_frame.GetPayload().data);
-                    m_payloadRetained = false;
-                }
-            }
-
-            RenderFrameInfo m_frame;
-            bool m_payloadRetained = false;
-            bool m_preparedViewFamilyRequired = false;
-        };
     } // namespace
+
+    RenderFrameCommandLists::RenderFrameCommandLists() noexcept
+        : m_commandLists(memory::pools::Rendering::GetInstance()), m_expectedQueueDependencies(memory::pools::Rendering::GetInstance()),
+          m_commandScopeReceipts(memory::pools::Rendering::GetInstance()), m_queueDependencyReceipts(memory::pools::Rendering::GetInstance())
+    {
+    }
+
+    RenderFrameCommandLists::~RenderFrameCommandLists()
+    {
+        Reset();
+    }
+
+    void RenderFrameCommandLists::PrepareForFrame(const u32 commandListCount) noexcept
+    {
+        for (Entry& entry : m_commandLists)
+        {
+            if (entry.commandList.IsValid())
+                VG_FATAL("frame command list survived its frame terminal boundary");
+        }
+        m_commandLists.Resize(commandListCount);
+        for (Entry& entry : m_commandLists)
+            entry = {};
+        m_expectedQueueDependencies.Clear();
+        m_commandScopeReceipts.Clear();
+        m_queueDependencyReceipts.Clear();
+        m_submissionFailure = {};
+        m_nextFlushStart = 0;
+        m_submissionFailurePending = false;
+        m_deviceLost = false;
+    }
+
+    void RenderFrameCommandLists::SetCommandList(const u32 index, const rhi::CommandListRef commandList) noexcept
+    {
+        if (index >= m_commandLists.Size())
+            VG_FATAL("frame command-list index lies outside the prepared frame storage");
+        if (commandList.IsValid() && m_commandLists[index].commandList.IsValid())
+            VG_FATAL("frame command-list slot is already occupied");
+        m_commandLists[index].commandList = commandList;
+    }
+
+    void RenderFrameCommandLists::RegisterCommandScope(const u32 index, const CommandScopeId scope, const rhi::QueueType queue) noexcept
+    {
+        if (index >= m_commandLists.Size() || !scope.IsValid())
+            VG_FATAL("compiled command scope lies outside the prepared frame storage");
+        Entry& entry = m_commandLists[index];
+        if (entry.scope.IsValid())
+            VG_FATAL("frame command-list slot already has a compiled command scope");
+        entry.scope = scope;
+        entry.queue = queue;
+    }
+
+    void RenderFrameCommandLists::RegisterQueueDependency(const CompiledQueueDependency& dependency) noexcept
+    {
+        if (!dependency.producerScope.IsValid() || !dependency.consumerScope.IsValid() ||
+            (dependency.sync != rhi::CommandListSyncType::ForkAsyncCompute && dependency.sync != rhi::CommandListSyncType::JoinAsyncCompute))
+            VG_FATAL("compiled queue dependency is invalid");
+        m_expectedQueueDependencies.PushBack({dependency.producerScope, dependency.consumerScope, dependency.sync, InvalidRenderFlowResourceIndex, InvalidRenderFlowResourceIndex, false});
+    }
+
+    void RenderFrameCommandLists::SealCommandScopes() noexcept
+    {
+        for (ExpectedQueueDependency& dependency : m_expectedQueueDependencies)
+        {
+            for (u32 index = 0; index < m_commandLists.Size(); ++index)
+            {
+                const Entry& entry = m_commandLists[index];
+                if (entry.scope == dependency.producerScope)
+                    dependency.producerIndex = index;
+                if (entry.scope == dependency.consumerScope)
+                    dependency.consumerIndex = index;
+            }
+            if (dependency.producerIndex == InvalidRenderFlowResourceIndex || dependency.consumerIndex == InvalidRenderFlowResourceIndex ||
+                dependency.producerIndex >= dependency.consumerIndex)
+                VG_FATAL("compiled queue dependency does not match the registered command-scope order");
+        }
+    }
+
+    rhi::CommandListRef RenderFrameCommandLists::GetCommandList(const u32 index) const noexcept
+    {
+        if (index >= m_commandLists.Size())
+            VG_FATAL("frame command-list index lies outside the prepared frame storage");
+        return m_commandLists[index].commandList;
+    }
+
+    u32 RenderFrameCommandLists::GetCount() const noexcept
+    {
+        return m_commandLists.Size();
+    }
+
+    bool RenderFrameCommandLists::Submit(const char* const scopeName, const u32 upToIndex, const rhi::CommandListSyncType sync, jobs::Builder& builder) noexcept
+    {
+        if (scopeName == nullptr || scopeName[0] == '\0' || upToIndex >= m_commandLists.Size())
+            return false;
+        if (upToIndex < m_nextFlushStart)
+            VG_FATAL("render-frame submission boundaries must execute in their authored order");
+        const u32 firstIndex = m_nextFlushStart;
+        for (u32 index = firstIndex; index <= upToIndex; ++index)
+            m_commandLists[index].closeFailure = rhi::FailureCode::None;
+        jobs::ParallelTask closeTasks = jobs::ParallelTask::Create([this, firstIndex](const u32 localIndex, const jobs::JobContext&) noexcept
+        {
+            Entry& entry = m_commandLists[firstIndex + localIndex];
+            if (entry.commandList.IsValid())
+            {
+                rhi::Failure closeFailure;
+                if (!rhi::CloseCommandList(entry.commandList, &closeFailure))
+                    entry.closeFailure = closeFailure.code == rhi::FailureCode::None ? rhi::FailureCode::BackendFailure : closeFailure.code;
+            }
+        });
+        jobs::Task submissionTask = jobs::Task::Create([this, scopeName, firstIndex, upToIndex, sync](const jobs::JobContext&) noexcept
+        {
+            // Submission jobs are ordered; device-loss cleanup waits for all recording to join.
+            if (HasFailure())
+                return;
+            if (m_nextFlushStart != firstIndex)
+                VG_FATAL("render-frame submission boundaries must execute in their authored order");
+            containers::DynamicArray<rhi::CommandListRef> submission{memory::pools::Rendering::GetInstance()};
+            submission.Reserve(upToIndex - firstIndex + 1u);
+            for (u32 index = firstIndex; index <= upToIndex; ++index)
+                if (m_commandLists[index].commandList.IsValid())
+                    submission.PushBack(m_commandLists[index].commandList);
+
+            rhi::SubmissionReceipt submissionReceipt;
+            rhi::Failure submissionFailure;
+            bool submitted = true;
+            for (u32 index = firstIndex; index <= upToIndex; ++index)
+            {
+                if (m_commandLists[index].closeFailure == rhi::FailureCode::None)
+                    continue;
+                submitted = false;
+                submissionFailure.code = m_commandLists[index].closeFailure;
+                CopyFailureMessage(submissionFailure.message, sizeof(submissionFailure.message), "render-frame command-list close failed");
+                break;
+            }
+            u32 dependencyIndex = InvalidRenderFlowResourceIndex;
+            bool dependencyMatches = true;
+            for (u32 index = 0; index < m_expectedQueueDependencies.Size(); ++index)
+            {
+                const ExpectedQueueDependency& dependency = m_expectedQueueDependencies[index];
+                if (dependency.producerIndex > upToIndex || upToIndex >= dependency.consumerIndex)
+                    continue;
+                if (dependencyIndex != InvalidRenderFlowResourceIndex || dependency.completionRecorded || dependency.sync != sync)
+                    dependencyMatches = false;
+                dependencyIndex = index;
+            }
+            if ((sync == rhi::CommandListSyncType::None) != (dependencyIndex == InvalidRenderFlowResourceIndex))
+                dependencyMatches = false;
+
+            if (submitted && !dependencyMatches)
+            {
+                submitted = false;
+                submissionFailure.code = rhi::FailureCode::InvalidArgument;
+                CopyFailureMessage(submissionFailure.message, sizeof(submissionFailure.message), "command-list synchronization does not match the compiled queue boundary");
+            }
+            else if (submitted && dependencyIndex != InvalidRenderFlowResourceIndex && submission.Empty())
+            {
+                submitted = false;
+                submissionFailure.code = rhi::FailureCode::InvalidCommandList;
+                CopyFailureMessage(submissionFailure.message, sizeof(submissionFailure.message), "cross-queue synchronization has no recorded producer command list");
+            }
+            else if (submitted && submission.Size() > rhi::MaximumCommandListsPerSubmission)
+            {
+                submitted = false;
+                submissionFailure.code = rhi::FailureCode::CapacityExceeded;
+                CopyFailureMessage(submissionFailure.message, sizeof(submissionFailure.message), "render-frame submission exceeds the RHI command-list limit");
+            }
+            else if (submitted && !submission.Empty())
+            {
+                submitted = rhi::SubmitCommandLists(scopeName, containers::ArraySpan<const rhi::CommandListRef>(submission), sync, submissionReceipt, &submissionFailure);
+            }
+            const bool workSubmitted = submissionReceipt.WasSubmitted();
+            if (!submitted && !workSubmitted && submissionFailure.code != rhi::FailureCode::DeviceLost)
+                VG_FATAL(submissionFailure.message[0] != '\0' ? submissionFailure.message : "required render-frame submission failed");
+            if (!submitted && !HasFailure())
+            {
+                m_submissionFailure = submissionFailure;
+                if (m_submissionFailure.message[0] == '\0')
+                    CopyFailureMessage(m_submissionFailure.message, sizeof(m_submissionFailure.message), "render-frame command-list submission failed");
+                m_submissionFailurePending = true;
+            }
+            m_deviceLost = m_deviceLost || (!submitted && (workSubmitted || submissionFailure.code == rhi::FailureCode::DeviceLost));
+
+            for (u32 index = firstIndex; index <= upToIndex; ++index)
+            {
+                Entry& entry = m_commandLists[index];
+                if (!entry.commandList.IsValid())
+                    continue;
+                if (!submitted && !workSubmitted)
+                    rhi::DiscardCommandList(entry.commandList);
+                else
+                    entry.commandList = {};
+
+                rhi::GpuFence fence;
+                if (submitted)
+                {
+                    const u64 value = entry.queue == rhi::QueueType::Graphics ? submissionReceipt.residency.graphics :
+                                      entry.queue == rhi::QueueType::Compute ? submissionReceipt.residency.compute : submissionReceipt.residency.copy;
+                    fence = {entry.queue, value};
+                }
+                if (index == static_cast<u32>(ReservedFrameCommandList::StorageData))
+                    continue;
+                if (!entry.scope.IsValid())
+                    continue;
+                m_commandScopeReceipts.PushBack({entry.scope,
+                                                 submitted ? CommandScopeCompletionKind::Submitted :
+                                                             workSubmitted ? CommandScopeCompletionKind::UnknownDueToDeviceLoss :
+                                                                             CommandScopeCompletionKind::DiscardedBeforeSubmission,
+                                                 entry.queue, fence});
+                entry.completionRecorded = true;
+            }
+            if (dependencyMatches && dependencyIndex != InvalidRenderFlowResourceIndex)
+            {
+                ExpectedQueueDependency& dependency = m_expectedQueueDependencies[dependencyIndex];
+                m_queueDependencyReceipts.PushBack({dependency.producerScope, dependency.consumerScope, dependency.sync,
+                                                    submitted ? QueueDependencyCompletionKind::Submitted :
+                                                                workSubmitted ? QueueDependencyCompletionKind::UnknownDueToDeviceLoss :
+                                                                                QueueDependencyCompletionKind::DiscardedBeforeSubmission});
+                dependency.completionRecorded = true;
+            }
+            m_nextFlushStart = upToIndex + 1u;
+        });
+        if (!closeTasks || !submissionTask)
+            return false;
+        static jobs::JobName closeName{"RenderGraph/CloseAndSubmitCommandLists"};
+        return builder.DispatchParallel(closeName, upToIndex - firstIndex + 1u, static_cast<jobs::ParallelTask&&>(closeTasks), static_cast<jobs::Task&&>(submissionTask));
+    }
+
+
+    void RenderFrameCommandLists::FinalizeSubmissions(const bool frameFailed) noexcept
+    {
+        const bool failureAlreadyKnown = frameFailed || HasFailure();
+        bool foundUnsubmittedWork = false;
+        for (Entry& entry : m_commandLists)
+        {
+            if (!entry.completionRecorded && entry.scope.IsValid())
+            {
+                m_commandScopeReceipts.PushBack({entry.scope, CommandScopeCompletionKind::DiscardedBeforeSubmission, entry.queue, {}});
+                entry.completionRecorded = true;
+                foundUnsubmittedWork = true;
+            }
+            if (entry.commandList.IsValid())
+            {
+                rhi::DiscardCommandList(entry.commandList);
+                foundUnsubmittedWork = true;
+            }
+        }
+        for (ExpectedQueueDependency& dependency : m_expectedQueueDependencies)
+        {
+            if (dependency.completionRecorded)
+                continue;
+            m_queueDependencyReceipts.PushBack({dependency.producerScope, dependency.consumerScope, dependency.sync, QueueDependencyCompletionKind::DiscardedBeforeSubmission});
+            dependency.completionRecorded = true;
+            foundUnsubmittedWork = true;
+        }
+        if (foundUnsubmittedWork && !failureAlreadyKnown)
+        {
+            m_submissionFailure = {};
+            m_submissionFailure.code = rhi::FailureCode::InvalidCommandList;
+            CopyFailureMessage(m_submissionFailure.message, sizeof(m_submissionFailure.message), "authored final synchronization node did not submit every recorded command scope");
+            m_submissionFailurePending = true;
+        }
+    }
+
+    bool RenderFrameCommandLists::GetFirstSubmissionFailure(rhi::Failure& failure) const noexcept
+    {
+        failure = m_submissionFailure;
+        return HasFailure();
+    }
+
+    containers::ArraySpan<const CommandScopeExecutionReceipt> RenderFrameCommandLists::GetCommandScopeReceipts() const noexcept
+    {
+        return containers::ArraySpan<const CommandScopeExecutionReceipt>(m_commandScopeReceipts);
+    }
+
+    containers::ArraySpan<const QueueDependencyExecutionReceipt> RenderFrameCommandLists::GetQueueDependencyReceipts() const noexcept
+    {
+        return containers::ArraySpan<const QueueDependencyExecutionReceipt>(m_queueDependencyReceipts);
+    }
+
+    bool RenderFrameCommandLists::WasDeviceLost() const noexcept
+    {
+        return m_deviceLost;
+    }
+
+    void RenderFrameCommandLists::Reset() noexcept
+    {
+        for (Entry& entry : m_commandLists)
+            if (entry.commandList.IsValid())
+                rhi::DiscardCommandList(entry.commandList);
+        m_commandLists.Clear();
+        m_expectedQueueDependencies.Clear();
+        m_commandScopeReceipts.Clear();
+        m_queueDependencyReceipts.Clear();
+        m_submissionFailure = {};
+        m_nextFlushStart = 0;
+        m_submissionFailurePending = false;
+        m_deviceLost = false;
+    }
+
+    struct RetainedRenderFrameRef::Impl
+    {
+        explicit Impl(const RenderFrameInfo& source, RenderFrameOutputTransaction&& frameOutput, RenderCommandSystem& commandSystem) noexcept
+            : frame(source), output(static_cast<RenderFrameOutputTransaction&&>(frameOutput)), commandSystem(&commandSystem), preparedViewFamilyRequired(source.GetViewFamily().IsValid())
+        {
+            if (frame.GetPayload().data != nullptr)
+            {
+                frame.GetPayload().retain(frame.GetPayload().data);
+                payloadRetained = true;
+            }
+        }
+
+        ~Impl()
+        {
+            if (jobsFrameInstalled.Exchange(false))
+                RenderNodeJob::ClearJobsRenderFrame(&frame);
+            if (payloadRetained)
+                frame.GetPayload().release(frame.GetPayload().data);
+        }
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return !preparedViewFamilyRequired || frame.GetViewFamily().IsValid();
+        }
+
+        concurrency::Atomic<u32> references{1};
+        RenderFrameInfo frame;
+        RenderFrameOutputTransaction output;
+        PreparedRenderViewFamily preparedViewFamily;
+        FrameCustomData frameCustomData;
+        GeometryFrameWork geometryFrameWork;
+        RenderFrameCommandLists frameCommandLists;
+        RenderNodeResourceBindings resourceBindings;
+        RenderNodeResourcePreparationFailures resourcePreparationFailures;
+        RenderCommandSystem* commandSystem = nullptr;
+        mutable concurrency::SpinLock failureLock;
+        char failureMessage[MaximumExecutionFailureMessageBytes]{};
+        concurrency::Atomic<bool> jobsFrameInstalled{false};
+        concurrency::Atomic<bool> terminalCompletionPublished{false};
+        bool payloadRetained = false;
+        bool preparedViewFamilyRequired = false;
+        concurrency::Atomic<bool> terminalCompletionDeferred{false};
+        bool failurePending = false;
+    };
+
+    namespace detail
+    {
+        struct RenderCommandRetainedFrameAccess
+        {
+            [[nodiscard]] static RetainedRenderFrameRef Create(const RenderFrameInfo& source, RenderFrameOutputTransaction&& output, RenderCommandSystem& commandSystem) noexcept
+            {
+                memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(RetainedRenderFrameRef::Impl), alignof(RetainedRenderFrameRef::Impl));
+                if (!block)
+                    return {};
+                return RetainedRenderFrameRef(new (block.address) RetainedRenderFrameRef::Impl(source, static_cast<RenderFrameOutputTransaction&&>(output), commandSystem));
+            }
+
+            static void TakeOutput(RetainedRenderFrameRef& frame, RenderFrameOutputTransaction& output) noexcept
+            {
+                if (frame.m_impl != nullptr)
+                    output = static_cast<RenderFrameOutputTransaction&&>(frame.m_impl->output);
+            }
+
+            static void PublishTerminalCompletion(RetainedRenderFrameRef& frame, const bool skipped) noexcept
+            {
+                frame.PublishTerminalCompletion(skipped);
+            }
+
+            [[nodiscard]] static bool IsTerminalCompletionDeferred(const RetainedRenderFrameRef& frame) noexcept
+            {
+                return frame.m_impl != nullptr && frame.m_impl->terminalCompletionDeferred.GetValue();
+            }
+        };
+    } // namespace detail
+
+    RetainedRenderFrameRef::~RetainedRenderFrameRef()
+    {
+        Reset();
+    }
+
+    RetainedRenderFrameRef::RetainedRenderFrameRef(const RetainedRenderFrameRef& other) noexcept : m_impl(other.m_impl)
+    {
+        if (m_impl != nullptr)
+            static_cast<void>(m_impl->references.Increment());
+    }
+
+    RetainedRenderFrameRef& RetainedRenderFrameRef::operator=(const RetainedRenderFrameRef& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+        Impl* const replacement = other.m_impl;
+        if (replacement != nullptr)
+            static_cast<void>(replacement->references.Increment());
+        Reset();
+        m_impl = replacement;
+        return *this;
+    }
+
+    RetainedRenderFrameRef::RetainedRenderFrameRef(RetainedRenderFrameRef&& other) noexcept : m_impl(other.m_impl)
+    {
+        other.m_impl = nullptr;
+    }
+
+    RetainedRenderFrameRef& RetainedRenderFrameRef::operator=(RetainedRenderFrameRef&& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+        Reset();
+        m_impl = other.m_impl;
+        other.m_impl = nullptr;
+        return *this;
+    }
+
+    bool RetainedRenderFrameRef::IsValid() const noexcept
+    {
+        return m_impl != nullptr && m_impl->IsValid();
+    }
+
+    const RenderFrameInfo& RetainedRenderFrameRef::GetFrame() const noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->frame;
+    }
+
+    PreparedRenderViewFamily& RetainedRenderFrameRef::GetPreparedViewFamily() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->preparedViewFamily;
+    }
+
+    FrameCustomData& RetainedRenderFrameRef::GetFrameCustomData() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->frameCustomData;
+    }
+
+    GeometryFrameWork& RetainedRenderFrameRef::GetGeometryFrameWork() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->geometryFrameWork;
+    }
+
+    RenderFrameCommandLists& RetainedRenderFrameRef::GetFrameCommandLists() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->frameCommandLists;
+    }
+
+    RenderNodeResourceBindings& RetainedRenderFrameRef::GetResourceBindings() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->resourceBindings;
+    }
+
+    RenderNodeResourcePreparationFailures& RetainedRenderFrameRef::GetResourcePreparationFailures() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->resourcePreparationFailures;
+    }
+
+    RenderFrameOutputTransaction& RetainedRenderFrameRef::GetOutputTransaction() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        return m_impl->output;
+    }
+
+    void RetainedRenderFrameRef::RecordFailure(const char* const message) noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->failureLock);
+        if (m_impl->failurePending)
+            return;
+        CopyFailureMessage(m_impl->failureMessage, MaximumExecutionFailureMessageBytes, message);
+        m_impl->failurePending = true;
+    }
+
+    void RetainedRenderFrameRef::RecordFailure(const RenderFlowResourceFailure& failure) noexcept
+    {
+        RecordFailure(failure.message != nullptr ? failure.message : "render-flow resource operation failed without a diagnostic");
+    }
+
+    bool RetainedRenderFrameRef::HasFailure() const noexcept
+    {
+        if (!IsValid())
+            return true;
+        concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->failureLock);
+        return m_impl->failurePending;
+    }
+
+    const char* RetainedRenderFrameRef::GetFailureMessage() const noexcept
+    {
+        if (!IsValid())
+            return "retained render-frame reference is invalid";
+        concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->failureLock);
+        return m_impl->failurePending ? m_impl->failureMessage : nullptr;
+    }
+
+    void RetainedRenderFrameRef::InstallJobsRenderFrame() noexcept
+    {
+        if (!IsValid())
+            VG_FATAL("retained render-frame reference is invalid");
+        if (m_impl->jobsFrameInstalled.Exchange(true))
+            VG_FATAL("retained render frame is already installed for render-node jobs");
+        RenderNodeJob::SetJobsRenderFrame(&m_impl->frame);
+    }
+
+    void RetainedRenderFrameRef::ClearJobsRenderFrame() noexcept
+    {
+        if (m_impl == nullptr || !m_impl->jobsFrameInstalled.Exchange(false))
+            return;
+        RenderNodeJob::ClearJobsRenderFrame(&m_impl->frame);
+    }
+
+    void RetainedRenderFrameRef::PublishTerminalCompletion(const bool skipped) noexcept
+    {
+        if (m_impl == nullptr || m_impl->terminalCompletionPublished.Exchange(true))
+            return;
+        const char* const failure = GetFailureMessage();
+        m_impl->commandSystem->PublishFrameCompletion(m_impl->frame.GetSerial(), failure != nullptr, skipped, failure);
+    }
+
+    void RetainedRenderFrameRef::DeferTerminalCompletion() noexcept
+    {
+        if (m_impl == nullptr)
+            VG_FATAL("retained render-frame reference is invalid");
+        m_impl->terminalCompletionDeferred.SetValue(true);
+    }
+
+    void RetainedRenderFrameRef::Reset() noexcept
+    {
+        Impl* const value = m_impl;
+        m_impl = nullptr;
+        if (value == nullptr || value->references.Decrement() != 0)
+            return;
+        value->~Impl();
+        memory::MemoryBlock block{value, sizeof(Impl), memory::PoolId::Rendering};
+        memory::Free(block);
+    }
 
     struct RenderCommandSystem::Impl
     {
@@ -182,15 +679,15 @@ namespace vanguard::rendering
                 return true;
             }
 
-            [[nodiscard]] bool Submit(const RenderFrameInfo& frame, jobs::Counter& cpuTail, RenderFrameSubmission& submission,
+            [[nodiscard]] bool Submit(const RenderFrameInfo& frame, RenderFrameOutputTransaction& output, jobs::Counter& cpuTail, RenderFrameSubmission& submission,
                                       RenderCommandFailure* const failure) noexcept
             {
                 if (execute == nullptr)
                     return Fail(failure, RenderCommandFailureCode::InvalidState, "RenderFrameDispatcher is not initialized");
                 if (!concurrency::IsMainThread())
                     return Fail(failure, RenderCommandFailureCode::WrongThread, "render frames must be submitted from the main thread");
-                if (frame.GetSerial() == 0 || !frame.GetEngineViewport().IsValid() || !frame.GetOutputViewport().IsValid() || !frame.GetRenderExtent().IsValid() ||
-                    !frame.GetPayload().IsValid())
+                if (frame.GetSerial() == 0 || !frame.GetEngineViewport().IsValid() || frame.GetViewport() == nullptr || !frame.GetViewport()->IsValid() ||
+                    !frame.GetRenderExtent().IsValid() || !frame.GetPayload().IsValid())
                     return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame packet is invalid");
                 if (frame.HasViewSetup())
                 {
@@ -210,43 +707,64 @@ namespace vanguard::rendering
                     }
                 }
 
-                RetainedFrame retained(frame);
+                const bool requiresOutput = frame.GetOutputKind() == RenderViewportOutputKind::Texture ||
+                                            (frame.GetOutputKind() == RenderViewportOutputKind::Presentation && frame.ShouldPresent());
+                if (requiresOutput != output.IsValid() || (requiresOutput && output.GetKind() != frame.GetOutputKind()))
+                    return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame output transaction does not match the frame packet");
+
+                RetainedRenderFrameRef retained = detail::RenderCommandRetainedFrameAccess::Create(frame, static_cast<RenderFrameOutputTransaction&&>(output), *owner->commandSystem);
                 if (!retained.IsValid())
-                    return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "prepared RenderViewFamily could not be retained");
+                    return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "retained render-frame allocation failed");
                 jobs::Task task = jobs::Task::Create(
-                    [dispatcher = this, retained = std::move(retained)](const jobs::JobContext& continuation) mutable noexcept
+                    [dispatcher = this, retained](const jobs::JobContext& continuation) mutable noexcept
                     {
-                        const RenderFrameInfo& retainedFrame = retained.GetFrame();
-                        RenderFrameContext context(retainedFrame, continuation);
+                        RenderFrameContext context(retained, continuation);
                         RenderFrameExecutionStatus status =
                             context.IsValid() ? dispatcher->execute(context, dispatcher->userData)
                                               : RenderFrameExecutionStatus::Failure("renderer continuation builder creation failed");
                         if (status.IsFailure())
                         {
-                            dispatcher->owner->ReportExecutionFailure(RenderCommandExecutionStage::RenderFrame, retainedFrame.GetSerial(), status.message);
-                            static_cast<void>(dispatcher->failedFrames.Increment());
+                            retained.RecordFailure(status.message);
+                            detail::RenderCommandRetainedFrameAccess::PublishTerminalCompletion(retained, false);
                         }
                         else if (status.IsSkipped())
-                            static_cast<void>(dispatcher->skippedFrames.Increment());
-                        static_cast<void>(dispatcher->completedFrames.Increment());
-                        dispatcher->lastCompletedSerial.SetValue(retainedFrame.GetSerial());
+                            detail::RenderCommandRetainedFrameAccess::PublishTerminalCompletion(retained, true);
+                        else if (!detail::RenderCommandRetainedFrameAccess::IsTerminalCompletionDeferred(retained))
+                            detail::RenderCommandRetainedFrameAccess::PublishTerminalCompletion(retained, false);
                     });
                 if (!task)
+                {
+                    detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame job allocation failed");
+                }
 
                 jobs::Builder builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker}, this);
                 if (!builder.IsValid())
+                {
+                    detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame job builder creation failed");
+                }
                 if (cpuTail.IsValid())
                     builder.AddDependency(cpuTail);
+                static_cast<void>(submittedFrames.Increment());
                 if (!builder.Dispatch(jobName, std::move(task)))
+                {
+                    static_cast<void>(submittedFrames.Decrement());
+                    detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame job dispatch failed");
+                }
 
                 jobs::Counter nextTail = builder.ExtractCounter();
                 if (!nextTail.IsValid())
-                    return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame completion extraction failed");
+                {
+                    if (!builder.WaitForCompletion())
+                        VG_FATAL("accepted render frame could not establish its completion boundary");
+                    // Dispatch accepted ownership. A synchronous join must not make this frame retryable.
+                    cpuTail = {};
+                    submission.serial = frame.GetSerial();
+                    return true;
+                }
                 cpuTail = std::move(nextTail);
-                static_cast<void>(submittedFrames.Increment());
                 submission.serial = frame.GetSerial();
                 return true;
             }
@@ -256,10 +774,6 @@ namespace vanguard::rendering
             void* userData = nullptr;
             jobs::JobName jobName{"RenderCommands.RenderFrame"};
             concurrency::Atomic<u64> submittedFrames{0};
-            concurrency::Atomic<u64> completedFrames{0};
-            concurrency::Atomic<u64> failedFrames{0};
-            concurrency::Atomic<u64> skippedFrames{0};
-            concurrency::Atomic<u64> lastCompletedSerial{0};
         };
 
         Impl() noexcept : sceneStamps(memory::pools::Rendering::GetInstance()), frameScenes(memory::pools::Rendering::GetInstance()) {}
@@ -276,6 +790,7 @@ namespace vanguard::rendering
 
         RenderSceneManager* scenes = nullptr;
         RenderCameraStorage* cameras = nullptr;
+        RenderCommandSystem* commandSystem = nullptr;
         ExecuteRenderingFrameTick executeFrameTick = nullptr;
         void* userData = nullptr;
         jobs::JobName frameTickJobName{"RenderCommands.FrameTick"};
@@ -289,6 +804,10 @@ namespace vanguard::rendering
         concurrency::Atomic<u64> frameTicks{0};
         concurrency::Atomic<u64> completedFrameTicks{0};
         concurrency::Atomic<u64> failedFrameTicks{0};
+        concurrency::Atomic<u64> completedFrames{0};
+        concurrency::Atomic<u64> failedFrames{0};
+        concurrency::Atomic<u64> skippedFrames{0};
+        concurrency::Atomic<u64> lastCompletedFrameSerial{0};
         concurrency::Atomic<u64> suppressedExecutionFailures{0};
         u64 explicitFlushes = 0;
         u64 rejectedOperations = 0;
@@ -318,6 +837,7 @@ namespace vanguard::rendering
         {
             impl->scenes = &scenes;
             impl->cameras = &cameras;
+            impl->commandSystem = this;
             impl->sceneStamps.Resize(scenes.GetStats().capacity);
             impl->frameScenes.Resize(scenes.GetStats().capacity);
         }
@@ -533,11 +1053,18 @@ namespace vanguard::rendering
 
     bool RenderCommandSystem::RenderFrame(const RenderFrameInfo& frame, RenderFrameSubmission& submission, RenderCommandFailure* const failure) noexcept
     {
+        RenderFrameOutputTransaction output;
+        return RenderFrame(frame, output, submission, failure);
+    }
+
+    bool RenderCommandSystem::RenderFrame(const RenderFrameInfo& frame, RenderFrameOutputTransaction& output, RenderFrameSubmission& submission,
+                                          RenderCommandFailure* const failure) noexcept
+    {
         ClearFailure(failure);
         submission = {};
         if (!IsInitialized())
             return Fail(failure, RenderCommandFailureCode::NotInitialized, "RenderCommandSystem is not initialized");
-        const bool submitted = m_impl->frameDispatcher.Submit(frame, m_impl->cpuTail, submission, failure);
+        const bool submitted = m_impl->frameDispatcher.Submit(frame, output, m_impl->cpuTail, submission, failure);
         if (!submitted)
             ++m_impl->rejectedOperations;
         return submitted;
@@ -575,6 +1102,21 @@ namespace vanguard::rendering
         return IsInitialized() && (!m_impl->cpuTail.IsValid() || m_impl->cpuTail.IsReady());
     }
 
+    void RenderCommandSystem::PublishFrameCompletion(const u64 serial, const bool failed, const bool skipped, const char* const message) noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        if (failed)
+        {
+            m_impl->ReportExecutionFailure(RenderCommandExecutionStage::RenderFrame, serial, message);
+            static_cast<void>(m_impl->failedFrames.Increment());
+        }
+        else if (skipped)
+            static_cast<void>(m_impl->skippedFrames.Increment());
+        static_cast<void>(m_impl->completedFrames.Increment());
+        m_impl->lastCompletedFrameSerial.SetValue(serial);
+    }
+
     RenderCommandSystemStats RenderCommandSystem::GetStats() const noexcept
     {
         RenderCommandSystemStats stats;
@@ -584,10 +1126,10 @@ namespace vanguard::rendering
         stats.completedFrameTicks = m_impl->completedFrameTicks.GetValue();
         stats.failedFrameTicks = m_impl->failedFrameTicks.GetValue();
         stats.submittedFrames = m_impl->frameDispatcher.submittedFrames.GetValue();
-        stats.completedFrames = m_impl->frameDispatcher.completedFrames.GetValue();
-        stats.failedFrames = m_impl->frameDispatcher.failedFrames.GetValue();
-        stats.skippedFrames = m_impl->frameDispatcher.skippedFrames.GetValue();
-        stats.lastCompletedFrameSerial = m_impl->frameDispatcher.lastCompletedSerial.GetValue();
+        stats.completedFrames = m_impl->completedFrames.GetValue();
+        stats.failedFrames = m_impl->failedFrames.GetValue();
+        stats.skippedFrames = m_impl->skippedFrames.GetValue();
+        stats.lastCompletedFrameSerial = m_impl->lastCompletedFrameSerial.GetValue();
         stats.explicitFlushes = m_impl->explicitFlushes;
         stats.suppressedExecutionFailures = m_impl->suppressedExecutionFailures.GetValue();
         stats.rejectedOperations = m_impl->rejectedOperations;
