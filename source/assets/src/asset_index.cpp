@@ -271,6 +271,9 @@ namespace vanguard::assets
         u64 generation = 0;
         u64 stagedPublications = 0;
         u64 stagedReplacements = 0;
+        BuildSystem* persistentProtectionDomain = nullptr;
+        BuildSystem* persistentProtectionDomainReservation = nullptr;
+        u32 activePersistentPublications = 0u;
         bool changed = false;
         mutable bool reverseDirty = true;
         bool transactionActive = false;
@@ -791,7 +794,25 @@ namespace vanguard::assets
 
     DependencyIndex::~DependencyIndex()
     {
-        static_cast<void>(Shutdown());
+        if (Shutdown() || m_impl == nullptr)
+            return;
+
+        // A destructor cannot report unsaved state. Preserve lifetime safety
+        // by discarding only the in-memory index after cleanly detaching the
+        // root domain. Concurrent destruction remains outside the API contract.
+        BuildSystem* protectionDomain = nullptr;
+        m_impl->lock.Acquire();
+        if (m_impl->persistentProtectionDomainReservation == nullptr && m_impl->activePersistentPublications == 0u)
+        {
+            protectionDomain = m_impl->persistentProtectionDomain;
+            m_impl->persistentProtectionDomainReservation = protectionDomain;
+        }
+        m_impl->lock.Release();
+        if (protectionDomain != nullptr && !protectionDomain->UnregisterPersistentProtectionDomain(this))
+            return;
+        Impl* const implementation = m_impl;
+        m_impl = nullptr;
+        VANGUARD_DELETE(implementation);
     }
 
     IndexResult DependencyIndex::Initialize(const DependencyIndexConfig& config) noexcept
@@ -890,11 +911,26 @@ namespace vanguard::assets
             return true;
         }
         m_impl->lock.Acquire();
-        if (m_impl->changed || m_impl->transactionActive)
+        if (m_impl->changed || m_impl->transactionActive || m_impl->persistentProtectionDomainReservation != nullptr ||
+            m_impl->activePersistentPublications != 0u)
         {
             m_impl->lock.Release();
             return false;
         }
+        BuildSystem* const protectionDomain = m_impl->persistentProtectionDomain;
+        m_impl->persistentProtectionDomainReservation = protectionDomain;
+        m_impl->lock.Release();
+        if (protectionDomain != nullptr && !protectionDomain->UnregisterPersistentProtectionDomain(this))
+        {
+            m_impl->lock.Acquire();
+            if (m_impl->persistentProtectionDomainReservation == protectionDomain)
+                m_impl->persistentProtectionDomainReservation = nullptr;
+            m_impl->lock.Release();
+            return false;
+        }
+        m_impl->lock.Acquire();
+        m_impl->persistentProtectionDomain = nullptr;
+        m_impl->persistentProtectionDomainReservation = nullptr;
         m_impl->lock.Release();
         Impl* const implementation = m_impl;
         m_impl = nullptr;
@@ -907,7 +943,67 @@ namespace vanguard::assets
         return m_impl != nullptr;
     }
 
-    IndexResult DependencyIndex::Publish(const BuildRequest& request, const BuildPlan& plan, const BuildOutput& output) noexcept
+    bool DependencyIndex::BindPersistentProtectionDomain(BuildSystem& buildSystem) noexcept
+    {
+        if (m_impl == nullptr || !buildSystem.IsInitialized())
+            return false;
+
+        m_impl->lock.Acquire();
+        if (m_impl->persistentProtectionDomain == &buildSystem && m_impl->persistentProtectionDomainReservation == nullptr)
+        {
+            m_impl->lock.Release();
+            return true;
+        }
+        if (m_impl->persistentProtectionDomain != nullptr || m_impl->persistentProtectionDomainReservation != nullptr ||
+            m_impl->activePersistentPublications != 0u || m_impl->changed || m_impl->transactionActive || !m_impl->stagedRecords.Empty())
+        {
+            m_impl->lock.Release();
+            return false;
+        }
+        m_impl->persistentProtectionDomainReservation = &buildSystem;
+        m_impl->lock.Release();
+
+        // Root-authority registration is deliberately outside the index lock.
+        if (!buildSystem.RegisterPersistentProtectionDomain(this))
+        {
+            m_impl->lock.Acquire();
+            if (m_impl->persistentProtectionDomainReservation == &buildSystem)
+                m_impl->persistentProtectionDomainReservation = nullptr;
+            m_impl->lock.Release();
+            return false;
+        }
+
+        bool bound = false;
+        m_impl->lock.Acquire();
+        if (m_impl->persistentProtectionDomain == nullptr && m_impl->persistentProtectionDomainReservation == &buildSystem &&
+            m_impl->activePersistentPublications == 0u && !m_impl->changed && !m_impl->transactionActive && m_impl->stagedRecords.Empty())
+        {
+            m_impl->persistentProtectionDomain = &buildSystem;
+            bound = true;
+        }
+        if (m_impl->persistentProtectionDomainReservation == &buildSystem)
+            m_impl->persistentProtectionDomainReservation = nullptr;
+        m_impl->lock.Release();
+        if (!bound)
+            static_cast<void>(buildSystem.UnregisterPersistentProtectionDomain(this));
+        return bound;
+    }
+
+    bool DependencyIndex::DetachPersistentProtectionDomain(BuildSystem& buildSystem) noexcept
+    {
+        if (m_impl == nullptr)
+            return true;
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (m_impl->persistentProtectionDomain == nullptr)
+            return true;
+        if (m_impl->persistentProtectionDomain != &buildSystem || m_impl->persistentProtectionDomainReservation != nullptr ||
+            m_impl->activePersistentPublications != 0u)
+            return false;
+        m_impl->persistentProtectionDomain = nullptr;
+        return true;
+    }
+
+    IndexResult DependencyIndex::Publish(const BuildRequest& request, const BuildPlan& plan, BuildOutput& output) noexcept
     {
         if (m_impl == nullptr)
         {
@@ -919,6 +1015,33 @@ namespace vanguard::assets
         {
             return IndexResult::InvalidArgument;
         }
+
+        BuildSystem* protectionDomain = nullptr;
+        m_impl->lock.Acquire();
+        if (m_impl->persistentProtectionDomain == nullptr || m_impl->persistentProtectionDomainReservation != nullptr)
+        {
+            m_impl->lock.Release();
+            return IndexResult::InvalidState;
+        }
+        protectionDomain = m_impl->persistentProtectionDomain;
+        ++m_impl->activePersistentPublications;
+        m_impl->lock.Release();
+
+        struct PublicationScope final
+        {
+            Impl* impl = nullptr;
+            ~PublicationScope()
+            {
+                if (impl == nullptr)
+                    return;
+                concurrency::ScopedLock guard(impl->lock);
+                if (impl->activePersistentPublications != 0u)
+                    --impl->activePersistentPublications;
+            }
+        } publicationScope{m_impl};
+
+        if (!protectionDomain->OwnsPersistentPublication(this, output))
+            return IndexResult::InvalidState;
 
         auto* const replacement = VANGUARD_NEW(DependencyRecord);
         if (replacement == nullptr)
@@ -950,87 +1073,97 @@ namespace vanguard::assets
             replacement->artifacts[index] = {artifact.resource, artifact.segment, artifact.flags, artifact.alignmentLog2, artifact.bytes.Size()};
         }
 
-        concurrency::ScopedLock guard(m_impl->lock);
-        if (m_impl->transactionActive)
+        const IndexResult published = [&]() noexcept
         {
-            u32 committedPathIndex = 0;
-            if (m_impl->lookup.Find(request.output.GetPath().Id(), committedPathIndex) &&
-                (committedPathIndex >= m_impl->records.Size() || m_impl->records[committedPathIndex]->output != request.output))
+            concurrency::ScopedLock guard(m_impl->lock);
+            if (m_impl->persistentProtectionDomain != protectionDomain || m_impl->persistentProtectionDomainReservation != nullptr)
             {
                 VANGUARD_DELETE(replacement);
-                return IndexResult::InvalidArgument;
+                return IndexResult::InvalidState;
             }
-            u32 stagedIndex = 0;
-            if (m_impl->stagedLookup.Find(request.output.GetPath().Id(), stagedIndex))
+            if (m_impl->transactionActive)
             {
-                if (stagedIndex >= m_impl->stagedRecords.Size() || m_impl->stagedRecords[stagedIndex]->output != request.output)
+                u32 committedPathIndex = 0;
+                if (m_impl->lookup.Find(request.output.GetPath().Id(), committedPathIndex) &&
+                    (committedPathIndex >= m_impl->records.Size() || m_impl->records[committedPathIndex]->output != request.output))
                 {
                     VANGUARD_DELETE(replacement);
                     return IndexResult::InvalidArgument;
                 }
-                VANGUARD_DELETE(m_impl->stagedRecords[stagedIndex]);
-                m_impl->stagedRecords[stagedIndex] = replacement;
-                ++m_impl->stagedReplacements;
+                u32 stagedIndex = 0;
+                if (m_impl->stagedLookup.Find(request.output.GetPath().Id(), stagedIndex))
+                {
+                    if (stagedIndex >= m_impl->stagedRecords.Size() || m_impl->stagedRecords[stagedIndex]->output != request.output)
+                    {
+                        VANGUARD_DELETE(replacement);
+                        return IndexResult::InvalidArgument;
+                    }
+                    VANGUARD_DELETE(m_impl->stagedRecords[stagedIndex]);
+                    m_impl->stagedRecords[stagedIndex] = replacement;
+                    ++m_impl->stagedReplacements;
+                }
+                else
+                {
+                    const u32 previous = m_impl->stagedRecords.Size();
+                    m_impl->stagedRecords.PushBack(replacement);
+                    if (m_impl->stagedRecords.Size() != previous + 1u ||
+                        !m_impl->stagedLookup.Insert(request.output.GetPath().Id(), previous).IsSuccessful())
+                    {
+                        if (m_impl->stagedRecords.Size() == previous + 1u)
+                            static_cast<void>(m_impl->stagedRecords.RemoveAt(previous));
+                        VANGUARD_DELETE(replacement);
+                        return IndexResult::OutOfMemory;
+                    }
+                }
+                ++m_impl->stagedPublications;
+                return IndexResult::Success;
+            }
+            u32 pathIndex = 0;
+            if (m_impl->lookup.Find(request.output.GetPath().Id(), pathIndex) &&
+                (pathIndex >= m_impl->records.Size() || m_impl->records[pathIndex]->output != request.output))
+            {
+                VANGUARD_DELETE(replacement);
+                return IndexResult::InvalidArgument;
+            }
+            DependencyRecord* const existing = m_impl->FindLocked(request.output);
+            if (existing != nullptr)
+            {
+                u32 recordIndex = 0;
+                static_cast<void>(m_impl->lookup.Find(request.output.GetPath().Id(), recordIndex));
+                m_impl->records[recordIndex] = replacement;
+                VANGUARD_DELETE(existing);
+                ++m_impl->stats.replacements;
             }
             else
             {
-                const u32 previous = m_impl->stagedRecords.Size();
-                m_impl->stagedRecords.PushBack(replacement);
-                if (m_impl->stagedRecords.Size() != previous + 1u || !m_impl->stagedLookup.Insert(request.output.GetPath().Id(), previous).IsSuccessful())
+                if (m_impl->records.Size() >= m_impl->config.maximumRecords)
                 {
-                    if (m_impl->stagedRecords.Size() == previous + 1u)
-                    {
-                        static_cast<void>(m_impl->stagedRecords.RemoveAt(previous));
-                    }
+                    VANGUARD_DELETE(replacement);
+                    return IndexResult::LimitExceeded;
+                }
+                const u32 previous = m_impl->records.Size();
+                m_impl->records.PushBack(replacement);
+                if (m_impl->records.Size() != previous + 1u)
+                {
+                    VANGUARD_DELETE(replacement);
+                    return IndexResult::OutOfMemory;
+                }
+                if (!m_impl->lookup.Insert(request.output.GetPath().Id(), previous).IsSuccessful())
+                {
+                    static_cast<void>(m_impl->records.RemoveAt(previous));
                     VANGUARD_DELETE(replacement);
                     return IndexResult::OutOfMemory;
                 }
             }
-            ++m_impl->stagedPublications;
+            ++m_impl->stats.publications;
+            m_impl->changed = true;
+            m_impl->reverseDirty = true;
+            m_impl->UpdateCountsLocked();
             return IndexResult::Success;
-        }
-        u32 pathIndex = 0;
-        if (m_impl->lookup.Find(request.output.GetPath().Id(), pathIndex) &&
-            (pathIndex >= m_impl->records.Size() || m_impl->records[pathIndex]->output != request.output))
-        {
-            VANGUARD_DELETE(replacement);
-            return IndexResult::InvalidArgument;
-        }
-        DependencyRecord* const existing = m_impl->FindLocked(request.output);
-        if (existing != nullptr)
-        {
-            u32 recordIndex = 0;
-            static_cast<void>(m_impl->lookup.Find(request.output.GetPath().Id(), recordIndex));
-            m_impl->records[recordIndex] = replacement;
-            VANGUARD_DELETE(existing);
-            ++m_impl->stats.replacements;
-        }
-        else
-        {
-            if (m_impl->records.Size() >= m_impl->config.maximumRecords)
-            {
-                VANGUARD_DELETE(replacement);
-                return IndexResult::LimitExceeded;
-            }
-            const u32 previous = m_impl->records.Size();
-            m_impl->records.PushBack(replacement);
-            if (m_impl->records.Size() != previous + 1u)
-            {
-                VANGUARD_DELETE(replacement);
-                return IndexResult::OutOfMemory;
-            }
-            if (!m_impl->lookup.Insert(request.output.GetPath().Id(), previous).IsSuccessful())
-            {
-                static_cast<void>(m_impl->records.RemoveAt(previous));
-                VANGUARD_DELETE(replacement);
-                return IndexResult::OutOfMemory;
-            }
-        }
-        ++m_impl->stats.publications;
-        m_impl->changed = true;
-        m_impl->reverseDirty = true;
-        m_impl->UpdateCountsLocked();
-        return IndexResult::Success;
+        }();
+        if (published == IndexResult::Success)
+            protectionDomain->AdoptPersistentPublication(this, output);
+        return published;
     }
 
     IndexResult DependencyIndex::Remove(const resources::ResourceReference output) noexcept
@@ -1207,6 +1340,60 @@ namespace vanguard::assets
         return affected.Empty() ? IndexResult::NotFound : IndexResult::Success;
     }
 
+    IndexResult DependencyIndex::MaterializeGeneratedDependencyContent(
+        BuildPlan& plan, const containers::ArraySpan<const DependencyRecord> preferredRecords) const noexcept
+    {
+        if (m_impl == nullptr)
+            return IndexResult::InvalidState;
+        if (!plan.IsPrepared() || (!preferredRecords.Empty() && preferredRecords.Data() == nullptr))
+            return IndexResult::InvalidArgument;
+
+        bool missingRequired = false;
+        for (const BuildDependency& dependency : plan.GetDependencies())
+        {
+            if (dependency.role != DependencyRole::Generated || dependency.requirement == DependencyRequirement::Soft)
+                continue;
+
+            BuildFingerprint content;
+            bool foundPreferred = false;
+            for (const DependencyRecord& record : preferredRecords)
+            {
+                if (record.output != dependency.identity)
+                    continue;
+                content = record.contentFingerprint;
+                foundPreferred = true;
+                break;
+            }
+
+            if (!foundPreferred)
+            {
+                DependencyRecord committed;
+                const IndexResult found = Find(dependency.identity, committed);
+                if (found == IndexResult::NotFound)
+                {
+                    if (dependency.requirement == DependencyRequirement::Required)
+                        missingRequired = true;
+                    continue;
+                }
+                if (found != IndexResult::Success)
+                    return found;
+                content = committed.contentFingerprint;
+            }
+
+            const Result applied = plan.SetGeneratedDependencyContent(dependency.identity, content);
+            if (applied == Result::Success)
+                continue;
+            if (applied == Result::OutOfMemory)
+                return IndexResult::OutOfMemory;
+            if (applied == Result::LimitExceeded)
+                return IndexResult::LimitExceeded;
+            if (applied == Result::InvalidArgument)
+                return IndexResult::InvalidArgument;
+            return IndexResult::InvalidState;
+        }
+        return missingRequired ? IndexResult::NotFound : IndexResult::Success;
+    }
+
     DirtyReason DependencyIndex::Evaluate(const BuildRequest& request, const BuildPlan& plan) const noexcept
     {
         if (m_impl == nullptr || !request.IsValid() || !plan.IsPrepared())
@@ -1246,6 +1433,51 @@ namespace vanguard::assets
         return DirtyReason::UpToDate;
     }
 
+    IndexResult DependencyIndex::CaptureProtectionKeys(containers::DynamicArray<ArtifactSetKey>& keys,
+                                                       const u32 maximumRecords, const u64 maximumBytes) const noexcept
+    {
+        keys.Clear();
+        if (m_impl == nullptr || maximumRecords == 0u || maximumBytes == 0u)
+            return IndexResult::InvalidArgument;
+
+        concurrency::ScopedLock guard(m_impl->lock);
+        const u64 committed = m_impl->records.Size();
+        const u64 staged = m_impl->transactionActive ? m_impl->stagedRecords.Size() : 0u;
+        const u64 count = committed + staged;
+        if (count > maximumRecords || count > maximumBytes / sizeof(ArtifactSetKey))
+            return IndexResult::LimitExceeded;
+
+        keys.Resize(static_cast<u32>(count));
+        if (keys.Size() != count)
+        {
+            keys.Clear();
+            return IndexResult::OutOfMemory;
+        }
+        u32 write = 0u;
+        for (const DependencyRecord* const record : m_impl->records)
+        {
+            if (record == nullptr || record->buildFingerprint.IsEmpty() || record->contentFingerprint.IsEmpty())
+            {
+                keys.Clear();
+                return IndexResult::InvalidState;
+            }
+            keys[write++] = {record->buildFingerprint, record->contentFingerprint};
+        }
+        if (m_impl->transactionActive)
+        {
+            for (const DependencyRecord* const record : m_impl->stagedRecords)
+            {
+                if (record == nullptr || record->buildFingerprint.IsEmpty() || record->contentFingerprint.IsEmpty())
+                {
+                    keys.Clear();
+                    return IndexResult::InvalidState;
+                }
+                keys[write++] = {record->buildFingerprint, record->contentFingerprint};
+            }
+        }
+        return IndexResult::Success;
+    }
+
     IndexResult DependencyIndex::Save() noexcept
     {
         if (m_impl == nullptr)
@@ -1283,6 +1515,61 @@ namespace vanguard::assets
         }
         m_impl->ClearStagedLocked();
         m_impl->transactionActive = true;
+        return IndexResult::Success;
+    }
+
+    IndexResult DependencyIndex::CaptureTransactionRecords(containers::DynamicArray<DependencyRecord>& records,
+                                                           const u32 maximumRecords, const u64 maximumBytes) const noexcept
+    {
+        records.Clear();
+        if (m_impl == nullptr || maximumRecords == 0u || maximumBytes == 0u)
+        {
+            return IndexResult::InvalidArgument;
+        }
+
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (!m_impl->transactionActive)
+        {
+            return IndexResult::InvalidState;
+        }
+        if (m_impl->stagedRecords.Size() > maximumRecords)
+        {
+            return IndexResult::LimitExceeded;
+        }
+
+        u64 retainedBytes = 0u;
+        for (const DependencyRecord* const staged : m_impl->stagedRecords)
+        {
+            if (staged == nullptr)
+            {
+                records.Clear();
+                return IndexResult::InvalidState;
+            }
+            const u64 dependencyBytes = static_cast<u64>(staged->dependencies.Size()) * sizeof(BuildDependency);
+            const u64 artifactBytes = static_cast<u64>(staged->artifacts.Size()) * sizeof(IndexedArtifact);
+            const u64 recordBytes = sizeof(DependencyRecord) + dependencyBytes + artifactBytes;
+            if (retainedBytes > maximumBytes || recordBytes > maximumBytes - retainedBytes)
+            {
+                records.Clear();
+                return IndexResult::LimitExceeded;
+            }
+            retainedBytes += recordBytes;
+        }
+
+        records.Resize(m_impl->stagedRecords.Size());
+        if (records.Size() != m_impl->stagedRecords.Size())
+        {
+            records.Clear();
+            return IndexResult::OutOfMemory;
+        }
+        for (u32 index = 0; index < m_impl->stagedRecords.Size(); ++index)
+        {
+            if (!CopyRecord(*m_impl->stagedRecords[index], records[index]))
+            {
+                records.Clear();
+                return IndexResult::OutOfMemory;
+            }
+        }
         return IndexResult::Success;
     }
 

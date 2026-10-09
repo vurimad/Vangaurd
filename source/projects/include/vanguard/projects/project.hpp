@@ -8,6 +8,9 @@ namespace vanguard::projects
     inline constexpr u16 ProjectSchemaMajor = 1;
     inline constexpr u16 ProjectSchemaMinor = 0;
     inline constexpr u32 MaximumProjectFileBytes = 64u * 1024u;
+    inline constexpr u32 MaximumTechnicalNameBytes = 64;
+    inline constexpr u32 ProjectIdTextLength = 36;
+    inline constexpr u32 ProjectIdTextBufferSize = ProjectIdTextLength + 1;
     inline constexpr u32 MaximumTargets = 16;
     inline constexpr u32 MaximumPlugins = 128;
 
@@ -17,6 +20,9 @@ namespace vanguard::projects
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] friend bool operator==(const ProjectId&, const ProjectId&) noexcept = default;
     };
+
+    [[nodiscard]] bool ParseProjectId(containers::StringView text, ProjectId& projectId) noexcept;
+    [[nodiscard]] bool FormatProjectId(const ProjectId& projectId, char* destination, u32 capacity) noexcept;
 
     struct EngineVersionRange
     {
@@ -75,6 +81,10 @@ namespace vanguard::projects
         const char* message = nullptr;
     };
 
+    // Canonical grammar for stable project-facing technical identifiers such as
+    // project names, targets, plugins and policy names. Keep every consumer on
+    // this one authority instead of duplicating the syntax.
+    [[nodiscard]] bool IsTechnicalName(containers::StringView name) noexcept;
     [[nodiscard]] Result Parse(containers::StringView text, ProjectDescriptor& project, Diagnostic* diagnostic = nullptr) noexcept;
     [[nodiscard]] Result Read(filesystem::IFile& file, ProjectDescriptor& project, Diagnostic* diagnostic = nullptr) noexcept;
     [[nodiscard]] Result Write(filesystem::IFile& file, const ProjectDescriptor& project, Diagnostic* diagnostic = nullptr) noexcept;

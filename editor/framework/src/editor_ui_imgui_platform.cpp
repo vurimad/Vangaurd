@@ -1,19 +1,30 @@
 #include <vanguard/editor/editor_ui_imgui_platform.hpp>
-#include <vanguard/editor/editor_ui_stall_probe.hpp>
 #include <vanguard/editor/editor_ui_imgui.hpp>
 #include <vanguard/editor/editor_ui_render_data.hpp>
+#include <vanguard/editor/editor_resources.hpp>
+#include <vanguard/editor/editor_svg_icon.hpp>
+#include <vanguard/editor/editor_toolbar_icons.hpp>
+#include <vanguard/editor/editor_visual_style.hpp>
 
 #include <vanguard/engine/input_service.hpp>
 #include <vanguard/engine/window_service.hpp>
+#include <vanguard/concurrency/thread.hpp>
 #include <vanguard/containers/containers.hpp>
+#include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/memory/pool.hpp>
+#include <vanguard/system/time.hpp>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -23,6 +34,239 @@ namespace
     namespace engine = vanguard::engine;
     namespace input = vanguard::input;
     namespace window = vanguard::window;
+
+    constexpr vanguard::u32 MaximumBrandWordmarkSegments = 2048;
+    constexpr float BrandWordmarkVanguardMaximumX = 885.0f;
+    constexpr int BrandWordmarkTextureHeight = 64;
+    constexpr int BrandWordmarkTexturePadding = 3;
+    constexpr int BrandWordmarkCoverageSamples = 4;
+    constexpr int MaximumBrandWordmarkTextureWidth = 1024;
+
+    struct BrandWordmarkSegment final
+    {
+        float x0 = 0.0f;
+        float y0 = 0.0f;
+        float x1 = 0.0f;
+        float y1 = 0.0f;
+    };
+
+    struct BrandWordmarkGeometry final
+    {
+        BrandWordmarkSegment segments[MaximumBrandWordmarkSegments]{};
+        vanguard::u32 count = 0;
+        float minimumX = 0.0f;
+        float minimumY = 0.0f;
+        float maximumX = 0.0f;
+        float maximumY = 0.0f;
+        bool hasBounds = false;
+    };
+
+    void SkipSvgSeparators(const char*& cursor, const char* const end) noexcept
+    {
+        while (cursor < end && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n' || *cursor == ','))
+            ++cursor;
+    }
+
+    [[nodiscard]] bool ReadSvgFloat(const char*& cursor, const char* const end, float& value) noexcept
+    {
+        SkipSvgSeparators(cursor, end);
+        if (cursor >= end)
+            return false;
+        char* parsedEnd = nullptr;
+        value = std::strtof(cursor, &parsedEnd);
+        if (parsedEnd == cursor || parsedEnd > end || !std::isfinite(value))
+            return false;
+        cursor = parsedEnd;
+        return true;
+    }
+
+    void IncludeBrandWordmarkPoint(BrandWordmarkGeometry& geometry, const float x, const float y) noexcept
+    {
+        if (!geometry.hasBounds)
+        {
+            geometry.minimumX = geometry.maximumX = x;
+            geometry.minimumY = geometry.maximumY = y;
+            geometry.hasBounds = true;
+            return;
+        }
+        geometry.minimumX = x < geometry.minimumX ? x : geometry.minimumX;
+        geometry.minimumY = y < geometry.minimumY ? y : geometry.minimumY;
+        geometry.maximumX = x > geometry.maximumX ? x : geometry.maximumX;
+        geometry.maximumY = y > geometry.maximumY ? y : geometry.maximumY;
+    }
+
+    [[nodiscard]] bool AppendBrandWordmarkSegment(BrandWordmarkGeometry& geometry, const float x0, const float y0,
+                                                  const float x1, const float y1) noexcept
+    {
+        const bool firstVanguard = x0 <= BrandWordmarkVanguardMaximumX;
+        const bool secondVanguard = x1 <= BrandWordmarkVanguardMaximumX;
+        if (!firstVanguard && !secondVanguard)
+            return true;
+        if (firstVanguard != secondVanguard)
+            return false;
+        if (geometry.count >= MaximumBrandWordmarkSegments)
+            return false;
+        geometry.segments[geometry.count++] = {x0, y0, x1, y1};
+        IncludeBrandWordmarkPoint(geometry, x0, y0);
+        IncludeBrandWordmarkPoint(geometry, x1, y1);
+        return true;
+    }
+
+    [[nodiscard]] bool ParseBrandWordmarkSvg(const char* const document, BrandWordmarkGeometry& geometry) noexcept
+    {
+        geometry = {};
+        if (document == nullptr)
+            return false;
+        const char* const path = std::strstr(document, "<path");
+        if (path == nullptr)
+            return false;
+        const char* const dataAttribute = std::strstr(path, "d=\"");
+        if (dataAttribute == nullptr)
+            return false;
+        const char* cursor = dataAttribute + 3;
+        const char* const end = std::strchr(cursor, '"');
+        if (end == nullptr || cursor == end)
+            return false;
+
+        char command = 0;
+        float currentX = 0.0f;
+        float currentY = 0.0f;
+        float contourX = 0.0f;
+        float contourY = 0.0f;
+        bool contourOpen = false;
+        while (cursor < end)
+        {
+            SkipSvgSeparators(cursor, end);
+            if (cursor >= end)
+                break;
+            if (*cursor == 'M' || *cursor == 'L' || *cursor == 'Z')
+                command = *cursor++;
+            else if (command == 0)
+                return false;
+
+            if (command == 'M')
+            {
+                float x = 0.0f;
+                float y = 0.0f;
+                if (!ReadSvgFloat(cursor, end, x) || !ReadSvgFloat(cursor, end, y))
+                    return false;
+                currentX = contourX = x;
+                currentY = contourY = y;
+                contourOpen = true;
+                command = 'L';
+                continue;
+            }
+            if (command == 'L')
+            {
+                if (!contourOpen)
+                    return false;
+                float x = 0.0f;
+                float y = 0.0f;
+                if (!ReadSvgFloat(cursor, end, x) || !ReadSvgFloat(cursor, end, y) ||
+                    !AppendBrandWordmarkSegment(geometry, currentX, currentY, x, y))
+                    return false;
+                currentX = x;
+                currentY = y;
+                continue;
+            }
+            if (command == 'Z')
+            {
+                if (!contourOpen || !AppendBrandWordmarkSegment(geometry, currentX, currentY, contourX, contourY))
+                    return false;
+                currentX = contourX;
+                currentY = contourY;
+                contourOpen = false;
+                command = 0;
+                continue;
+            }
+            return false;
+        }
+        return geometry.count != 0 && geometry.hasBounds && geometry.maximumX > geometry.minimumX && geometry.maximumY > geometry.minimumY;
+    }
+
+    [[nodiscard]] bool RasterizeBrandWordmark(const BrandWordmarkGeometry& geometry, ImTextureData& texture,
+                                              float& aspectRatio) noexcept
+    {
+        const float sourceWidth = geometry.maximumX - geometry.minimumX;
+        const float sourceHeight = geometry.maximumY - geometry.minimumY;
+        constexpr int contentHeight = BrandWordmarkTextureHeight - BrandWordmarkTexturePadding * 2;
+        if (!(sourceWidth > 0.0f) || !(sourceHeight > 0.0f) || contentHeight <= 0)
+            return false;
+        const float scale = static_cast<float>(contentHeight) / sourceHeight;
+        const int width = static_cast<int>(std::ceil(sourceWidth * scale)) + BrandWordmarkTexturePadding * 2;
+        if (width <= 0 || width > MaximumBrandWordmarkTextureWidth)
+            return false;
+
+        texture.Create(ImTextureFormat_RGBA32, width, BrandWordmarkTextureHeight);
+        auto* const pixels = static_cast<unsigned char*>(texture.GetPixels());
+        const int pixelCount = width * BrandWordmarkTextureHeight;
+        for (int pixel = 0; pixel < pixelCount; ++pixel)
+        {
+            pixels[pixel * 4 + 0] = 255;
+            pixels[pixel * 4 + 1] = 255;
+            pixels[pixel * 4 + 2] = 255;
+            pixels[pixel * 4 + 3] = 0;
+        }
+
+        float intersections[MaximumBrandWordmarkSegments]{};
+        float coverage[MaximumBrandWordmarkTextureWidth]{};
+        for (int y = BrandWordmarkTexturePadding; y < BrandWordmarkTextureHeight - BrandWordmarkTexturePadding; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+                coverage[x] = 0.0f;
+            for (int sample = 0; sample < BrandWordmarkCoverageSamples; ++sample)
+            {
+                const float subpixelY = (static_cast<float>(sample) + 0.5f) / static_cast<float>(BrandWordmarkCoverageSamples);
+                const float sourceY = geometry.minimumY +
+                                      (static_cast<float>(y - BrandWordmarkTexturePadding) + subpixelY) / scale;
+                vanguard::u32 intersectionCount = 0;
+                for (vanguard::u32 index = 0; index < geometry.count; ++index)
+                {
+                    const BrandWordmarkSegment& segment = geometry.segments[index];
+                    const bool crosses = (segment.y0 <= sourceY && segment.y1 > sourceY) ||
+                                         (segment.y1 <= sourceY && segment.y0 > sourceY);
+                    if (!crosses)
+                        continue;
+                    if (intersectionCount >= MaximumBrandWordmarkSegments)
+                        return false;
+                    const float amount = (sourceY - segment.y0) / (segment.y1 - segment.y0);
+                    const float sourceX = segment.x0 + (segment.x1 - segment.x0) * amount;
+                    intersections[intersectionCount++] = static_cast<float>(BrandWordmarkTexturePadding) +
+                                                         (sourceX - geometry.minimumX) * scale;
+                }
+                if ((intersectionCount & 1u) != 0u)
+                    return false;
+                std::sort(intersections, intersections + intersectionCount);
+                for (vanguard::u32 index = 0; index < intersectionCount; index += 2u)
+                {
+                    const float left = intersections[index] > 0.0f ? intersections[index] : 0.0f;
+                    const float right = intersections[index + 1u] < static_cast<float>(width)
+                                            ? intersections[index + 1u]
+                                            : static_cast<float>(width);
+                    if (!(right > left))
+                        continue;
+                    int first = static_cast<int>(std::floor(left));
+                    int last = static_cast<int>(std::ceil(right)) - 1;
+                    first = first < 0 ? 0 : first;
+                    last = last >= width ? width - 1 : last;
+                    for (int x = first; x <= last; ++x)
+                    {
+                        const float overlapLeft = left > static_cast<float>(x) ? left : static_cast<float>(x);
+                        const float overlapRight = right < static_cast<float>(x + 1) ? right : static_cast<float>(x + 1);
+                        if (overlapRight > overlapLeft)
+                            coverage[x] += (overlapRight - overlapLeft) / static_cast<float>(BrandWordmarkCoverageSamples);
+                    }
+                }
+            }
+            for (int x = 0; x < width; ++x)
+            {
+                const float alpha = coverage[x] < 0.0f ? 0.0f : (coverage[x] > 1.0f ? 1.0f : coverage[x]);
+                pixels[(y * width + x) * 4 + 3] = static_cast<unsigned char>(alpha * 255.0f + 0.5f);
+            }
+        }
+        aspectRatio = static_cast<float>(width) / static_cast<float>(BrandWordmarkTextureHeight);
+        return aspectRatio > 0.0f && std::isfinite(aspectRatio);
+    }
 
     void ClearFailure(editor::EditorUiFailure* const failure) noexcept
     {
@@ -38,6 +282,54 @@ namespace
             failure->message = message;
         }
         return false;
+    }
+
+    bool FailCode(editor::EditorUiFailure* const failure, const editor::EditorUiFailureCode code,
+                  const char* const message) noexcept
+    {
+        if (failure != nullptr)
+        {
+            failure->code = code;
+            failure->message = message;
+        }
+        return false;
+    }
+
+    void ClearManualIniDirtyState() noexcept
+    {
+        if (ImGui::GetCurrentContext() == nullptr)
+            return;
+        ImGui::GetIO().WantSaveIniSettings = false;
+        ImGui::GetCurrentContext()->SettingsDirtyTimer = 0.0f;
+    }
+
+    [[nodiscard]] ImGuiDockNode* FindPersistedCentralDockNode(ImGuiDockNode* const node) noexcept
+    {
+        if (node == nullptr)
+            return nullptr;
+        if (node->IsCentralNode())
+            return node;
+        if (ImGuiDockNode* const left = FindPersistedCentralDockNode(node->ChildNodes[0]))
+            return left;
+        return FindPersistedCentralDockNode(node->ChildNodes[1]);
+    }
+
+    [[nodiscard]] bool SavedDisplayLess(const editor::detail::EditorUiSavedDisplay& left,
+                                        const editor::detail::EditorUiSavedDisplay& right) noexcept
+    {
+        if (left.primary != right.primary)
+            return left.primary && !right.primary;
+        if (left.boundsX != right.boundsX) return left.boundsX < right.boundsX;
+        if (left.boundsY != right.boundsY) return left.boundsY < right.boundsY;
+        if (left.boundsWidth != right.boundsWidth) return left.boundsWidth < right.boundsWidth;
+        if (left.boundsHeight != right.boundsHeight) return left.boundsHeight < right.boundsHeight;
+        if (left.workX != right.workX) return left.workX < right.workX;
+        if (left.workY != right.workY) return left.workY < right.workY;
+        if (left.workWidth != right.workWidth) return left.workWidth < right.workWidth;
+        if (left.workHeight != right.workHeight) return left.workHeight < right.workHeight;
+        if (left.desktopPixelWidth != right.desktopPixelWidth) return left.desktopPixelWidth < right.desktopPixelWidth;
+        if (left.desktopPixelHeight != right.desktopPixelHeight) return left.desktopPixelHeight < right.desktopPixelHeight;
+        return left.scaleQ16_16 < right.scaleQ16_16;
     }
 
     void* ImGuiAllocate(const size_t size, void*) noexcept
@@ -225,6 +517,14 @@ namespace vanguard::editor::detail
             EditorTextureHandle identity;
         };
 
+        struct SvgIconRecord final
+        {
+            EditorResourceId resource = InvalidEditorResourceId;
+            EditorSvgIcon icon;
+            bool active = false;
+            bool registered = false;
+        };
+
         EditorUiService* ui = nullptr;
         engine::WindowService* windowService = nullptr;
         engine::InputService* inputService = nullptr;
@@ -235,14 +535,113 @@ namespace vanguard::editor::detail
         containers::DynamicArray<char> clipboard;
         containers::DynamicArray<ManagedTextureRecord> managedTextures;
         rhi::SamplerState textureSampler;
+        SvgIconRecord svgIcons[EditorToolbarIconCount]{};
+        ImTextureData vanguardWordmarkTexture;
+        float vanguardWordmarkAspectRatio = 0.0f;
+        bool vanguardWordmarkRegistered = false;
         const char* deferredFailure = nullptr;
         ImGuiMouseCursor appliedCursor = ImGuiMouseCursor_COUNT;
         bool appliedCursorVisible = true;
         bool frameActive = false;
+        bool frameEverBegun = false;
+        bool layoutLoadAttempted = false;
+        u64 inputCaptureFrame = 0;
+        u64 diagnosticsHeartbeatTick = 0;
+        bool frameDiagnosticsEnabled = false;
+        bool preWantCaptureKeyboard = false;
+        bool preWantTextInput = false;
+        bool postImeWantTextInput = false;
+        float userUiScale = 1.0f;
+        float appliedUserUiScale = 1.0f;
+
+        void ResetInputCapture() noexcept
+        {
+            inputCaptureFrame = 0;
+            preWantCaptureKeyboard = false;
+            preWantTextInput = false;
+            postImeWantTextInput = false;
+        }
 
         [[nodiscard]] window::WindowManager& Windows() const noexcept { return windowService->GetManager(); }
 
+        [[nodiscard]] bool InitializeToolbarIcons(EditorResourceService& resources) noexcept
+        {
+            const containers::ArraySpan<const EditorToolbarIconDescriptor> descriptors =
+                GetEditorToolbarIconDescriptors();
+            if (descriptors.Size() != EditorToolbarIconCount)
+                return false;
+            for (u32 index = 0; index < descriptors.Size(); ++index)
+            {
+                EditorResourceLocation location;
+                if (!resources.Resolve(descriptors[index].resource.id, location) ||
+                    location.kind != EditorResourceKind::SvgIcon ||
+                    !LoadEditorSvgIcon(location.path, svgIcons[index].icon))
+                    return false;
+                svgIcons[index].resource = descriptors[index].resource.id;
+                ImGui::RegisterUserTexture(&svgIcons[index].icon.texture);
+                svgIcons[index].registered = true;
+                svgIcons[index].active = true;
+            }
+            return true;
+        }
+
+        void ReleaseToolbarIcons() noexcept
+        {
+            for (SvgIconRecord& record : svgIcons)
+            {
+                if (record.registered)
+                    ImGui::UnregisterUserTexture(&record.icon.texture);
+                record.registered = false;
+                record.active = false;
+                record.resource = InvalidEditorResourceId;
+            }
+        }
+
+        [[nodiscard]] EditorSvgIcon* FindSvgIcon(const EditorResourceId resource) noexcept
+        {
+            if (resource == InvalidEditorResourceId)
+                return nullptr;
+            for (SvgIconRecord& record : svgIcons)
+                if (record.active && record.resource == resource)
+                    return &record.icon;
+            return nullptr;
+        }
+
+        void InitializeVanguardWordmark(EditorResourceService& resources) noexcept
+        {
+            EditorResourceLocation location;
+            if (!resources.Resolve(EditorVanguardEngineWordmarkResourceId, location) ||
+                location.kind != EditorResourceKind::SvgImage)
+                return;
+            containers::String document;
+            if (!filesystem::LoadFileToString(location.path, document))
+                return;
+            BrandWordmarkGeometry geometry;
+            if (!ParseBrandWordmarkSvg(document.AsChar(), geometry) ||
+                !RasterizeBrandWordmark(geometry, vanguardWordmarkTexture, vanguardWordmarkAspectRatio))
+                return;
+            ImGui::RegisterUserTexture(&vanguardWordmarkTexture);
+            vanguardWordmarkRegistered = true;
+        }
+
+        void ReleaseVanguardWordmark() noexcept
+        {
+            if (!vanguardWordmarkRegistered)
+                return;
+            ImGui::UnregisterUserTexture(&vanguardWordmarkTexture);
+            vanguardWordmarkRegistered = false;
+            vanguardWordmarkAspectRatio = 0.0f;
+        }
+
         static void ResetRenderState(const ImDrawList*, const ImDrawCmd*) noexcept {}
+
+        static void OnChangedViewport(ImGuiViewport* const viewport) noexcept
+        {
+            Impl* const impl = Get();
+            if (impl == nullptr || viewport == nullptr)
+                return;
+            editor::detail::ApplyEditorVisualStyle(impl->appliedUserUiScale, viewport->DpiScale);
+        }
 
         [[nodiscard]] ViewportRecord* AllocateViewport() noexcept
         {
@@ -319,7 +718,8 @@ namespace vanguard::editor::detail
             descriptor.placement.display = impl->DisplayFor(viewport->Pos);
             descriptor.placement.visible = false;
             descriptor.initialPlacement = window::InitialWindowPlacement::Explicit;
-            descriptor.flags = window::WindowFlag::Resizable | window::WindowFlag::HighPixelDensity;
+            descriptor.flags = window::WindowFlag::Resizable | window::WindowFlag::HighPixelDensity |
+                               window::WindowFlag::AcceptFileDrop;
             if ((viewport->Flags & ImGuiViewportFlags_NoDecoration) != 0)
                 descriptor.flags = descriptor.flags | window::WindowFlag::Borderless;
             if ((viewport->Flags & ImGuiViewportFlags_TopMost) != 0)
@@ -465,6 +865,14 @@ namespace vanguard::editor::detail
             ViewportRecord* const record = GetRecord(viewport);
             if (impl == nullptr || record == nullptr || !record->window.IsValid())
                 return;
+            // ImGui derives platform titles from the rendered portion of its window name. Internal
+            // docking host windows are named with a leading "##" (for example ##DockNode_x), so
+            // FindRenderedTextEnd() legitimately produces an empty platform title while a detached
+            // viewport is transitioning/resizing. WindowManager intentionally rejects empty titles;
+            // preserve the last valid native title instead of turning this transient ImGui state
+            // into a fatal editor-frame failure.
+            if (title == nullptr || title[0] == '\0')
+                return;
             window::Failure failure;
             if (!impl->Windows().SetTitle(record->window, title, &failure))
                 impl->RecordFailure(failure.message != nullptr ? failure.message : "editor native viewport title change failed");
@@ -499,6 +907,8 @@ namespace vanguard::editor::detail
         static void SetImeData(ImGuiContext*, ImGuiViewport* const viewport, ImGuiPlatformImeData* const data) noexcept
         {
             Impl* const impl = Get();
+            if (impl != nullptr && data != nullptr)
+                impl->postImeWantTextInput = impl->postImeWantTextInput || data->WantTextInput;
             ViewportRecord* const record = GetRecord(viewport);
             if (impl == nullptr || record == nullptr || data == nullptr || !record->window.IsValid())
                 return;
@@ -748,6 +1158,7 @@ namespace vanguard::editor::detail
             retained.texture.Reset(resolved.texture);
             retained.sampler.Reset(resolved.sampler);
             retained.colorSpace = resolved.colorSpace;
+            retained.publication = resolved.publication;
             renderData.textures.PushBack(static_cast<EditorUiRenderTexture&&>(retained));
             index = renderData.textures.Size() - 1u;
             return true;
@@ -1003,7 +1414,9 @@ namespace vanguard::editor::detail
         Shutdown();
     }
 
-    bool EditorUiImGuiPlatform::Initialize(EditorUiService& ui, engine::WindowService& windows, engine::InputService& input,
+    bool EditorUiImGuiPlatform::Initialize(EditorUiService& ui, EditorResourceService& resources,
+                                           engine::WindowService& windows, engine::InputService& input,
+                                           const bool frameDiagnosticsEnabled,
                                            EditorUiFailure* const failure) noexcept
     {
         ClearFailure(failure);
@@ -1016,6 +1429,7 @@ namespace vanguard::editor::detail
         m_impl->ui = &ui;
         m_impl->windowService = &windows;
         m_impl->inputService = &input;
+        m_impl->frameDiagnosticsEnabled = frameDiagnosticsEnabled;
 
         ImGui::SetAllocatorFunctions(ImGuiAllocate, ImGuiFree);
         m_impl->context = ImGui::CreateContext();
@@ -1042,6 +1456,43 @@ namespace vanguard::editor::detail
         io.ConfigDockingTransparentPayload = true;
         io.ConfigDpiScaleFonts = true;
         io.ConfigDpiScaleViewports = true;
+
+        EditorResourceLocation regularFont;
+        EditorResourceLocation semiboldFont;
+        if (!resources.Resolve(EditorUiRegularFontResourceId, regularFont) ||
+            !resources.Resolve(EditorUiSemiboldFontResourceId, semiboldFont))
+        {
+            Shutdown();
+            return Fail(failure, "editor UI font resources could not be resolved");
+        }
+
+        ImFontConfig regularConfig;
+        regularConfig.SizePixels = 13.0f;
+        regularConfig.OversampleH = 2;
+        regularConfig.OversampleV = 2;
+        std::snprintf(regularConfig.Name, sizeof(regularConfig.Name), "%s", "Source Sans 3 Regular");
+        ImFont* const regular = io.Fonts->AddFontFromFileTTF(regularFont.path.AsChar(), 13.0f, &regularConfig);
+
+        ImFontConfig semiboldConfig;
+        semiboldConfig.SizePixels = 13.0f;
+        semiboldConfig.OversampleH = 2;
+        semiboldConfig.OversampleV = 2;
+        std::snprintf(semiboldConfig.Name, sizeof(semiboldConfig.Name), "%s", "Source Sans 3 Semibold");
+        ImFont* const semibold = io.Fonts->AddFontFromFileTTF(semiboldFont.path.AsChar(), 13.0f, &semiboldConfig);
+        if (regular == nullptr || semibold == nullptr)
+        {
+            Shutdown();
+            return Fail(failure, "editor UI fonts could not be loaded from the editor resource image");
+        }
+        io.FontDefault = regular;
+        editor::detail::SetEditorVisualFonts(regular, semibold);
+        editor::detail::ApplyEditorVisualStyle(m_impl->userUiScale, 1.0f);
+        if (!m_impl->InitializeToolbarIcons(resources))
+        {
+            Shutdown();
+            return Fail(failure, "editor toolbar SVG icon resources could not be loaded");
+        }
+        m_impl->InitializeVanguardWordmark(resources);
         io.IniFilename = nullptr;
         io.BackendPlatformUserData = m_impl;
         io.BackendPlatformName = "vanguard_editor_platform";
@@ -1064,6 +1515,7 @@ namespace vanguard::editor::detail
         platform.Platform_GetWindowMinimized = Impl::GetWindowMinimized;
         platform.Platform_SetWindowTitle = Impl::SetWindowTitle;
         platform.Platform_GetWindowDpiScale = Impl::GetWindowDpiScale;
+        platform.Platform_OnChangedViewport = Impl::OnChangedViewport;
         platform.Platform_GetClipboardTextFn = Impl::GetClipboardText;
         platform.Platform_SetClipboardTextFn = Impl::SetClipboardText;
         platform.Platform_SetImeDataFn = Impl::SetImeData;
@@ -1097,6 +1549,7 @@ namespace vanguard::editor::detail
     {
         if (m_impl == nullptr)
             return;
+        m_impl->ResetInputCapture();
         if (m_impl->context != nullptr)
         {
             ImGui::SetCurrentContext(m_impl->context);
@@ -1107,8 +1560,11 @@ namespace vanguard::editor::detail
             {
                 window::Failure failure;
                 static_cast<void>(m_impl->Windows().SetTextInput(primaryWindow, {}, &failure));
+                static_cast<void>(m_impl->Windows().SetHitTest(primaryWindow, {}, &failure));
             }
             ImGui::DestroyPlatformWindows();
+            m_impl->ReleaseToolbarIcons();
+            m_impl->ReleaseVanguardWordmark();
             m_impl->ReleaseManagedTextures();
             for (Impl::ViewportRecord& record : m_impl->viewports)
             {
@@ -1128,8 +1584,10 @@ namespace vanguard::editor::detail
             ImGui::GetPlatformIO().ClearRendererHandlers();
             ImGui::GetIO().BackendPlatformUserData = nullptr;
             ImGui::GetIO().BackendPlatformName = nullptr;
+            editor::detail::ResetEditorVisualFonts();
             ImGui::DestroyContext(m_impl->context);
         }
+        m_impl->ResetInputCapture();
         m_impl->~Impl();
         memory::MemoryBlock block{m_impl, sizeof(Impl), memory::PoolId::Editor};
         memory::Free(block);
@@ -1143,62 +1601,576 @@ namespace vanguard::editor::detail
             return Fail(failure, "editor UI platform is not ready to begin a frame");
         ImGui::SetCurrentContext(m_impl->context);
         m_impl->deferredFailure = nullptr;
+        const vanguard::u64 frequency = vanguard::system::GetMonotonicFrequency();
+        const vanguard::u64 beginTick = vanguard::system::GetMonotonicTicks();
         if (!m_impl->ProcessWindowEvents(failure))
             return false;
+        const vanguard::u64 afterEventsTick = vanguard::system::GetMonotonicTicks();
         m_impl->UpdateMonitors();
+        const vanguard::u64 afterMonitorsTick = vanguard::system::GetMonotonicTicks();
+        ImGuiIO& io = ImGui::GetIO();
+        m_impl->ResetInputCapture();
+        m_impl->inputCaptureFrame = frame.frame;
+        m_impl->preWantCaptureKeyboard = io.WantCaptureKeyboard;
+        m_impl->preWantTextInput = io.WantTextInput;
+        u32 mouseMotionEvents = 0;
+        u32 mouseButtonEvents = 0;
+        u32 focusEvents = 0;
+        if (m_impl->frameDiagnosticsEnabled)
+        {
+            for (const input::RawEvent& event : m_impl->inputService->GetEvents())
+            {
+                if (event.type == input::EventType::MouseMoved)
+                    ++mouseMotionEvents;
+                else if (event.type == input::EventType::MouseButtonChanged)
+                    ++mouseButtonEvents;
+                else if (event.type == input::EventType::FocusGained || event.type == input::EventType::FocusLost)
+                    ++focusEvents;
+            }
+        }
         m_impl->ForwardInput();
         window::WindowSnapshot primary;
         if (!m_impl->Windows().GetSnapshot(m_impl->windowService->GetPrimaryWindow(), primary))
+        {
+            m_impl->ResetInputCapture();
             return Fail(failure, "editor UI primary native window state is unavailable");
-        ImGuiIO& io = ImGui::GetIO();
+        }
+        m_impl->appliedUserUiScale = m_impl->userUiScale;
+        editor::detail::ApplyEditorVisualStyle(m_impl->appliedUserUiScale, primary.nativeState.contentScale);
         io.DisplaySize = {static_cast<f32>(primary.nativeState.placement.logicalExtent.width), static_cast<f32>(primary.nativeState.placement.logicalExtent.height)};
         io.DisplayFramebufferScale = Impl::GetFramebufferScale(ImGui::GetMainViewport());
         io.DeltaTime = frame.realDeltaSeconds > 0.0f ? frame.realDeltaSeconds : 1.0f / 60.0f;
+        if (m_impl->frameDiagnosticsEnabled && frequency != 0 && !primary.nativeState.focused &&
+            (m_impl->diagnosticsHeartbeatTick == 0 || beginTick - m_impl->diagnosticsHeartbeatTick >= frequency / 2u))
+        {
+            const input::FrameSnapshot& inputSnapshot = m_impl->inputService->GetSnapshot();
+            const input::InputStats inputStats = m_impl->inputService->GetStats();
+            VG_LOG_INFO(vanguard::diagnostics::Category::Engine,
+                        "editor input state: frame=%llu mouseFocus=%u mouseWindow=%u inputFocused=%u inputEvents=%u mouseMotionEvents=%u mouseButtonEvents=%u focusEvents=%u mouseX=%.1f mouseY=%.1f deltaX=%.1f deltaY=%.1f buttons=%u imguiMouseX=%.1f imguiMouseY=%.1f hoveredViewport=%u",
+                        static_cast<unsigned long long>(frame.frame), u32(primary.nativeState.mouseFocus), u32(m_impl->mouseWindow.IsValid()),
+                        u32(inputSnapshot.focused), inputStats.lastFrameEvents, mouseMotionEvents, mouseButtonEvents, focusEvents,
+                        inputSnapshot.mouse.x, inputSnapshot.mouse.y, inputSnapshot.mouse.deltaX, inputSnapshot.mouse.deltaY, u32(inputSnapshot.mouse.down),
+                        io.MousePos.x, io.MousePos.y, io.MouseHoveredViewport);
+            m_impl->diagnosticsHeartbeatTick = beginTick;
+        }
         // Enter/leave hover reporting is not reliable under capture, including the first drag frame.
         if (m_impl->inputService->GetSnapshot().mouse.down == 0 && ImGui::GetDragDropPayload() == nullptr)
             io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport;
         else
             io.BackendFlags &= ~ImGuiBackendFlags_HasMouseHoveredViewport;
         ImGui::NewFrame();
+        const vanguard::u64 finishedTick = vanguard::system::GetMonotonicTicks();
+        if (frequency != 0)
+        {
+            const auto milliseconds = [frequency](const vanguard::u64 from, const vanguard::u64 to) noexcept
+            {
+                return to >= from ? 1000.0 * static_cast<double>(to - from) / static_cast<double>(frequency) : 0.0;
+            };
+            const double eventsMs = milliseconds(beginTick, afterEventsTick);
+            const double monitorsMs = milliseconds(afterEventsTick, afterMonitorsTick);
+            const double newFrameMs = milliseconds(afterMonitorsTick, finishedTick);
+            const double totalMs = milliseconds(beginTick, finishedTick);
+            if (totalMs >= 40.0)
+                VG_LOG_WARNING(vanguard::diagnostics::Category::Engine,
+                               "editor ImGui begin stall: frame=%llu totalMs=%.3f windowEventsMs=%.3f monitorsMs=%.3f newFrameMs=%.3f",
+                               static_cast<unsigned long long>(frame.frame), totalMs, eventsMs, monitorsMs, newFrameMs);
+        }
         m_impl->frameActive = true;
+        m_impl->frameEverBegun = true;
         return true;
     }
 
     bool EditorUiImGuiPlatform::EndFrame(EditorUiFrameData* const frames, const u32 capacity, u32& count, EditorUiTextureFrameData& textureFrame,
-                                         EditorUiFailure* const failure) noexcept
+                                         EditorUiInputCapture& inputCapture, EditorUiFailure* const failure) noexcept
     {
         ClearFailure(failure);
         count = 0;
         textureFrame.Reset();
+        inputCapture = {};
         if (m_impl == nullptr || !m_impl->frameActive)
             return Fail(failure, "editor UI platform has no active frame");
         ImGui::SetCurrentContext(m_impl->context);
+        const vanguard::u64 frequency = vanguard::system::GetMonotonicFrequency();
+        const vanguard::u64 beginTick = vanguard::system::GetMonotonicTicks();
         m_impl->UpdateCursor();
         ImGui::Render();
+        const vanguard::u64 afterRenderTick = vanguard::system::GetMonotonicTicks();
         m_impl->frameActive = false;
+        const ImGuiIO& io = ImGui::GetIO();
+        const bool postAnyItemActive = ImGui::IsAnyItemActive();
+        const bool postAnyPopup = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopup);
+        const bool postNavigationCapture = io.NavActive && io.ConfigNavCaptureKeyboard;
         {
-            UiStallProbe probe("ImGui UpdatePlatformWindows");
             ImGui::UpdatePlatformWindows();
         }
+        const vanguard::u64 afterPlatformWindowsTick = vanguard::system::GetMonotonicTicks();
         if (m_impl->deferredFailure != nullptr)
+        {
+            m_impl->ResetInputCapture();
             return Fail(failure, m_impl->deferredFailure);
+        }
+        const bool textInputCaptured = m_impl->preWantTextInput || m_impl->postImeWantTextInput;
+        const bool keyboardCaptured = m_impl->preWantCaptureKeyboard || textInputCaptured || postAnyItemActive || postAnyPopup || postNavigationCapture;
         if (!m_impl->CaptureTextureUpdates(textureFrame, failure))
+        {
+            m_impl->ResetInputCapture();
             return false;
+        }
+        const vanguard::u64 afterTexturesTick = vanguard::system::GetMonotonicTicks();
         if (!m_impl->CaptureFrames(frames, capacity, count, failure))
         {
             m_impl->RequeueTextureUpdates(textureFrame);
+            m_impl->ResetInputCapture();
             return false;
         }
+        const vanguard::u64 finishedTick = vanguard::system::GetMonotonicTicks();
+        if (frequency != 0)
+        {
+            const auto milliseconds = [frequency](const vanguard::u64 from, const vanguard::u64 to) noexcept
+            {
+                return to >= from ? 1000.0 * static_cast<double>(to - from) / static_cast<double>(frequency) : 0.0;
+            };
+            const double renderMs = milliseconds(beginTick, afterRenderTick);
+            const double platformWindowsMs = milliseconds(afterRenderTick, afterPlatformWindowsTick);
+            const double texturesMs = milliseconds(afterPlatformWindowsTick, afterTexturesTick);
+            const double framesMs = milliseconds(afterTexturesTick, finishedTick);
+            const double totalMs = milliseconds(beginTick, finishedTick);
+            if (totalMs >= 40.0)
+                VG_LOG_WARNING(vanguard::diagnostics::Category::Engine,
+                               "editor ImGui end stall: totalMs=%.3f renderMs=%.3f platformWindowsMs=%.3f texturesMs=%.3f framesMs=%.3f",
+                               totalMs, renderMs, platformWindowsMs, texturesMs, framesMs);
+        }
+        inputCapture = {m_impl->inputCaptureFrame, textInputCaptured, keyboardCaptured};
+        m_impl->ResetInputCapture();
         return true;
     }
 
     void EditorUiImGuiPlatform::AbortFrame() noexcept
     {
-        if (m_impl == nullptr || !m_impl->frameActive)
+        if (m_impl == nullptr)
             return;
+        if (m_impl->frameActive)
+        {
+            ImGui::SetCurrentContext(m_impl->context);
+            ImGui::EndFrame();
+            m_impl->frameActive = false;
+        }
+        m_impl->ResetInputCapture();
+    }
+
+    bool EditorUiImGuiPlatform::GetCurrentViewportHost(EditorHostWindowHandle& host) const noexcept
+    {
+        host = {};
+        if (m_impl == nullptr || m_impl->context == nullptr || ImGui::GetCurrentContext() != m_impl->context)
+            return false;
+        ImGuiViewport* const viewport = ImGui::GetWindowViewport();
+        Impl::ViewportRecord* const record = Impl::GetRecord(viewport);
+        if (record == nullptr || !record->active || !record->host.IsValid())
+            return false;
+        host = record->host;
+        return true;
+    }
+
+    bool EditorUiImGuiPlatform::GetVanguardWordmarkTexture(ImTextureData*& texture, float& aspectRatio) const noexcept
+    {
+        texture = nullptr;
+        aspectRatio = 0.0f;
+        if (m_impl == nullptr || m_impl->context == nullptr || !m_impl->vanguardWordmarkRegistered ||
+            !(m_impl->vanguardWordmarkAspectRatio > 0.0f))
+            return false;
+        texture = &m_impl->vanguardWordmarkTexture;
+        aspectRatio = m_impl->vanguardWordmarkAspectRatio;
+        return true;
+    }
+
+    EditorSvgIcon* EditorUiImGuiPlatform::FindSvgIcon(const EditorResourceId resource) const noexcept
+    {
+        return m_impl != nullptr ? m_impl->FindSvgIcon(resource) : nullptr;
+    }
+
+    f32 EditorUiImGuiPlatform::GetUserScale() const noexcept
+    {
+        return m_impl != nullptr ? m_impl->userUiScale : 1.0f;
+    }
+
+    bool EditorUiImGuiPlatform::SetUserScale(const f32 scale, EditorUiFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (!vanguard::concurrency::IsMainThread())
+            return FailCode(failure, EditorUiFailureCode::WrongThread,
+                            "editor UI scale changes require the main thread");
+        if (m_impl == nullptr || m_impl->context == nullptr)
+            return FailCode(failure, EditorUiFailureCode::NotReady,
+                            "editor UI scale changes require an initialized platform");
+        if (!(scale >= 0.50f && scale <= 3.00f) || !std::isfinite(scale))
+            return FailCode(failure, EditorUiFailureCode::InvalidDescriptor,
+                            "editor UI scale must be finite and between 0.50 and 3.00");
+        if (std::fabs(m_impl->userUiScale - scale) <= 0.0001f)
+            return true;
+
+        m_impl->userUiScale = scale;
+        // Preference edits may occur while the UI is authoring a frame. Do not mutate global style
+        // metrics underneath widgets already laid out in that frame; BeginFrame reapplies the new
+        // scale before the next ImGui::NewFrame(). Startup restore reaches this path before framing and
+        // can apply immediately.
+        if (m_impl->frameActive)
+            return true;
+
         ImGui::SetCurrentContext(m_impl->context);
-        ImGui::EndFrame();
-        m_impl->frameActive = false;
+        m_impl->appliedUserUiScale = m_impl->userUiScale;
+        ImGuiContext* const context = ImGui::GetCurrentContext();
+        const ImGuiViewport* const viewport = context != nullptr && context->CurrentViewport != nullptr
+                                                  ? context->CurrentViewport
+                                                  : ImGui::GetMainViewport();
+        const f32 dpiScale = viewport != nullptr && viewport->DpiScale > 0.0f ? viewport->DpiScale : 1.0f;
+        editor::detail::ApplyEditorVisualStyle(m_impl->appliedUserUiScale, dpiScale);
+        return true;
+    }
+
+    EditorUiUserStateLayoutLoadResult EditorUiImGuiPlatform::LoadUserStateLayout(
+        const containers::ArraySpan<const u8> bytes,
+        const containers::ArraySpan<const EditorUiSavedDisplay> savedDisplays,
+        u32& repairedPlacementCount, EditorUiFailure* const failure) noexcept
+    {
+        return ApplyUserStateLayoutInternal(bytes, savedDisplays, true, repairedPlacementCount, failure);
+    }
+
+    EditorUiUserStateLayoutLoadResult EditorUiImGuiPlatform::ApplyUserStateLayoutLive(
+        const containers::ArraySpan<const u8> bytes,
+        const containers::ArraySpan<const EditorUiSavedDisplay> savedDisplays,
+        u32& repairedPlacementCount, EditorUiFailure* const failure) noexcept
+    {
+        return ApplyUserStateLayoutInternal(bytes, savedDisplays, false, repairedPlacementCount, failure);
+    }
+
+    bool EditorUiImGuiPlatform::ResetUserStateLayoutLive(EditorUiFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (!concurrency::IsMainThread())
+            return FailCode(failure, EditorUiFailureCode::WrongThread,
+                            "editor UI live layout reset requires the main thread");
+        if (m_impl == nullptr || m_impl->context == nullptr)
+            return FailCode(failure, EditorUiFailureCode::NotReady,
+                            "editor UI live layout reset requires an initialized platform");
+        if (m_impl->frameActive)
+            return FailCode(failure, EditorUiFailureCode::WrongPhase,
+                            "editor UI live layout reset requires no active UI frame");
+        ImGui::SetCurrentContext(m_impl->context);
+        ImGui::ClearIniSettings();
+        // ClearIniSettings() removes the live docking tree and persisted window records, but
+        // existing ImGuiWindow instances keep the condition masks consumed by their first Begin().
+        // Vanguard's default placement path intentionally uses ImGuiCond_FirstUseEver, so without
+        // re-arming that condition a live reset leaves already-created panels undocked instead of
+        // placing them into the freshly rebuilt default dock tree. Hidden windows keep this bit
+        // until they are authored again, which also gives them their normal initial placement when
+        // reopened after the reset.
+        ImGuiContext& context = *ImGui::GetCurrentContext();
+        for (ImGuiWindow* const window : context.Windows)
+        {
+            if (window == nullptr || (window->Flags & ImGuiWindowFlags_NoSavedSettings) != 0)
+                continue;
+            window->SetWindowPosAllowFlags = static_cast<ImGuiCond>(
+                window->SetWindowPosAllowFlags | ImGuiCond_FirstUseEver);
+            window->SetWindowSizeAllowFlags = static_cast<ImGuiCond>(
+                window->SetWindowSizeAllowFlags | ImGuiCond_FirstUseEver);
+            window->SetWindowCollapsedAllowFlags = static_cast<ImGuiCond>(
+                window->SetWindowCollapsedAllowFlags | ImGuiCond_FirstUseEver);
+            window->SetWindowDockAllowFlags = static_cast<ImGuiCond>(
+                window->SetWindowDockAllowFlags | ImGuiCond_FirstUseEver);
+        }
+        ClearManualIniDirtyState();
+        return true;
+    }
+
+    EditorUiUserStateLayoutLoadResult EditorUiImGuiPlatform::ApplyUserStateLayoutInternal(
+        const containers::ArraySpan<const u8> bytes,
+        const containers::ArraySpan<const EditorUiSavedDisplay> savedDisplays,
+        const bool startup, u32& repairedPlacementCount, EditorUiFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        repairedPlacementCount = 0;
+        if (!concurrency::IsMainThread())
+        {
+            FailCode(failure, EditorUiFailureCode::WrongThread, "editor UI user-state load requires the main thread");
+            return EditorUiUserStateLayoutLoadResult::InvalidArgument;
+        }
+        if (m_impl == nullptr || m_impl->context == nullptr)
+        {
+            FailCode(failure, EditorUiFailureCode::NotReady, "editor UI user-state load requires an initialized platform");
+            return EditorUiUserStateLayoutLoadResult::EnvironmentUnavailable;
+        }
+        if (m_impl->frameActive || (startup && m_impl->frameEverBegun))
+        {
+            FailCode(failure, EditorUiFailureCode::WrongPhase,
+                     startup ? "editor UI user-state load must precede the first UI frame"
+                             : "editor UI live layout apply requires no active UI frame");
+            return EditorUiUserStateLayoutLoadResult::InvalidArgument;
+        }
+        if (startup && m_impl->layoutLoadAttempted)
+        {
+            FailCode(failure, EditorUiFailureCode::WrongPhase, "editor UI user-state layout load is one-shot per platform lifetime");
+            return EditorUiUserStateLayoutLoadResult::InvalidArgument;
+        }
+        if (startup)
+            m_impl->layoutLoadAttempted = true;
+        if (bytes.Size() > MaximumEditorUiPersistenceBytes || savedDisplays.Empty() ||
+            savedDisplays.Size() > window::MaximumDisplays || (bytes.Size() != 0 && bytes.Data() == nullptr))
+        {
+            FailCode(failure, EditorUiFailureCode::InvalidDescriptor, "editor UI user-state layout input is invalid");
+            return EditorUiUserStateLayoutLoadResult::InvalidArgument;
+        }
+
+        u32 savedPrimaryCount = 0;
+        for (const EditorUiSavedDisplay& display : savedDisplays)
+        {
+            if (display.boundsWidth == 0 || display.boundsHeight == 0 || display.workWidth == 0 || display.workHeight == 0 ||
+                display.desktopPixelWidth == 0 || display.desktopPixelHeight == 0 || display.scaleQ16_16 == 0 ||
+                display.scaleQ16_16 > 0x00100000u)
+            {
+                FailCode(failure, EditorUiFailureCode::InvalidDescriptor, "editor UI saved display topology is invalid");
+                return EditorUiUserStateLayoutLoadResult::InvalidArgument;
+            }
+            savedPrimaryCount += display.primary ? 1u : 0u;
+        }
+        if (savedPrimaryCount != 1)
+        {
+            FailCode(failure, EditorUiFailureCode::InvalidDescriptor, "editor UI saved display topology requires one primary display");
+            return EditorUiUserStateLayoutLoadResult::InvalidArgument;
+        }
+
+        window::DisplaySnapshot currentDisplays[window::MaximumDisplays]{};
+        const u32 currentCount = m_impl->Windows().VisitDisplays(currentDisplays, window::MaximumDisplays);
+        u32 currentPrimaryCount = 0;
+        bool currentValid = currentCount != 0 && currentCount <= window::MaximumDisplays;
+        for (u32 index = 0; currentValid && index < currentCount; ++index)
+        {
+            EditorUiSavedDisplay converted;
+            currentValid = editor::detail::CaptureEditorUiSavedDisplay(currentDisplays[index], converted);
+            currentPrimaryCount += currentDisplays[index].primary ? 1u : 0u;
+            for (u32 previous = 0; currentValid && previous < index; ++previous)
+                if (currentDisplays[previous].handle == currentDisplays[index].handle)
+                    currentValid = false;
+        }
+        if (!currentValid || currentPrimaryCount != 1)
+        {
+            FailCode(failure, EditorUiFailureCode::PlatformFailure, "editor UI current display topology is unavailable for restore");
+            return EditorUiUserStateLayoutLoadResult::EnvironmentUnavailable;
+        }
+
+        ImGui::SetCurrentContext(m_impl->context);
+        const ImGuiID defaultViewportId = ImGui::GetMainViewport()->ID;
+        if (bytes.Empty())
+        {
+            if (startup)
+                ImGui::ClearIniSettings();
+            ClearManualIniDirtyState();
+            return EditorUiUserStateLayoutLoadResult::DiscardedUnusable;
+        }
+
+        containers::String liveBackup;
+        if (!startup)
+        {
+            size_t backupBytes = 0;
+            const char* const backup = ImGui::SaveIniSettingsToMemory(&backupBytes);
+            if (backupBytes > MaximumEditorUiPersistenceBytes ||
+                (backupBytes != 0 && backup == nullptr))
+            {
+                FailCode(failure, EditorUiFailureCode::CapacityExceeded,
+                         "editor UI live layout rollback snapshot exceeds the persistence bound");
+                return EditorUiUserStateLayoutLoadResult::EnvironmentUnavailable;
+            }
+            if (backupBytes != 0)
+                liveBackup.Append(backup, static_cast<u32>(backupBytes));
+        }
+        const auto rollbackLiveLayout = [&]() noexcept {
+            if (startup)
+                ImGui::ClearIniSettings();
+            else
+            {
+                ImGui::ClearIniSettings();
+                if (!liveBackup.Empty())
+                    ImGui::LoadIniSettingsFromMemory(liveBackup.AsChar(), liveBackup.Length());
+            }
+            ClearManualIniDirtyState();
+        };
+        ImGui::LoadIniSettingsFromMemory(reinterpret_cast<const char*>(bytes.Data()), bytes.Size());
+        ImGuiContext& context = *ImGui::GetCurrentContext();
+        const containers::ArraySpan<const window::DisplaySnapshot> currentSpan{currentDisplays, currentCount};
+
+        for (ImGuiWindowSettings* settings = context.SettingsWindows.begin(); settings != nullptr;
+             settings = context.SettingsWindows.next_chunk(settings))
+        {
+            if (settings->WantDelete || settings->IsChild || settings->ViewportId == 0 ||
+                settings->ViewportId == defaultViewportId)
+                continue;
+            const EditorUiSavedRect savedRect = DecodeEditorUiPrivateWindowPlacement({
+                settings->ViewportPos.x, settings->ViewportPos.y, settings->Pos.x, settings->Pos.y,
+                settings->Size.x, settings->Size.y});
+            EditorUiRepairedPlacement repaired;
+            const EditorUiPlacementResolveResult result = ResolveEditorUiSavedPlacement(savedDisplays, currentSpan, savedRect, repaired);
+            if (result != EditorUiPlacementResolveResult::Resolved)
+            {
+                rollbackLiveLayout();
+                FailCode(failure, result == EditorUiPlacementResolveResult::InvalidArgument
+                                      ? EditorUiFailureCode::InvalidDescriptor
+                                      : EditorUiFailureCode::PlatformFailure,
+                         "editor UI detached placement cannot be restored safely");
+                return result == EditorUiPlacementResolveResult::InvalidArgument
+                    ? EditorUiUserStateLayoutLoadResult::InvalidArgument
+                    : EditorUiUserStateLayoutLoadResult::EnvironmentUnavailable;
+            }
+        }
+
+        for (ImGuiWindowSettings* settings = context.SettingsWindows.begin(); settings != nullptr;
+             settings = context.SettingsWindows.next_chunk(settings))
+        {
+            if (settings->WantDelete || settings->IsChild || settings->ViewportId == 0 ||
+                settings->ViewportId == defaultViewportId)
+                continue;
+            const EditorUiSavedRect savedRect = DecodeEditorUiPrivateWindowPlacement({
+                settings->ViewportPos.x, settings->ViewportPos.y, settings->Pos.x, settings->Pos.y,
+                settings->Size.x, settings->Size.y});
+            EditorUiRepairedPlacement repaired;
+            if (ResolveEditorUiSavedPlacement(savedDisplays, currentSpan, savedRect, repaired) !=
+                EditorUiPlacementResolveResult::Resolved)
+            {
+                rollbackLiveLayout();
+                FailCode(failure, EditorUiFailureCode::PlatformFailure, "editor UI detached placement changed during restore");
+                return EditorUiUserStateLayoutLoadResult::EnvironmentUnavailable;
+            }
+            EditorUiPrivateWindowPlacementFields writeback;
+            if (!EncodeEditorUiPrivateWindowPlacement(repaired.rect, writeback))
+            {
+                rollbackLiveLayout();
+                FailCode(failure, EditorUiFailureCode::PlatformFailure,
+                         "editor UI detached placement cannot be represented by private toolkit settings");
+                return EditorUiUserStateLayoutLoadResult::EnvironmentUnavailable;
+            }
+            settings->ViewportPos = ImVec2ih(writeback.viewportX, writeback.viewportY);
+            settings->Pos = ImVec2ih(writeback.relativeX, writeback.relativeY);
+            settings->Size = ImVec2ih(writeback.width, writeback.height);
+            repairedPlacementCount += repaired.changed ? 1u : 0u;
+        }
+
+        ImGuiDockNode* const root = ImGui::DockBuilderGetNode(EditorPrimaryDockspaceId);
+        // LoadIniSettingsFromMemory() has rebuilt the persisted docking nodes at this point, but
+        // ImGui does not populate the root's derived CentralNode pointer until DockSpace() runs in
+        // the first frame. Validate the persisted central-node flag directly from the loaded tree
+        // instead of rejecting every valid pre-first-frame dock layout as unusable.
+        ImGuiDockNode* const central = FindPersistedCentralDockNode(root);
+        if (!IsPersistedEditorDockTreeUsable(
+                root != nullptr, root != nullptr && root->IsDockSpace(),
+                root != nullptr && root->IsRootNode(), central != nullptr,
+                root != nullptr && central != nullptr && ImGui::DockNodeGetRootNode(central) == root))
+        {
+            rollbackLiveLayout();
+            repairedPlacementCount = 0;
+            return EditorUiUserStateLayoutLoadResult::DiscardedUnusable;
+        }
+        ClearManualIniDirtyState();
+        return EditorUiUserStateLayoutLoadResult::AppliedUsable;
+    }
+
+    bool EditorUiImGuiPlatform::CaptureUserStateLayout(void* const destination, const u32 capacity, u32& byteCount,
+                                                       EditorUiSavedDisplay* const savedDisplays, const u32 displayCapacity,
+                                                       u32& displayCount, EditorUiFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        byteCount = 0;
+        displayCount = 0;
+        if (!concurrency::IsMainThread())
+            return FailCode(failure, EditorUiFailureCode::WrongThread, "editor UI user-state capture requires the main thread");
+        if (m_impl == nullptr || m_impl->context == nullptr)
+            return FailCode(failure, EditorUiFailureCode::NotReady, "editor UI user-state capture requires an initialized platform");
+        if (m_impl->frameActive)
+            return FailCode(failure, EditorUiFailureCode::WrongPhase, "editor UI user-state capture requires no active authoring frame");
+
+        window::DisplaySnapshot currentDisplays[window::MaximumDisplays]{};
+        displayCount = m_impl->Windows().VisitDisplays(currentDisplays, window::MaximumDisplays);
+        EditorUiSavedDisplay captured[window::MaximumDisplays]{};
+        u32 primaryCount = 0;
+        bool topologyValid = displayCount != 0 && displayCount <= window::MaximumDisplays;
+        for (u32 index = 0; topologyValid && index < displayCount; ++index)
+        {
+            topologyValid = editor::detail::CaptureEditorUiSavedDisplay(currentDisplays[index], captured[index]);
+            primaryCount += currentDisplays[index].primary ? 1u : 0u;
+            for (u32 previous = 0; topologyValid && previous < index; ++previous)
+                if (currentDisplays[previous].handle == currentDisplays[index].handle)
+                    topologyValid = false;
+        }
+        if (!topologyValid || primaryCount != 1)
+            return FailCode(failure, EditorUiFailureCode::PlatformFailure, "editor UI current display topology cannot be persisted");
+
+        for (u32 index = 1; index < displayCount; ++index)
+        {
+            const EditorUiSavedDisplay value = captured[index];
+            u32 insertion = index;
+            while (insertion != 0 && SavedDisplayLess(value, captured[insertion - 1u]))
+            {
+                captured[insertion] = captured[insertion - 1u];
+                --insertion;
+            }
+            captured[insertion] = value;
+        }
+
+        ImGui::SetCurrentContext(m_impl->context);
+        ImGuiContext& context = *ImGui::GetCurrentContext();
+        const float priorTimer = context.SettingsDirtyTimer;
+        const bool priorWantSave = ImGui::GetIO().WantSaveIniSettings;
+        size_t requiredBytes = 0;
+        const char* const data = ImGui::SaveIniSettingsToMemory(&requiredBytes);
+        context.SettingsDirtyTimer = priorTimer;
+        ImGui::GetIO().WantSaveIniSettings = priorWantSave;
+        byteCount = requiredBytes <= ~u32{0} ? static_cast<u32>(requiredBytes) : ~u32{0};
+        if (requiredBytes > MaximumEditorUiPersistenceBytes || requiredBytes > capacity || displayCount > displayCapacity ||
+            (requiredBytes != 0 && (destination == nullptr || data == nullptr)) ||
+            (displayCount != 0 && savedDisplays == nullptr))
+        {
+            return FailCode(failure, EditorUiFailureCode::CapacityExceeded, "editor UI user-state capture destination is insufficient");
+        }
+        if (requiredBytes != 0)
+            std::memcpy(destination, data, requiredBytes);
+        for (u32 index = 0; index < displayCount; ++index)
+            savedDisplays[index] = captured[index];
+        return true;
+    }
+
+    bool EditorUiImGuiPlatform::ConsumeUserStateLayoutDirty(EditorUiFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (!concurrency::IsMainThread())
+        {
+            FailCode(failure, EditorUiFailureCode::WrongThread, "editor UI layout dirty observation requires the main thread");
+            return false;
+        }
+        if (m_impl == nullptr || m_impl->context == nullptr || m_impl->frameActive)
+        {
+            FailCode(failure, m_impl == nullptr ? EditorUiFailureCode::NotReady : EditorUiFailureCode::WrongPhase,
+                     "editor UI layout dirty observation requires an idle live UI");
+            return false;
+        }
+        ImGui::SetCurrentContext(m_impl->context);
+        const bool dirty = ImGui::GetIO().WantSaveIniSettings;
+        ImGui::GetIO().WantSaveIniSettings = false;
+        return dirty;
+    }
+
+    bool EditorUiImGuiPlatform::IsUserStateLayoutSettling(EditorUiFailure* const failure) const noexcept
+    {
+        ClearFailure(failure);
+        if (!concurrency::IsMainThread())
+        {
+            FailCode(failure, EditorUiFailureCode::WrongThread, "editor UI layout settling observation requires the main thread");
+            return false;
+        }
+        if (m_impl == nullptr || m_impl->context == nullptr || m_impl->frameActive)
+        {
+            FailCode(failure, m_impl == nullptr ? EditorUiFailureCode::NotReady : EditorUiFailureCode::WrongPhase,
+                     "editor UI layout settling observation requires an idle live UI");
+            return false;
+        }
+        ImGui::SetCurrentContext(m_impl->context);
+        return ImGui::GetCurrentContext()->SettingsDirtyTimer > 0.0f;
     }
 
     bool EditorUiImGuiPlatform::IsInitialized() const noexcept

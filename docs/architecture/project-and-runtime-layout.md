@@ -44,6 +44,10 @@ The normative grammar, validation levels, identity rules, and transactional crea
 
 `Assets` is the authoritative source-data tree. It contains original files such as PNG, TIFF, OpenEXR, FBX, glTF, WAV, shader source, and authored world or prefab documents. Cooked `.vxxx` resources must not be written beside these sources.
 
+Authorable creative asset sources must not use `.v*` extensions. The `.v*` asset-resource namespace is reserved for generated/cooked Vanguard outputs such as `.vworld`, `.vcell`, `.vprefab`, `.vmesh`, `.vtex`, `.vmat`, `.vshader`, `.vinput`, and future package-facing resource formats. The source-side exception is `.vmeta`, which is always a sidecar for one exact source filename and includes that source extension in its own name. Vanguard-owned project, index, cache, transaction, package-manifest, editor-state and other tool/system files may also use `.v*` extensions, but they are not creative asset sources.
+
+Use plain authoring extensions for editable asset documents: for example `.scene` for scene/world source, `.prefab` for prefab source, `.material` for material source, `.inputmap` for input mapping source, `.anim` for animation source, and `.shader` for shader source. Their cooked outputs use the generated `.v*` resource extensions.
+
 Every independently managed source asset has a sidecar whose name includes the source extension:
 
 ```text

@@ -1,7 +1,7 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/entities/entities.hpp>
-#include <vanguard/entities/world_render_bridge.hpp>
 #include <vanguard/ecs/native.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/io/io.hpp>
@@ -62,6 +62,9 @@ namespace
     };
 
     ObjectLifecycleCounters g_objectLifecycle;
+    vanguard::u64 g_pendingReleaseStableId = entities::InvalidComponentStableId;
+    vanguard::u64 g_failedReleaseStableId = entities::InvalidComponentStableId;
+    vanguard::u32 g_pendingReleaseAttempts = 0;
 
     class TestObjectComponent final : public entities::Component
     {
@@ -92,6 +95,15 @@ namespace
             return true;
         }
 
+        [[nodiscard]] entities::ComponentReleaseResult OnPrepareDetach(const entities::ComponentContext&) noexcept override
+        {
+            if (GetStableId() == g_failedReleaseStableId)
+                return entities::ComponentReleaseResult::Failed;
+            if (GetStableId() == g_pendingReleaseStableId && g_pendingReleaseAttempts++ == 0)
+                return entities::ComponentReleaseResult::Pending;
+            return entities::ComponentReleaseResult::Complete;
+        }
+
         void OnDetach(const entities::ComponentContext&) noexcept override
         {
             ++g_objectLifecycle.detached;
@@ -100,73 +112,6 @@ namespace
     private:
         vanguard::u32 m_value = 0;
     };
-
-    struct BridgeLight
-    {
-        vanguard::f32 intensity = 1.0f;
-    };
-
-    struct BridgeTransform
-    {
-        vanguard::f32 x = 0.0f;
-    };
-
-    struct BridgeComponentContext
-    {
-        vanguard::ecs::ComponentType<BridgeLight> light;
-        vanguard::ecs::ComponentType<BridgeTransform> transform;
-    };
-
-    bool BuildBridgeLight(const vanguard::ecs::World& world, const vanguard::ecs::EntityId, const vanguard::ecs::Entity entity,
-                          entities::WorldRenderContributorBuild& build, void* const userData) noexcept
-    {
-        const auto* const context = static_cast<const BridgeComponentContext*>(userData);
-        const auto* const light =
-            context != nullptr && entity ? static_cast<const BridgeLight*>(ecs_get_id(world.GetNative(), entity.value, context->light.id)) : nullptr;
-        if (light == nullptr)
-            return false;
-        build.light.proxy.bounds.minimum[0] = -1.0f;
-        build.light.proxy.bounds.minimum[1] = -1.0f;
-        build.light.proxy.bounds.minimum[2] = -1.0f;
-        build.light.proxy.bounds.maximum[0] = 1.0f;
-        build.light.proxy.bounds.maximum[1] = 1.0f;
-        build.light.proxy.bounds.maximum[2] = 1.0f;
-        build.light.proxy.debugName = "bridgeLight";
-        build.light.intensity = light->intensity;
-        build.light.range = 10.0f;
-        return true;
-    }
-
-    bool ResolveBridgeLight(const vanguard::ecs::World& world, const vanguard::ecs::EntityId, const vanguard::ecs::Entity entity,
-                            entities::WorldRenderProxyState& state, void* const userData) noexcept
-    {
-        const auto* const context = static_cast<const BridgeComponentContext*>(userData);
-        const auto* const transform =
-            context != nullptr && entity ? static_cast<const BridgeTransform*>(ecs_get_id(world.GetNative(), entity.value, context->transform.id)) : nullptr;
-        if (transform == nullptr)
-            return false;
-        state.transform = vanguard::rendering::RenderProxyTransform{};
-        state.transform.row0[3] = transform->x;
-        state.bounds.minimum[0] = transform->x - 10.0f;
-        state.bounds.minimum[1] = -10.0f;
-        state.bounds.minimum[2] = -10.0f;
-        state.bounds.maximum[0] = transform->x + 10.0f;
-        state.bounds.maximum[1] = 10.0f;
-        state.bounds.maximum[2] = 10.0f;
-        return true;
-    }
-
-    bool ReadBridgeTransform(const vanguard::ecs::World& world, const vanguard::ecs::EntityId, const vanguard::ecs::Entity entity,
-                             const vanguard::ecs::CommittedChangeKind, entities::WorldRenderState& state, void* const userData) noexcept
-    {
-        const auto* const context = static_cast<const BridgeComponentContext*>(userData);
-        const auto* const transform =
-            context != nullptr && entity ? static_cast<const BridgeTransform*>(ecs_get_id(world.GetNative(), entity.value, context->transform.id)) : nullptr;
-        if (transform == nullptr)
-            return false;
-        state.fields = entities::WorldRenderStateFields::Spatial;
-        return true;
-    }
 
     constexpr reflection::SchemaTypeId TransformType = reflection::HashSchemaName("vanguard.test.transform");
     constexpr reflection::SchemaTypeId RenderType = reflection::HashSchemaName("vanguard.test.render");
@@ -222,11 +167,40 @@ namespace
         return materializer.PublishActivation(cellId, generation);
     }
 
+    entities::Result SettleActivationInitialization(entities::CellMaterializer& materializer, const vanguard::u64 cellId,
+                                                    const vanguard::u32 generation) noexcept
+    {
+        for (vanguard::u32 attempt = 0; attempt < 1'000; ++attempt)
+        {
+            const entities::Result result = SynchronizeActivation(materializer, cellId, generation);
+            if (result != entities::Result::NotReady || materializer.GetState(cellId) != entities::CellState::PendingActivation)
+                return result;
+            vanguard::concurrency::SleepOnCurrentThread(1);
+        }
+        return entities::Result::NotReady;
+    }
+
     entities::Result SynchronizeActivationGroups(entities::CellMaterializer& materializer, const vanguard::u64 cellId,
                                                  const vanguard::u32 generation) noexcept
     {
         const entities::Result result = materializer.PrepareActivationGroups(cellId, generation);
         return result == entities::Result::Success ? materializer.PublishActivationGroups(cellId, generation) : result;
+    }
+
+    entities::Result SettleActivationGroupInitialization(entities::CellMaterializer& materializer, const vanguard::u64 cellId,
+                                                         const vanguard::u32 generation, const vanguard::u64 groupId) noexcept
+    {
+        for (vanguard::u32 attempt = 0; attempt < 1'000; ++attempt)
+        {
+            const entities::Result result = SynchronizeActivationGroups(materializer, cellId, generation);
+            const entities::ActivationGroupState state = materializer.GetActivationState(cellId, groupId);
+            if (result != entities::Result::NotReady ||
+                (state != entities::ActivationGroupState::PendingActivation &&
+                 state != entities::ActivationGroupState::PendingReferences))
+                return result;
+            vanguard::concurrency::SleepOnCurrentThread(1);
+        }
+        return entities::Result::NotReady;
     }
 
     struct CellLoaderHarness
@@ -334,13 +308,33 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "entitiesTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("entities_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
     Check(vanguard::jobs::Initialize(), "jobs initialization");
     Check(reflection::Initialize(), "reflection initialization");
     Check(reflection::RegisterSchema(TransformSchema) && reflection::RegisterSchema(RenderSchema) && reflection::RegisterSchema(LightSchema) &&
               reflection::RegisterSchema(ObjectSchema),
           "register stable component schemas");
+
+    vanguard::game::GameWorld lostChangeWorld;
+    entities::ComponentRuntime lostChangeRuntime;
+    vanguard::game::GameWorldConfig lostChangeConfig;
+    lostChangeConfig.entities.initialEntityCapacity = 8;
+    lostChangeConfig.entities.initialActionCapacity = 8;
+    lostChangeConfig.entities.committedChangeCapacity = 2;
+    Check(lostChangeWorld.RegisterSystem(lostChangeRuntime) && lostChangeWorld.Initialize(lostChangeConfig),
+          "initialize committed-change loss fixture");
+    Check(lostChangeWorld.GetEntities().QueueCreate(9'100u) && lostChangeWorld.GetEntities().FlushActions() &&
+              lostChangeRuntime.SynchronizeCommittedChanges(lostChangeWorld),
+          "advance the component runtime committed-change cursor before overflow");
+    Check(lostChangeWorld.GetEntities().QueueCreate(9'101u) && lostChangeWorld.GetEntities().QueueCreate(9'102u) &&
+              lostChangeWorld.GetEntities().QueueCreate(9'103u) && lostChangeWorld.GetEntities().FlushActions() &&
+              !lostChangeRuntime.SynchronizeCommittedChanges(lostChangeWorld) && lostChangeRuntime.GetSynchronizationFailure() != nullptr,
+          "component runtime treats lost committed-change records as a terminal synchronization failure");
+    Check(lostChangeWorld.GetEntities().QueueDestroy(9'100u) && lostChangeWorld.GetEntities().QueueDestroy(9'101u) &&
+              lostChangeWorld.GetEntities().QueueDestroy(9'102u) && lostChangeWorld.GetEntities().QueueDestroy(9'103u) &&
+              lostChangeWorld.GetEntities().FlushActions() && lostChangeWorld.Shutdown(),
+          "shutdown committed-change loss fixture after explicit ECS cleanup");
 
     const resources::ResourceReference prefabReference(resources::ResourcePath::FromString("prefabs/materializer_test.vprefab"), prefab::PrefabResourceType);
     const resources::ResourceReference originalMesh(resources::ResourcePath::FromString("meshes/original.vmesh"),
@@ -480,7 +474,8 @@ int main()
           "entity visibility alone cannot prematurely fail or activate a component-incomplete cell");
     Check(ecsWorld.FlushComponentActions(), "commit materialized component batch");
     Check(SynchronizeActivation(materializer, 500, 6) == entities::Result::StaleGeneration, "stale resource generation cannot publish cell readiness");
-    Check(SynchronizeActivation(materializer, 500, 7) == entities::Result::NotReady && materializer.GetState(500) == entities::CellState::PendingReferences &&
+    Check(SettleActivationInitialization(materializer, 500, 7) == entities::Result::NotReady &&
+              materializer.GetState(500) == entities::CellState::PendingReferences &&
               referenceRegistry.Resolve(1000, RequiredWorldSlot).state == entities::ReferenceState::Unresolved &&
               referenceRegistry.Resolve(1000, OptionalWorldSlot).state == entities::ReferenceState::Unresolved,
           "publish materialized entities while required world references wait for another streamed cell");
@@ -494,9 +489,9 @@ int main()
     auto* const secondRuntimeObject = static_cast<TestObjectComponent*>(componentRuntime.GetDirectory().Find(1000, 401));
     Check(firstRuntimeObject != nullptr && secondRuntimeObject != nullptr && firstRuntimeObject->GetValue() == 41 &&
               secondRuntimeObject->GetValue() == 42 && firstRuntimeObject->IsInitialized() && firstRuntimeObject->IsAttached() &&
-              secondRuntimeObject->IsInitialized() && !secondRuntimeObject->IsAttached() &&
+              secondRuntimeObject->IsInitialized() && secondRuntimeObject->IsAttached() && !secondRuntimeObject->IsEnabled() &&
               componentRuntime.GetDirectory().GetEntityComponentCount(1000) == 2 && g_objectLifecycle.initialized == 2 &&
-              g_objectLifecycle.attached == 1 && g_objectLifecycle.initializedWithLiveOwner,
+              g_objectLifecycle.attached == 2 && g_objectLifecycle.initializedWithLiveOwner,
           "materialize two same-type stable objects on one entity after its ECS transaction commits");
     const ecs::Entity firstResolvedTarget = referenceRegistry.Resolve(1000, RequiredWorldSlot).entity;
     const vanguard::u64 firstResolutionRevision = referenceRegistry.Resolve(1000, RequiredWorldSlot).revision;
@@ -511,15 +506,32 @@ int main()
               materializer.GetState(500) == entities::CellState::Active,
           "automatically relink waiters to the new Flecs generation when the stable target returns");
 
+    const std::array<ecs::EntityId, 2> indexedReferenceEntities{{9100, 9101}};
+    const std::array<world::EntityReferenceRecord, 2> indexedReferences{{{9100, 0x910001, 9101, world::EntityReferenceKind::RequiredLocal},
+                                                                         {9101, 0x910002, 9100, world::EntityReferenceKind::OptionalLocal}}};
+    const entities::ReferenceRegistryStats indexedReferenceStatsBefore = referenceRegistry.GetStats();
+    Check(ecsWorld.QueueCreate(9100) && ecsWorld.QueueCreate(9101) && ecsWorld.FlushActions() &&
+              referenceRegistry.RegisterCell(601, 1, {indexedReferenceEntities.data(), static_cast<vanguard::u32>(indexedReferenceEntities.size())},
+                                             {indexedReferences.data(), static_cast<vanguard::u32>(indexedReferences.size())}) == entities::ReferenceResult::Success &&
+              referenceRegistry.GetStats().registrationEntitiesVisited == indexedReferenceStatsBefore.registrationEntitiesVisited + indexedReferenceEntities.size() &&
+              referenceRegistry.GetStats().registrationReferencesVisited == indexedReferenceStatsBefore.registrationReferencesVisited + indexedReferences.size() &&
+              referenceRegistry.GetStats().registrationSlotLookups == indexedReferenceStatsBefore.registrationSlotLookups + indexedReferences.size() &&
+              referenceRegistry.Resolve(9100, 0x910001) && referenceRegistry.Resolve(9101, 0x910002) &&
+              referenceRegistry.UnregisterCell(601, 1) == entities::ReferenceResult::Success && ecsWorld.QueueDestroy(9100) && ecsWorld.QueueDestroy(9101) && ecsWorld.FlushActions(),
+          "partition registration performs one indexed entity/reference/slot admission per authored record");
+
     constexpr entities::ActivationOwnerId GameplayGroupOwner = 0x1001;
     constexpr entities::ActivationOwnerId EditorGroupOwner = 0x1002;
+    const entities::MaterializerStats groupClosureStatsBefore = materializer.GetStats();
     Check(materializer.AcquireActivationGroup(cellFile, 7, 77, GameplayGroupOwner, &ResolvePrefab, &resolver) == entities::Result::Success &&
               materializer.AcquireActivationGroup(cellFile, 7, 77, EditorGroupOwner, &ResolvePrefab, &resolver) == entities::Result::Success &&
               materializer.GetActivationOwnerCount(500, 77) == 2 && materializer.GetActivationOwnerCount(500, 88) == 2 && !ecsWorld.Resolve(2000) &&
-              !ecsWorld.Resolve(3000),
+              !ecsWorld.Resolve(3000) && materializer.GetStats().activationClosureGroupsVisited == groupClosureStatsBefore.activationClosureGroupsVisited + 4u &&
+              materializer.GetStats().activationClosurePlacementsVisited == groupClosureStatsBefore.activationClosurePlacementsVisited + 4u &&
+              materializer.GetStats().activationClosureReferencesVisited == groupClosureStatsBefore.activationClosureReferencesVisited + 2u,
           "coalesce overlapping activation-group owners onto one pending entity transaction");
-    Check(ecsWorld.FlushActions() && SynchronizeActivationGroups(materializer, 500, 7) == entities::Result::NotReady && ecsWorld.FlushComponentActions() &&
-              SynchronizeActivationGroups(materializer, 500, 7) == entities::Result::Success &&
+    Check(ecsWorld.FlushActions() && SynchronizeActivationGroups(materializer, 500, 7) == entities::Result::NotReady &&
+              ecsWorld.FlushComponentActions() && SettleActivationGroupInitialization(materializer, 500, 7, 77) == entities::Result::Success &&
               materializer.GetActivationState(500, 77) == entities::ActivationGroupState::Active && ecsWorld.Resolve(2000) && ecsWorld.Resolve(3000) &&
               referenceRegistry.Resolve(2000, 0x67726f7570646570ull),
           "publish a group and its required-local dependency closure only after both Flecs batches are observable");
@@ -561,11 +573,33 @@ int main()
     }
 
     const ObjectLifecycleCounters lifecycleBeforeBaseRelease = g_objectLifecycle;
-    Check(materializer.QueueRelease(500, 7) == entities::Result::Success, "queue cell release transaction");
-    Check(componentRuntime.GetDirectory().GetEntityComponentCount(1000) == 0 &&
+    g_pendingReleaseStableId = 400;
+    g_pendingReleaseAttempts = 0;
+    const entities::Result firstBaseRelease = materializer.QueueRelease(500, 7);
+    Check(firstBaseRelease == entities::Result::NotReady &&
+              materializer.GetState(500) == entities::CellState::PendingRelease &&
+              componentRuntime.GetDirectory().GetEntityComponentCount(1000) == 1 &&
+              firstRuntimeObject->IsInitialized() && firstRuntimeObject->IsAttached() &&
+              referenceRegistry.Resolve(1000, RequiredWorldSlot).state == entities::ReferenceState::Undefined &&
               g_objectLifecycle.detached == lifecycleBeforeBaseRelease.detached + 1u &&
-              g_objectLifecycle.uninitialized == lifecycleBeforeBaseRelease.uninitialized + 2u,
-          "detach and uninitialize stable objects in reverse ownership order while their ECS owner is still live");
+              g_objectLifecycle.uninitialized == lifecycleBeforeBaseRelease.uninitialized + 1u,
+          "cell release cutover revokes references once while a retryable component stays attached and a releasable sibling completes");
+    g_failedReleaseStableId = 400;
+    entities::MaterializerReleaseFailure materializerReleaseFailure;
+    Check(materializer.QueueRelease(500, 7, &materializerReleaseFailure) == entities::Result::InvalidState &&
+              materializerReleaseFailure.componentFailure.code == entities::ComponentDirectoryFailureCode::AttachmentFailure &&
+              materializerReleaseFailure.componentFailure.stableId == 400 &&
+              firstRuntimeObject->IsInitialized() && firstRuntimeObject->IsAttached(),
+          "terminal materializer release preserves the exact component-directory failure while logical ownership stays attached");
+    g_failedReleaseStableId = entities::InvalidComponentStableId;
+    const entities::Result finalBaseRelease = materializer.QueueRelease(500, 7);
+    Check(finalBaseRelease == entities::Result::Success &&
+              componentRuntime.GetDirectory().GetEntityComponentCount(1000) == 0 &&
+              g_objectLifecycle.detached == lifecycleBeforeBaseRelease.detached + 2u &&
+              g_objectLifecycle.uninitialized == lifecycleBeforeBaseRelease.uninitialized + 2u &&
+              g_pendingReleaseAttempts == 2u,
+          "cell release resumes without replaying an already released stable object");
+    g_pendingReleaseStableId = entities::InvalidComponentStableId;
     Check(ecsWorld.FlushActions(), "flush first release entities");
     Check(ecsWorld.FlushComponentActions() && materializer.CompleteRelease(500, 7) == entities::Result::Success,
           "release a cell through reverse entity destruction and explicit completion");
@@ -605,10 +639,13 @@ int main()
     world::CellFile localCellFile;
     Check(localCellFile.Open(localCellReader) == world::Result::Success, "open required-local activation-closure cell");
     entities::MaterializationReport localReport;
+    const entities::MaterializerStats localClosureStatsBefore = materializer.GetStats();
     Check(materializer.QueueCell(localCellFile, 1, &ResolvePrefab, &resolver, &localReport) == entities::Result::Success && localReport.placements == 2 &&
               localReport.placementsSkippedInactive == 0 && ecsWorld.FlushActions() && ecsWorld.FlushComponentActions() &&
-              SynchronizeActivation(materializer, 502, 1) == entities::Result::Success && ecsWorld.Resolve(3000) && ecsWorld.Resolve(4000) &&
-              referenceRegistry.Resolve(3000, 0x6c6f63616cull),
+              SettleActivationInitialization(materializer, 502, 1) == entities::Result::Success && ecsWorld.Resolve(3000) && ecsWorld.Resolve(4000) &&
+              referenceRegistry.Resolve(3000, 0x6c6f63616cull) &&
+              materializer.GetStats().dependencyClosurePlacementsVisited == localClosureStatsBefore.dependencyClosurePlacementsVisited + 2u &&
+              materializer.GetStats().dependencyClosureReferencesVisited == localClosureStatsBefore.dependencyClosureReferencesVisited + 1u,
           "pull a required local target into the materialization transaction even when its group is initially inactive");
     Check(materializer.QueueRelease(502, 1) == entities::Result::Success && ecsWorld.FlushActions() && ecsWorld.FlushComponentActions() &&
               materializer.CompleteRelease(502, 1) == entities::Result::Success,
@@ -631,7 +668,7 @@ int main()
     {
         const vanguard::u32 generation = 10 + cycle;
         soakSucceeded = materializer.QueueCell(soakCellFile, generation, &ResolvePrefab, &resolver) == entities::Result::Success && ecsWorld.FlushActions() &&
-                        ecsWorld.FlushComponentActions() && SynchronizeActivation(materializer, 500, generation) == entities::Result::Success &&
+                        ecsWorld.FlushComponentActions() && SettleActivationInitialization(materializer, 500, generation) == entities::Result::Success &&
                         materializer.QueueRelease(500, generation) == entities::Result::Success && ecsWorld.FlushActions() &&
                         ecsWorld.FlushComponentActions() && materializer.CompleteRelease(500, generation) == entities::Result::Success && soakSucceeded;
     }
@@ -710,7 +747,11 @@ int main()
     for (vanguard::u32 attempt = 0; attempt < 500 && !streamedIn; ++attempt)
     {
         Check(streamedGameWorld.Tick(1.0f / 60.0f), "tick asynchronous cell materialization");
-        streamedIn = static_cast<bool>(streamedGameWorld.GetEntities().Resolve(1000));
+        streamedIn = static_cast<bool>(streamedGameWorld.GetEntities().Resolve(1000)) &&
+                     streamedGrid.GetState({500, world::StreamingNodeKind::Cell}) == world::StreamingNodeState::Streamed &&
+                     streamedGrid.IsRenderReady({500, world::StreamingNodeKind::Cell}) &&
+                     streamingSystem.GetStats().activatedCells == 1 &&
+                     streamingSystem.GetReferences()->HasEntity(1000);
         if (!streamedIn)
             vanguard::concurrency::SleepOnCurrentThread(1);
     }
@@ -755,99 +796,42 @@ int main()
     Check(streamingSystem.SetProcessInput(streamedInput) && streamedGameWorld.Tick(0.0f) &&
               streamedGrid.GetState({501, world::StreamingNodeKind::Cell}) == world::StreamingNodeState::Unloaded,
           "retire downstream-failed residency after it leaves the desired set");
+
+    streamedObserver.predictedPosition[0] = 0.0;
+    streamedInput.cameraPosition[0] = 0.0;
+    streamedInput.observers = {&streamedObserver, 1};
+    containers::DynamicArray<world::StreamingResourceEvent> releaseRaceEvents(memory::pools::World::GetInstance());
+    const world::StreamingExecutorStats releaseRaceBefore = streamedExecutor.GetStats();
+    Check(streamingSystem.SetProcessInput(streamedInput) && streamedExecutor.Process(streamedInput, releaseRaceEvents) &&
+              streamedGrid.GetState({500, world::StreamingNodeKind::Cell}) == world::StreamingNodeState::StreamingIn &&
+              streamingSystem.GetStats().trackedCells == 0,
+          "start a cell resource request without handing its eventual availability to the materializer");
+    bool lateResourceReady = false;
+    for (vanguard::u32 attempt = 0; attempt < 500 && !lateResourceReady; ++attempt)
+    {
+        lateResourceReady = streamedRegistry.GetState(streamedCellReference.GetPath()) == resources::State::Loaded;
+        if (!lateResourceReady)
+            vanguard::concurrency::SleepOnCurrentThread(1);
+    }
+    entities::CellStreamingReleaseFailure prematureReleaseFailure;
+    Check(streamingSystem.ProgressReleaseOnly(&prematureReleaseFailure) == entities::CellStreamingReleaseStatus::Failed &&
+              prematureReleaseFailure.code == entities::CellStreamingReleaseFailureCode::InvalidState &&
+              prematureReleaseFailure.materializerResult == entities::Result::InvalidState,
+          "release-only streaming reports typed invalid-state detail before its ownership cutover");
+    Check(lateResourceReady && streamedGrid.RequestShutdown() && streamingSystem.BeginReleaseOnly() &&
+              streamingSystem.ProgressReleaseOnly() == entities::CellStreamingReleaseStatus::Complete &&
+              !streamedGameWorld.GetEntities().Resolve(1000) && streamingSystem.GetStats().trackedCells == 0 &&
+              streamedGrid.GetState({500, world::StreamingNodeKind::Cell}) == world::StreamingNodeState::Unloaded,
+          "release-only streaming ignores a late ResourceAvailable and directly acknowledges its same-key release");
+    const world::StreamingExecutorStats releaseRaceAfter = streamedExecutor.GetStats();
+    Check(releaseRaceAfter.completedRequests == releaseRaceBefore.completedRequests + 1u &&
+              releaseRaceAfter.releasedResources == releaseRaceBefore.releasedResources + 1u &&
+              releaseRaceAfter.residentNodes == 0 && releaseRaceAfter.releasePendingNodes == 0,
+          "late shutdown-raced cell availability never creates downstream durable ownership");
     Check(streamedGameWorld.Shutdown() && streamedExecutor.Shutdown() && streamedGrid.Shutdown() && streamedPipeline.Shutdown() && streamedRegistry.Shutdown(),
           "shutdown a fully drained entity-streaming world");
     streamedWorld.Close();
 
-    {
-        vanguard::ecs::World bridgeWorld;
-        Check(bridgeWorld.Initialize(), "initialize world-render bridge ECS world");
-        BridgeComponentContext bridgeComponents;
-        bridgeComponents.light = vanguard::ecs::RegisterComponent<BridgeLight>(bridgeWorld, true);
-        bridgeComponents.transform = vanguard::ecs::RegisterComponent<BridgeTransform>(bridgeWorld, true);
-        Check(bridgeComponents.light && bridgeComponents.transform, "register project-defined world-render bridge components");
-
-        vanguard::rendering::RenderSceneManager scenes;
-        vanguard::rendering::RenderSceneFailure sceneFailure;
-        vanguard::rendering::RenderSceneHandle scene;
-        vanguard::rendering::RenderSceneDesc sceneDesc;
-        sceneDesc.name = "entityBridgeTest";
-        sceneDesc.maximumProxies = 64;
-        sceneDesc.maximumPendingProxyMutations = 2;
-        Check(scenes.Initialize({}, &sceneFailure) && scenes.CreateScene(sceneDesc, scene, &sceneFailure), "create the world-render bridge target scene");
-
-        entities::WorldRenderBridge bridge;
-        entities::WorldRenderBridgeFailure bridgeFailure;
-        Check(bridge.Initialize(bridgeWorld, scenes, scene, 7, {}, &bridgeFailure) &&
-                  bridge.RegisterContributor({bridgeComponents.light.id, bridgeComponents.light.world, entities::WorldRenderContributorKind::Light,
-                                              &BuildBridgeLight, &bridgeComponents, &ResolveBridgeLight, entities::WorldRenderStateFields::Spatial},
-                                             &bridgeFailure) &&
-                  bridge.RegisterState({bridgeComponents.transform.id, bridgeComponents.transform.world, entities::WorldRenderStateFields::Spatial,
-                                        &ReadBridgeTransform, &bridgeComponents},
-                                       &bridgeFailure),
-              "initialize component-neutral world-render translation descriptors");
-
-        const vanguard::ecs::CommandBatch activation = bridgeWorld.BeginCommandBatch();
-        Check(activation && bridgeWorld.QueueCreate(activation, 9001) && bridgeWorld.QueueAddComponent(activation, 9001, bridgeComponents.light) &&
-                  bridgeWorld.QueueSetComponent(activation, 9001, bridgeComponents.light, BridgeLight{4.0f}) &&
-                  bridgeWorld.QueueAddComponent(activation, 9001, bridgeComponents.transform) &&
-                  bridgeWorld.QueueSetComponent(activation, 9001, bridgeComponents.transform, BridgeTransform{2.0f}) &&
-                  bridgeWorld.QueueSetComponent(activation, 9001, bridgeComponents.transform, BridgeTransform{3.0f}) &&
-                  bridgeWorld.SealCommandBatch(activation) && bridgeWorld.FlushActions() && bridgeWorld.FlushComponentActions(),
-              "commit one activation-group component transaction");
-        entities::WorldRenderBridgeFlushResult bridgeFlush;
-        vanguard::rendering::RenderProxyHandle bridgeProxy;
-        Check(bridge.Flush(bridgeFlush, &bridgeFailure) && bridgeFlush.sceneCommitAllowed && bridgeFlush.createdProxies == 1 &&
-                  bridgeFlush.updatedProxies == 0 && bridge.FindProxy(9001, bridgeComponents.light.id, bridgeProxy),
-              "coalesce repeated component writes and admit one matching proxy transaction");
-        // TODO: This former assertion does not compile against the snapshot-free RenderScene API. Replace it with a
-        // purpose-specific bridge/scene query when test work resumes; do not restore broad proxy copies.
-        entities::WorldRenderBridgeValidationReport bridgeValidation;
-        Check(bridge.ValidateFullRebuild(bridgeValidation, &bridgeFailure) && bridgeValidation.valid && bridgeValidation.scannedWorldContributors == 1 &&
-                  bridgeValidation.trackedContributors == 1,
-              "validate the dirty-stream result against a cold full-world contributor scan");
-
-        vanguard::u64 sceneUpdateTick = 1;
-        const auto executeSceneUpdate = [&](vanguard::rendering::RenderSceneUpdateResult& update) noexcept
-        {
-            vanguard::rendering::RenderSceneFramePrepareResult prepare;
-            if (!scenes.PrepareSceneUpdate(scene, sceneUpdateTick++, prepare, &sceneFailure))
-                return false;
-            vanguard::jobs::Builder builder({vanguard::jobs::Priority::RenderPath, vanguard::jobs::Affinity::AnyWorker});
-            if (!scenes.ExecuteSceneUpdate(scene, builder, update, &sceneFailure))
-                return false;
-            if (!update.dispatched)
-                return true;
-            vanguard::jobs::Counter completion = builder.ExtractCounter();
-            return completion.IsValid() && completion.Wait();
-        };
-        vanguard::rendering::RenderSceneUpdateResult firstUpdate;
-        Check(executeSceneUpdate(firstUpdate), "apply the activated proxy scene update");
-        // TODO: The former post-update proxy snapshot assertion is intentionally disabled with the API removal above.
-        Check(bridgeWorld.RetireCommandBatch(activation), "retire the completed activation transaction before release");
-        const vanguard::ecs::CommandBatch motion = bridgeWorld.BeginCommandBatch();
-        Check(motion && bridgeWorld.QueueSetComponent(motion, 9001, bridgeComponents.transform, BridgeTransform{5.0f}) &&
-                  bridgeWorld.SealCommandBatch(motion) && bridgeWorld.FlushActions() && bridgeWorld.FlushComponentActions(),
-              "commit a transform-only world-render state invalidation");
-        vanguard::rendering::RenderSceneUpdateResult motionUpdate;
-        Check(bridge.Flush(bridgeFlush, &bridgeFailure) && bridgeFlush.createdProxies == 0 && bridgeFlush.updatedProxies == 1,
-              "resolve and relink one contributor from its own transform invalidation");
-        Check(executeSceneUpdate(motionUpdate), "apply the transform-only scene update");
-        Check(bridgeWorld.RetireCommandBatch(motion), "retire the transform-only command batch");
-        Check(bridgeWorld.QueueDestroy(9001) && bridgeWorld.FlushActions() && bridgeWorld.FlushComponentActions() &&
-                  bridge.Flush(bridgeFlush, &bridgeFailure) && bridgeFlush.destroyedProxies == 1 &&
-                  !bridge.FindProxy(9001, bridgeComponents.light.id, bridgeProxy),
-              "translate exact entity destruction into proxy detachment without a table scan");
-        vanguard::rendering::RenderSceneUpdateResult releaseUpdate;
-        Check(executeSceneUpdate(releaseUpdate), "apply the scene update with the released entity removed");
-        vanguard::containers::DynamicArray<entities::WorldRenderDetachedProxy> detached(vanguard::memory::pools::Rendering::GetInstance());
-        Check(bridge.RetireDetachedProxies(detached, &bridgeFailure) && detached.Size() == 1 && detached[0].entity == 9001 && detached[0].bridgeGeneration == 7,
-              "retire detached proxies after live scene work completes without retaining copied scene images");
-        detached.Clear();
-        Check(bridge.RetireDetachedProxies(detached, &bridgeFailure) && detached.Empty(), "completed scene updates do not produce a second proxy release");
-        Check(bridge.Shutdown(&bridgeFailure) && scenes.DestroyScene(scene, &sceneFailure) && scenes.Shutdown(&sceneFailure) && bridgeWorld.Shutdown(),
-              "shutdown the drained world-render bridge path");
-    }
     Check(materializer.Shutdown(), "shutdown empty materializer");
     Check(referenceRegistry.Shutdown(), "shutdown empty entity reference registry");
     Check(componentRegistry.Shutdown(), "shutdown component registry");

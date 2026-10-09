@@ -17,6 +17,11 @@ namespace vanguard::entities
 
         [[nodiscard]] ComponentDirectory& GetDirectory() noexcept;
         [[nodiscard]] const ComponentDirectory& GetDirectory() const noexcept;
+        /// Consumes every retained committed ECS change needed by stable component
+        /// state. This is also the terminal synchronization boundary between bounded
+        /// structural/component commit slices.
+        [[nodiscard]] bool SynchronizeCommittedChanges(game::GameWorld& world) noexcept;
+        [[nodiscard]] const char* GetSynchronizationFailure() const noexcept { return m_readinessBlocker; }
 
     protected:
         [[nodiscard]] bool OnInitialize(game::GameWorld& world) noexcept override;

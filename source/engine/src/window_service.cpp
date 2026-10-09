@@ -16,7 +16,10 @@ namespace
     class ManagedWindowService final : public engine::WindowService, public win::IWindowEventSink
     {
     public:
-        explicit ManagedWindowService(app::IPlatformHost* const platform) noexcept : m_platform(platform) {}
+        explicit ManagedWindowService(const engine::WindowServiceConfig& config) noexcept
+            : m_platform(config.platform), m_primaryLogicalExtent(config.primaryLogicalExtent)
+        {
+        }
 
         [[nodiscard]] win::WindowManager& GetManager() noexcept override
         {
@@ -30,6 +33,18 @@ namespace
         {
             return m_primaryWindow;
         }
+        [[nodiscard]] bool AttachFileDropSink(engine::IWindowFileDropSink* const sink) noexcept override
+        {
+            if (sink == nullptr || (m_fileDropSink != nullptr && m_fileDropSink != sink))
+                return false;
+            m_fileDropSink = sink;
+            return true;
+        }
+        void DetachFileDropSink(engine::IWindowFileDropSink* const sink) noexcept override
+        {
+            if (m_fileDropSink == sink)
+                m_fileDropSink = nullptr;
+        }
 
         [[nodiscard]] win::BackendStatus RefreshDisplayTopology() noexcept override
         {
@@ -41,6 +56,31 @@ namespace
 
         [[nodiscard]] win::WindowEventSinkResult ProcessWindowEvent(const win::BackendWindowEvent& event) noexcept override
         {
+            if (event.type == win::BackendEventType::FileDropBegin || event.type == win::BackendEventType::FileDropped ||
+                event.type == win::BackendEventType::FileDropComplete)
+            {
+                const win::WindowHandle window = m_manager.ResolveBackendWindow(event.window);
+                if (!window.IsValid())
+                    return {win::BackendStatus::Failure(-1, "file-drop event references an unknown window"),
+                            win::WindowEventSinkAction::Continue};
+                if (m_fileDropSink != nullptr)
+                {
+                    engine::WindowFileDropEvent drop;
+                    drop.type = event.type == win::BackendEventType::FileDropBegin
+                                    ? engine::WindowFileDropEventType::Begin
+                                : event.type == win::BackendEventType::FileDropped
+                                    ? engine::WindowFileDropEventType::File
+                                    : engine::WindowFileDropEventType::Complete;
+                    drop.window = window;
+                    drop.position = event.dropPosition;
+                    drop.timestampNanoseconds = event.timestampNanoseconds;
+                    drop.path = event.dropPath;
+                    if (!m_fileDropSink->ProcessFileDrop(drop))
+                        return {win::BackendStatus::Failure(-1, "file-drop sink rejected the event"),
+                                win::WindowEventSinkAction::Continue};
+                }
+                return {win::BackendStatus::Success(), win::WindowEventSinkAction::Continue};
+            }
             win::Failure failure;
             if (!m_manager.ProcessBackendEvent(event, &failure))
                 return {win::BackendStatus::Failure(failure.backendCode, failure.message != nullptr ? failure.message : "window event processing failed"),
@@ -78,9 +118,14 @@ namespace
             descriptor.title = editor ? "RED Vanguard Editor" : "RED Vanguard";
             descriptor.role = editor ? win::WindowRole::EditorMain : win::WindowRole::Primary;
             descriptor.placement.display = m_manager.GetPrimaryDisplay();
-            descriptor.placement.logicalExtent = editor ? win::WindowExtent{1920, 1080} : win::WindowExtent{1920, 1080};
+            descriptor.placement.logicalExtent = m_primaryLogicalExtent;
             descriptor.initialPlacement = win::InitialWindowPlacement::CenteredOnDisplay;
-            descriptor.placement.visible = true;
+            // Editor user state restores the primary placement while the native window is
+            // still hidden, then performs the one authoritative reveal before service
+            // startup completes. Runtime/tool profiles keep the existing immediate show.
+            descriptor.placement.visible = !editor;
+            if (editor)
+                descriptor.flags = descriptor.flags | win::WindowFlag::Borderless | win::WindowFlag::AcceptFileDrop;
             win::Failure failure;
             if (!m_manager.Create(descriptor, m_primaryWindow, &failure))
             {
@@ -121,21 +166,27 @@ namespace
             if (!m_manager.Shutdown(&failure))
                 return app::LifecycleStatus::Failure(failure.message != nullptr ? failure.message : "Window manager shutdown failed");
             m_platform = nullptr;
+            m_fileDropSink = nullptr;
             return app::LifecycleStatus::Success();
         }
 
     private:
         app::IPlatformHost* m_platform = nullptr;
+        win::WindowExtent m_primaryLogicalExtent;
         win::WindowManager m_manager;
         win::WindowHandle m_primaryWindow;
+        engine::IWindowFileDropSink* m_fileDropSink = nullptr;
         bool m_attached = false;
     };
 
     app::Service* CreateWindowService(void* const userData) noexcept
     {
+        const auto* const config = static_cast<const engine::WindowServiceConfig*>(userData);
+        if (config == nullptr)
+            return nullptr;
         vanguard::memory::MemoryBlock block =
             vanguard::memory::Allocate(vanguard::memory::PoolId::Window, sizeof(ManagedWindowService), alignof(ManagedWindowService));
-        return block ? ::new (block.address) ManagedWindowService(static_cast<app::IPlatformHost*>(userData)) : nullptr;
+        return block ? ::new (block.address) ManagedWindowService(*config) : nullptr;
     }
 
     void DestroyWindowService(app::Service* const service, void*) noexcept
@@ -150,13 +201,15 @@ namespace
 
 namespace vanguard::engine
 {
-    bool RegisterWindowService(application::EngineHost& host, application::IPlatformHost* const platform, application::HostFailure* const failure) noexcept
+    bool RegisterWindowService(application::EngineHost& host, const WindowServiceConfig& config, application::HostFailure* const failure) noexcept
     {
-        if (platform == nullptr || platform->GetWindowBackend() == nullptr)
+        const window::WindowConstraints constraints;
+        if (config.platform == nullptr || config.platform->GetWindowBackend() == nullptr || !config.primaryLogicalExtent.IsValid() ||
+            config.primaryLogicalExtent.width > constraints.maximum.width || config.primaryLogicalExtent.height > constraints.maximum.height)
         {
             if (failure != nullptr)
                 *failure = {application::HostFailureCode::InvalidArgument, WindowServiceId, application::InvalidServiceId, application::InvalidCapabilityId,
-                            "Window service requires an initialized platform window backend"};
+                            "Window service requires an initialized platform window backend and a valid primary extent"};
             return false;
         }
         constexpr application::CapabilityId capabilities[]{WindowCapabilityId};
@@ -169,7 +222,7 @@ namespace vanguard::engine
         descriptor.provides = {capabilities, 1};
         descriptor.create = CreateWindowService;
         descriptor.destroy = DestroyWindowService;
-        descriptor.userData = platform;
+        descriptor.userData = const_cast<WindowServiceConfig*>(&config);
         return host.RegisterService(EngineModuleId, descriptor, failure);
     }
 

@@ -217,6 +217,9 @@ namespace vanguard::ecs
         [[nodiscard]] bool QueueDestroy(EntityId identity) noexcept;
         [[nodiscard]] bool QueueDestroy(CommandBatch batch, EntityId identity) noexcept;
         [[nodiscard]] bool FlushActions(ActionReport* report = nullptr) noexcept;
+        /// Commits at most maximumActions queued structural commands while preserving
+        /// queue order and command-batch completion state for the remaining work.
+        [[nodiscard]] bool FlushActions(u32 maximumActions, ActionReport* report) noexcept;
 
         /// Live component structure is changed only when FlushComponentActions is called. Tokens
         /// must have been registered for this exact world through RegisterComponent in native.hpp.
@@ -278,6 +281,9 @@ namespace vanguard::ecs
         }
 
         [[nodiscard]] bool FlushComponentActions(ComponentActionReport* report = nullptr) noexcept;
+        /// Commits at most maximumActions queued component commands while preserving
+        /// queue order and command-batch completion state for the remaining work.
+        [[nodiscard]] bool FlushComponentActions(u32 maximumActions, ComponentActionReport* report) noexcept;
         /// Reads retained committed changes without consuming them for other subscribers. A slow reader is
         /// advanced to the oldest retained sequence and receives an exact lost-record count.
         [[nodiscard]] bool ReadCommittedChanges(CommittedChangeCursor& cursor, containers::DynamicArray<CommittedChange>& changes, u32 maximumRecords,

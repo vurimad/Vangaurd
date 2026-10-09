@@ -186,6 +186,11 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool IsValid(GpuSceneAllocation allocation) const noexcept;
         [[nodiscard]] GpuSceneAllocationState GetState(GpuSceneAllocation allocation) const noexcept;
+        /// Highest individual-slot index ever materialized plus one. This is a
+        /// CPU-owned allocation high-water mark, not a GPU readback. Recycled
+        /// holes remain inside the extent and must be rejected by table payload
+        /// liveness/generation data.
+        [[nodiscard]] u32 GetTraversalExtent(GpuSceneTableKind table) const noexcept;
         [[nodiscard]] GpuSceneTableLifetimeStats GetTableStats(GpuSceneTableKind table) const noexcept;
         [[nodiscard]] GpuSceneLifetimeStats GetStats() const noexcept;
 

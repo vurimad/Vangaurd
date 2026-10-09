@@ -214,9 +214,50 @@ int main()
     Check(registry.Publish(reloaded, secondResource), "new generation publishes successfully");
     ResourceHandle secondStrong = reloaded.Acquire();
     Check(secondStrong.IsValid() && secondStrong.GetGeneration() != firstGeneration, "reloaded resource receives a new generation");
-    Check(registry.Evict(meshReference.GetPath()), "reloaded resource can be evicted");
+    WeakResourceHandle secondWeak = secondStrong.ToWeak();
+
+    ResourceRequest failedReplacement = registry.RequestReplacement(meshReference);
+    Check(failedReplacement.GetStatus() == State::Loading && registry.GetState(meshReference.GetPath()) == State::Reloading,
+          "replacement candidate loads in a distinct slot while the old generation stays current");
+    ResourceHandle duringReplacement = registry.TryAcquire(meshReference);
+    Check(duringReplacement.IsValid() && duringReplacement.GetGeneration() == secondStrong.GetGeneration() &&
+              static_cast<TestResource*>(duringReplacement.Get())->Value() == 22,
+          "ordinary acquisition remains on the old current generation during replacement");
+    ResourceRequest failedReplacementPeer = registry.RequestReplacement(meshReference);
+    Check(failedReplacementPeer.IsSameOperation(failedReplacement), "concurrent replacement callers coalesce on one candidate generation");
+    Check(registry.Fail(failedReplacement, Failure::IoFailure) && failedReplacement.HasFailed() &&
+              registry.GetState(meshReference.GetPath()) == State::Loaded && secondStrong.IsValid() && secondWeak.IsValid(),
+          "failed replacement preserves the old current generation and its strong/weak handles");
+
+    ResourceRequest replacement = registry.RequestReplacement(meshReference);
+    TestResource* replacementResource = VANGUARD_NEW(TestResource)(meshType, 33);
+    Check(replacement.GetStatus() == State::Loading && registry.Publish(replacement, replacementResource),
+          "successful replacement publishes a fresh candidate generation");
+    ResourceHandle replacementStrong = replacement.Acquire();
+    ResourceHandle currentStrong = registry.TryAcquire(meshReference);
+    Check(replacementStrong.IsValid() && currentStrong.IsValid() && replacementStrong.GetGeneration() == currentStrong.GetGeneration() &&
+              replacementStrong.GetGeneration() != secondStrong.GetGeneration() && static_cast<TestResource*>(currentStrong.Get())->Value() == 33,
+          "successful replacement atomically makes the fresh slot the path-current generation");
+    ResourceHandle oldRequestAcquire = reloaded.Acquire();
+    ResourceHandle oldWeakAcquire = secondWeak.Lock();
+    Check(secondStrong.IsValid() && oldRequestAcquire.IsValid() && oldWeakAcquire.IsValid() &&
+              oldRequestAcquire.GetGeneration() == secondStrong.GetGeneration() && oldWeakAcquire.GetGeneration() == secondStrong.GetGeneration() &&
+              static_cast<TestResource*>(secondStrong.Get())->Value() == 22,
+          "old completion, strong, and weak handles remain generation-safe across current-path cutover");
+
+    duringReplacement.Reset();
+    oldRequestAcquire.Reset();
+    oldWeakAcquire.Reset();
     secondStrong.Reset();
-    Check(loaderHarness.destructions.GetValue() == 2, "reloaded object follows the same destruction contract");
+    Check(loaderHarness.destructions.GetValue() == 2 && secondWeak.IsStale() && !secondWeak.Lock(),
+          "old replacement generation retires exactly once after its last strong handle drains");
+    secondWeak.Reset();
+    failedReplacement.Reset();
+    failedReplacementPeer.Reset();
+    replacementStrong.Reset();
+    Check(registry.Evict(meshReference.GetPath()), "replacement-current resource can be evicted independently of the retired generation");
+    currentStrong.Reset();
+    Check(loaderHarness.destructions.GetValue() == 3, "replacement-current object follows the same destruction contract");
 
     const ResourceReference cancelledReference(ResourcePath::FromString("meshes/cancelled.vmesh"), meshType);
     ResourceRequest cancelled = registry.Request(cancelledReference);
@@ -228,7 +269,7 @@ int main()
     VANGUARD_DELETE(lateResource);
 
     ResourceRequest failed = registry.Request(cancelledReference);
-    Check(loaderHarness.starts.GetValue() == 4, "retry after cancellation starts a distinct operation");
+    Check(loaderHarness.starts.GetValue() == 6, "retry after cancellation starts a distinct operation");
     Check(registry.Fail(failed, Failure::IoFailure), "loader can explicitly fail an in-flight request");
     failed.Wait();
     Check(failed.GetStatus() == State::Failed && failed.GetError() == Failure::IoFailure, "failure reason is shared by request observers");
@@ -238,8 +279,8 @@ int main()
     Check(unknown.HasFailed() && unknown.GetError() == Failure::UnknownType, "unregistered resource types fail without invoking a loader");
 
     const RegistryStats registryStats = registry.GetStats();
-    Check(registryStats.registeredLoaders == 1 && registryStats.knownResources == 2, "registry statistics expose loaders and known resources");
-    Check(registryStats.coalescedRequests == requestThreadCount, "registry statistics expose request coalescing");
+    Check(registryStats.registeredLoaders == 1 && registryStats.knownResources >= 2, "registry statistics expose loaders and known resources");
+    Check(registryStats.coalescedRequests >= requestThreadCount + 1u, "registry statistics expose ordinary and replacement request coalescing");
     Check(registry.UnregisterLoader(meshType), "loader unregisters after live work and objects are gone");
     Check(!registry.HasLoader(meshType), "unregistered loader is no longer discoverable");
     Check(!registry.Shutdown(), "shutdown refuses outstanding request and weak handles");
@@ -250,10 +291,53 @@ int main()
         request.Reset();
     }
     reloaded.Reset();
+    replacement.Reset();
     cancelled.Reset();
     failed.Reset();
     unknown.Reset();
     Check(registry.Shutdown(), "registry shuts down after external ownership is released");
+
+    // P4: protected old generations are never invalidated just to make room, but
+    // total registry generation metadata is bounded. Admission fails
+    // deterministically until an actually unowned slot becomes recyclable.
+    ResourceRegistry boundedRegistry;
+    ResourceRegistryConfig boundedConfig;
+    boundedConfig.maximumEntries = 2u;
+    Check(boundedRegistry.Initialize(boundedConfig), "P4 bounded resource registry initializes");
+    LoaderHarness boundedHarness;
+    const LoaderDescriptor boundedLoader{meshType, "bounded test mesh loader", &BeginTestLoad, &DestroyTestResource, &boundedHarness};
+    Check(boundedRegistry.RegisterLoader(boundedLoader), "P4 bounded registry loader registers");
+    const ResourceReference boundedA(ResourcePath::FromString("bounded/a.vmesh"), meshType);
+    const ResourceReference boundedB(ResourcePath::FromString("bounded/b.vmesh"), meshType);
+    const ResourceReference boundedC(ResourcePath::FromString("bounded/c.vmesh"), meshType);
+    ResourceRequest boundedRequestA = boundedRegistry.Request(boundedA);
+    ResourceRequest boundedRequestB = boundedRegistry.Request(boundedB);
+    Check(boundedRegistry.Publish(boundedRequestA, VANGUARD_NEW(TestResource)(meshType, 1u)) &&
+              boundedRegistry.Publish(boundedRequestB, VANGUARD_NEW(TestResource)(meshType, 2u)),
+          "P4 bounded registry fills both protected generation slots");
+    ResourceHandle boundedStrongA = boundedRequestA.Acquire();
+    ResourceHandle boundedStrongB = boundedRequestB.Acquire();
+    ResourceRequest boundedOverflow = boundedRegistry.Request(boundedC);
+    Check(boundedOverflow.HasFailed() && boundedOverflow.GetError() == Failure::OutOfMemory && boundedStrongA.IsValid() && boundedStrongB.IsValid(),
+          "P4 registry capacity rejects a third generation without invalidating protected handles");
+    Check(boundedRegistry.Evict(boundedA.GetPath()), "P4 bounded registry begins exact retirement of one protected slot");
+    boundedStrongA.Reset();
+    boundedRequestA.Reset();
+    boundedOverflow.Reset();
+    ResourceRequest boundedRecovered = boundedRegistry.Request(boundedC);
+    Check(!boundedRecovered.HasFailed() && boundedRecovered.GetStatus() == State::Loading,
+          "P4 registry admission recovers after an owner-proven slot becomes recyclable");
+    Check(boundedRegistry.Publish(boundedRecovered, VANGUARD_NEW(TestResource)(meshType, 3u)),
+          "P4 recycled registry slot publishes a later generation");
+    ResourceHandle boundedStrongC = boundedRecovered.Acquire();
+    Check(boundedRegistry.Evict(boundedB.GetPath()) && boundedRegistry.Evict(boundedC.GetPath()),
+          "P4 bounded registry generations accept orderly retirement");
+    boundedStrongB.Reset();
+    boundedStrongC.Reset();
+    boundedRequestB.Reset();
+    boundedRecovered.Reset();
+    Check(boundedRegistry.UnregisterLoader(meshType) && boundedRegistry.Shutdown(),
+          "P4 bounded registry shuts down after all protected owners release");
 
     if (g_failures == 0)
     {

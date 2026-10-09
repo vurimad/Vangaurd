@@ -717,9 +717,10 @@ namespace vanguard::rendering
                                                             RenderSceneFailure* failure) const noexcept;
 
         friend class FrameRenderer;
-        // Reuses the family scene seal and exclusive Global spatial membership.
-        // One family traversal, no per-light locks or copied light properties.
-        [[nodiscard]] bool CollectDirectionalLights(const RenderSceneGpuCandidatePlan& plan, containers::ArraySpan<const RenderView> views,
+        // Synchronous renderer-boundary read of exclusive Global spatial
+        // membership. Geometry no longer keeps the CPU candidate-production seal
+        // alive merely to select directional lights.
+        [[nodiscard]] bool CollectDirectionalLights(RenderSceneHandle scene, u64 mutationEpoch, containers::ArraySpan<const RenderView> views,
                                                      containers::ArraySpan<GpuDirectionalLightSelection> selections, RenderSceneFailure* failure) const noexcept;
         friend class RenderCameraStorage;
         friend class RenderSceneGpuPublisher;
@@ -729,6 +730,10 @@ namespace vanguard::rendering
         [[nodiscard]] bool DetachCameraStorage(RenderCameraStorage& storage) noexcept;
         [[nodiscard]] bool AttachGpuPublisher(RenderSceneGpuPublisher& publisher) noexcept;
         [[nodiscard]] bool DetachGpuPublisher(RenderSceneGpuPublisher& publisher) noexcept;
+        /// Terminal device-loss cutover. The publisher has already abandoned every
+        /// per-scene GPU state, so live CPU RenderScenes must sever the back-pointer
+        /// without requiring normal scene destruction first.
+        [[nodiscard]] bool AbandonGpuPublisher(RenderSceneGpuPublisher& publisher) noexcept;
         [[nodiscard]] bool IsGpuPublicationReady(RenderSceneHandle scene, u64 mutationEpoch) const noexcept;
         [[nodiscard]] bool ReadGpuProxy(RenderProxyHandle proxy, RenderSceneGpuReadView& view) const noexcept;
         [[nodiscard]] bool SetGpuInstanceIndex(RenderProxyHandle proxy, GpuInstanceIndex instanceIndex) noexcept;

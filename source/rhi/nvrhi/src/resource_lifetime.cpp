@@ -436,6 +436,7 @@ namespace vanguard::rhi::backend
         concurrency::Atomic<u64> staleReferenceOperations;
         concurrency::Atomic<u64> retirementQueueRecoveries;
         concurrency::Atomic<u64> retirementBucketOverflows;
+        concurrency::Atomic<u32> retirementRecoveryNeeded;
         bool initialized = false;
 
         [[nodiscard]] ResourceTable* GetTable(const ResourceKind kind) noexcept
@@ -472,6 +473,7 @@ namespace vanguard::rhi::backend
             {
                 slot.retirementQueued.SetValue(0);
                 static_cast<void>(retirementQueueRecoveries.Increment());
+                retirementRecoveryNeeded.SetValue(1u);
                 return false;
             }
             const u32 bucketIndex = enqueueBucket.GetValue();
@@ -986,7 +988,11 @@ namespace vanguard::rhi::backend
     {
         if (!IsInitialized())
             return;
-        m_impl->RecoverUnqueuedRetirements();
+        // The retirement queue is sized to the complete resource-slot domain, so publication failure is
+        // exceptional. A full table walk is only needed after such a failure; paying it every frame turns
+        // a defensive recovery path into O(total resource capacity) steady-state work.
+        if (m_impl->retirementRecoveryNeeded.Exchange(0u) != 0u)
+            m_impl->RecoverUnqueuedRetirements();
         m_impl->PrepareEvictions();
         if (m_impl->pendingEvictions.GetValue() == 0)
             return;

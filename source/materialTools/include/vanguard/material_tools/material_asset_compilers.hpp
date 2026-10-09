@@ -11,7 +11,7 @@ namespace vanguard::material_tools
     inline constexpr resources::ResourceTypeId MaterialPipelineInputResourceType = serialization::MakeFourCC('M', 'P', 'L', 'I');
     inline constexpr resources::ResourceTypeId MaterialValueInputResourceType = serialization::MakeFourCC('M', 'V', 'L', 'I');
     inline constexpr resources::ResourceTypeId MaterialCompilerToolResourceType = serialization::MakeFourCC('M', 'T', 'O', 'L');
-    inline constexpr u32 MaterialArtifactCompilerVersion = 4;
+    inline constexpr u32 MaterialArtifactCompilerVersion = 5;
 
     /// Headless cook policy. It is deliberately independent from the active RHI
     /// adapter: cooks may run on a different machine from the target runtime.
@@ -22,7 +22,7 @@ namespace vanguard::material_tools
             shaders::KnownMaterialShaderCapabilityMask,
             shaders::KnownMaterialShaderCapabilityMask};
         resources::ResourceTypeId resourceTypes[4]{textures::TextureResourceType, resources::InvalidResourceTypeId,
-                                                    resources::InvalidResourceTypeId, resources::InvalidResourceTypeId};
+                                                    materials::StandardSamplerResourceType, resources::InvalidResourceTypeId};
 
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] shaders::MaterialShaderCapabilityMask Capabilities(assets::TargetPlatform target) const noexcept;

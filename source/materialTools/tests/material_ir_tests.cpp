@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/assets/derived_data_package_artifact_reader.hpp>
 #include <vanguard/assets/derived_data_artifact_source.hpp>
@@ -1116,30 +1117,28 @@ namespace
             materialRequest = {{materialSource, selectedMaterialBytes, {}}, material, target, {}};
         }
 
-        static bool Resolve(const assets::BuildDependency& dependency, assets::BuildRequest& request, void* const userData) noexcept
+        static bool Resolve(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request, void* const userData) noexcept
         {
             const ArtifactFixture& fixture = *static_cast<const ArtifactFixture*>(userData);
             if (dependency.identity == fixture.shader)
-                request = fixture.programRequest;
+                return request.CopyFrom(fixture.programRequest);
             else if (dependency.identity == fixture.pipeline)
-                request = fixture.pipelineRequest;
+                return request.CopyFrom(fixture.pipelineRequest);
             else
                 return false;
-            return true;
         }
 
-        static bool ResolveOutput(const resources::ResourceReference output, assets::BuildRequest& request, void* const userData) noexcept
+        static bool ResolveOutput(const resources::ResourceReference output, assets::OwnedBuildRequest& request, void* const userData) noexcept
         {
             const ArtifactFixture& fixture = *static_cast<const ArtifactFixture*>(userData);
             if (output == fixture.shader)
-                request = fixture.programRequest;
+                return request.CopyFrom(fixture.programRequest);
             else if (output == fixture.pipeline)
-                request = fixture.pipelineRequest;
+                return request.CopyFrom(fixture.pipelineRequest);
             else if (output == fixture.material)
-                request = fixture.materialRequest;
+                return request.CopyFrom(fixture.materialRequest);
             else
                 return false;
-            return true;
         }
 
         CanonicalFixture canonical;
@@ -1228,38 +1227,36 @@ namespace
             valid = programRequest.output == shader && pipelineRequests[0].output == pipelines[0] && pipelineRequests[1].output == pipelines[1] && materialRequest.output == material;
         }
 
-        static bool Resolve(const assets::BuildDependency& dependency, assets::BuildRequest& request, void* const userData) noexcept
+        static bool Resolve(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request, void* const userData) noexcept
         {
             const auto& fixture = *static_cast<const DeclaredSurfaceArtifactFixture*>(userData);
             if (dependency.identity == fixture.shader)
-                request = fixture.programRequest;
+                return request.CopyFrom(fixture.programRequest);
             else if (dependency.identity == fixture.pipelines[0])
-                request = fixture.pipelineRequests[0];
+                return request.CopyFrom(fixture.pipelineRequests[0]);
             else if (dependency.identity == fixture.pipelines[1])
-                request = fixture.pipelineRequests[1];
+                return request.CopyFrom(fixture.pipelineRequests[1]);
             else if (fixture.texture != nullptr && fixture.texture->available && dependency.identity == fixture.texture->output)
-                request = fixture.texture->Request();
+                return request.CopyFrom(fixture.texture->Request());
             else
                 return false;
-            return true;
         }
 
-        static bool ResolveOutput(const resources::ResourceReference output, assets::BuildRequest& request, void* const userData) noexcept
+        static bool ResolveOutput(const resources::ResourceReference output, assets::OwnedBuildRequest& request, void* const userData) noexcept
         {
             const auto& fixture = *static_cast<const DeclaredSurfaceArtifactFixture*>(userData);
             if (output == fixture.shader)
-                request = fixture.programRequest;
+                return request.CopyFrom(fixture.programRequest);
             else if (output == fixture.pipelines[0])
-                request = fixture.pipelineRequests[0];
+                return request.CopyFrom(fixture.pipelineRequests[0]);
             else if (output == fixture.pipelines[1])
-                request = fixture.pipelineRequests[1];
+                return request.CopyFrom(fixture.pipelineRequests[1]);
             else if (output == fixture.material)
-                request = fixture.materialRequest;
+                return request.CopyFrom(fixture.materialRequest);
             else if (fixture.texture != nullptr && output == fixture.texture->output)
-                request = fixture.texture->Request();
+                return request.CopyFrom(fixture.texture->Request());
             else
                 return false;
-            return true;
         }
 
         DeclaredSurfaceCanonicalFixture canonical;
@@ -1501,7 +1498,7 @@ int main()
     Check(containers::Initialize(), "containers initialization");
     Check(vanguard::io::Initialize(), "I/O initialization");
     const filesystem::AbsolutePath working = filesystem::paths::GetCurrentWorkingDirectory();
-    const filesystem::AbsolutePath looseProofRoot = working.AddDirPath("vanguard_material_tools_loose_tests");
+    const filesystem::AbsolutePath looseProofRoot = vanguard::tests::ScratchDirectory("material_ir_tests").AddDirPath("vanguard_material_tools_loose_tests");
     Check(filesystem::Initialize({working, working, looseProofRoot}), "filesystem initialization");
     filesystem::Manager& fileManager = filesystem::GetManager();
     DeleteLooseProofFiles(fileManager, looseProofRoot);

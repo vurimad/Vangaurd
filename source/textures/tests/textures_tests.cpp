@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/io/io.hpp>
@@ -155,7 +156,7 @@ int main()
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
     Check(jobs::Initialize(jobs::ToolConfig()), "jobs initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("textures_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
 
     Fixture fixture;

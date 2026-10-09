@@ -16,6 +16,9 @@ project "crypto"
         "../system/include"
     }
     links { "system" }
+    filter "system:windows"
+        links { "Bcrypt" }
+    filter {}
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
         ["Source/*"] = { "src/**.hpp", "src/**.cpp" }

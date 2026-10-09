@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vanguard/rhi/rhi_types.hpp>
 #include <vanguard/system/types.hpp>
 
 namespace vanguard::meshes
@@ -10,6 +11,11 @@ namespace vanguard::meshes
 namespace vanguard::pipelines
 {
     class PipelineFile;
+}
+
+namespace vanguard::shaders
+{
+    class ShaderFile;
 }
 
 namespace vanguard::rendering
@@ -38,6 +44,19 @@ namespace vanguard::rendering
         u32 reserved = 0;
     };
     static_assert(sizeof(StaticSurfaceDrawContext) == 24);
+
+    // Canonical native fixed interface consumed by static_surface_prefix.vsl.
+    // The returned descriptor borrows process-lifetime immutable entry storage.
+    [[nodiscard]] rhi::BindingLayoutDesc GetStaticSurfaceDrawBindingLayout() noexcept;
+
+    // Cooked-shader side of the same ABI. This validates the reflected b0
+    // declaration directly instead of introducing a second material ABI owner.
+    [[nodiscard]] bool ValidateStaticSurfaceShaderInterface(const shaders::ShaderFile& shader) noexcept;
+
+    // Bounded pipeline-side identity for the counted-indirect static-surface path.
+    // Reuses the existing binding-15/VG_DRAW ABI instead of inferring draw ABI from
+    // a render-phase key or introducing a parallel material identity.
+    [[nodiscard]] bool IsStaticSurfaceDrawPipeline(const pipelines::PipelineFile& pipeline) noexcept;
 
     // Resource-time, allocation-free validation. Only bounded vertex-layout
     // records are inspected; never scene objects, residency records or draws.

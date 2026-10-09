@@ -77,6 +77,7 @@ namespace vanguard::entities
         [[nodiscard]] bool OnInitialize(const ComponentInitializeContext& context) noexcept override;
         [[nodiscard]] bool OnAttach(const ComponentContext& context) noexcept override;
         void OnEnabled(const ComponentContext& context, bool enabled) noexcept override;
+        [[nodiscard]] ComponentReleaseResult OnPrepareDetach(const ComponentContext& context) noexcept override;
         void OnDetach(const ComponentContext& context) noexcept override;
         void OnUninitialize(const ComponentContext& context) noexcept override;
         void OnTransformUpdated(math::Box& worldBounds) noexcept override;
@@ -84,11 +85,10 @@ namespace vanguard::entities
         friend class RenderingRuntime;
         [[nodiscard]] rendering::RenderCameraState MakeState() const noexcept;
         [[nodiscard]] bool ApplyTransform() noexcept;
-        void ReleaseCamera() noexcept;
+        [[nodiscard]] ComponentReleaseResult ReleaseCamera() noexcept;
         CameraComponentData m_data;
         RenderingRuntime* m_rendering = nullptr;
         rendering::RenderCameraHandle m_camera;
-        rendering::RenderPhaseSet m_phases;
         CameraComponent* m_nextDirty = nullptr;
         CameraComponent* m_previousDirty = nullptr;
         // One transform job owns a given component; main-thread access is after join.

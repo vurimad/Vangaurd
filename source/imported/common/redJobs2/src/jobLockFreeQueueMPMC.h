@@ -30,8 +30,8 @@ public:
 		RED_FATAL_ASSERT( red::IsPowerOf2( m_numEntries ), "Queue size must be a power of two, got %llu", m_numEntries );
 	}
 
-	Bool Push( const TEntry& entry )
-	{
+		Bool Push( const TEntry& entry )
+		{
 		const Uint64 writeIndex = m_writeIndex.PostIncrement();
 
 		// No space; queue is full
@@ -59,8 +59,37 @@ public:
 			continue;
 		}
 
-		return true;
-	}
+			return true;
+		}
+
+		Bool TryPush( const TEntry& entry )
+		{
+			const Uint64 writeIndex = m_writeIndex.GetValue();
+			if ( m_comittedWriteEnd.GetValue() != writeIndex )
+			{
+				return false;
+			}
+			const Uint64 readIndex = m_readIndex.GetValue();
+			if ( writeIndex - readIndex >= m_numEntries )
+			{
+				return false;
+			}
+
+			// A failed producer race is deliberately reported as admission failure rather
+			// than spinning. This path is for optional scheduler control traffic only.
+			if ( m_writeIndex.CompareExchange( writeIndex + 1, writeIndex ) != writeIndex )
+			{
+				return false;
+			}
+
+			m_entries[ writeIndex & ( m_numEntries - 1 ) ] = entry;
+
+			const Uint64 oldWriteEnd = writeIndex;
+			const Uint64 newWriteEnd = writeIndex + 1;
+			RED_FATAL_ASSERT( m_comittedWriteEnd.CompareExchange( newWriteEnd, oldWriteEnd ) == oldWriteEnd );
+
+			return true;
+		}
 
 	Bool PushBulk( const red::ArraySpan< const TEntry >& entries )
 	{

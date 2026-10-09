@@ -1,5 +1,17 @@
 #include <vanguard/crypto/crypto.hpp>
 
+#include <vanguard/system/platform.hpp>
+
+#if VG_PLATFORM_WINDOWS
+#include <Windows.h>
+#include <bcrypt.h>
+#elif VG_PLATFORM_LINUX
+#include <cerrno>
+#include <sys/random.h>
+#endif
+
+#include <cstring>
+
 namespace
 {
     using namespace vanguard;
@@ -81,6 +93,38 @@ namespace
 
 namespace vanguard::crypto
 {
+    bool SecureRandom(void* const destination, const usize size) noexcept
+    {
+        if (size == 0)
+            return true;
+        if (destination == nullptr || size > static_cast<usize>(0xffffffffu))
+            return false;
+#if VG_PLATFORM_WINDOWS
+        const NTSTATUS status = ::BCryptGenRandom(nullptr, static_cast<PUCHAR>(destination), static_cast<ULONG>(size),
+                                                  BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (status >= 0)
+            return true;
+#elif VG_PLATFORM_LINUX
+        usize offset = 0;
+        while (offset < size)
+        {
+            const ssize_t read = ::getrandom(static_cast<u8*>(destination) + offset, size - offset, 0);
+            if (read > 0)
+            {
+                offset += static_cast<usize>(read);
+                continue;
+            }
+            if (read < 0 && errno == EINTR)
+                continue;
+            break;
+        }
+        if (offset == size)
+            return true;
+#endif
+        std::memset(destination, 0, size);
+        return false;
+    }
+
     bool Digest256::IsEmpty() const noexcept
     {
         for (const u8 byte : bytes)

@@ -215,6 +215,15 @@ namespace vanguard::textures
     {
         return m_impl != nullptr;
     }
+    streaming::ResourceSourceKind TextureSubresourceSource::GetKind() const noexcept
+    {
+        return m_impl != nullptr ? m_impl->source.GetKind() : streaming::ResourceSourceKind::LooseFile;
+    }
+    const filesystem::AbsolutePath& TextureSubresourceSource::GetPhysicalPath() const noexcept
+    {
+        static const filesystem::AbsolutePath empty;
+        return m_impl != nullptr ? m_impl->source.GetPhysicalPath() : empty;
+    }
     u64 TextureSubresourceSource::GetLogicalSize() const noexcept
     {
         return m_impl != nullptr ? m_impl->source.GetLogicalSize() : 0;

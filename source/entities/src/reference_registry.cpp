@@ -29,6 +29,21 @@ namespace
         return kind == world::EntityReferenceKind::RequiredLocal || kind == world::EntityReferenceKind::RequiredWorld;
     }
 
+    struct ReferenceSlotKey
+    {
+        ecs::EntityId source = ecs::InvalidEntityId;
+        u64 slot = 0;
+
+        [[nodiscard]] u32 CalcHash() const noexcept
+        {
+            u64 value = source;
+            value ^= slot + 0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
+            return static_cast<u32>(value ^ (value >> 32u));
+        }
+
+        [[nodiscard]] friend constexpr bool operator==(const ReferenceSlotKey&, const ReferenceSlotKey&) noexcept = default;
+    };
+
 } // namespace
 
 namespace vanguard::entities
@@ -82,6 +97,7 @@ namespace vanguard::entities
         struct LiveEntity
         {
             u64 cellId = 0;
+            u64 partitionId = 0;
             u32 generation = 0;
             ecs::Entity entity;
         };
@@ -102,26 +118,10 @@ namespace vanguard::entities
             return cells.Find(cellId, cell) ? cell : nullptr;
         }
 
-        [[nodiscard]] bool HasEntity(const containers::DynamicArray<ecs::EntityId>& values, const ecs::EntityId identity) const noexcept
-        {
-            for (const ecs::EntityId value : values)
-                if (value == identity)
-                    return true;
-            return false;
-        }
-
         [[nodiscard]] PartitionRecord* FindPartition(CellRecord& cell, const u64 partitionId) const noexcept
         {
             PartitionRecord* partition = nullptr;
             return cell.partitions.Find(partitionId, partition) ? partition : nullptr;
-        }
-
-        [[nodiscard]] SourceRecord* FindPreparedSource(PartitionRecord& partition, const ecs::EntityId identity) const noexcept
-        {
-            for (SourceRecord* const source : partition.sources)
-                if (source->entity == identity)
-                    return source;
-            return nullptr;
         }
 
         void ChangeResolution(Binding& binding, const ecs::Entity value) noexcept
@@ -170,6 +170,9 @@ namespace vanguard::entities
         containers::HashMap<ecs::EntityId, SourceRecord*> sources;
         containers::HashMap<ecs::EntityId, TargetRecord*> targets;
         u64 resolutionRevision = 0;
+        u64 registrationEntitiesVisited = 0;
+        u64 registrationReferencesVisited = 0;
+        u64 registrationSlotLookups = 0;
     };
 
     namespace
@@ -300,23 +303,40 @@ namespace vanguard::entities
         }
         partition->partitionId = partitionId;
         partition->entities.Reserve(entities.Size());
+        containers::HashMap<ecs::EntityId, u8> partitionEntitySet(memory::pools::World::GetInstance());
+        partitionEntitySet.Reserve(entities.Size());
         for (const ecs::EntityId identity : entities)
         {
+            ++m_impl->registrationEntitiesVisited;
             Impl::LiveEntity existing;
+            u8 present = 0;
             if (identity == ecs::InvalidEntityId || !m_impl->world->Resolve(identity) || m_impl->live.Find(identity, existing) ||
-                m_impl->HasEntity(partition->entities, identity))
+                partitionEntitySet.Find(identity, present))
             {
                 DeleteReferenceObject(partition);
                 if (newCell)
                     DeleteReferenceObject(cell);
                 return ReferenceResult::DuplicateEntity;
             }
+            if (!partitionEntitySet.Insert(identity, 1u).IsSuccessful())
+            {
+                DeleteReferenceObject(partition);
+                if (newCell)
+                    DeleteReferenceObject(cell);
+                return ReferenceResult::InvalidState;
+            }
             partition->entities.PushBack(identity);
         }
 
+        containers::HashMap<ecs::EntityId, Impl::SourceRecord*> preparedSources(memory::pools::World::GetInstance());
+        containers::HashSet<ReferenceSlotKey> preparedSlots(memory::pools::World::GetInstance());
+        preparedSources.Reserve(entities.Size() < references.Size() ? entities.Size() : references.Size());
+        preparedSlots.Reserve(references.Size());
         for (const world::EntityReferenceRecord& reference : references)
         {
-            if (!m_impl->HasEntity(partition->entities, reference.sourceEntityId))
+            ++m_impl->registrationReferencesVisited;
+            u8 sourcePresent = 0;
+            if (!partitionEntitySet.Find(reference.sourceEntityId, sourcePresent))
                 continue;
             if (reference.slot == 0 || reference.targetEntityId == ecs::InvalidEntityId)
             {
@@ -327,7 +347,8 @@ namespace vanguard::entities
                     DeleteReferenceObject(cell);
                 return ReferenceResult::InvalidArgument;
             }
-            Impl::SourceRecord* source = m_impl->FindPreparedSource(*partition, reference.sourceEntityId);
+            Impl::SourceRecord* source = nullptr;
+            static_cast<void>(preparedSources.Find(reference.sourceEntityId, source));
             if (source == nullptr)
             {
                 source = AllocateReferenceObject<Impl::SourceRecord>();
@@ -345,17 +366,35 @@ namespace vanguard::entities
                 source->generation = generation;
                 source->entity = reference.sourceEntityId;
                 partition->sources.PushBack(source);
+                if (!preparedSources.Insert(reference.sourceEntityId, source).IsSuccessful())
+                {
+                    for (Impl::SourceRecord* const prepared : partition->sources)
+                        DeleteReferenceObject(prepared);
+                    DeleteReferenceObject(partition);
+                    if (newCell)
+                        DeleteReferenceObject(cell);
+                    return ReferenceResult::InvalidState;
+                }
             }
-            for (const Impl::Binding& binding : source->bindings)
+            const ReferenceSlotKey slotKey{reference.sourceEntityId, reference.slot};
+            ++m_impl->registrationSlotLookups;
+            if (preparedSlots.Exist(slotKey))
             {
-                if (binding.slot != reference.slot)
-                    continue;
                 for (Impl::SourceRecord* const prepared : partition->sources)
                     DeleteReferenceObject(prepared);
                 DeleteReferenceObject(partition);
                 if (newCell)
                     DeleteReferenceObject(cell);
                 return ReferenceResult::DuplicateSlot;
+            }
+            if (!preparedSlots.Insert(slotKey).IsSuccessful())
+            {
+                for (Impl::SourceRecord* const prepared : partition->sources)
+                    DeleteReferenceObject(prepared);
+                DeleteReferenceObject(partition);
+                if (newCell)
+                    DeleteReferenceObject(cell);
+                return ReferenceResult::InvalidState;
             }
             source->bindings.PushBack({reference.sourceEntityId, reference.slot, reference.targetEntityId, reference.kind, {}, 0});
         }
@@ -458,7 +497,7 @@ namespace vanguard::entities
         for (const ecs::EntityId identity : partition->entities)
         {
             const ecs::Entity entity = m_impl->world->Resolve(identity);
-            static_cast<void>(m_impl->live.Insert(identity, {cellId, generation, entity}));
+            static_cast<void>(m_impl->live.Insert(identity, {cellId, partitionId, generation, entity}));
             Impl::TargetRecord* target = nullptr;
             if (!m_impl->targets.Find(identity, target))
                 continue;
@@ -593,6 +632,17 @@ namespace vanguard::entities
         return m_impl->live.Find(entityId, value);
     }
 
+    bool EntityReferenceRegistry::HasEntityInPartition(const ecs::EntityId entityId, const u64 cellId, const u32 generation,
+                                                       const u64 partitionId) const noexcept
+    {
+        if (m_impl == nullptr || entityId == ecs::InvalidEntityId || cellId == 0 || generation == 0)
+            return false;
+        VG_SCOPE_SHARED_LOCK(m_impl->lock);
+        Impl::LiveEntity value;
+        return m_impl->live.Find(entityId, value) && value.cellId == cellId && value.partitionId == partitionId &&
+               value.generation == generation;
+    }
+
     ReferenceRegistryStats EntityReferenceRegistry::GetStats() const noexcept
     {
         ReferenceRegistryStats stats;
@@ -603,6 +653,9 @@ namespace vanguard::entities
         stats.liveEntities = m_impl->live.Size();
         stats.sourceEntities = m_impl->sources.Size();
         stats.resolutionRevision = m_impl->resolutionRevision;
+        stats.registrationEntitiesVisited = m_impl->registrationEntitiesVisited;
+        stats.registrationReferencesVisited = m_impl->registrationReferencesVisited;
+        stats.registrationSlotLookups = m_impl->registrationSlotLookups;
         for (auto iterator = m_impl->sources.Begin(), end = m_impl->sources.End(); iterator != end; ++iterator)
         {
             for (const Impl::Binding& binding : iterator.Value()->bindings)

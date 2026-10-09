@@ -1,5 +1,6 @@
 #include <vanguard/rendering/render_node_graph_factory.hpp>
 
+#include <vanguard/profiling/profiling.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
 
 #include <vanguard/system/assert.hpp>
@@ -9,8 +10,10 @@ namespace vanguard::rendering
     class RenderNodeCommandListGroup final : public RenderNodeImpl
     {
     public:
-        RenderNodeCommandListGroup(const char* const name, const rhi::CommandListType commandListType)
-            : m_name(memory::pools::Rendering::GetInstance()), m_commandListType(commandListType), m_subnodes(memory::pools::Rendering::GetInstance())
+        RenderNodeCommandListGroup(const char* const name, const rhi::CommandListType commandListType, const u64 commandListRole,
+                                   const rhi::CommandListRetentionPolicy retentionPolicy)
+            : m_name(memory::pools::Rendering::GetInstance()), m_commandListType(commandListType), m_commandListRole(commandListRole),
+              m_retentionPolicy(retentionPolicy), m_subnodes(memory::pools::Rendering::GetInstance())
         {
             if (name != nullptr)
                 m_name = name;
@@ -67,6 +70,7 @@ namespace vanguard::rendering
 
                 if (!childJobDispatched && !nodeRequiresBuilder)
                 {
+                    VG_PROFILE_ZONE_DYNAMIC(subnode->GetName());
                     subnode->Process(context, nullptr);
                     firstDeferredNodeIndex = nodeIndex + 1;
                     continue;
@@ -87,6 +91,7 @@ namespace vanguard::rendering
                     for (u32 childIndex = firstNodeIndex; childIndex <= lastNodeIndex; ++childIndex)
                     {
                         RenderNodeImpl* const child = m_subnodes[childIndex];
+                        VG_PROFILE_ZONE_DYNAMIC(child->GetName());
                         if (child->GetJobBuilderUsage())
                         {
                             if (childIndex != lastNodeIndex)
@@ -112,12 +117,14 @@ namespace vanguard::rendering
     private:
         containers::String m_name;
         rhi::CommandListType m_commandListType = rhi::CommandListType::Default;
+        u64 m_commandListRole = 0;
+        rhi::CommandListRetentionPolicy m_retentionPolicy = rhi::CommandListRetentionPolicy::Default;
         containers::DynamicArray<RenderNodeImpl*> m_subnodes;
     };
 
     rhi::CommandListRef RenderNodeCommandListGroup::CreateCommandList() const
     {
-        rhi::CommandListRef commandList = rhi::CreateCommandList(m_commandListType);
+        rhi::CommandListRef commandList = rhi::CreateCommandList(m_commandListType, m_commandListRole, nullptr, m_retentionPolicy);
         if (commandList.IsValid())
             rhi::SetResourceDebugName(commandList, m_name.AsChar());
         return commandList;
@@ -196,11 +203,13 @@ namespace vanguard::rendering
     }
 
     RenderNodeGraph::ItemId NodeGraphFactory::BeginCommandListGroup(const NodeGroupId groupId, const RenderNodeType type, const RenderNodeSubtype subtype,
-                                                                          const char* const name, const rhi::CommandListType commandListType)
+                                                                    const char* const name, const rhi::CommandListType commandListType,
+                                                                    const u64 commandListRole,
+                                                                    const rhi::CommandListRetentionPolicy retentionPolicy)
     {
         if (m_currentGroup != nullptr)
             VG_FATAL("command-list group nesting is not supported");
-        RenderNodeCommandListGroup* const group = VANGUARD_NEW(RenderNodeCommandListGroup)(name, commandListType);
+        RenderNodeCommandListGroup* const group = VANGUARD_NEW(RenderNodeCommandListGroup)(name, commandListType, commandListRole, retentionPolicy);
         if (group == nullptr)
             VG_FATAL("command-list group allocation failed during graph construction");
         const RenderNodeGraph::ItemId itemId = Register(groupId, RenderNodeParameters().Set(type, subtype, group));

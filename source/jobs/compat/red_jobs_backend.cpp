@@ -1,3 +1,4 @@
+#include <vanguard/profiling/profiling.hpp>
 #include <vanguard/jobs/jobs_backend.hpp>
 
 #include "../../imported/common/redJobs2/include/redJobs2Public.h"
@@ -12,6 +13,7 @@
 #include <vanguard/memory/memory.hpp>
 
 #include <cstddef>
+#include <cstdio>
 #include <new>
 #include <utility>
 
@@ -121,6 +123,19 @@ namespace
 
     [[nodiscard]] vanguard::jobs::JobContext MakeContext(const job::RunContext& redContext) noexcept
     {
+#if VG_ENABLE_PROFILING
+        if (redContext.dispatcherThreadIndex != 0 && redContext.dispatcherThreadIndex != UINT32_MAX)
+        {
+            thread_local bool profilerThreadNamed = false;
+            if (!profilerThreadNamed)
+            {
+                char threadName[32]{};
+                static_cast<void>(std::snprintf(threadName, sizeof(threadName), "VanguardJobWorker%u", redContext.dispatcherThreadIndex));
+                VG_PROFILE_THREAD_NAME(threadName);
+                profilerThreadNamed = true;
+            }
+        }
+#endif
         vanguard::jobs::JobContext context;
         context.debugName = redContext.debugName;
         context.parallelForTeamIndex = redContext.parallelForTeamIndex;
@@ -134,6 +149,8 @@ namespace
 
     void RunTask(const TaskPacket task, JobNameBackend& name, const job::RunContext& redContext) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/RunTask");
+        VG_PROFILE_ZONE_DYNAMIC(name.instrumentation.m_name);
         const vanguard::jobs::JobContext context = MakeContext(redContext);
         task.execute(task.state, context);
         task.destroy(task.state);
@@ -150,6 +167,7 @@ namespace
 
     void RunParallelEpilogue(const ParallelTaskPacket parallelTask, const TaskPacket epilogue, JobNameBackend& name, const job::RunContext& redContext) noexcept
     {
+        VG_PROFILE_ZONE_DYNAMIC(name.instrumentation.m_name);
         parallelTask.destroy(parallelTask.state);
 
         if (epilogue.state != nullptr)
@@ -312,9 +330,18 @@ namespace vanguard::jobs::backend
         stats.waitCalls = static_cast<u64>(g_waitCalls.GetValue());
         stats.timedOutWaits = static_cast<u64>(g_timedOutWaits.GetValue());
 
-        if (stats.initialized)
-        {
-            stats.queued.latent = static_cast<u32>(job::GetApproximateQueueDepth(job::Priority::Latent));
+		if (stats.initialized)
+		{
+			const job::DependencyContinuationStats dependencyStats = job::GetDependencyContinuationStats();
+			stats.dependencyContinuation.pendingRecruitmentControls = static_cast<u32>(dependencyStats.pendingRecruitmentControls);
+			stats.dependencyContinuation.recruitmentControlsAdmitted = static_cast<u64>(dependencyStats.recruitmentControlsAdmitted);
+			stats.dependencyContinuation.recruitmentControlsPopped = static_cast<u64>(dependencyStats.recruitmentControlsPopped);
+			stats.dependencyContinuation.recruitmentControlsDroppedBound = static_cast<u64>(dependencyStats.recruitmentControlsDroppedBound);
+			stats.dependencyContinuation.recruitmentControlsDroppedQueueFull = static_cast<u64>(dependencyStats.recruitmentControlsDroppedQueueFull);
+			stats.dependencyContinuation.recruitmentControlsAbandoned = static_cast<u64>(dependencyStats.recruitmentControlsAbandoned);
+			stats.dependencyContinuation.relaysInlined = static_cast<u64>(dependencyStats.relaysInlined);
+			stats.dependencyContinuation.relaysQueuedFallback = static_cast<u64>(dependencyStats.relaysQueuedFallback);
+			stats.queued.latent = static_cast<u32>(job::GetApproximateQueueDepth(job::Priority::Latent));
             stats.queued.renderPath = static_cast<u32>(job::GetApproximateQueueDepth(job::Priority::RenderPath));
             stats.queued.criticalPath = static_cast<u32>(job::GetApproximateQueueDepth(job::Priority::CriticalPath));
             stats.queued.immediate = static_cast<u32>(job::GetApproximateQueueDepth(job::Priority::Immediate));
@@ -362,6 +389,7 @@ namespace vanguard::jobs::backend
 
     void* CreateBuilder(const Schedule schedule, const void* debugUserData) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/CreateBuilder");
         if (!IsInitialized())
         {
             return nullptr;
@@ -379,6 +407,7 @@ namespace vanguard::jobs::backend
 
     void* CreateContinuationBuilder(const JobContext& context) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/CreateContinuationBuilder");
         if (!IsInitialized())
         {
             return nullptr;
@@ -402,6 +431,7 @@ namespace vanguard::jobs::backend
 
     void DestroyBuilder(void* builder) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/DestroyBuilder");
         if (builder != nullptr)
         {
             FreeEngineObject(static_cast<job::Builder*>(builder));
@@ -411,6 +441,7 @@ namespace vanguard::jobs::backend
 
     bool Dispatch(void* builder, void* jobName, const detail::TaskPacket task, const Fence fence) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/Dispatch");
         if (builder == nullptr || jobName == nullptr || task.state == nullptr)
         {
             return false;
@@ -437,6 +468,7 @@ namespace vanguard::jobs::backend
 
     bool DispatchAfter(void* builder, const void* dependency, void* jobName, const detail::TaskPacket task, const Fence fence) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/DispatchAfter");
         if (builder == nullptr || dependency == nullptr || jobName == nullptr || task.state == nullptr)
         {
             return false;
@@ -504,6 +536,7 @@ namespace vanguard::jobs::backend
 
     void AddDependency(void* builder, const void* dependency) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/AddDependency");
         static_cast<job::Builder*>(builder)->DispatchWait(*static_cast<const job::Counter*>(dependency));
     }
 
@@ -520,6 +553,7 @@ namespace vanguard::jobs::backend
 
     void* ExtractCounter(void* builder) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("Jobs/ExtractCounter");
         using Envelope = EngineObjectEnvelope<job::Counter>;
         vanguard::memory::MemoryBlock allocation = vanguard::memory::Allocate(vanguard::memory::PoolId::Jobs, sizeof(Envelope), alignof(Envelope));
         if (!allocation)

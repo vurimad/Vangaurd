@@ -1,54 +1,108 @@
 #include <vanguard/rendering/frame_renderer.hpp>
 
 #include <vanguard/jobs/jobs.hpp>
+#include <vanguard/profiling/profiling.hpp>
+#include <vanguard/rendering/render_graph_scheduler_probe.hpp>
 #include <vanguard/rendering/render_graph_nodes.hpp>
 #include <vanguard/rendering/geometry_graph_nodes.hpp>
 #include <vanguard/rendering/render_node_graph.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/rendering/render_node_job.hpp>
 
-#include <cmath>
-#include <limits>
 #include <cstdio>
 #include <cstring>
 
 namespace vanguard::rendering
 {
+#if VG_BUILD_PROFILE
+    class RenderNodeSchedulerProbeResourcePhase final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeSchedulerProbeResourcePhase(const u32 phase) noexcept : m_phase(phase) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "SchedulerProbeResources"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::None; }
+        [[nodiscard]] bool DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure* failure) const noexcept override
+        {
+            return UseRenderGraphSchedulerProbeResources(context, m_phase, failure);
+        }
+        void Execute(const RenderNodeImplContext&, jobs::Builder*) const override {}
+    private:
+        u32 m_phase = 0;
+    };
+#endif
+
+    class RenderNodeBeginFrameGpuTiming final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeBeginFrameGpuTiming(FrameRenderer& renderer) noexcept : m_renderer(renderer) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "BeginFrameGpuTiming"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override { m_renderer.BeginFrameGpuTiming(context); }
+    private:
+        FrameRenderer& m_renderer;
+    };
+
+    class RenderNodeBeginGeometryGpuTiming final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeBeginGeometryGpuTiming(FrameRenderer& renderer) noexcept : m_renderer(renderer) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "BeginGeometryGpuTiming"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override { m_renderer.BeginGeometryGpuTiming(context); }
+    private:
+        FrameRenderer& m_renderer;
+    };
+
+    class RenderNodeEndGeometryGpuTiming final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeEndGeometryGpuTiming(FrameRenderer& renderer) noexcept : m_renderer(renderer) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "EndGeometryGpuTiming"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override { m_renderer.EndGeometryGpuTiming(context); }
+    private:
+        FrameRenderer& m_renderer;
+    };
+
+    class RenderNodeBeginCameraGpuTiming final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeBeginCameraGpuTiming(FrameRenderer& renderer) noexcept : m_renderer(renderer) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "BeginCameraGpuTiming"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override { m_renderer.BeginCameraGpuTiming(context); }
+    private:
+        FrameRenderer& m_renderer;
+    };
+
+    class RenderNodeEndCameraGpuTiming final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeEndCameraGpuTiming(FrameRenderer& renderer) noexcept : m_renderer(renderer) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "EndCameraGpuTiming"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override { m_renderer.EndCameraGpuTiming(context); }
+    private:
+        FrameRenderer& m_renderer;
+    };
+
+    class RenderNodeEndFrameGpuTiming final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeEndFrameGpuTiming(FrameRenderer& renderer) noexcept : m_renderer(renderer) {}
+        [[nodiscard]] const char* GetName() const noexcept override { return "EndFrameGpuTiming"; }
+        [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override { m_renderer.EndFrameGpuTiming(context); }
+    private:
+        FrameRenderer& m_renderer;
+    };
+
     namespace
     {
-        inline constexpr u64 RenderGraphRendererRevision = 5;
-        inline constexpr u32 GeometryCandidateTargetBatchSize = 1024;
-
-        // RenderView planes consume camera-relative positions. The CPU spatial
-        // index stores scene-space bounds, so translate only its query planes.
-        [[nodiscard]] bool BuildSceneQueryFrustum(const RenderView& view, const f32 worldCellSize, VisibilityFrustum& output) noexcept
-        {
-            if (!std::isfinite(worldCellSize) || worldCellSize <= 0.0f || view.frustum.planeCount == 0 ||
-                view.frustum.planeCount > MaximumVisibilityFrustumPlanes)
-                return false;
-            f64 origin[3];
-            for (u32 axis = 0; axis < 3; ++axis)
-            {
-                origin[axis] = static_cast<f64>(view.origin.worldCell[axis]) * worldCellSize + view.origin.localPosition[axis];
-                if (!std::isfinite(origin[axis]))
-                    return false;
-            }
-            output = view.frustum;
-            for (u32 index = 0; index < output.planeCount; ++index)
-            {
-                auto& plane = output.planes[index];
-                f64 distance = plane.distance;
-                for (u32 axis = 0; axis < 3; ++axis)
-                    distance -= static_cast<f64>(plane.normal[axis]) * origin[axis];
-                if (!std::isfinite(distance) || std::abs(distance) > std::numeric_limits<f32>::max())
-                    return false;
-                plane.distance = static_cast<f32>(distance);
-                // Round outward so narrowing does not shrink the visible half-space.
-                if (static_cast<f64>(plane.distance) < distance)
-                    plane.distance = std::nextafter(plane.distance, std::numeric_limits<f32>::infinity());
-            }
-            return true;
-        }
+        inline constexpr u64 RenderGraphRendererRevision = 7;
+        inline constexpr rhi::GpuCounterScopeId GeometryWorkGpuTimingScope = rhi::MakeGpuCounterScopeId("GeometryWork");
+        inline constexpr rhi::GpuCounterScopeId CameraGeometryGpuTimingScope = rhi::MakeGpuCounterScopeId("CameraGeometry");
+        inline constexpr u64 GeometryWorkCommandListRole = 0x47454f4d574f524bull;
 
         enum : u32
         {
@@ -148,11 +202,56 @@ namespace vanguard::rendering
     {
     }
 
+    bool FrameRenderer::EnsureGeometryShellPlanBuffer(GeometryFrameWork& work, rhi::Failure* const failure) noexcept
+    {
+        concurrency::ScopedLock<concurrency::SpinLock> guard(m_geometryShellPlanCache.lock);
+        auto& cache = m_geometryShellPlanCache;
+        const u64 expectedSerial = work.GetShellPlanCacheSerial();
+        if (!work.IsPrepared() || expectedSerial == 0 || !cache.valid || cache.serial != expectedSerial)
+            return false;
+        if (!cache.gpuBuffer.IsValid() || cache.gpuBufferSerial != cache.serial)
+        {
+            rhi::BufferDesc desc;
+            desc.size = static_cast<u64>(cache.shellDraws.Size() != 0 ? cache.shellDraws.Size() : 1u) * sizeof(GpuGeometryShellRange);
+            desc.structureStride = sizeof(GpuGeometryShellRange);
+            desc.usage = rhi::BufferUsage::Structured | rhi::BufferUsage::ShaderResource;
+            desc.initialState = rhi::ResourceState::Common;
+            GpuGeometryShellRange emptyPlan{};
+            const rhi::BufferInitData initialData{cache.shellDraws.Empty() ? static_cast<const void*>(&emptyPlan) : cache.shellDraws.Data(), desc.size};
+            rhi::Buffer replacement = rhi::Buffer::Create(desc, initialData, failure);
+            if (!replacement.IsValid())
+                return false;
+            rhi::SetResourceDebugName(replacement.GetRef(), "Geometry Persistent Shell Plans");
+            cache.gpuBuffer = static_cast<rhi::Buffer&&>(replacement);
+            cache.gpuBufferSerial = cache.serial;
+        }
+        work.PinShellPlanBuffer(cache.gpuBuffer);
+        return true;
+    }
+
 
     bool FrameRenderer::RegisterGeometryImports(GeometryFrameWork& work, RenderFlowResourceFailure* failure) noexcept
     {
         if (!work.IsPrepared())
             return true;
+        work.SetShellPlanImport({});
+        const rhi::BufferRef shellPlanBuffer = work.GetShellPlanBuffer();
+        if (!shellPlanBuffer.IsValid())
+            return false;
+        RetainedBufferImportDesc shellPlanDesc;
+        shellPlanDesc.buffer = shellPlanBuffer;
+        shellPlanDesc.token = {rhi::ResourceRef(shellPlanDesc.buffer).value};
+        if (!rhi::GetBufferDesc(shellPlanDesc.buffer, shellPlanDesc.expected))
+            return false;
+        shellPlanDesc.initialState = shellPlanDesc.expected.initialState;
+        shellPlanDesc.terminalState = shellPlanDesc.expected.initialState;
+        shellPlanDesc.initialQueue = rhi::QueueType::Graphics;
+        shellPlanDesc.terminalQueue = rhi::QueueType::Graphics;
+        shellPlanDesc.readiness = ImportReadinessKind::SameQueueContinuation;
+        ImportedResourceId shellPlanImport;
+        if (!m_resourceAllocator.RegisterImport(shellPlanDesc, shellPlanImport, failure))
+            return false;
+        work.SetShellPlanImport(shellPlanImport);
         auto& imports = work.GetExternalBuffers();
         imports.Clear();
         containers::HashMap<u64, u32> importedBuffers{memory::pools::Rendering::GetInstance()};
@@ -178,6 +277,7 @@ namespace vanguard::rendering
             entry.sceneTable = scene;
             entry.readState = state;
             std::snprintf(entry.name, sizeof(entry.name), "Geometry.External.%llu", static_cast<unsigned long long>(identity));
+            entry.nameHash = LogicalResourceName::CalculateHash(containers::StringView(entry.name));
             // Import readiness follows the actual publication queue. CopySync
             // currently publishes GPU Scene on Graphics; submission ordering
             // satisfies that case without inserting a redundant native wait.
@@ -234,7 +334,7 @@ namespace vanguard::rendering
         for (const auto& external : work->GetExternalBuffers())
         {
             if (!external.sceneTable) continue;
-            const auto tag = context.RTSharedNameTag(external.name);
+            const auto tag = context.RTSharedNameTag(external.GetLogicalName());
             context.RTUseBegin(tag, BufferUseDesc{external.readState});
             context.RTUseEnd(tag);
         }
@@ -248,7 +348,7 @@ namespace vanguard::rendering
         for (const auto& external : work->GetExternalBuffers())
         {
             if (external.sceneTable) continue;
-            const auto tag = context.RTSharedNameTag(external.name);
+            const auto tag = context.RTSharedNameTag(external.GetLogicalName());
             context.RTUseBegin(tag, BufferUseDesc{external.readState});
             context.RTUseEnd(tag);
         }
@@ -314,20 +414,41 @@ namespace vanguard::rendering
     {
         NodeGraphFactory factory(&graph, &nodes);
         const NodeGroupId group = NodeGroupId::None;
-        RENDER_UNIQUE_SIMPLE_COMMAND_LIST(group, "StartRender", UniqueRenderNodeStartRender, RenderNodeStartRender);
+        const RenderNodeGraph::ItemId startRenderId =
+            factory.BeginCommandListGroup(group, RenderNodeType::Unique, RenderNodeSubtype(UniqueRenderNodeStartRender), "StartRender");
+        if (auto scopedCommandList = ScopedCloseCommandList(factory))
+        {
+            ADD_SUBNODE("BeginFrameGpuTiming", RenderNodeBeginFrameGpuTiming, *this);
+            ADD_SUBNODE("StartRender", RenderNodeStartRender);
+        }
         // Unique occurrences merge across cached camera fragments. Every stage
         // addresses the complete family plan once, with independent view ranges.
-        RENDER_UNIQUE_COMMAND_LIST(group, UniqueRenderNodeGeometryCompute, "GeometryWork")
+        RENDER_UNIQUE_BOUNDED_UPLOAD_COMMAND_LIST(group, UniqueRenderNodeGeometryCompute, "GeometryWork", GeometryWorkCommandListRole)
         {
+            ADD_SUBNODE("BeginGeometryGpuTiming", RenderNodeBeginGeometryGpuTiming, *this);
             // Declaration-only child uses the group's planning writer and
             // records no GPU commands or separate submission.
             ADD_SUBNODE("DeclareGeometryWorkResources", RenderNodeDeclareGeometryWorkResources);
             ADD_SUBNODE("InitializeGeometryWork", RenderNodeInitializeGeometryWork);
             for (u32 stage = 0; stage < static_cast<u32>(GeometryComputeStage::Count); ++stage)
                 ADD_SUBNODE("GeometryCompute", RenderNodeGeometryCompute, *this, static_cast<GeometryComputeStage>(stage));
+            ADD_SUBNODE("EndGeometryGpuTiming", RenderNodeEndGeometryGpuTiming, *this);
         }
+#if VG_BUILD_PROFILE
+        if (IsRenderGraphSchedulerProbeEnabled())
+        {
+            for (u32 phase = 0; phase < 10; ++phase)
+            {
+                RENDER_COMMAND_LIST(group, "SchedulerProbeResources")
+                {
+                    ADD_SUBNODE("SchedulerProbeResources", RenderNodeSchedulerProbeResourcePhase, phase);
+                }
+            }
+        }
+#endif
         RENDER_COMMAND_LIST(group, "CameraGeometry")
         {
+            ADD_SUBNODE("BeginCameraGpuTiming", RenderNodeBeginCameraGpuTiming, *this);
             ADD_SUBNODE("BeginCameraDependencies", RenderNodeBeginCameraDependencies);
             ADD_SUBNODE("DeclareCommonResourceAllocs", RenderNodeDeclareCommonResourceAllocs);
             ADD_SUBNODE("ClearCameraTargets", RenderNodeClearCameraTargets);
@@ -342,6 +463,7 @@ namespace vanguard::rendering
                 ADD_SUBNODE("DirectionalDiffuse", RenderNodeDirectionalDiffuse, *this);
             }
             ADD_SUBNODE("EndCameraDependencies", RenderNodeEndCameraDependencies);
+            ADD_SUBNODE("EndCameraGpuTiming", RenderNodeEndCameraGpuTiming, *this);
         }
         RENDER_UNIQUE_SIMPLE_COMMAND_LIST(group, "ComposeCameraOutput", UniqueRenderNodeComposeCameraOutput, RenderNodeComposeCameraOutput, *this);
         if (diagnostics)
@@ -352,14 +474,37 @@ namespace vanguard::rendering
                 ADD_SUBNODE("ReadbackGeometryDiagnostics", RenderNodeReadbackGeometryDiagnostics);
             }
         }
-        RENDER_UNIQUE_SIMPLE_COMMAND_LIST(group, "EndRender", UniqueRenderNodeEndRender, RenderNodeEndRender);
-        ADD_UNIQUE(group, "FlushGpu", UniqueRenderNodeFinalFlush, RenderNodeSynchronize, rhi::CommandListSyncType::None, "Submit_CameraGraph");
-        ADD_UNIQUE(group, "Present", UniqueRenderNodePresent, RenderNodePresent);
-        ADD_UNIQUE(group, "FlushTextureGrabs", UniqueRenderNodeFlushTextureGrabs, RenderNodeFlushTextureGrabs);
-        ADD_UNIQUE(group, "CleanupBatchDataAllocator", UniqueRenderNodeCleanupBatchDataAllocator, RenderNodeCleanupBatchDataAllocator);
-        ADD_UNIQUE(group, "EndFrame", UniqueRenderNodeEndFrame, RenderNodeEndFrame);
+        const RenderNodeGraph::ItemId endRenderId =
+            factory.BeginCommandListGroup(group, RenderNodeType::Unique, RenderNodeSubtype(UniqueRenderNodeEndRender), "EndRender");
+        if (auto scopedCommandList = ScopedCloseCommandList(factory))
+        {
+            ADD_SUBNODE("EndRender", RenderNodeEndRender);
+            ADD_SUBNODE("EndFrameGpuTiming", RenderNodeEndFrameGpuTiming, *this);
+        }
+        const RenderNodeGraph::ItemId finalFlushId =
+            ADD_UNIQUE(group, "FlushGpu", UniqueRenderNodeFinalFlush, RenderNodeSynchronize, rhi::CommandListSyncType::None, "Submit_CameraGraph");
+        const RenderNodeGraph::ItemId presentId = ADD_UNIQUE(group, "Present", UniqueRenderNodePresent, RenderNodePresent);
+        const RenderNodeGraph::ItemId flushTextureGrabsId =
+            ADD_UNIQUE(group, "FlushTextureGrabs", UniqueRenderNodeFlushTextureGrabs, RenderNodeFlushTextureGrabs);
+        const RenderNodeGraph::ItemId cleanupBatchDataAllocatorId =
+            ADD_UNIQUE(group, "CleanupBatchDataAllocator", UniqueRenderNodeCleanupBatchDataAllocator, RenderNodeCleanupBatchDataAllocator);
+        const RenderNodeGraph::ItemId endFrameId = ADD_UNIQUE(group, "EndFrame", UniqueRenderNodeEndFrame, RenderNodeEndFrame);
+
+#if VG_BUILD_PROFILE
+        if (IsRenderGraphSchedulerProbeEnabled())
+            AppendRenderGraphSchedulerProbe(factory, startRenderId, endRenderId);
+#endif
+
+        // GPU submission order remains declaration-ordered, while CPU recording follows the
+        // explicit branch/join model instead of serializing every command-list occurrence with LinkCpu().
         factory.LinkGpu();
-        factory.LinkCpu();
+        factory.LinkCpuToNextGpu(startRenderId);
+        factory.LinkCpuToPreviousGpu(endRenderId);
+        factory.LinkCpuToPreviousGpu(finalFlushId);
+        factory.Link(finalFlushId, presentId, RenderNodeDependencyType::Cpu);
+        factory.Link(presentId, flushTextureGrabsId, RenderNodeDependencyType::Cpu);
+        factory.Link(flushTextureGrabsId, cleanupBatchDataAllocatorId, RenderNodeDependencyType::Cpu);
+        factory.Link(cleanupBatchDataAllocatorId, endFrameId, RenderNodeDependencyType::Cpu);
     }
 
     void FrameRenderer::BuildRenderGraphSafeMode(RenderNodeGraph& graph, NodesContainer& nodes, const RenderView&) noexcept
@@ -403,6 +548,212 @@ namespace vanguard::rendering
     bool FrameRenderer::InitializeResourceAllocator(const RenderFlowResourceAllocatorConfig& config, RenderFlowResourceFailure* const failure) noexcept
     {
         return m_resourceAllocator.Initialize(config, failure);
+    }
+
+    bool FrameRenderer::InitializeGpuTimings(rhi::Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_gpuTimings.IsInitialized())
+        {
+            if (failure != nullptr)
+            {
+                failure->code = rhi::FailureCode::AlreadyInitialized;
+                std::snprintf(failure->message, sizeof(failure->message), "%s", "renderer GPU timings are already initialized");
+            }
+            return false;
+        }
+        if (!rhi::GetCapabilities().timestampQueries)
+            return true;
+
+        rhi::GpuCounterConfig config;
+        config.bufferedFrames = 4;
+        config.maximumScopesPerFrame = MaximumRenderViewsPerFamily + 1u;
+        config.maximumRegisteredScopes = 2;
+        config.queue = rhi::QueueType::Graphics;
+        config.collectPipelineStatistics = false;
+        if (!m_gpuTimings.Initialize(config, failure))
+            return false;
+        if (!m_gpuTimings.RegisterScope(GeometryWorkGpuTimingScope, "GeometryWork", failure) ||
+            !m_gpuTimings.RegisterScope(CameraGeometryGpuTimingScope, "CameraGeometry", failure))
+        {
+            static_cast<void>(m_gpuTimings.Shutdown());
+            return false;
+        }
+        m_droppedGpuTimingFrames.SetValue(0);
+        return true;
+    }
+
+    bool FrameRenderer::ShutdownGpuTimings(rhi::Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (!m_gpuTimings.IsInitialized())
+            return true;
+        static_cast<void>(m_gpuTimings.Collect(failure));
+        if (failure != nullptr && failure->code != rhi::FailureCode::None)
+            return false;
+        rhi::GpuCounterFrameView ready;
+        while (m_gpuTimings.GetOldestReadyFrame(ready, nullptr))
+            if (!m_gpuTimings.ConsumeFrame(ready.handle, failure))
+                return false;
+        return m_gpuTimings.Shutdown(failure);
+    }
+
+    void FrameRenderer::AbandonGpuTimings() noexcept
+    {
+        m_gpuTimings.AbandonDevice();
+    }
+
+    FrameGpuTimingPoll FrameRenderer::PollGpuTimings(FrameGpuTimingSample& output, rhi::Failure* const failure) noexcept
+    {
+        output = {};
+        if (failure != nullptr)
+            *failure = {};
+        if (!m_gpuTimings.IsInitialized())
+            return FrameGpuTimingPoll::Empty;
+        static_cast<void>(m_gpuTimings.Collect(failure));
+        if (failure != nullptr && failure->code != rhi::FailureCode::None)
+            return FrameGpuTimingPoll::Failed;
+
+        rhi::GpuCounterFrameView frame;
+        rhi::Failure readyFailure;
+        if (!m_gpuTimings.GetOldestReadyFrame(frame, &readyFailure))
+        {
+            const rhi::GpuCounterStats stats = m_gpuTimings.GetStats();
+            if (readyFailure.code != rhi::FailureCode::Busy)
+            {
+                if (failure != nullptr)
+                    *failure = readyFailure;
+                return FrameGpuTimingPoll::Failed;
+            }
+            return stats.recordingFrames != 0 || stats.awaitingSubmissionFrames != 0 || stats.pendingGpuFrames != 0
+                       ? FrameGpuTimingPoll::Pending
+                       : FrameGpuTimingPoll::Empty;
+        }
+
+        output.frameSerial = frame.frameNumber;
+        output.droppedScopes = frame.droppedSamples;
+        for (u32 index = 0; index < frame.sampleCount; ++index)
+        {
+            const rhi::GpuCounterSample& sample = frame.samples[index];
+            if (!sample.valid || sample.gpuEnd < sample.gpuBegin)
+                continue;
+            const u64 elapsed = rhi::GpuCounterTicksToNanoseconds(sample.gpuEnd - sample.gpuBegin, frame.calibration.gpuFrequency);
+            if (sample.scope == GeometryWorkGpuTimingScope)
+                output.geometryWorkNanoseconds += elapsed;
+            else if (sample.scope == CameraGeometryGpuTimingScope)
+            {
+                output.cameraGeometryNanoseconds += elapsed;
+                ++output.cameraGeometrySamples;
+            }
+        }
+        if (!m_gpuTimings.ConsumeFrame(frame.handle, failure))
+            return FrameGpuTimingPoll::Failed;
+        return FrameGpuTimingPoll::Ready;
+    }
+
+    void FrameRenderer::BeginFrameGpuTiming(const RenderNodeImplContext& context) noexcept
+    {
+        GeometryFrameWork* const work = context.GetGeometryFrameWork();
+        if (!m_gpuTimings.IsInitialized() || work == nullptr || !work->IsPrepared() || work->gpuTimingFrame.IsValid())
+            return;
+        rhi::Failure failure;
+        if (!m_gpuTimings.BeginFrame(context.GetFrameInfo().GetSerial(), work->gpuTimingFrame, &failure))
+        {
+            static_cast<void>(m_droppedGpuTimingFrames.Increment());
+            return;
+        }
+    }
+
+    void FrameRenderer::BeginGeometryGpuTiming(const RenderNodeImplContext& context) noexcept
+    {
+        GeometryFrameWork* const work = context.GetGeometryFrameWork();
+        if (!m_gpuTimings.IsInitialized() || work == nullptr || !work->gpuTimingFrame.IsValid() || work->geometryTimingScope.IsValid())
+            return;
+        rhi::Failure failure;
+        if (!m_gpuTimings.BeginScope(work->gpuTimingFrame, GeometryWorkGpuTimingScope, work->geometryTimingScope, &failure))
+        {
+            static_cast<void>(m_droppedGpuTimingFrames.Increment());
+        }
+    }
+
+    void FrameRenderer::EndGeometryGpuTiming(const RenderNodeImplContext& context) noexcept
+    {
+        GeometryFrameWork* const work = context.GetGeometryFrameWork();
+        if (work != nullptr && work->geometryTimingScope.IsValid())
+            static_cast<void>(m_gpuTimings.EndScope(work->geometryTimingScope));
+    }
+
+    void FrameRenderer::BeginCameraGpuTiming(const RenderNodeImplContext& context) noexcept
+    {
+        GeometryFrameWork* const work = context.GetGeometryFrameWork();
+        const i32 cameraIndex = context.GetCameraIndex();
+        if (!m_gpuTimings.IsInitialized() || work == nullptr || !work->gpuTimingFrame.IsValid() || cameraIndex < 0 ||
+            static_cast<u32>(cameraIndex) >= MaximumRenderViewsPerFamily)
+            return;
+        rhi::GpuCounterScopeToken& scope = work->cameraTimingScopes[static_cast<u32>(cameraIndex)];
+        if (!scope.IsValid())
+            static_cast<void>(m_gpuTimings.BeginScope(work->gpuTimingFrame, CameraGeometryGpuTimingScope, scope));
+    }
+
+    void FrameRenderer::EndCameraGpuTiming(const RenderNodeImplContext& context) noexcept
+    {
+        GeometryFrameWork* const work = context.GetGeometryFrameWork();
+        const i32 cameraIndex = context.GetCameraIndex();
+        if (work == nullptr || cameraIndex < 0 || static_cast<u32>(cameraIndex) >= MaximumRenderViewsPerFamily)
+            return;
+        rhi::GpuCounterScopeToken& scope = work->cameraTimingScopes[static_cast<u32>(cameraIndex)];
+        if (scope.IsValid())
+            static_cast<void>(m_gpuTimings.EndScope(scope));
+    }
+
+    void FrameRenderer::EndFrameGpuTiming(const RenderNodeImplContext& context) noexcept
+    {
+        GeometryFrameWork* const work = context.GetGeometryFrameWork();
+        if (!m_gpuTimings.IsInitialized() || work == nullptr || !work->gpuTimingFrame.IsValid())
+            return;
+        rhi::Failure failure;
+        if (!m_gpuTimings.EndFrame(work->gpuTimingFrame, &failure))
+        {
+            if (m_gpuTimings.GetFrameState(work->gpuTimingFrame) != rhi::GpuCounterFrameState::Recording)
+                static_cast<void>(m_gpuTimings.DiscardFrame(work->gpuTimingFrame));
+            work->gpuTimingFrame = {};
+            static_cast<void>(m_droppedGpuTimingFrames.Increment());
+            return;
+        }
+        work->gpuTimingResolveScope = context.GetCommandScope();
+    }
+
+    void FrameRenderer::FinalizeGpuTiming(GeometryFrameWork& work,
+                                          const containers::ArraySpan<const CommandScopeExecutionReceipt> receipts,
+                                          const bool deviceLost) noexcept
+    {
+        if (!m_gpuTimings.IsInitialized() || !work.gpuTimingFrame.IsValid())
+            return;
+        if (deviceLost)
+            return;
+        if (!work.gpuTimingResolveScope.IsValid())
+        {
+            if (m_gpuTimings.DiscardFrame(work.gpuTimingFrame))
+                work.gpuTimingFrame = {};
+            return;
+        }
+        for (const CommandScopeExecutionReceipt& receipt : receipts)
+        {
+            if (receipt.scope != work.gpuTimingResolveScope)
+                continue;
+            if (receipt.completion == CommandScopeCompletionKind::Submitted && receipt.fence.IsValid() &&
+                m_gpuTimings.CommitFrame(work.gpuTimingFrame, receipt.fence))
+            {
+                work.gpuTimingFrame = {};
+                return;
+            }
+            if (receipt.completion == CommandScopeCompletionKind::DiscardedBeforeSubmission &&
+                m_gpuTimings.DiscardFrame(work.gpuTimingFrame))
+                work.gpuTimingFrame = {};
+            return;
+        }
     }
 
     RenderPipelineResult FrameRenderer::InitializePipelines(const containers::ArraySpan<const NamedRenderPipeline> pipelines, PipelineCache& cache) noexcept
@@ -456,6 +807,23 @@ namespace vanguard::rendering
     {
         ClearGraphCache();
         m_geometryDiagnostics.Reset();
+        {
+            // Shell catalog revisions restart when the geometry batcher is
+            // reinitialized. Invalidate both the device-owned snapshot and its
+            // CPU identity at the renderer/device boundary; retained frames pin
+            // their own immutable buffer references until terminal destruction.
+            concurrency::ScopedLock<concurrency::SpinLock> guard(m_geometryShellPlanCache.lock);
+            auto& cache = m_geometryShellPlanCache;
+            cache.gpuBuffer.Reset();
+            cache.gpuBufferSerial = 0;
+            cache.shellDraws.Clear();
+            cache.catalogRevision = 0;
+            cache.viewCount = 0;
+            cache.shellsPerView = 0;
+            cache.binsPerView = 0;
+            cache.indirectArgumentCapacity = 0;
+            cache.valid = false;
+        }
         m_pipelines.Clear();
     }
 
@@ -691,97 +1059,59 @@ namespace vanguard::rendering
     {
         const containers::ArraySpan<const RenderView> views = family.GetViews();
         if (views.Empty() || views.Size() > MaximumRenderViewsPerFamily || family.GetFamily().frameSerial != context.GetFrame().GetSerial())
-            return RenderFrameExecutionStatus::Failure("geometry candidate production requires the current prepared view family");
+            return RenderFrameExecutionStatus::Failure("geometry preparation requires the current prepared view family");
         RetainedRenderFrameRef retainedFrame = context.RetainFrame();
         GeometryFrameWork& work = retainedFrame.GetGeometryFrameWork();
         if (work.IsPrepared())
             return RenderFrameExecutionStatus::Failure("geometry frame work is already prepared");
 
         const RenderViewFamily& viewFamily = family.GetFamily();
-        VisibilityQueryRequest request;
-        request.scene = family.GetScene();
-        request.mutationEpoch = viewFamily.sceneVersion;
-        const f32 worldCellSize = m_gpuScene.GetScenePublisher().GetWorldCellSize();
-        if (!BuildSceneQueryFrustum(views[0], worldCellSize, request.frustum))
-            return RenderFrameExecutionStatus::Failure("geometry CPU frustum cannot be represented in scene space");
-        request.layerMask = views[0].layerMask;
-        request.visibilityMask = views[0].visibilityMask;
-        request.requiredFlags = RenderProxyVisibilityFlags::Visible;
-        request.excludedFlags = RenderProxyVisibilityFlags::QueryOnly;
-        request.payloadFilter = VisibilityQueryPayloadFilter::Mesh;
-        request.maximumResults = ~u32{0};
-        request.useBounds = false;
-        request.useFrustum = true;
-
-        RenderSceneGpuCandidatePlan candidatePlan;
+        RenderSceneSnapshot sceneSnapshot;
+        if (!m_scenes.GetSnapshot(family.GetScene(), sceneSnapshot) || sceneSnapshot.state != RenderSceneState::Alive ||
+            sceneSnapshot.framePrepared || sceneSnapshot.pendingProxyMutations != 0 ||
+            sceneSnapshot.completedMutationEpoch != viewFamily.sceneVersion)
+            return RenderFrameExecutionStatus::Failure("geometry preparation requires the exact completed scene epoch");
+        if (!m_gpuScene.IsScenePublicationSubmitted(family.GetScene(), viewFamily.sceneVersion))
+            return RenderFrameExecutionStatus::Skipped("geometry preparation deferred until the exact GPU Scene epoch is submitted");
+        const u32 instanceTraversalExtent = m_gpuScene.GetLifetime().GetTraversalExtent(GpuSceneTableKind::Instance);
+        RenderSceneGpuStats sceneGpuStats;
+        if (!m_gpuScene.GetScenePublisher().GetSceneStats(family.GetScene(), sceneGpuStats) || sceneGpuStats.trackedInstances > sceneSnapshot.activeProxies)
+            return RenderFrameExecutionStatus::Failure("geometry GPU Scene instance accounting is inconsistent with the completed scene epoch");
+        const u32 visibleCapacityPerView = sceneGpuStats.trackedInstances != 0 ? sceneGpuStats.trackedInstances : 1u;
         RenderSceneFailure sceneFailure;
-        if (!m_scenes.PrepareGpuVisibilityCandidatePlan(request, GeometryCandidateTargetBatchSize, views, candidatePlan, &sceneFailure))
-            return RenderFrameExecutionStatus::Failure(FailureMessage(sceneFailure.message, "geometry candidate planning failed"));
-
-        const u32 visibleCapacity = candidatePlan.requiredCandidateCapacity != 0 ? candidatePlan.requiredCandidateCapacity : 1u;
-        // This cleanup is only used before dispatch. Once writers start, their
-        // joined epilogue owns both seal release and terminal frame completion.
-        const auto failBeforeDispatch = [&](const char* message) noexcept -> RenderFrameExecutionStatus
-        {
-            if (work.IsPrepared())
-                work.GetVisibilityBuilder().Cancel();
-            RenderSceneFailure completionFailure;
-            if (!m_scenes.CompleteGpuVisibilityCandidates(candidatePlan, &completionFailure))
-                message = FailureMessage(completionFailure.message, "geometry candidate seal release failed");
-            work.GetCandidatePlan() = {};
-            return RenderFrameExecutionStatus::Failure(message);
-        };
 
         if (m_geometryConfig.maximumWorkItemsPerVisible == 0 || m_geometryBinCapacity == 0 || m_geometryBinCapacity == InvalidGpuSceneIndex)
-            return failBeforeDispatch("geometry frame-work capacity policy is invalid");
-        if (candidatePlan.requiredCandidateCapacity != 0 && m_geometryBatcher == nullptr)
-            return failBeforeDispatch("mesh candidates require the residency-owned geometry batcher");
+            return RenderFrameExecutionStatus::Failure("geometry frame-work capacity policy is invalid");
+        if (sceneGpuStats.trackedInstances != 0 && m_geometryBatcher == nullptr)
+            return RenderFrameExecutionStatus::Failure("GPU Scene mesh instances require the residency-owned geometry batcher");
         if (m_geometryBatcher != nullptr && (m_geometryShellCapacity == 0 || m_geometryShellCapacity == InvalidGpuSceneIndex))
-            return failBeforeDispatch("geometry shell capacity policy is invalid");
+            return RenderFrameExecutionStatus::Failure("geometry shell capacity policy is invalid");
 
-        const u64 totalCandidates = static_cast<u64>(views.Size()) * candidatePlan.requiredCandidateCapacity;
-        const u64 totalWorkRanges = static_cast<u64>(views.Size()) * candidatePlan.requiredWorkRangeCapacity;
-        const u64 totalVisible = static_cast<u64>(views.Size()) * visibleCapacity;
-        const u64 workPerView = static_cast<u64>(visibleCapacity) * m_geometryConfig.maximumWorkItemsPerVisible;
+        const u64 totalVisible = static_cast<u64>(views.Size()) * visibleCapacityPerView;
+        const u64 workPerView = static_cast<u64>(visibleCapacityPerView) * m_geometryConfig.maximumWorkItemsPerVisible;
         if (workPerView >= InvalidGpuSceneIndex)
-            return failBeforeDispatch("geometry per-view work capacity overflowed");
+            return RenderFrameExecutionStatus::Failure("geometry per-view work capacity overflowed");
         const u64 totalGeometryWork = static_cast<u64>(views.Size()) * workPerView;
-        const u64 totalExpansionRanges = static_cast<u64>(views.Size()) *
-                                         ((static_cast<u64>(visibleCapacity) + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup);
-        const u64 totalGeometryRanges = static_cast<u64>(views.Size()) *
-                                        ((workPerView + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup);
         const u64 totalGeometryBins = static_cast<u64>(views.Size()) * m_geometryBinCapacity;
-        const u64 totalBinPrefixRanges = static_cast<u64>(views.Size()) *
-                                         ((static_cast<u64>(m_geometryBinCapacity) + GpuVisibilityThreadsPerGroup - 1u) /
-                                          GpuVisibilityThreadsPerGroup);
-        const u64 totalPrefixBlocks = totalExpansionRanges + totalBinPrefixRanges;
-        const u64 totalWrites = static_cast<u64>(views.Size()) * candidatePlan.batchCount;
         const u64 totalShellDraws = m_geometryBatcher != nullptr
                                        ? static_cast<u64>(views.Size()) * m_geometryBatcher->GetCatalogStats().activeShells : 0;
         const u64 totalShellSlots = static_cast<u64>(views.Size()) * m_geometryShellCapacity;
-        if (totalWorkRanges > 65535u || totalExpansionRanges > 65535u || totalGeometryRanges > 65535u ||
-            totalBinPrefixRanges > 65535u || (totalShellDraws + 127u) / 128u > 65535u)
-            return failBeforeDispatch("geometry work exceeds the current one-dimensional GPU dispatch capacity");
-        if (totalCandidates >= InvalidGpuSceneIndex || totalWorkRanges >= InvalidGpuSceneIndex || totalVisible >= InvalidGpuSceneIndex ||
-            totalExpansionRanges >= InvalidGpuSceneIndex || totalGeometryWork >= InvalidGpuSceneIndex ||
-            totalGeometryRanges >= InvalidGpuSceneIndex || totalGeometryBins >= InvalidGpuSceneIndex ||
-            totalBinPrefixRanges >= InvalidGpuSceneIndex || totalPrefixBlocks >= InvalidGpuSceneIndex || totalWrites >= InvalidGpuSceneIndex ||
+        const u64 instanceGroups = (static_cast<u64>(instanceTraversalExtent) + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup;
+        const u64 geometryGroups = (totalGeometryWork + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup;
+        if (instanceGroups > 65535u || geometryGroups > 65535u || (totalShellDraws + 127u) / 128u > 65535u)
+            return RenderFrameExecutionStatus::Failure("geometry work exceeds the current GPU dispatch capacity");
+        if (totalVisible >= InvalidGpuSceneIndex || totalGeometryWork >= InvalidGpuSceneIndex || totalGeometryBins >= InvalidGpuSceneIndex ||
             totalShellDraws * sizeof(GpuGeometryShellCounters) > 0xffffffffull || totalShellSlots >= InvalidGpuSceneIndex)
-            return failBeforeDispatch("geometry view-family capacity calculation overflowed");
-        const GeometryFrameWorkCapacity capacity{views.Size(), static_cast<u32>(totalCandidates), static_cast<u32>(totalWorkRanges),
-                                                 static_cast<u32>(totalVisible), static_cast<u32>(totalExpansionRanges),
-                                                 static_cast<u32>(totalGeometryWork), static_cast<u32>(totalGeometryRanges),
-                                                 static_cast<u32>(totalGeometryBins), static_cast<u32>(totalBinPrefixRanges),
-                                                 static_cast<u32>(totalPrefixBlocks), candidatePlan.batchCount,
-                                                 static_cast<u32>(totalShellDraws), m_geometryShellCapacity};
+            return RenderFrameExecutionStatus::Failure("geometry view-family capacity calculation overflowed");
+        const GeometryFrameWorkCapacity capacity{views.Size(), static_cast<u32>(totalVisible), static_cast<u32>(totalGeometryWork),
+                                                 static_cast<u32>(totalGeometryBins), static_cast<u32>(totalShellDraws), m_geometryShellCapacity};
         if (work.Prepare(context.GetFrame().GetSerial(), capacity) != GeometryFrameWorkResult::Success)
-            return failBeforeDispatch("retained geometry frame-work allocation failed");
-        work.GetCandidatePlan() = candidatePlan;
+            return RenderFrameExecutionStatus::Failure("retained geometry frame-work allocation failed");
         if (context.GetFrame().GetMode() == RenderingMode::Shaded || context.GetFrame().GetMode() == RenderingMode::ShadedNoAmbient)
         {
-            const bool lightsSelected = m_scenes.CollectDirectionalLights(candidatePlan, views, work.GetDirectionalLights(), &sceneFailure);
+            const bool lightsSelected = m_scenes.CollectDirectionalLights(family.GetScene(), viewFamily.sceneVersion, views, work.GetDirectionalLights(), &sceneFailure);
             if (!lightsSelected)
-                return failBeforeDispatch(FailureMessage(sceneFailure.message, "directional light selection failed"));
+                return RenderFrameExecutionStatus::Failure(FailureMessage(sceneFailure.message, "directional light selection failed"));
         }
         for (const auto& dependency : family.GetDependencies())
         {
@@ -789,7 +1119,7 @@ namespace vanguard::rendering
             const bool producerFound = FindViewIndex(views, dependency.child, producer);
             const bool consumerFound = FindViewIndex(views, dependency.parent, consumer);
             if (!producerFound || !consumerFound || producer >= consumer)
-                return failBeforeDispatch("camera dependency family is not in producer-before-consumer order");
+                return RenderFrameExecutionStatus::Failure("camera dependency family is not in producer-before-consumer order");
             // The simple path's final camera result is CameraColor as well.
             // A future post-processing path must split Final at its producer.
             if (dependency.outputs != RenderCameraDependencyOutputs::None)
@@ -803,9 +1133,9 @@ namespace vanguard::rendering
             {
                 u32 viewIndex = 0;
                 const bool found = FindViewIndex(views, region.camera, viewIndex);
-                if (!found) return failBeforeDispatch("output region camera is disabled or absent from the prepared family");
+                if (!found) return RenderFrameExecutionStatus::Failure("output region camera is disabled or absent from the prepared family");
                 const bool added = work.AddOutputRegion({viewIndex, region.rect});
-                if (!added) return failBeforeDispatch("geometry output region capacity exceeded");
+                if (!added) return RenderFrameExecutionStatus::Failure("geometry output region capacity exceeded");
             }
         }
         else
@@ -814,7 +1144,7 @@ namespace vanguard::rendering
             if (!setup.rootCameras.Empty())
             {
                 const bool found = FindViewIndex(views, setup.rootCameras[0], outputView);
-                if (!found) return failBeforeDispatch("frame output camera is not part of the prepared family");
+                if (!found) return RenderFrameExecutionStatus::Failure("frame output camera is not part of the prepared family");
             }
             bool foundPrimary = false;
             for (u32 index = 0; index < views.Size(); ++index)
@@ -828,182 +1158,26 @@ namespace vanguard::rendering
                         isRoot |= views[index].id.index == root.index && views[index].id.generation == root.generation;
                     if (!isRoot) continue;
                 }
-                if (foundPrimary) return failBeforeDispatch("multiple primary output cameras require explicit output regions");
+                if (foundPrimary) return RenderFrameExecutionStatus::Failure("multiple primary output cameras require explicit output regions");
                 foundPrimary = true;
                 outputView = index;
             }
             const auto extent = frameInfo.GetOutputExtent();
             const bool added = work.AddOutputRegion({outputView, {0, 0, extent.width, extent.height}});
-            if (!added) return failBeforeDispatch("frame output extent is invalid");
+            if (!added) return RenderFrameExecutionStatus::Failure("frame output extent is invalid");
         }
-        const bool batchesBuilt = m_scenes.BuildGpuVisibilityCandidateBatches(candidatePlan, work.GetCandidateBatches(), &sceneFailure);
-        if (!batchesBuilt)
-            return failBeforeDispatch(FailureMessage(sceneFailure.message, "geometry candidate batch construction failed"));
-
-        GpuVisibilityBuildFailure visibilityFailure;
-        GpuVisibilityPlanBuilder& visibilityBuilder = work.GetVisibilityBuilder();
-        const bool visibilityBegun = visibilityBuilder.Begin(work.GetVisibilityBuildStorage(), context.GetFrame().GetSerial(), &visibilityFailure);
-        if (!visibilityBegun)
-            return failBeforeDispatch(FailureMessage(visibilityFailure.message, "geometry visibility planning failed"));
-        const auto candidateViews = work.GetCandidateViews();
-        for (u32 viewIndex = 0; viewIndex < views.Size(); ++viewIndex)
-        {
-            const RenderView& view = views[viewIndex];
-            GeometryCandidateView& candidateView = candidateViews[viewIndex];
-            candidateView.request = request;
-            if (viewIndex != 0)
-            {
-                const bool frustumBuilt = BuildSceneQueryFrustum(view, worldCellSize, candidateView.request.frustum);
-                if (!frustumBuilt) return failBeforeDispatch("geometry CPU frustum cannot be represented in scene space");
-            }
-            candidateView.request.layerMask = view.layerMask;
-            candidateView.request.visibilityMask = view.visibilityMask;
-            GpuView gpuView;
-            if (view.frameSerial != context.GetFrame().GetSerial())
-                return failBeforeDispatch("geometry view belongs to another frame");
-            const bool gpuViewBuilt = BuildGpuView(view, gpuView);
-            if (!gpuViewBuilt) return failBeforeDispatch("geometry GPU view is invalid");
-            const bool rangesReserved = visibilityBuilder.ReserveViewRanges(gpuView, candidatePlan.requiredCandidateCapacity, candidatePlan.requiredWorkRangeCapacity,
-                                                                           visibleCapacity, candidateView.reservation, &visibilityFailure);
-            if (!rangesReserved)
-                return failBeforeDispatch(FailureMessage(visibilityFailure.message, "geometry visibility view reservation failed"));
-        }
-
-        if (candidatePlan.batchCount == 0)
-        {
-            FinishGeometryCandidates(retainedFrame);
-            return retainedFrame.HasFailure() ? RenderFrameExecutionStatus::Failure(retainedFrame.GetFailureMessage()) : RenderPreparedFrame(context);
-        }
-
-        GeometryFrameWork* const workPointer = &work;
-        const u32 writeCount = static_cast<u32>(totalWrites);
-        const u32 groupCount = writeCount < jobs::GetWorkerCount() + 1u ? writeCount : jobs::GetWorkerCount() + 1u;
-        jobs::ParallelTask writers = jobs::ParallelTask::Create(
-            [scenes = &m_scenes, workPointer, groupCount, writeCount](const u32 group, const jobs::JobContext&) noexcept
-            {
-                const RenderSceneGpuCandidatePlan& plan = workPointer->GetCandidatePlan();
-                const auto batches = workPointer->GetCandidateBatches();
-                auto ranges = workPointer->GetCandidateRanges();
-                auto results = workPointer->GetCandidateResults();
-                auto failures = workPointer->GetCandidateFailures();
-                const auto viewWork = workPointer->GetCandidateViews();
-                // Contiguous balanced partitions keep neighboring result slots
-                // together. No shared append cursor or per-candidate retain.
-                const u32 first = static_cast<u32>(static_cast<u64>(writeCount) * group / groupCount);
-                const u32 end = static_cast<u32>(static_cast<u64>(writeCount) * (group + 1u) / groupCount);
-                for (u32 writeIndex = first; writeIndex < end; ++writeIndex)
-                {
-                    const GeometryCandidateView& view = viewWork[writeIndex / plan.batchCount];
-                    const RenderSceneGpuCandidateBatch& batch = batches[writeIndex % plan.batchCount];
-                    static_cast<void>(scenes->WriteGpuVisibilityCandidateBatch(plan, view.request, batch, view.reservation, ranges[writeIndex],
-                                                                               results[writeIndex], &failures[writeIndex]));
-                }
-            });
-        jobs::Task epilogue = jobs::Task::Create([this, retainedFrame](const jobs::JobContext& jobContext) mutable noexcept
-        {
-            FinishGeometryCandidates(retainedFrame);
-            if (retainedFrame.HasFailure())
-            {
-                retainedFrame.PublishTerminalCompletion();
-                return;
-            }
-            // Graph construction and resource preparation consume the finished
-            // family plan, so they must execute inside this joined continuation.
-            RenderFrameContext continuation(retainedFrame, jobContext);
-            const RenderFrameExecutionStatus status = continuation.IsValid() ? RenderPreparedFrame(continuation) :
-                RenderFrameExecutionStatus::Failure("geometry graph continuation builder allocation failed");
-            if (status.IsFailure())
-            {
-                retainedFrame.RecordFailure(status.message);
-                retainedFrame.PublishTerminalCompletion();
-            }
-            else if (status.IsSkipped())
-                retainedFrame.PublishTerminalCompletion(true);
-        });
-        if (!writers || !epilogue)
-            return failBeforeDispatch("geometry candidate job allocation failed");
-
-        static jobs::JobName candidateWriteName{"Geometry.PrepareCandidates"};
-        retainedFrame.DeferTerminalCompletion();
-        if (!context.GetBuilder().DispatchParallel(candidateWriteName, groupCount, static_cast<jobs::ParallelTask&&>(writers),
-                                                   static_cast<jobs::Task&&>(epilogue), 1u))
-            return failBeforeDispatch("geometry candidate jobs could not be dispatched");
-        return RenderFrameExecutionStatus::Success();
-    }
-
-    void FrameRenderer::FinishGeometryCandidates(RetainedRenderFrameRef& retainedFrame) noexcept
-    {
-        GeometryFrameWork& work = retainedFrame.GetGeometryFrameWork();
-        const RenderSceneGpuCandidatePlan& candidatePlan = work.GetCandidatePlan();
-        const auto results = work.GetCandidateResults();
-        const auto failures = work.GetCandidateFailures();
-        const bool collectDiagnostics = retainedFrame.GetFrame().GetFeatures().geometryDiagnostics;
-        const char* failureMessage = nullptr;
-        for (u32 writeIndex = 0; writeIndex < results.Size(); ++writeIndex)
-        {
-            if (results[writeIndex].completed && failures[writeIndex].code == RenderSceneFailureCode::None)
-            {
-                if (collectDiagnostics)
-                {
-                    auto& view = work.GetCandidateViews()[writeIndex / candidatePlan.batchCount];
-                    view.diagnosticCandidates += work.GetCandidateRanges()[writeIndex].count;
-                    view.diagnosticUnresolvedIdentities += results[writeIndex].unresolvedGpuIdentities;
-                }
-                continue;
-            }
-            failureMessage = FailureMessage(failures[writeIndex].message, "geometry candidate worker failed");
-            break;
-        }
-
-        GpuVisibilityPlanBuilder& visibilityBuilder = work.GetVisibilityBuilder();
-        if (failureMessage == nullptr)
-        {
-            GpuVisibilityBuildFailure visibilityFailure;
-            const auto ranges = work.GetCandidateRanges();
-            const auto candidateViews = work.GetCandidateViews();
-            for (u32 viewIndex = 0; viewIndex < candidateViews.Size(); ++viewIndex)
-            {
-                const auto* const firstRange = candidatePlan.batchCount != 0 ? ranges.Data() + viewIndex * candidatePlan.batchCount : nullptr;
-                const bool rangesCompleted = visibilityBuilder.CompleteViewRanges(candidateViews[viewIndex].reservation, {firstRange, candidatePlan.batchCount}, &visibilityFailure);
-                if (!rangesCompleted)
-                {
-                    failureMessage = FailureMessage(visibilityFailure.message, "geometry candidate range completion failed");
-                    break;
-                }
-            }
-            if (failureMessage == nullptr)
-            {
-                GpuVisibilityPlan visibilityPlan;
-                const bool finalized = visibilityBuilder.Finalize(visibilityPlan, &visibilityFailure);
-                if (!finalized)
-                    failureMessage = FailureMessage(visibilityFailure.message, "geometry visibility plan finalization failed");
-                else
-                {
-                    const auto committed = work.CommitVisibilityPlan(visibilityPlan);
-                    if (committed != GeometryFrameWorkResult::Success)
-                        failureMessage = "geometry visibility plan does not belong to its retained frame storage";
-                    else
-                    {
-                        const auto planned = work.PlanShellDraws(m_geometryBatcher);
-                        if (planned == GeometryFrameWorkResult::IncompatibleDepthConvention)
-                            failureMessage = "camera depth convention does not match the cooked geometry pipeline; matching PSO variants are required";
-                        else if (planned != GeometryFrameWorkResult::Success)
-                            failureMessage = "geometry shell planning exceeded capacity or observed an invalid catalog";
-                    }
-                }
-            }
-        }
-        RenderSceneFailure completionFailure;
-        const bool candidatesCompleted = m_scenes.CompleteGpuVisibilityCandidates(candidatePlan, &completionFailure);
-        if (!candidatesCompleted && failureMessage == nullptr)
-            failureMessage = FailureMessage(completionFailure.message, "geometry candidate seal release failed");
-        work.GetCandidatePlan() = {};
-        if (failureMessage != nullptr)
-        {
-            visibilityBuilder.Cancel();
-            work.ClearVisibilityPlan();
-            retainedFrame.RecordFailure(failureMessage);
-        }
+        const GeometryFrameWorkResult visibility = work.BuildDirectVisibilityPlan(family.GetScene(), views, instanceTraversalExtent, visibleCapacityPerView);
+        if (visibility != GeometryFrameWorkResult::Success)
+            return RenderFrameExecutionStatus::Failure("geometry direct GPU visibility plan is invalid");
+        const GeometryFrameWorkResult planned = work.PlanShellDraws(m_geometryBatcher, &m_geometryShellPlanCache);
+        if (planned == GeometryFrameWorkResult::IncompatibleDepthConvention)
+            return RenderFrameExecutionStatus::Failure("camera depth convention does not match the cooked geometry pipeline; matching PSO variants are required");
+        if (planned != GeometryFrameWorkResult::Success)
+            return RenderFrameExecutionStatus::Failure("geometry shell planning exceeded capacity or observed an invalid catalog");
+        rhi::Failure shellPlanFailure;
+        if (!EnsureGeometryShellPlanBuffer(work, &shellPlanFailure))
+            return RenderFrameExecutionStatus::Failure(FailureMessage(shellPlanFailure.message, "geometry persistent shell-plan publication failed"));
+        return RenderPreparedFrame(context);
     }
 
     void FrameRenderer::FinishBuiltGraph(RetainedRenderFrameRef& retainedFrame, RenderNodeGraph& graph) noexcept
@@ -1022,6 +1196,7 @@ namespace vanguard::rendering
         commandLists.FinalizeSubmissions(retainedFrame.HasFailure());
         if (commandLists.GetFirstSubmissionFailure(submissionFailure))
             retainedFrame.RecordFailure(FailureMessage(submissionFailure.message, "render-frame command-list submission failed"));
+        FinalizeGpuTiming(retainedFrame.GetGeometryFrameWork(), commandLists.GetCommandScopeReceipts(), commandLists.WasDeviceLost());
 
         bool allocatorCompleted = false;
         const ExecutionGenerationId generation = m_resourceAllocator.GetExecutionGeneration();
@@ -1051,16 +1226,29 @@ namespace vanguard::rendering
         {
             m_resourceAllocator.CancelBeforePublication();
         }
-
         RenderFrameOutputTransaction& output = retainedFrame.GetOutputTransaction();
+        bool ownerBoundaryPublished = false;
         if (output.IsValid())
         {
-            if (commandLists.WasDeviceLost())
+            const detail::RetainedOutputFinalizationAction outputAction =
+                detail::SelectRetainedOutputFinalizationAction(output.IsValid(), output.GetKind(), commandLists.WasDeviceLost(),
+                                                               allocatorCompleted, retainedFrame.HasFailure(), output.WasPresentNodeReached());
+            if (outputAction == detail::RetainedOutputFinalizationAction::DeviceLost)
                 output.m_viewport->DeviceLostOutput(output.m_acquisition);
-            else if (!allocatorCompleted || retainedFrame.HasFailure() || !output.WasPresentNodeReached())
+            else if (outputAction == detail::RetainedOutputFinalizationAction::Abandon)
             {
                 if (!output.WasPresentNodeReached() && !retainedFrame.HasFailure())
                     retainedFrame.RecordFailure("render graph did not execute its terminal output node");
+                if (allocatorCompleted && output.GetKind() == RenderViewportOutputKind::Texture)
+                {
+                    const ExportSlotId exportSlot{output.m_resourceExportIndex, output.m_resourceExportGeneration};
+                    PublishedResourceExport discardedExport;
+                    RenderFlowResourceFailure discardFailure;
+                    if (exportSlot.IsValid() && !m_resourceAllocator.TakeExport(exportSlot, discardedExport, &discardFailure) &&
+                        discardFailure.code != RenderFlowResourceFailureCode::InvalidOrStaleIdentity)
+                        retainedFrame.RecordFailure(discardFailure);
+                    discardedExport.Reset();
+                }
                 ViewportFailure outputFailure;
                 if (!output.m_viewport->AbandonOutput(output.m_acquisition, &outputFailure))
                 {
@@ -1068,14 +1256,64 @@ namespace vanguard::rendering
                     output.m_viewport->DeviceLostOutput(output.m_acquisition);
                 }
             }
-            else if (output.GetKind() == RenderViewportOutputKind::Texture)
+            else if (outputAction == detail::RetainedOutputFinalizationAction::CompleteTexture)
             {
+                const ExportSlotId exportSlot{output.m_resourceExportIndex, output.m_resourceExportGeneration};
+                PublishedResourceExport exported;
+                RenderFlowResourceFailure exportFailure;
+                bool exportValid = exportSlot.IsValid() && m_resourceAllocator.TakeExport(exportSlot, exported, &exportFailure);
+                RenderOutputPublicationReadinessKind readiness = RenderOutputPublicationReadinessKind::SameQueueContinuation;
+                if (exportValid)
+                {
+                    if (exported.GetReadiness() == ExportReadinessKind::ExplicitFenceSignal)
+                        readiness = RenderOutputPublicationReadinessKind::ExplicitFence;
+                    else if (exported.GetReadiness() != ExportReadinessKind::SameQueueContinuation)
+                        exportValid = false;
+                    const RenderTextureOutputContract& contract = output.m_viewport->GetTextureOutputContract();
+                    exportValid = exportValid && exported.GetKind() == FrameResourceKind::Texture && exported.GetTexture() == output.GetTexture() &&
+                                  exported.GetTerminalState() == contract.restingState && exported.GetTerminalQueue() == contract.restingQueue &&
+                                  readiness == contract.publicationReadiness && exported.GetReadyFence().IsValid() && exported.GetReadyFence().queue == contract.restingQueue;
+                }
                 ViewportFailure outputFailure;
-                if (!output.m_viewport->CompleteOutput(output.m_acquisition, &outputFailure))
+                if (!exportValid)
+                {
+                    if (exportFailure.code != RenderFlowResourceFailureCode::None)
+                        retainedFrame.RecordFailure(exportFailure);
+                    else
+                        retainedFrame.RecordFailure("render-frame texture output terminal export did not match its viewport contract");
+                    if (!output.m_viewport->AbandonOutput(output.m_acquisition, &outputFailure))
+                    {
+                        retainedFrame.RecordFailure(FailureMessage(outputFailure.message, "render-frame texture output abandonment failed"));
+                        output.m_viewport->DeviceLostOutput(output.m_acquisition);
+                    }
+                }
+                else if (!output.CompleteTextureOutput(exported.GetTerminalState(), exported.GetTerminalQueue(), readiness, exported.GetReadyFence(), &outputFailure))
+                {
                     retainedFrame.RecordFailure(FailureMessage(outputFailure.message, "render-frame texture output completion failed"));
+                    if (output.m_acquisition.IsValid() && !output.m_viewport->AbandonOutput(output.m_acquisition, &outputFailure))
+                        output.m_viewport->DeviceLostOutput(output.m_acquisition);
+                }
+                exported.Reset();
             }
-            else
+            else if (outputAction == detail::RetainedOutputFinalizationAction::Present)
             {
+                // Successful presentation is terminal output work, not a renderer-owner
+                // dependency. Release every graph/camera/view owner first, then publish
+                // the narrower boundary used by next-frame PreSimulation. The original
+                // render-command tail remains active through Present and terminal
+                // completion, preserving FlushFrame/viewport mutation/shutdown semantics.
+                graph.ReleaseExclusiveUpdateFlag();
+                retainedFrame.ClearJobsRenderFrame();
+                retainedFrame.ReleaseOwnerStateForTerminalCompletion();
+                // Snapshot device loss at the owner-safe point, before DXGI Present. Core GPU
+                // removal/reset must still stop before Simulation, while a failure caused by
+                // the later terminal Present remains a deterministic RenderUpdate failure.
+                const rhi::DeviceState ownerDeviceState = rhi::IsInitialized() ? rhi::TestDeviceState() : rhi::DeviceState::Unknown;
+                const bool ownerRequiresTerminalResolution =
+                    ownerDeviceState == rhi::DeviceState::Removed || ownerDeviceState == rhi::DeviceState::ResetRequired;
+                retainedFrame.PublishOwnerCompletion(ownerRequiresTerminalResolution);
+                ownerBoundaryPublished = true;
+
                 ViewportFailure outputFailure;
                 if (!output.m_viewport->Present(output.m_acquisition, &outputFailure))
                 {
@@ -1090,8 +1328,20 @@ namespace vanguard::rendering
         auto& diagnosticWork = retainedFrame.GetGeometryFrameWork();
         m_geometryDiagnostics.Complete(diagnosticWork.diagnosticSlot, diagnosticWork, commandLists.GetCommandScopeReceipts(), retainedFrame.HasFailure());
         diagnosticWork.diagnosticSlot = GeometryDiagnosticReadbacks::InvalidSlot;
-        graph.ReleaseExclusiveUpdateFlag();
-        retainedFrame.ClearJobsRenderFrame();
+        if (!ownerBoundaryPublished)
+        {
+            graph.ReleaseExclusiveUpdateFlag();
+            retainedFrame.ClearJobsRenderFrame();
+            retainedFrame.ReleaseOwnerStateForTerminalCompletion();
+            // Non-Present outputs reach their owner-safe point only after terminal output
+            // finalization above. Snapshot core device removal/reset here as well so the next
+            // PreSimulation cannot proceed merely because this frame had no DXGI Present.
+            const rhi::DeviceState ownerDeviceState = rhi::IsInitialized() ? rhi::TestDeviceState() : rhi::DeviceState::Unknown;
+            const bool ownerRequiresTerminalResolution =
+                ownerDeviceState == rhi::DeviceState::Removed || ownerDeviceState == rhi::DeviceState::ResetRequired;
+            retainedFrame.PublishOwnerCompletion(ownerRequiresTerminalResolution);
+            ownerBoundaryPublished = true;
+        }
         retainedFrame.PublishTerminalCompletion();
     }
 
@@ -1157,6 +1407,8 @@ namespace vanguard::rendering
                                                      static_cast<jobs::Task&&>(nodesCompleteTask), &schedulingFailure))
                     return;
                 retainedFrame.RecordFailure(schedulingFailure);
+                // NOTE: This exceptional setup-failure path synchronously joins the kickoff gate before cleanup. A future cleanup pass could replace
+                // this wait with a preallocated FinishBuiltGraph continuation dependent on kickoffCounter, preserving failure robustness without occupying a worker.
                 if (!kickoffCounter.Wait())
                     VG_FATAL("render-node setup failure could not join frame preparation before cleanup");
                 FinishBuiltGraph(retainedFrame, *graphPointer);
@@ -1173,13 +1425,23 @@ namespace vanguard::rendering
             }
 
             RenderFlowResourceFailure resourceFailure;
-            if (!m_resourceAllocator.SealPlanning(PlanningJoinToken::CompletedSynchronously(), &resourceFailure))
+            bool planningSealed = false;
+            {
+                VG_PROFILE_ZONE_NAMED("RenderFlow/SealPlanning");
+                planningSealed = m_resourceAllocator.SealPlanning(PlanningJoinToken::CompletedSynchronously(), &resourceFailure);
+            }
+            if (!planningSealed)
             {
                 retainedFrame.RecordFailure(resourceFailure);
                 m_resourceAllocator.CancelBeforePublication();
                 return;
             }
-            if (!m_resourceAllocator.Resolve(nullptr, &resourceFailure))
+            bool resourcesResolved = false;
+            {
+                VG_PROFILE_ZONE_NAMED("RenderFlow/Resolve");
+                resourcesResolved = m_resourceAllocator.Resolve(nullptr, &resourceFailure);
+            }
+            if (!resourcesResolved)
             {
                 retainedFrame.RecordFailure(resourceFailure);
                 m_resourceAllocator.CancelBeforePublication();
@@ -1189,10 +1451,26 @@ namespace vanguard::rendering
             [this, retainedFrame, graphPointer = &graph, kickoffDeferral = static_cast<jobs::CompletionDeferral&&>(kickoffDeferral)](const jobs::JobContext&) mutable noexcept
             {
                 RenderFlowResourceFailure resourceFailure;
-                if (!retainedFrame.HasFailure() && !m_resourceAllocator.BeginExecution(&resourceFailure))
-                    retainedFrame.RecordFailure(resourceFailure);
-                if (!retainedFrame.HasFailure() && !graphPointer->PrepareExecutionPackets(m_resourceAllocator, retainedFrame.GetFrameCommandLists(), retainedFrame.GetResourceBindings(), &resourceFailure))
-                    retainedFrame.RecordFailure(resourceFailure);
+                if (!retainedFrame.HasFailure())
+                {
+                    bool executionBegun = false;
+                    {
+                        VG_PROFILE_ZONE_NAMED("RenderFlow/BeginExecution");
+                        executionBegun = m_resourceAllocator.BeginExecution(&resourceFailure);
+                    }
+                    if (!executionBegun)
+                        retainedFrame.RecordFailure(resourceFailure);
+                }
+                if (!retainedFrame.HasFailure())
+                {
+                    bool packetsPrepared = false;
+                    {
+                        VG_PROFILE_ZONE_NAMED("RenderFlow/PrepareExecutionPackets");
+                        packetsPrepared = graphPointer->PrepareExecutionPackets(m_resourceAllocator, retainedFrame.GetFrameCommandLists(), retainedFrame.GetResourceBindings(), &resourceFailure);
+                    }
+                    if (!packetsPrepared)
+                        retainedFrame.RecordFailure(resourceFailure);
+                }
                 if (retainedFrame.HasFailure())
                     retainedFrame.GetResourceBindings().BlockExecution(RenderFlowResourceFailureCode::IncompleteExecution,
                                                                         "render-node execution was canceled before allocator publication completed");
@@ -1227,8 +1505,18 @@ namespace vanguard::rendering
                 m_resourceAllocator.CancelBeforePublication();
                 return RenderFrameExecutionStatus::Failure("render-flow texture output is unavailable");
             }
-            desc.initialState = desc.expected.initialState;
-            desc.terminalState = desc.expected.initialState;
+            const RenderTextureOutputContract& contract = output.m_viewport->GetTextureOutputContract();
+            desc.initialState = contract.restingState;
+            desc.terminalState = contract.restingState;
+            desc.initialQueue = contract.restingQueue;
+            desc.terminalQueue = contract.restingQueue;
+            desc.readiness = ImportReadinessKind::SameQueueContinuation;
+            ExportSlotId exportSlot;
+            if (!m_resourceAllocator.ReserveExportSlot(exportSlot, &resourceFailure))
+            {
+                m_resourceAllocator.CancelBeforePublication();
+                return RenderFrameExecutionStatus::Failure(FailureMessage(resourceFailure.message, "render-flow texture output export reservation failed"));
+            }
             ImportedResourceId imported;
             if (!m_resourceAllocator.RegisterImport(desc, imported, &resourceFailure))
             {
@@ -1237,6 +1525,8 @@ namespace vanguard::rendering
             }
             output.m_resourceImportIndex = imported.index;
             output.m_resourceImportGeneration = imported.generation;
+            output.m_resourceExportIndex = exportSlot.index;
+            output.m_resourceExportGeneration = exportSlot.generation;
         }
         if (family != nullptr && family->GetScene().IsValid() &&
             (frame.GetMode() == RenderingMode::Shaded || frame.GetMode() == RenderingMode::ShadedNoAmbient || frame.GetMode() == RenderingMode::GBufferOnly) &&

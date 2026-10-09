@@ -181,6 +181,9 @@ namespace vanguard::rendering
 
     private:
         explicit RetainedRenderFrameRef(Impl* impl) noexcept : m_impl(impl) {}
+        void InstallOwnerCompletion(jobs::CompletionDeferral&& completion) noexcept;
+        void ReleaseOwnerStateForTerminalCompletion() noexcept;
+        void PublishOwnerCompletion(bool requiresTerminalResolution = false) noexcept;
         void DeferTerminalCompletion() noexcept;
         void PublishTerminalCompletion(bool skipped = false) noexcept;
 
@@ -369,6 +372,13 @@ namespace vanguard::rendering
         /// Strong CPU boundary. This processes/waits for the current rendering chain, never for GPU queue completion.
         [[nodiscard]] bool FlushPreviousFrameProcessing(RenderCommandFailure* failure = nullptr) noexcept;
 
+        /// Renderer-owner boundary. Waits only until prior-frame renderer-owned scene/camera state is no longer retained by
+        /// asynchronous CPU work. Terminal presentation/output work may still be active; requiresTerminalResolution is set
+        /// when the owner boundary completed through a renderer-core failure and the caller must use the full boundary.
+        /// This boundary permits owner mutation only; a new FrameTick/render-frame generation still requires the terminal
+        /// boundary to be consumed so asynchronous failures remain ordered within one generation.
+        [[nodiscard]] bool FlushPreviousFrameOwnerProcessing(bool& requiresTerminalResolution, RenderCommandFailure* failure = nullptr) noexcept;
+
         /// Consumes the first asynchronous execution failure observed since the previous call. The CPU chain must first
         /// be made quiescent through FlushPreviousFrameProcessing so the returned message remains stable.
         [[nodiscard]] bool ConsumeExecutionFailure(RenderCommandFailure& failure) noexcept;
@@ -376,6 +386,8 @@ namespace vanguard::rendering
         [[nodiscard]] RenderCommandSystemStats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] bool FlushRendererOwnerMutationBoundary(RenderCommandFailure* failure) noexcept;
+        void PublishFrameOwnerCompletion(bool requiresTerminalResolution) noexcept;
         void PublishFrameCompletion(u64 serial, bool failed, bool skipped, const char* message) noexcept;
 
         Impl* m_impl = nullptr;

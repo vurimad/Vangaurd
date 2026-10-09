@@ -1,4 +1,5 @@
 #include <vanguard/assets/assets.hpp>
+#include <vanguard/assets/asset_index.hpp>
 #include <vanguard/assets/derived_data_artifact_source.hpp>
 
 #include <vanguard/assets/derived_data_artifact_source_internal.hpp>
@@ -8,6 +9,8 @@
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/serialization/serialization.hpp>
 
+#include <algorithm>
+
 namespace
 {
     using namespace vanguard;
@@ -15,6 +18,53 @@ namespace
 
     constexpr u16 KnownArtifactFlags = static_cast<u16>(ArtifactFlags::Primary) | static_cast<u16>(ArtifactFlags::Streamable) |
                                        static_cast<u16>(ArtifactFlags::MemoryResident) | static_cast<u16>(ArtifactFlags::EditorOnly);
+
+    [[nodiscard]] int CompareFingerprint(const BuildFingerprint& left, const BuildFingerprint& right) noexcept
+    {
+        for (u32 index = 0; index < BuildFingerprint::ByteCount; ++index)
+        {
+            if (left.bytes[index] < right.bytes[index])
+                return -1;
+            if (left.bytes[index] > right.bytes[index])
+                return 1;
+        }
+        return 0;
+    }
+
+    [[nodiscard]] bool FingerprintLess(const BuildFingerprint& left, const BuildFingerprint& right) noexcept
+    {
+        return CompareFingerprint(left, right) < 0;
+    }
+
+    [[nodiscard]] bool ProtectionContainsBuild(const containers::ArraySpan<const ArtifactSetKey> keys,
+                                               const BuildFingerprint& build) noexcept
+    {
+        u32 first = 0u;
+        u32 count = keys.Count();
+        while (count != 0u)
+        {
+            const u32 step = count / 2u;
+            const u32 middle = first + step;
+            if (FingerprintLess(keys[middle].build, build))
+            {
+                first = middle + 1u;
+                count -= step + 1u;
+            }
+            else
+            {
+                count = step;
+            }
+        }
+        return first < keys.Count() && keys[first].build == build;
+    }
+
+    struct PersistentMaintenanceCandidate final
+    {
+        BuildFingerprint build;
+        filesystem::AbsolutePath path;
+        u64 bytes = 0;
+        u64 timestamp = 0;
+    };
 
     void HashU8(crypto::Sha256Builder& hash, const u8 value) noexcept
     {
@@ -195,6 +245,74 @@ namespace
 
 namespace vanguard::assets
 {
+    OwnedBuildRequest::OwnedBuildRequest() noexcept
+        : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()), settings(memory::pools::Assets::GetInstance())
+    {
+    }
+
+    bool OwnedBuildRequest::CopyFrom(const BuildRequest& request) noexcept
+    {
+        if (!request.IsValid())
+        {
+            Reset();
+            return false;
+        }
+
+        source.Resize(request.source.content.Count());
+        metadata.Resize(request.source.metadata.Count());
+        settings.Resize(request.settings.Count());
+        if (source.Size() != request.source.content.Count() || metadata.Size() != request.source.metadata.Count() ||
+            settings.Size() != request.settings.Count())
+        {
+            Reset();
+            return false;
+        }
+
+        sourceReference = request.source.identity;
+        outputReference = request.output;
+        target = request.target;
+        for (u32 index = 0; index < source.Size(); ++index)
+            source[index] = request.source.content[index];
+        for (u32 index = 0; index < metadata.Size(); ++index)
+            metadata[index] = request.source.metadata[index];
+        for (u32 index = 0; index < settings.Size(); ++index)
+            settings[index] = request.settings[index];
+        return true;
+    }
+
+    BuildRequest OwnedBuildRequest::View() const noexcept
+    {
+        return {{sourceReference, {source.TypedData(), source.Size()}, {metadata.TypedData(), metadata.Size()}},
+                outputReference,
+                target,
+                {settings.TypedData(), settings.Size()}};
+    }
+
+    u64 OwnedBuildRequest::ByteCount() const noexcept
+    {
+        return static_cast<u64>(source.Size()) + metadata.Size() + settings.Size();
+    }
+
+    void OwnedBuildRequest::Reset() noexcept
+    {
+        sourceReference = {};
+        outputReference = {};
+        target = TargetPlatform::WindowsD3D12;
+        source.Clear();
+        metadata.Clear();
+        settings.Clear();
+    }
+
+    void OwnedBuildRequest::ReleasePayload() noexcept
+    {
+        source.Clear();
+        source.Shrink();
+        metadata.Clear();
+        metadata.Shrink();
+        settings.Clear();
+        settings.Shrink();
+    }
+
     const char* ToString(const Result result) noexcept
     {
         switch (result)
@@ -221,6 +339,8 @@ namespace vanguard::assets
             return "CompileFailed";
         case Result::InvalidArtifact:
             return "InvalidArtifact";
+        case Result::PersistentCacheFailure:
+            return "PersistentCacheFailure";
         case Result::LimitExceeded:
             return "LimitExceeded";
         case Result::OutOfMemory:
@@ -347,6 +467,39 @@ namespace vanguard::assets
     }
 
     Result DependencyCollector::GetStatus() const noexcept
+    {
+        return m_status;
+    }
+
+    AssetReferenceCollector::AssetReferenceCollector() noexcept : m_references(memory::pools::Assets::GetInstance()) {}
+
+    Result AssetReferenceCollector::Add(const ScannedAssetReference& reference) noexcept
+    {
+        if (m_status != Result::Success)
+            return m_status;
+        if (!reference.IsValid())
+        {
+            m_status = Result::InvalidArgument;
+            return m_status;
+        }
+        const u32 previous = m_references.Size();
+        m_references.PushBack(reference);
+        if (m_references.Size() != previous + 1u)
+            m_status = Result::OutOfMemory;
+        return m_status;
+    }
+
+    u32 AssetReferenceCollector::Count() const noexcept
+    {
+        return m_references.Size();
+    }
+
+    containers::ArraySpan<const ScannedAssetReference> AssetReferenceCollector::GetReferences() const noexcept
+    {
+        return {m_references.TypedData(), m_references.Size()};
+    }
+
+    Result AssetReferenceCollector::GetStatus() const noexcept
     {
         return m_status;
     }
@@ -649,7 +802,9 @@ namespace vanguard::assets
 
     void BuildOutput::Reset() noexcept
     {
+        m_publicationProtection.Reset();
         disposition = BuildDisposition::Built;
+        origin = BuildOrigin::Unknown;
         buildFingerprint = {};
         contentFingerprint = {};
         artifacts.Clear();
@@ -657,6 +812,13 @@ namespace vanguard::assets
 
     struct BuildSystem::Impl
     {
+        enum class PersistentLookup : u8
+        {
+            Hit,
+            Miss,
+            Failure
+        };
+
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
 
         struct CompilerRecord
@@ -689,6 +851,8 @@ namespace vanguard::assets
         containers::DynamicArray<CacheEntry> cache;
         Stats stats;
         u64 nextSequence = 1;
+        const void* persistentProtectionDomainOwner = nullptr;
+        const void* persistentProtectionDomainReservation = nullptr;
 
         [[nodiscard]] bool InitializePersistentCache() noexcept
         {
@@ -707,30 +871,39 @@ namespace vanguard::assets
             sourceConfig.root = persistentRoot.AsChar();
             sourceConfig.limits.maximumArtifacts = config.maximumArtifactsPerBuild;
             sourceConfig.limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
+            sourceConfig.coordination = config.persistentCacheCoordination;
             if (!persistentArtifacts.Initialize(sourceConfig))
             {
                 return false;
             }
 
             containers::DynamicArray<filesystem::AbsolutePath> staleFiles(memory::pools::Assets::GetInstance());
-            manager.FindFiles(persistentRoot, containers::String("*.tmp"), staleFiles, true);
             u64 recovered = 0;
-            for (const filesystem::AbsolutePath& stale : staleFiles)
+            if (filesystem::ScanFiles(persistentRoot, staleFiles) == filesystem::ScanResult::Success)
             {
-                if (manager.DeleteFile(stale))
+                detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(persistentArtifacts);
+                for (const filesystem::AbsolutePath& stale : staleFiles)
                 {
-                    ++recovered;
+                    BuildFingerprint build;
+                    if (!detail::ParsePersistentRecordStagePath(persistentRoot, stale, build))
+                        continue;
+                    detail::PersistentWriterLease writer;
+                    if (detail::PersistentCacheAuthorityAccess::AcquireWriter(authority, build, writer) != DerivedDataArtifactResult::Success)
+                        continue;
+                    if (detail::PersistentCacheAuthorityAccess::DeleteStage(writer, stale))
+                        ++recovered;
                 }
             }
             stats.persistentCacheRecoveries += recovered;
             return true;
         }
 
-        [[nodiscard]] bool LookupPersistentCache(const BuildFingerprint& key, BuildOutput& output) noexcept
+        [[nodiscard]] PersistentLookup LookupPersistentCache(const BuildFingerprint& key, BuildOutput& output,
+                                                             const bool protectPublication) noexcept
         {
             if (persistentRoot.Empty())
             {
-                return false;
+                return PersistentLookup::Miss;
             }
             const BuildFingerprint requestedKey = key;
             const filesystem::AbsolutePath path = detail::PersistentRecordPath(persistentRoot, requestedKey);
@@ -738,6 +911,13 @@ namespace vanguard::assets
             DerivedDataArtifactResult result = persistentArtifacts.Open({requestedKey, {}}, reader);
             if (result == DerivedDataArtifactResult::Success)
                 result = reader.ReadAll(output);
+            if (result == DerivedDataArtifactResult::Success && protectPublication)
+            {
+                if (!detail::PersistentCacheAuthorityAccess::PromoteReaderToPublication(reader, output.m_publicationProtection))
+                    result = DerivedDataArtifactResult::LimitExceeded;
+            }
+            if (result == DerivedDataArtifactResult::Success)
+                output.origin = BuildOrigin::PersistentCacheHit;
             if (result != DerivedDataArtifactResult::Success)
             {
                 output.Reset();
@@ -770,82 +950,223 @@ namespace vanguard::assets
 
             if (result == DerivedDataArtifactResult::Corrupt || result == DerivedDataArtifactResult::ContentMismatch)
             {
-                static_cast<void>(filesystem::GetManager().DeleteFile(path));
+                reader.Close();
+                detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(persistentArtifacts);
+                detail::PersistentWriterLease cleanup;
+                if (detail::PersistentCacheAuthorityAccess::AcquireWriter(authority, requestedKey, cleanup) == DerivedDataArtifactResult::Success)
+                {
+                    DerivedDataArtifactLimits limits;
+                    limits.maximumArtifacts = config.maximumArtifactsPerBuild;
+                    limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
+                    const DerivedDataArtifactResult current = detail::ValidatePersistentRecord(path, {requestedKey, {}}, limits);
+                    if (current == DerivedDataArtifactResult::Success)
+                    {
+                        BuildOutputProtection currentProtection;
+                        if (!protectPublication ||
+                            detail::PersistentCacheAuthorityAccess::PromoteWriterToPublication(cleanup, currentProtection))
+                        {
+                            cleanup.Reset();
+                            ArtifactSetReader currentReader;
+                            result = persistentArtifacts.Open({requestedKey, {}}, currentReader);
+                            if (result == DerivedDataArtifactResult::Success)
+                                result = currentReader.ReadAll(output);
+                            if (result == DerivedDataArtifactResult::Success && protectPublication)
+                                output.m_publicationProtection = static_cast<BuildOutputProtection&&>(currentProtection);
+                        }
+                        else
+                            result = DerivedDataArtifactResult::LimitExceeded;
+                    }
+                    else if (current == DerivedDataArtifactResult::NotFound)
+                    {
+                        result = DerivedDataArtifactResult::NotFound;
+                    }
+                    else if (current == DerivedDataArtifactResult::Corrupt || current == DerivedDataArtifactResult::ContentMismatch)
+                    {
+                        result = detail::PersistentCacheAuthorityAccess::DeleteCanonical(cleanup, path)
+                                     ? DerivedDataArtifactResult::NotFound
+                                     : DerivedDataArtifactResult::IoFailure;
+                    }
+                    else
+                        result = current;
+                }
+                else
+                {
+                    // A same-root participant may have repaired the record while
+                    // the stale invalid observation was being retired. Re-open
+                    // once instead of deleting without an exclusive final check.
+                    ArtifactSetReader currentReader;
+                    result = persistentArtifacts.Open({requestedKey, {}}, currentReader);
+                    if (result == DerivedDataArtifactResult::Success)
+                        result = currentReader.ReadAll(output);
+                    if (result == DerivedDataArtifactResult::Success && protectPublication &&
+                        !detail::PersistentCacheAuthorityAccess::PromoteReaderToPublication(currentReader, output.m_publicationProtection))
+                        result = DerivedDataArtifactResult::LimitExceeded;
+                }
             }
-            return result == DerivedDataArtifactResult::Success;
+            if (result == DerivedDataArtifactResult::Success)
+            {
+                output.origin = BuildOrigin::PersistentCacheHit;
+                output.disposition = BuildDisposition::CacheHit;
+                return PersistentLookup::Hit;
+            }
+            if (result == DerivedDataArtifactResult::NotFound || result == DerivedDataArtifactResult::Corrupt ||
+                result == DerivedDataArtifactResult::ContentMismatch || !protectPublication)
+                return PersistentLookup::Miss;
+            return PersistentLookup::Failure;
         }
 
-        void StorePersistentCache(const BuildOutput& output) noexcept
+        [[nodiscard]] bool StorePersistentCache(BuildOutput& output, const bool protectPublication) noexcept
         {
             if (persistentRoot.Empty())
             {
-                return;
+                return !protectPublication;
             }
             filesystem::Manager& manager = filesystem::GetManager();
             const filesystem::AbsolutePath directory = detail::PersistentRecordDirectory(persistentRoot, output.buildFingerprint);
             const filesystem::AbsolutePath target = detail::PersistentRecordPath(persistentRoot, output.buildFingerprint);
+            const filesystem::AbsolutePath temporary = detail::PersistentRecordStagePath(persistentRoot, output.buildFingerprint);
+            detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(persistentArtifacts);
+            detail::PersistentWriterLease writer;
+            if (detail::PersistentCacheAuthorityAccess::AcquireWriter(authority, output.buildFingerprint, writer) != DerivedDataArtifactResult::Success)
+            {
+                RecordPersistentStore(false);
+                return false;
+            }
             if (!manager.CreatePath(directory))
             {
                 RecordPersistentStore(false);
-                return;
+                return false;
             }
+            DerivedDataArtifactLimits limits;
+            limits.maximumArtifacts = config.maximumArtifactsPerBuild;
+            limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
 
             if (manager.FileExist(target))
             {
-                ArtifactSetReader existing;
-                const DerivedDataArtifactResult existingResult =
-                    persistentArtifacts.Open({output.buildFingerprint, output.contentFingerprint}, existing);
+                const DerivedDataArtifactResult existingResult = detail::ValidatePersistentRecord(
+                    target, {output.buildFingerprint, output.contentFingerprint}, limits);
                 if (existingResult == DerivedDataArtifactResult::Success)
                 {
-                    return;
+                    if (!protectPublication)
+                        return true;
+                    if (!detail::PersistentCacheAuthorityAccess::PromoteWriterToPublication(writer, output.m_publicationProtection))
+                    {
+                        RecordPersistentStore(false);
+                        return false;
+                    }
+                    return true;
                 }
                 if (existingResult != DerivedDataArtifactResult::Corrupt &&
                     existingResult != DerivedDataArtifactResult::ContentMismatch)
                 {
                     RecordPersistentStore(false);
-                    return;
+                    return false;
                 }
-                if (!manager.DeleteFile(target))
+                if (!detail::PersistentCacheAuthorityAccess::DeleteCanonical(writer, target))
                 {
                     RecordPersistentStore(false);
-                    return;
+                    return false;
                 }
             }
 
-            const filesystem::AbsolutePath generated = manager.GenerateTemporaryFilePath();
-            const filesystem::AbsolutePath temporary = directory.AddFilePath(filesystem::paths::GetFileName(generated));
+            if (manager.FileExist(temporary) && !detail::PersistentCacheAuthorityAccess::DeleteStage(writer, temporary))
+            {
+                RecordPersistentStore(false);
+                return false;
+            }
             if (!WritePersistentRecord(temporary, output))
             {
-                static_cast<void>(manager.DeleteFile(temporary));
+                static_cast<void>(detail::PersistentCacheAuthorityAccess::DeleteStage(writer, temporary));
                 RecordPersistentStore(false);
-                return;
+                return false;
             }
 
-            DerivedDataArtifactLimits limits;
-            limits.maximumArtifacts = config.maximumArtifactsPerBuild;
-            limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
             const DerivedDataArtifactResult validationResult = detail::ValidatePersistentRecord(
                 temporary, {output.buildFingerprint, output.contentFingerprint}, limits);
             if (validationResult != DerivedDataArtifactResult::Success)
             {
-                static_cast<void>(manager.DeleteFile(temporary));
+                static_cast<void>(detail::PersistentCacheAuthorityAccess::DeleteStage(writer, temporary));
                 RecordPersistentStore(false);
-                return;
+                return false;
             }
 
-            const bool moved = filesystem::SystemIO::MoveFile(temporary.AsChar(), target.AsChar());
-            bool published = moved;
-            if (!moved && manager.FileExist(target))
+            if (!filesystem::ReplaceFile(manager, temporary, target))
             {
-                ArtifactSetReader raced;
-                published = persistentArtifacts.Open({output.buildFingerprint, output.contentFingerprint}, raced) ==
-                            DerivedDataArtifactResult::Success;
+                static_cast<void>(detail::PersistentCacheAuthorityAccess::DeleteStage(writer, temporary));
+                RecordPersistentStore(false);
+                return false;
             }
-            if (!moved)
+            const DerivedDataArtifactResult published = detail::ValidatePersistentRecord(
+                target, {output.buildFingerprint, output.contentFingerprint}, limits);
+            if (published != DerivedDataArtifactResult::Success)
             {
-                static_cast<void>(manager.DeleteFile(temporary));
+                static_cast<void>(detail::PersistentCacheAuthorityAccess::DeleteCanonical(writer, target));
+                RecordPersistentStore(false);
+                return false;
             }
-            RecordPersistentStore(published);
+            if (protectPublication &&
+                !detail::PersistentCacheAuthorityAccess::PromoteWriterToPublication(writer, output.m_publicationProtection))
+            {
+                RecordPersistentStore(false);
+                return false;
+            }
+            RecordPersistentStore(true);
+            return true;
+        }
+
+        [[nodiscard]] bool EnsurePersistentExact(BuildOutput& output) noexcept
+        {
+            if (persistentRoot.Empty() || output.buildFingerprint.IsEmpty() || output.contentFingerprint.IsEmpty() || output.artifacts.Empty())
+                return false;
+            ArtifactSetReader reader;
+            const DerivedDataArtifactResult open = persistentArtifacts.Open(
+                {output.buildFingerprint, output.contentFingerprint}, reader);
+            if (open == DerivedDataArtifactResult::Success)
+            {
+                return detail::PersistentCacheAuthorityAccess::PromoteReaderToPublication(reader, output.m_publicationProtection);
+            }
+            if (open != DerivedDataArtifactResult::NotFound && open != DerivedDataArtifactResult::Corrupt &&
+                open != DerivedDataArtifactResult::ContentMismatch)
+                return false;
+            if (open == DerivedDataArtifactResult::Corrupt || open == DerivedDataArtifactResult::ContentMismatch)
+            {
+                const filesystem::AbsolutePath path = detail::PersistentRecordPath(persistentRoot, output.buildFingerprint);
+                detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(persistentArtifacts);
+                detail::PersistentWriterLease cleanup;
+                if (detail::PersistentCacheAuthorityAccess::AcquireWriter(authority, output.buildFingerprint, cleanup) == DerivedDataArtifactResult::Success)
+                {
+                    DerivedDataArtifactLimits limits;
+                    limits.maximumArtifacts = config.maximumArtifactsPerBuild;
+                    limits.maximumArtifactBytes = config.maximumArtifactBytesPerBuild;
+                    const ArtifactSetKey exact{output.buildFingerprint, output.contentFingerprint};
+                    const DerivedDataArtifactResult current = detail::ValidatePersistentRecord(path, exact, limits);
+                    if (current == DerivedDataArtifactResult::Success)
+                        return detail::PersistentCacheAuthorityAccess::PromoteWriterToPublication(cleanup, output.m_publicationProtection);
+                    if (current != DerivedDataArtifactResult::NotFound && current != DerivedDataArtifactResult::Corrupt &&
+                        current != DerivedDataArtifactResult::ContentMismatch)
+                        return false;
+                    if (current != DerivedDataArtifactResult::NotFound &&
+                        !detail::PersistentCacheAuthorityAccess::DeleteCanonical(cleanup, path))
+                        return false;
+                }
+                else
+                {
+                    ArtifactSetReader current;
+                    if (persistentArtifacts.Open({output.buildFingerprint, output.contentFingerprint}, current) == DerivedDataArtifactResult::Success)
+                        return detail::PersistentCacheAuthorityAccess::PromoteReaderToPublication(current, output.m_publicationProtection);
+                    return false;
+                }
+            }
+            return StorePersistentCache(output, true);
+        }
+
+        [[nodiscard]] bool MarkDurablePublication(BuildOutput& output) noexcept
+        {
+            detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(persistentArtifacts);
+            return persistentProtectionDomainOwner != nullptr &&
+                   detail::PersistentCacheAuthorityAccess::MarkDurablePublication(
+                       authority, persistentProtectionDomainOwner, output.buildFingerprint, output.contentFingerprint,
+                       output.m_publicationProtection);
         }
 
         void RecordPersistentStore(const bool success) noexcept
@@ -865,6 +1186,11 @@ namespace vanguard::assets
         [[nodiscard]] Result AcquireCompiler(const BuildRequest& request, CompilerDescriptor& descriptor) noexcept
         {
             lock.Acquire();
+            if (persistentProtectionDomainReservation != nullptr)
+            {
+                lock.Release();
+                return Result::InvalidState;
+            }
             for (CompilerRecord& compiler : compilers)
             {
                 if (compiler.descriptor.sourceType == request.source.identity.ExpectedType() && compiler.descriptor.outputType == request.output.ExpectedType())
@@ -911,6 +1237,7 @@ namespace vanguard::assets
                     output.buildFingerprint = entry.key;
                     output.contentFingerprint = entry.content;
                     output.disposition = BuildDisposition::CacheHit;
+                    output.origin = BuildOrigin::MemoryCacheHit;
                     const bool copied = CopyArtifacts({entry.artifacts.TypedData(), entry.artifacts.Size()}, output.artifacts);
                     lock.ReleaseShared();
                     return copied;
@@ -1004,6 +1331,13 @@ namespace vanguard::assets
             stats.cacheEntries = cache.Size();
             lock.Release();
         }
+
+        void RecordMemoryCacheHit() noexcept
+        {
+            lock.Acquire();
+            ++stats.memoryCacheHits;
+            lock.Release();
+        }
     };
 
     namespace
@@ -1029,7 +1363,37 @@ namespace vanguard::assets
 
     BuildSystem::~BuildSystem()
     {
-        static_cast<void>(Shutdown());
+        if (Shutdown() || m_impl == nullptr)
+            return;
+
+        // Normal ownership requires the bound DependencyIndex to shut down
+        // first. If a caller destroys the BuildSystem out of order, detach the
+        // exact index pair before releasing the root registration so the live
+        // index cannot retain a dangling BuildSystem pointer.
+        const void* owner = nullptr;
+        m_impl->lock.Acquire();
+        if (m_impl->stats.activeBuilds == 0u && m_impl->persistentProtectionDomainReservation == nullptr)
+        {
+            owner = m_impl->persistentProtectionDomainOwner;
+            m_impl->persistentProtectionDomainReservation = owner;
+        }
+        m_impl->lock.Release();
+        if (owner == nullptr)
+            return;
+
+        auto* const index = const_cast<DependencyIndex*>(static_cast<const DependencyIndex*>(owner));
+        if (!index->DetachPersistentProtectionDomain(*this))
+            return;
+
+        detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+        if (authority != nullptr)
+            detail::PersistentCacheAuthorityAccess::UnregisterProtectionDomain(authority, owner);
+        m_impl->lock.Acquire();
+        m_impl->persistentProtectionDomainOwner = nullptr;
+        m_impl->persistentProtectionDomainReservation = nullptr;
+        m_impl->lock.Release();
+        VANGUARD_DELETE(m_impl);
+        m_impl = nullptr;
     }
 
     bool BuildSystem::Initialize(const Config& config) noexcept
@@ -1040,6 +1404,7 @@ namespace vanguard::assets
         }
         if (!memory::IsInitialized() || config.maximumCompilers == 0 || config.maximumDependenciesPerBuild == 0 || config.maximumArtifactsPerBuild == 0 ||
             config.maximumArtifactBytesPerBuild == 0 || !config.reportLimits.IsValid() || (config.maximumCacheEntries != 0 && config.maximumCacheBytes == 0) ||
+            !config.persistentCacheCoordination.IsValid() ||
             (config.persistentCacheRoot != nullptr &&
              (!filesystem::IsInitialized() || config.persistentCacheRoot[0] == '\0' || !filesystem::AbsolutePath::IsValidPath(config.persistentCacheRoot) ||
               !filesystem::paths::IsAbsolutePath(config.persistentCacheRoot))))
@@ -1067,7 +1432,8 @@ namespace vanguard::assets
             return true;
         }
         m_impl->lock.AcquireShared();
-        const bool busy = m_impl->stats.activeBuilds != 0;
+        const bool busy = m_impl->stats.activeBuilds != 0 || m_impl->persistentProtectionDomainOwner != nullptr ||
+                          m_impl->persistentProtectionDomainReservation != nullptr;
         m_impl->lock.ReleaseShared();
         if (busy)
         {
@@ -1326,14 +1692,42 @@ namespace vanguard::assets
 
         if (m_impl->LookupCache(output.buildFingerprint, output))
         {
+            m_impl->RecordMemoryCacheHit();
+            detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+            const bool durable = m_impl->persistentProtectionDomainOwner != nullptr;
+            const bool protectedOutput = authority == nullptr ||
+                                         (durable ? (m_impl->EnsurePersistentExact(output) && m_impl->MarkDurablePublication(output))
+                                                  : detail::PersistentCacheAuthorityAccess::AcquirePublication(
+                                                        authority, output.buildFingerprint, output.m_publicationProtection));
+            if (!protectedOutput)
+            {
+                output.Reset();
+                m_impl->RecordResult(false, false);
+                return Result::PersistentCacheFailure;
+            }
             m_impl->RecordResult(true, true);
             return Result::Success;
         }
-        if (m_impl->LookupPersistentCache(output.buildFingerprint, output))
+        detail::PersistentRootAuthority* const persistentAuthority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+        const Impl::PersistentLookup persistentLookup =
+            m_impl->LookupPersistentCache(output.buildFingerprint, output, persistentAuthority != nullptr);
+        if (persistentLookup == Impl::PersistentLookup::Hit)
         {
+            if (m_impl->persistentProtectionDomainOwner != nullptr && !m_impl->MarkDurablePublication(output))
+            {
+                output.Reset();
+                m_impl->RecordResult(false, false);
+                return Result::PersistentCacheFailure;
+            }
             m_impl->StoreCache(output);
             m_impl->RecordResult(true, true);
             return Result::Success;
+        }
+        if (persistentLookup == Impl::PersistentLookup::Failure)
+        {
+            output.Reset();
+            m_impl->RecordResult(false, false);
+            return Result::PersistentCacheFailure;
         }
 
         ArtifactWriter writer(request.output, m_impl->config.maximumArtifactsPerBuild, m_impl->config.maximumArtifactBytesPerBuild);
@@ -1381,8 +1775,29 @@ namespace vanguard::assets
             return Result::OutOfMemory;
         }
         output.disposition = BuildDisposition::Built;
+        output.origin = BuildOrigin::CompilerBuilt;
         output.contentFingerprint = ComputeArtifactFingerprint({output.artifacts.TypedData(), output.artifacts.Size()});
-        m_impl->StorePersistentCache(output);
+        const bool durable = m_impl->persistentProtectionDomainOwner != nullptr;
+        bool storedPersistent = true;
+        if (persistentAuthority != nullptr)
+        {
+            storedPersistent = m_impl->StorePersistentCache(output, true);
+            if (!storedPersistent && !durable)
+                storedPersistent = detail::PersistentCacheAuthorityAccess::AcquirePublication(
+                    persistentAuthority, output.buildFingerprint, output.m_publicationProtection);
+        }
+        if (!storedPersistent)
+        {
+            output.Reset();
+            m_impl->RecordResult(false, false);
+            return Result::PersistentCacheFailure;
+        }
+        if (durable && !m_impl->MarkDurablePublication(output))
+        {
+            output.Reset();
+            m_impl->RecordResult(false, false);
+            return Result::PersistentCacheFailure;
+        }
         m_impl->StoreCache(output);
         m_impl->RecordResult(false, true);
         return Result::Success;
@@ -1411,5 +1826,298 @@ namespace vanguard::assets
         const Stats stats = m_impl->stats;
         m_impl->lock.ReleaseShared();
         return stats;
+    }
+
+    bool BuildSystem::RegisterPersistentProtectionDomain(const void* const owner) noexcept
+    {
+        if (m_impl == nullptr || owner == nullptr)
+            return false;
+        m_impl->lock.Acquire();
+        if (m_impl->persistentProtectionDomainOwner == owner && m_impl->persistentProtectionDomainReservation == nullptr)
+        {
+            m_impl->lock.Release();
+            return true;
+        }
+        if (m_impl->persistentProtectionDomainOwner != nullptr || m_impl->persistentProtectionDomainReservation != nullptr ||
+            m_impl->stats.activeBuilds != 0u)
+        {
+            m_impl->lock.Release();
+            return false;
+        }
+        m_impl->persistentProtectionDomainReservation = owner;
+        m_impl->lock.Release();
+
+        detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+        const bool registered = authority != nullptr && detail::PersistentCacheAuthorityAccess::RegisterProtectionDomain(authority, owner);
+
+        bool installed = false;
+        m_impl->lock.Acquire();
+        if (registered && m_impl->persistentProtectionDomainReservation == owner &&
+            m_impl->persistentProtectionDomainOwner == nullptr && m_impl->stats.activeBuilds == 0u)
+        {
+            m_impl->persistentProtectionDomainOwner = owner;
+            installed = true;
+        }
+        if (m_impl->persistentProtectionDomainReservation == owner)
+            m_impl->persistentProtectionDomainReservation = nullptr;
+        m_impl->lock.Release();
+        if (registered && !installed)
+            detail::PersistentCacheAuthorityAccess::UnregisterProtectionDomain(authority, owner);
+        return installed;
+    }
+
+    bool BuildSystem::UnregisterPersistentProtectionDomain(const void* const owner) noexcept
+    {
+        if (m_impl == nullptr || owner == nullptr)
+            return false;
+        m_impl->lock.Acquire();
+        if (m_impl->persistentProtectionDomainOwner != owner || m_impl->persistentProtectionDomainReservation != nullptr ||
+            m_impl->stats.activeBuilds != 0u)
+        {
+            m_impl->lock.Release();
+            return false;
+        }
+        m_impl->persistentProtectionDomainReservation = owner;
+        m_impl->lock.Release();
+
+        detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+        if (authority != nullptr)
+            detail::PersistentCacheAuthorityAccess::UnregisterProtectionDomain(authority, owner);
+
+        m_impl->lock.Acquire();
+        const bool removed = m_impl->persistentProtectionDomainOwner == owner &&
+                             m_impl->persistentProtectionDomainReservation == owner && m_impl->stats.activeBuilds == 0u;
+        if (removed)
+            m_impl->persistentProtectionDomainOwner = nullptr;
+        if (m_impl->persistentProtectionDomainReservation == owner)
+            m_impl->persistentProtectionDomainReservation = nullptr;
+        m_impl->lock.Release();
+        return removed;
+    }
+
+    bool BuildSystem::OwnsPersistentPublication(const void* const owner, const BuildOutput& output) const noexcept
+    {
+        if (m_impl == nullptr || owner == nullptr || output.buildFingerprint.IsEmpty() || output.contentFingerprint.IsEmpty() ||
+            output.artifacts.Empty() || ComputeArtifactFingerprint({output.artifacts.TypedData(), output.artifacts.Size()}) != output.contentFingerprint)
+            return false;
+        m_impl->lock.AcquireShared();
+        const bool ownsDomain = m_impl->persistentProtectionDomainOwner == owner &&
+                                m_impl->persistentProtectionDomainReservation == nullptr;
+        m_impl->lock.ReleaseShared();
+        if (!ownsDomain)
+            return false;
+        detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+        return detail::PersistentCacheAuthorityAccess::OwnsDurablePublication(
+            authority, owner, output.buildFingerprint, output.contentFingerprint, output.m_publicationProtection);
+    }
+
+    void BuildSystem::AdoptPersistentPublication(const void* const owner, BuildOutput& output) noexcept
+    {
+        if (!OwnsPersistentPublication(owner, output))
+            return;
+        detail::PersistentCacheAuthorityAccess::AdoptPublication(output.m_publicationProtection);
+    }
+
+    u64 BuildSystem::PersistentProtectionEpoch(const void* const owner) const noexcept
+    {
+        if (m_impl == nullptr || owner == nullptr)
+            return 0u;
+        m_impl->lock.AcquireShared();
+        const bool ownsDomain = m_impl->persistentProtectionDomainOwner == owner &&
+                                m_impl->persistentProtectionDomainReservation == nullptr;
+        m_impl->lock.ReleaseShared();
+        if (!ownsDomain)
+            return 0u;
+        return detail::PersistentCacheAuthorityAccess::ProtectionEpoch(
+            detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts));
+    }
+
+    PersistentCacheMaintenanceResult BuildSystem::MaintainPersistentCache(
+        const void* const owner, const containers::ArraySpan<const ArtifactSetKey> protectedKeys,
+        const u64 protectionEpoch, const PersistentCacheMaintenanceLimits& limits,
+        PersistentCacheMaintenanceReport& report, containers::DynamicArray<PersistentCacheMaintenanceDiagnostic>& diagnostics,
+        const IsCancellationRequestedFunction cancellation,
+        void* const cancellationUserData) noexcept
+    {
+        report = {};
+        diagnostics.Clear();
+        if (m_impl == nullptr || owner == nullptr || protectionEpoch == 0u || !limits.IsValid() || m_impl->persistentRoot.Empty() ||
+            protectedKeys.Count() > limits.maximumProtectionRecords ||
+            static_cast<u64>(protectedKeys.Count()) > limits.maximumProtectionBytes / sizeof(ArtifactSetKey))
+            return PersistentCacheMaintenanceResult::InvalidArgument;
+
+        m_impl->lock.AcquireShared();
+        const bool ownsDomain = m_impl->persistentProtectionDomainOwner == owner &&
+                                m_impl->persistentProtectionDomainReservation == nullptr;
+        m_impl->lock.ReleaseShared();
+        if (!ownsDomain)
+            return PersistentCacheMaintenanceResult::InvalidState;
+
+        containers::DynamicArray<ArtifactSetKey> protections(memory::pools::Assets::GetInstance());
+        protections.Reserve(protectedKeys.Count());
+        if (protections.Capacity() < protectedKeys.Count())
+            return PersistentCacheMaintenanceResult::OutOfMemory;
+        for (const ArtifactSetKey& key : protectedKeys)
+        {
+            if (key.build.IsEmpty())
+                return PersistentCacheMaintenanceResult::InvalidArgument;
+            protections.PushBack(key);
+        }
+        if (protections.Size() != protectedKeys.Count())
+            return PersistentCacheMaintenanceResult::OutOfMemory;
+        std::sort(protections.Begin(), protections.End(), [](const ArtifactSetKey& left, const ArtifactSetKey& right) noexcept
+        {
+            return FingerprintLess(left.build, right.build);
+        });
+        u32 unique = 0u;
+        for (u32 index = 0; index < protections.Size(); ++index)
+        {
+            if (unique != 0u && protections[unique - 1u].build == protections[index].build)
+                continue;
+            if (unique != index)
+                protections[unique] = protections[index];
+            ++unique;
+        }
+        protections.Resize(unique);
+        const containers::ArraySpan<const ArtifactSetKey> protectedBuilds{protections.TypedData(), protections.Size()};
+        const auto addDiagnostic = [&](const BuildFingerprint& build,
+                                       const PersistentCacheMaintenanceDiagnosticReason reason) noexcept
+        {
+            if (diagnostics.Size() >= limits.maximumDiagnosticRows)
+            {
+                report.diagnosticsTruncated = true;
+                return;
+            }
+            const u32 previous = diagnostics.Size();
+            diagnostics.PushBack({build, reason});
+            if (diagnostics.Size() != previous + 1u)
+                report.diagnosticsTruncated = true;
+        };
+
+        detail::PersistentRootAuthority* const authority = detail::PersistentCacheAuthorityAccess::Authority(m_impl->persistentArtifacts);
+        if (authority == nullptr || detail::PersistentCacheAuthorityAccess::ProtectionEpoch(authority) != protectionEpoch)
+            return PersistentCacheMaintenanceResult::ProtectionChanged;
+        if (cancellation != nullptr && cancellation(cancellationUserData))
+            return PersistentCacheMaintenanceResult::Cancelled;
+
+        containers::DynamicArray<filesystem::AbsolutePath> files(memory::pools::Assets::GetInstance());
+        const filesystem::ScanResult scanned = filesystem::ScanFiles(m_impl->persistentRoot, files, limits.maximumScanEntries);
+        if (scanned == filesystem::ScanResult::LimitExceeded)
+            return PersistentCacheMaintenanceResult::LimitExceeded;
+        if (scanned != filesystem::ScanResult::Success)
+            return PersistentCacheMaintenanceResult::ScanFailed;
+
+        containers::DynamicArray<PersistentMaintenanceCandidate> candidates(memory::pools::Assets::GetInstance());
+        candidates.Reserve(files.Size());
+        if (candidates.Capacity() < files.Size())
+            return PersistentCacheMaintenanceResult::OutOfMemory;
+
+        filesystem::Manager& manager = filesystem::GetManager();
+        for (const filesystem::AbsolutePath& path : files)
+        {
+            if (cancellation != nullptr && cancellation(cancellationUserData))
+                return PersistentCacheMaintenanceResult::Cancelled;
+
+            BuildFingerprint build;
+            if (!detail::ParsePersistentRecordPath(m_impl->persistentRoot, path, build))
+            {
+                BuildFingerprint stageBuild;
+                if (detail::ParsePersistentRecordStagePath(m_impl->persistentRoot, path, stageBuild))
+                    ++report.stageFiles;
+                else
+                    ++report.foreignFiles;
+                continue;
+            }
+
+            if (!manager.FileExist(path))
+                return PersistentCacheMaintenanceResult::ScanFailed;
+            const u64 bytes = manager.GetFileSize(path);
+            const u64 timestamp = manager.GetFileTimeStamp(path);
+            if (timestamp == 0u)
+                return PersistentCacheMaintenanceResult::ScanFailed;
+            if (report.scannedBytes > limits.maximumScanBytes || bytes > limits.maximumScanBytes - report.scannedBytes)
+                return PersistentCacheMaintenanceResult::LimitExceeded;
+
+            ++report.scannedRecords;
+            report.scannedBytes += bytes;
+            if (ProtectionContainsBuild(protectedBuilds, build))
+            {
+                ++report.protectedRecords;
+                report.protectedBytes += bytes;
+                continue;
+            }
+
+            ++report.eligibleRecords;
+            report.eligibleBytes += bytes;
+            const u32 previous = candidates.Size();
+            candidates.PushBack({build, path, bytes, timestamp});
+            if (candidates.Size() != previous + 1u)
+                return PersistentCacheMaintenanceResult::OutOfMemory;
+        }
+
+        if (detail::PersistentCacheAuthorityAccess::ProtectionEpoch(authority) != protectionEpoch)
+            return PersistentCacheMaintenanceResult::ProtectionChanged;
+
+        report.protectedOverBudget = report.protectedBytes > limits.maximumCacheBytes;
+        if (report.protectedOverBudget)
+            return PersistentCacheMaintenanceResult::Success;
+        if (report.scannedBytes <= limits.maximumCacheBytes)
+        {
+            report.budgetSatisfied = true;
+            return PersistentCacheMaintenanceResult::Success;
+        }
+
+        std::sort(candidates.Begin(), candidates.End(), [](const PersistentMaintenanceCandidate& left,
+                                                           const PersistentMaintenanceCandidate& right) noexcept
+        {
+            if (left.timestamp != right.timestamp)
+                return left.timestamp < right.timestamp;
+            return FingerprintLess(left.build, right.build);
+        });
+
+        u64 remainingBytes = report.scannedBytes;
+        u32 attemptedDeletes = 0u;
+        for (const PersistentMaintenanceCandidate& candidate : candidates)
+        {
+            if (remainingBytes <= limits.maximumCacheBytes)
+                break;
+            if (attemptedDeletes >= limits.maximumDeleteRecords)
+            {
+                report.deleteBatchLimitReached = true;
+                break;
+            }
+            if (cancellation != nullptr && cancellation(cancellationUserData))
+                return PersistentCacheMaintenanceResult::Cancelled;
+
+            ++attemptedDeletes;
+            const auto deleted = detail::PersistentCacheAuthorityAccess::DeleteCanonicalForMaintenance(
+                authority, owner, protectionEpoch, candidate.build, candidate.path, protectedBuilds);
+            switch (deleted)
+            {
+            case detail::PersistentCacheAuthorityAccess::MaintenanceDeleteResult::Removed:
+                ++report.removedRecords;
+                report.removedBytes += candidate.bytes;
+                remainingBytes = candidate.bytes <= remainingBytes ? remainingBytes - candidate.bytes : 0u;
+                break;
+            case detail::PersistentCacheAuthorityAccess::MaintenanceDeleteResult::Deferred:
+                ++report.deferredDeletes;
+                addDiagnostic(candidate.build, PersistentCacheMaintenanceDiagnosticReason::LeaseBusy);
+                break;
+            case detail::PersistentCacheAuthorityAccess::MaintenanceDeleteResult::InvalidPath:
+                ++report.deferredDeletes;
+                ++report.failedDeletes;
+                addDiagnostic(candidate.build, PersistentCacheMaintenanceDiagnosticReason::InvalidCandidate);
+                break;
+            case detail::PersistentCacheAuthorityAccess::MaintenanceDeleteResult::IoFailure:
+                ++report.deferredDeletes;
+                ++report.failedDeletes;
+                addDiagnostic(candidate.build, PersistentCacheMaintenanceDiagnosticReason::IoFailure);
+                break;
+            case detail::PersistentCacheAuthorityAccess::MaintenanceDeleteResult::ProtectionChanged:
+                return PersistentCacheMaintenanceResult::ProtectionChanged;
+            }
+        }
+        report.budgetSatisfied = remainingBytes <= limits.maximumCacheBytes;
+        return PersistentCacheMaintenanceResult::Success;
     }
 } // namespace vanguard::assets

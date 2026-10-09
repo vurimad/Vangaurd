@@ -28,6 +28,39 @@ namespace vanguard::rendering
         Failed
     };
 
+    namespace detail
+    {
+        enum class PresentationRecreationStage : u8
+        {
+            Suspended,
+            SurfaceUnavailable,
+            UnsupportedSurface,
+            HdrPrerequisiteMissing,
+            ReadyToCreate
+        };
+
+        struct PresentationSurfaceRetirementDecision
+        {
+            bool pendingRetirement = false;
+            bool drainBeforeCreate = false;
+        };
+
+        [[nodiscard]] constexpr PresentationSurfaceRetirementDecision EvaluatePresentationSurfaceRetirement(
+            const bool pendingRetirement, const PresentationRecreationStage stage, const bool drainSucceeded = false) noexcept
+        {
+            if (!pendingRetirement)
+                return {};
+            if (stage != PresentationRecreationStage::ReadyToCreate)
+                return {true, false};
+            return drainSucceeded ? PresentationSurfaceRetirementDecision{} : PresentationSurfaceRetirementDecision{true, true};
+        }
+
+        [[nodiscard]] constexpr bool ShouldInvalidatePresentationActiveFormat(const bool hasLiveSwapChain) noexcept
+        {
+            return !hasLiveSwapChain;
+        }
+    } // namespace detail
+
     enum class PresentationFailureCode : u8
     {
         None,
@@ -133,6 +166,7 @@ namespace vanguard::rendering
         u64 m_surfaceReplacements = 0;
         u64 m_colorFallbacks = 0;
         u64 m_failures = 0;
+        bool m_pendingSurfaceRetirement = false;
         bool m_active = false;
 
         friend class PresentationService;

@@ -6,6 +6,53 @@
 
 namespace vanguard::editor::detail
 {
+    bool ResolveEditorTexturePublicationImport(const EditorTextureRenderOutputPublication& publication,
+                                               rendering::RetainedTextureImportDesc& import) noexcept
+    {
+        if (!publication.IsValid())
+            return false;
+        rendering::RenderOutputReceipt receipt;
+        if (!publication.ResolveReceipt(receipt) || !receipt.IsReady() || receipt.viewport != publication.viewport ||
+            receipt.outputRevision != publication.outputRevision)
+            return false;
+
+        import.initialState = receipt.terminalState;
+        import.terminalState = receipt.terminalState;
+        import.initialQueue = receipt.terminalQueue;
+        import.terminalQueue = receipt.terminalQueue;
+        switch (receipt.readiness)
+        {
+        case rendering::RenderOutputPublicationReadinessKind::SameQueueContinuation:
+            import.readiness = rendering::ImportReadinessKind::SameQueueContinuation;
+            import.incomingWait = {};
+            return true;
+        case rendering::RenderOutputPublicationReadinessKind::ExplicitFence:
+            import.readiness = rendering::ImportReadinessKind::ExplicitFenceWait;
+            import.incomingWait = receipt.readyFence;
+            return import.incomingWait.IsValid();
+        default:
+            return false;
+        }
+    }
+
+    bool ResolveEditorUiTextureImport(const EditorUiRenderTexture& texture,
+                                      rendering::RetainedTextureImportDesc& import) noexcept
+    {
+        import = {};
+        import.texture = texture.texture.GetRef();
+        import.token = {rhi::ResourceRef(import.texture).value};
+        if (!import.texture.IsValid() || !rhi::GetTextureDesc(import.texture, import.expected))
+            return false;
+
+        if (!texture.publication.IsSpecified())
+        {
+            import.initialState = import.terminalState = import.expected.initialState;
+            return true;
+        }
+
+        return ResolveEditorTexturePublicationImport(texture.publication, import);
+    }
+
     EditorUiRenderData* AllocateEditorUiRenderData() noexcept
     {
         memory::MemoryBlock block = memory::Allocate(memory::PoolId::Editor, sizeof(EditorUiRenderData), alignof(EditorUiRenderData));

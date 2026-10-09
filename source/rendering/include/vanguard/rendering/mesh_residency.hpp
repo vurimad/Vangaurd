@@ -212,8 +212,7 @@ namespace vanguard::rendering
         RenderableDefinitionFailure,
         DrawPreparationNotReady,
         InvalidDrawLayout,
-        DrawablePublicationFailure,
-        IncompatibleDrawContext
+        DrawablePublicationFailure
     };
 
     struct MeshResidencyFailure
@@ -234,10 +233,14 @@ namespace vanguard::rendering
         GeometryUploadStats upload;
         MeshLodGeometryUploaderStats lodUpload;
         u32 residencyRecords = 0;
+        u32 activeResidencyRecords = 0;
+        u32 retiringResidencyRecords = 0;
         u32 liveDemands = 0;
         u64 demandsIssued = 0;
         u64 demandsCoalesced = 0;
         u64 demandsReleased = 0;
+        u64 progressRecordVisits = 0;
+        u64 retirementRecordVisits = 0;
     };
 
     /// Renderer-global composition owner for the physical mesh residency stack. Demand creation is thread-safe;
@@ -254,9 +257,11 @@ namespace vanguard::rendering
         [[nodiscard]] bool Initialize(GpuSceneDefinitions& definitions, const MeshResidencyConfig& config = {}, MeshResidencyFailure* failure = nullptr) noexcept;
         /// Enables complete immutable renderable-topology construction. Technique names are durable
         /// RenderPhaseKey values; only techniques resolved by the sealed phase registry participate.
-        [[nodiscard]] bool Initialize(GpuSceneDefinitions& definitions, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases, const MeshResidencyConfig& config = {},
+        [[nodiscard]] bool Initialize(GpuSceneDefinitions& definitions, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases,
+                                      containers::ArraySpan<const MeshDrawPhaseContext> drawPhases, const MeshResidencyConfig& config = {},
                                       MeshResidencyFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool Initialize(GpuSceneRuntime& runtime, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases, const MeshResidencyConfig& config = {},
+        [[nodiscard]] bool Initialize(GpuSceneRuntime& runtime, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases,
+                                      containers::ArraySpan<const MeshDrawPhaseContext> drawPhases, const MeshResidencyConfig& config = {},
                                       MeshResidencyFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(MeshResidencyFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool AbandonDevice(MeshResidencyFailure* failure = nullptr) noexcept;
@@ -276,11 +281,17 @@ namespace vanguard::rendering
         /// shell/bin lease; Pending/failure leave both arguments untouched. This does
         /// not publish GPU placement/residency or make the whole mesh drawable.
         [[nodiscard]] GeometryBatchResult AcquireDrawPlacement(MeshDrawPreparation& preparation, GeometryBatchLease& output) noexcept;
-        // Every anchor phase requires one explicit attachment context. Equal
-        // requests share the closure; incompatible contexts cannot overwrite it.
-        [[nodiscard]] bool RequestDrawable(const MeshDemandHandle& demand, containers::ArraySpan<const MeshDrawPhaseContext> phases,
-                                           MeshDrawableBinding& output, MeshResidencyFailure* failure = nullptr) noexcept;
-        [[nodiscard]] bool StageGpuSceneContribution(MeshResidencyFailure* failure = nullptr) noexcept;
+        /// Main-thread request for the renderer-generation drawable closure. Attachment
+        /// compatibility is owned by this manager's initialization, not by scene callers.
+        [[nodiscard]] bool RequestDrawable(const MeshDemandHandle& demand, MeshDrawableBinding& output,
+                                           MeshResidencyFailure* failure = nullptr) noexcept;
+        /// The staged output is true only when this call transfers a contribution into the shared GPU Scene transaction.
+        [[nodiscard]] bool StageGpuSceneContribution(bool& staged, MeshResidencyFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool StageGpuSceneContribution(MeshResidencyFailure* failure = nullptr) noexcept
+        {
+            bool staged = false;
+            return StageGpuSceneContribution(staged, failure);
+        }
         /// Main-thread non-blocking geometry/topology and requested drawable closure
         /// progress. StageGpuSceneContribution feeds shared publication separately.
         /// No per-view visibility, indirect generation or drawing occurs here.

@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/assets/asset_recooker.hpp>
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
@@ -16,17 +17,31 @@ namespace
         resources::ResourceReference sharedSource;
         resources::ResourceReference leftSource;
         resources::ResourceReference rootSource;
+        resources::ResourceReference firstSource;
         resources::ResourceReference sharedOutput;
         resources::ResourceReference leftOutput;
         resources::ResourceReference rootOutput;
+        resources::ResourceReference firstOutput;
         u8 sharedByte = 1;
         u8 leftByte = 2;
         u8 rootByte = 3;
+        u8 firstByte = 4;
         concurrency::Atomic<u32> compileCalls;
         concurrency::Atomic<bool> sharedCompileStarted;
         bool failShared = false;
         bool failRoot = false;
         bool blockShared = false;
+    };
+
+    struct ValidationProbe
+    {
+        assets::DependencyIndex* index = nullptr;
+        resources::ResourceReference output;
+        assets::BuildFingerprint committedContent;
+        u32 calls = 0;
+        u32 recordCount = 0;
+        bool sawCommittedReaderState = false;
+        bool reject = false;
     };
 
     int g_failures = 0;
@@ -58,7 +73,7 @@ namespace
             return collector.Add({fixture.leftOutput, {}, assets::DependencyRole::Generated, assets::DependencyRequirement::Required}) ==
                    assets::Result::Success;
         }
-        return request.source.identity == fixture.sharedSource;
+        return request.source.identity == fixture.sharedSource || request.source.identity == fixture.firstSource;
     }
 
     [[nodiscard]] bool Compile(const assets::CompileContext& context, assets::ArtifactWriter& writer, void* const userData) noexcept
@@ -103,30 +118,45 @@ namespace
         return {{source, {&byte, 1}, {}}, output, assets::TargetPlatform::WindowsD3D12, {}};
     }
 
-    [[nodiscard]] bool ResolveOutput(const resources::ResourceReference output, assets::BuildRequest& request, void* const userData) noexcept
+    [[nodiscard]] bool ResolveOutput(const resources::ResourceReference output, assets::OwnedBuildRequest& request, void* const userData) noexcept
     {
         auto& fixture = *static_cast<Fixture*>(userData);
         if (output == fixture.sharedOutput)
         {
-            request = MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte));
         }
         if (output == fixture.leftOutput)
         {
-            request = MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte));
         }
         if (output == fixture.rootOutput)
         {
-            request = MakeRequest(fixture.rootSource, fixture.rootOutput, fixture.rootByte);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.rootSource, fixture.rootOutput, fixture.rootByte));
+        }
+        if (output == fixture.firstOutput)
+        {
+            return request.CopyFrom(MakeRequest(fixture.firstSource, fixture.firstOutput, fixture.firstByte));
         }
         return false;
     }
 
-    [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::BuildRequest& request, void* const userData) noexcept
+    [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request, void* const userData) noexcept
     {
         return ResolveOutput(dependency.identity, request, userData);
+    }
+
+    [[nodiscard]] assets::RecookPreCommitValidationResult ValidatePreCommit(
+        const containers::ArraySpan<const assets::DependencyRecord> records, void* const userData) noexcept
+    {
+        auto& probe = *static_cast<ValidationProbe*>(userData);
+        ++probe.calls;
+        probe.recordCount = records.Count();
+        assets::DependencyRecord committed;
+        probe.sawCommittedReaderState = probe.index != nullptr &&
+                                         probe.index->Find(probe.output, committed) == assets::IndexResult::Success &&
+                                         committed.contentFingerprint == probe.committedContent;
+        return probe.reject ? assets::RecookPreCommitValidationResult::Reject
+                            : assets::RecookPreCommitValidationResult::Accept;
     }
 
     [[nodiscard]] bool BuildAndPublish(assets::BuildSystem& system, assets::DependencyIndex& index, const assets::BuildRequest& request,
@@ -156,6 +186,20 @@ namespace
             }
         }
     }
+
+    [[nodiscard]] bool DeleteDirectoryTree(filesystem::Manager& manager, const filesystem::AbsolutePath& directory) noexcept
+    {
+        bool removed = true;
+        containers::DynamicArray<filesystem::AbsolutePath> directories(memory::pools::Assets::GetInstance());
+        manager.FindDirectories(directory, directories);
+        for (const filesystem::AbsolutePath& child : directories)
+            removed = DeleteDirectoryTree(manager, child) && removed;
+        containers::DynamicArray<filesystem::AbsolutePath> files(memory::pools::Assets::GetInstance());
+        manager.FindFiles(directory, containers::String("*"), files, false);
+        for (const filesystem::AbsolutePath& file : files)
+            removed = manager.DeleteFile(file) && removed;
+        return manager.DeletePath(directory) && removed;
+    }
 } // namespace
 
 int main()
@@ -167,25 +211,31 @@ int main()
     diagnostics::EnableCategory(diagnostics::Category::FunctionalTests, true);
     Check(containers::Initialize(), "containers initialization");
     Check(vanguard::io::Initialize(), "io initialization");
-    const filesystem::AbsolutePath working = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath working = vanguard::tests::ScratchDirectory("asset_recooker_tests");
     const filesystem::AbsolutePath root = working.AddDirPath("vanguard_asset_recooker_tests");
+    const filesystem::AbsolutePath cacheRoot = root.AddDirPath("ddc");
     Check(filesystem::Initialize({working, working, root}), "filesystem initialization");
     Check(jobs::Initialize(jobs::ToolConfig()), "jobs initialization");
 
     filesystem::Manager& manager = filesystem::GetManager();
     DeleteIndexFiles(manager, root);
+    static_cast<void>(DeleteDirectoryTree(manager, root));
     Check(manager.CreatePath(root), "recooker test root");
 
     Fixture fixture;
     fixture.sharedSource = Reference("source/recook/shared.asset", SourceType);
     fixture.leftSource = Reference("source/recook/left.asset", SourceType);
     fixture.rootSource = Reference("source/recook/root.asset", SourceType);
+    fixture.firstSource = Reference("source/recook/first.asset", SourceType);
     fixture.sharedOutput = Reference("cooked/recook/shared.asset", OutputType);
     fixture.leftOutput = Reference("cooked/recook/left.asset", OutputType);
     fixture.rootOutput = Reference("cooked/recook/root.asset", OutputType);
+    fixture.firstOutput = Reference("cooked/recook/first.asset", OutputType);
 
     assets::BuildSystem buildSystem;
-    Check(buildSystem.Initialize(), "build-system initialization");
+    assets::Config buildConfig;
+    buildConfig.persistentCacheRoot = cacheRoot.AsChar();
+    Check(buildSystem.Initialize(buildConfig), "build-system initialization");
     const assets::CompilerDescriptor compiler{
         assets::HashCompilerName("assets.recooker_test"), "assets.recooker_test", 1, SourceType, OutputType, &Discover, &Compile, &fixture, &Estimate};
     Check(buildSystem.RegisterCompiler(compiler) == assets::Result::Success, "compiler registration");
@@ -195,6 +245,7 @@ int main()
     indexConfig.settingsFingerprint = crypto::Sha256("recooker-settings", 17);
     assets::DependencyIndex index;
     Check(index.Initialize(indexConfig) == assets::IndexResult::Success, "index initialization");
+    Check(index.BindPersistentProtectionDomain(buildSystem), "bind recooker index to persistent protection domain");
 
     Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte)), "baseline shared publication");
     assets::DependencyRecord sharedRecord;
@@ -216,11 +267,62 @@ int main()
 
     const assets::AssetChange sharedChange{fixture.sharedSource};
     {
+        const assets::BuildFingerprint previousSharedContent = sharedRecord.contentFingerprint;
+        fixture.sharedByte = 6;
+        Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte)) &&
+                  index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success &&
+                  sharedRecord.contentFingerprint != previousSharedContent && index.Save() == assets::IndexResult::Success,
+              "P2 commit changed Generated child without refreshing its dependant");
+        assets::BuildPlan parityPlan;
+        Check(buildSystem.Prepare(MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte), parityPlan) == assets::Result::Success &&
+                  index.MaterializeGeneratedDependencyContent(parityPlan) == assets::IndexResult::Success &&
+                  index.Evaluate(MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte), parityPlan) ==
+                      assets::DirtyReason::DependenciesChanged,
+              "P2 recooker preparation sees committed Generated content change as DependenciesChanged");
+        const resources::ResourceReference explicitOutputs[]{fixture.leftOutput};
+        assets::RecookBatch dependencyChanged = recooker.Request({}, {explicitOutputs, 1}, assets::BuildPriority::High);
+        dependencyChanged.Wait();
+        const assets::RecookStats stats = dependencyChanged.GetStats();
+        assets::DependencyRecord refreshedLeft;
+        Check(dependencyChanged.GetStatus() == assets::RecookState::Succeeded && stats.explicitOutputs == 1u && stats.dirtySeeds == 1u &&
+                  stats.affectedOutputs == 2u && stats.rootRequests == 1u && stats.succeededRoots == 1u &&
+                  index.Find(fixture.leftOutput, refreshedLeft) == assets::IndexResult::Success && refreshedLeft.dependencies.Size() == 1u &&
+                  refreshedLeft.dependencies[0].content == sharedRecord.contentFingerprint,
+              "P2 recooker dirty planning matches committed Generated materialization");
+        leftRecord = refreshedLeft;
+        dependencyChanged.Reset();
+    }
+
+    {
+        Check(index.Remove(fixture.sharedOutput) == assets::IndexResult::Success && index.Save() == assets::IndexResult::Success,
+              "P2 remove required Generated VADI row for legacy tolerance fixture");
+        assets::BuildPlan missingRequiredPlan;
+        Check(buildSystem.Prepare(MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte), missingRequiredPlan) == assets::Result::Success &&
+                  index.MaterializeGeneratedDependencyContent(missingRequiredPlan) == assets::IndexResult::NotFound &&
+                  index.Evaluate(MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftByte), missingRequiredPlan) ==
+                      assets::DirtyReason::DependenciesChanged,
+              "P2 missing Required Generated row remains dirty instead of failing preparation");
+        const resources::ResourceReference explicitOutputs[]{fixture.leftOutput};
+        assets::RecookBatch missingRequired = recooker.Request({}, {explicitOutputs, 1}, assets::BuildPriority::High);
+        missingRequired.Wait();
+        const assets::RecookStats stats = missingRequired.GetStats();
+        Check(missingRequired.GetStatus() == assets::RecookState::Succeeded && stats.explicitOutputs == 1u && stats.dirtySeeds == 1u &&
+                  stats.affectedOutputs == 2u && stats.rootRequests == 1u && stats.succeededRoots == 1u &&
+                  index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success,
+              "P2 recooker preserves legacy Required-missing tolerance through dirty planning and rebuild");
+        Check(index.Find(fixture.leftOutput, leftRecord) == assets::IndexResult::Success,
+              "P2 Required-missing recovery refreshes dependent VADI state");
+        missingRequired.Reset();
+    }
+
+    {
         const u32 callsBefore = fixture.compileCalls.GetValue();
         assets::RecookBatch unchanged = recooker.Request({&sharedChange, 1});
+        containers::DynamicArray<assets::DependencyRecord> unchangedCommitted(memory::pools::Assets::GetInstance());
         Check(unchanged && unchanged.HasFinished() && unchanged.GetStatus() == assets::RecookState::Succeeded && unchanged.GetStats().unchangedChanges == 1 &&
-                  unchanged.GetStats().rootRequests == 0 && fixture.compileCalls.GetValue() == callsBefore && !index.HasActiveTransaction(),
-              "unchanged source event performs no work");
+                  unchanged.GetStats().rootRequests == 0 && fixture.compileCalls.GetValue() == callsBefore && !index.HasActiveTransaction() &&
+                  !unchanged.TakeCommittedRecords(unchangedCommitted) && unchangedCommitted.Empty(),
+              "P1 unchanged source event performs no work and exposes no committed-delivery handoff");
         unchanged.Reset();
     }
 
@@ -255,13 +357,96 @@ int main()
         failed.Wait();
         assets::DependencyRecord afterFailure;
         assets::DependencyRecord leftAfterFailure;
+        containers::DynamicArray<assets::DependencyRecord> failedCommitted(memory::pools::Assets::GetInstance());
         Check(failed.GetStatus() == assets::RecookState::Failed && failed.GetError() == assets::RecookFailure::BuildFailed &&
                   index.Find(fixture.sharedOutput, afterFailure) == assets::IndexResult::Success && afterFailure.contentFingerprint == committedSharedContent &&
                   index.Find(fixture.leftOutput, leftAfterFailure) == assets::IndexResult::Success &&
-                  leftAfterFailure.contentFingerprint == committedLeftContent && !index.HasActiveTransaction() && !index.HasChanges(),
-              "failed root rolls back successful staged dependency publications");
+                  leftAfterFailure.contentFingerprint == committedLeftContent && !index.HasActiveTransaction() && !index.HasChanges() &&
+                  !failed.TakeCommittedRecords(failedCommitted) && failedCommitted.Empty(),
+              "P1 failed root rolls back staged publications and exposes no committed-delivery handoff");
         failed.Reset();
         fixture.failRoot = false;
+    }
+
+    {
+        // E2.3 P3: an untracked typed source plus an explicit cooked output is
+        // a legitimate first cook. It must share the same recooker-owned VADI
+        // transaction with ordinary indexed invalidation work.
+        fixture.sharedByte = 12;
+        const assets::AssetChange firstChange{fixture.firstSource};
+        const assets::AssetChange combinedChanges[]{sharedChange, firstChange};
+        const resources::ResourceReference explicitOutputs[]{fixture.firstOutput};
+        const u64 commitsBefore = index.GetStats().transactionCommits;
+        assets::RecookBatch combined = recooker.Request({combinedChanges, 2}, {explicitOutputs, 1}, assets::BuildPriority::High);
+        combined.Wait();
+        const assets::RecookStats stats = combined.GetStats();
+        assets::DependencyRecord firstRecord;
+        Check(combined.GetStatus() == assets::RecookState::Succeeded && stats.explicitOutputs == 1u &&
+                  stats.firstCookOutputs == 1u && stats.affectedOutputs == 4u && stats.rootRequests == 2u &&
+                  index.GetStats().transactionCommits == commitsBefore + 1u &&
+                  index.Find(fixture.firstOutput, firstRecord) == assets::IndexResult::Success &&
+                  firstRecord.source == fixture.firstSource && !index.HasActiveTransaction() && !index.HasChanges(),
+              "P3 first cook and transitive indexed invalidation commit through one minimized recooker transaction");
+        Check(index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success,
+              "P3 combined transaction refreshes committed shared record");
+        committedSharedContent = sharedRecord.contentFingerprint;
+        combined.Reset();
+    }
+
+    {
+        // E2.3 P4: validation receives the complete owned staged closure while
+        // ordinary VADI readers still see the last committed records. Rejection
+        // rolls every staged publication back before it can become visible.
+        fixture.sharedByte = 13;
+        ValidationProbe probe;
+        probe.index = &index;
+        probe.output = fixture.sharedOutput;
+        probe.committedContent = committedSharedContent;
+        probe.reject = true;
+        const assets::RecookPreCommitValidator validator{&ValidatePreCommit, &probe};
+        assets::RecookBatch rejected = recooker.Request({&sharedChange, 1}, {}, assets::BuildPriority::High, validator);
+        rejected.Wait();
+        assets::DependencyRecord afterReject;
+        containers::DynamicArray<assets::DependencyRecord> rejectedCommitted(memory::pools::Assets::GetInstance());
+        Check(rejected.GetStatus() == assets::RecookState::Failed &&
+                  rejected.GetError() == assets::RecookFailure::PreCommitRejected && probe.calls == 1u && probe.recordCount == 3u &&
+                  probe.sawCommittedReaderState && index.Find(fixture.sharedOutput, afterReject) == assets::IndexResult::Success &&
+                  afterReject.contentFingerprint == committedSharedContent && !index.HasActiveTransaction() && !index.HasChanges() &&
+                  !rejected.TakeCommittedRecords(rejectedCommitted) && rejectedCommitted.Empty(),
+              "P4 precommit rejection sees staged closure but preserves committed VADI");
+        rejected.Reset();
+
+        probe.calls = 0u;
+        probe.recordCount = 0u;
+        probe.reject = false;
+        assets::RecookBatch accepted = recooker.Request({&sharedChange, 1}, {}, assets::BuildPriority::High, validator);
+        accepted.Wait();
+        containers::DynamicArray<assets::DependencyRecord> committedEvidence(memory::pools::Assets::GetInstance());
+        Check(accepted.GetStatus() == assets::RecookState::Succeeded && probe.calls == 1u && probe.recordCount == 3u &&
+                  index.Find(fixture.sharedOutput, sharedRecord) == assets::IndexResult::Success &&
+                  sharedRecord.contentFingerprint != committedSharedContent && accepted.TakeCommittedRecords(committedEvidence) &&
+                  committedEvidence.Size() == 3u,
+              "P1 successful validator batch exposes the exact committed transaction handoff");
+        bool foundCommittedShared = false;
+        for (const assets::DependencyRecord& record : committedEvidence)
+            if (record.output == fixture.sharedOutput)
+                foundCommittedShared = record.buildFingerprint == sharedRecord.buildFingerprint &&
+                                       record.contentFingerprint == sharedRecord.contentFingerprint;
+        Check(foundCommittedShared && !accepted.TakeCommittedRecords(rejectedCommitted),
+              "P1 committed transaction handoff preserves exact fingerprints and is take-once");
+        committedSharedContent = sharedRecord.contentFingerprint;
+        accepted.Reset();
+
+        probe.calls = 0u;
+        probe.recordCount = 99u;
+        probe.committedContent = committedSharedContent;
+        probe.reject = true;
+        assets::RecookBatch rejectedNoop = recooker.Request({&sharedChange, 1}, {}, assets::BuildPriority::High, validator);
+        Check(rejectedNoop && rejectedNoop.HasFinished() && rejectedNoop.GetStatus() == assets::RecookState::Failed &&
+                  rejectedNoop.GetError() == assets::RecookFailure::PreCommitRejected && probe.calls == 1u && probe.recordCount == 0u &&
+                  probe.sawCommittedReaderState && !index.HasActiveTransaction(),
+              "P4 validator also fences a no-work completion before evidence is retired");
+        rejectedNoop.Reset();
     }
 
     {
@@ -279,9 +464,10 @@ int main()
               "active transaction hides staged records from readers");
         Check(cancelled.Cancel(), "batch cancellation accepted");
         cancelled.Wait();
+        containers::DynamicArray<assets::DependencyRecord> cancelledCommitted(memory::pools::Assets::GetInstance());
         Check(cancelled.GetStatus() == assets::RecookState::Cancelled && cancelled.GetError() == assets::RecookFailure::Cancelled && !index.HasActiveTransaction() &&
-                  !index.HasChanges(),
-              "cancelled recook rolls back transaction");
+                  !index.HasChanges() && !cancelled.TakeCommittedRecords(cancelledCommitted) && cancelledCommitted.Empty(),
+              "P1 cancelled recook rolls back transaction and exposes no committed-delivery handoff");
         cancelled.Reset();
         fixture.blockShared = false;
     }
@@ -295,7 +481,7 @@ int main()
         untracked.Reset();
     }
 
-    Check(recooker.GetStats().completedBatches == 2 && recooker.GetStats().failedBatches == 2 && recooker.GetStats().cancelledBatches == 1,
+    Check(recooker.GetStats().completedBatches == 6 && recooker.GetStats().failedBatches == 4 && recooker.GetStats().cancelledBatches == 1,
           "recook lifetime telemetry");
     Check(recooker.Shutdown(), "recooker shutdown");
     Check(graph.Shutdown(), "graph shutdown");
@@ -310,7 +496,7 @@ int main()
 
     Check(buildSystem.UnregisterCompiler(compiler.id) == assets::Result::Success, "compiler unregistration");
     Check(buildSystem.Shutdown(), "build-system shutdown");
-    DeleteIndexFiles(manager, root);
+    Check(DeleteDirectoryTree(manager, root), "recooker test root cleanup");
     Check(jobs::Shutdown(), "jobs shutdown");
     filesystem::Shutdown();
     vanguard::io::Shutdown();

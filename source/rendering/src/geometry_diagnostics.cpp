@@ -33,12 +33,16 @@ namespace vanguard::rendering
             slot.report.scene = frame.GetViewFamily().IsValid() ? frame.GetViewFamily().GetScene() : frame.GetViewSetup().scene;
             const auto& plan = work.GetVisibilityPlan();
             slot.report.viewCount = plan.views.Size();
+            slot.report.outputRegions = work.GetOutputRegions().Size();
             for (u32 view = 0; view < plan.views.Size(); ++view)
             {
                 auto& report = slot.report.views[view];
                 report.view = {plan.views[view].viewIndex, plan.views[view].viewGeneration};
-                report.candidates = work.GetCandidateViews()[view].diagnosticCandidates;
-                report.unresolvedGpuIdentities = work.GetCandidateViews()[view].diagnosticUnresolvedIdentities;
+                // Direct visibility visits the persistent Instance-table extent; no CPU identity
+                // resolution pass exists anymore, so unresolved identities are structurally zero.
+                report.candidates = plan.instanceTraversalExtent;
+                report.unresolvedGpuIdentities = 0;
+                report.directionalLights = work.GetDirectionalLights()[view].count;
                 report.visibleCapacity = plan.results[view].visibleCapacity;
                 const auto& geometry = work.GetGeometryResults()[view];
                 report.workCapacity = geometry.workCapacity;

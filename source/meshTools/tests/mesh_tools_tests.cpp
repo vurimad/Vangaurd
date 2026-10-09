@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -171,7 +172,7 @@ int main()
     Check(tools::CookMesh(importedSource, importedCookedWriter) == tools::Result::Success,
           "feed imported Assimp data directly into the existing mesh cooker");
 
-    const filesystem::AbsolutePath importTestRoot = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath importTestRoot = vanguard::tests::ScratchDirectory("mesh_tools_tests");
     const filesystem::AbsolutePath importObjPath = importTestRoot.AddFilePath("vanguard_mesh_import_test.obj");
     const filesystem::AbsolutePath importMtlPath = importTestRoot.AddFilePath("vanguard_mesh_import_test.mtl");
     const filesystem::AbsolutePath importTexturePath = importTestRoot.AddFilePath("vanguard_mesh_import_test.png");
@@ -270,7 +271,7 @@ int main()
               cachedMeshBuild.contentFingerprint == meshBuildOutput.contentFingerprint,
           "reuse the deterministic mesh artifact through the generic derived-data cache");
 
-    const filesystem::AbsolutePath bunnySourcePath = importTestRoot.AddFilePath("tests/data_assets/bunny/bunny.obj");
+    const filesystem::AbsolutePath bunnySourcePath = filesystem::paths::GetCurrentWorkingDirectory().AddFilePath("tests/data_assets/bunny/bunny.obj");
     containers::DynamicArray<vanguard::u8> bunnySourceBytes(memory::pools::Assets::GetInstance());
     Check(ReadTestFile(bunnySourcePath.AsChar(), bunnySourceBytes), "read the real Stanford Bunny source asset");
     const resources::ResourceReference bunnySource(resources::ResourcePath::FromString("meshes/stanford_bunny.obj"), tools::MeshSourceResourceType);

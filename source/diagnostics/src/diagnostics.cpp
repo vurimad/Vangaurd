@@ -86,6 +86,22 @@ namespace vanguard::diagnostics
         backend::SetSinkCallback(callback, userData);
     }
 
+    SinkRegistrationResult RegisterSinkCallback(const SinkCallback callback, void* const userData,
+                                                SinkRegistrationToken& token) noexcept
+    {
+        return backend::RegisterSinkCallback(callback, userData, token);
+    }
+
+    SinkRegistrationResult UnregisterSinkCallback(const SinkRegistrationToken token) noexcept
+    {
+        return backend::UnregisterSinkCallback(token);
+    }
+
+    bool IsSinkCallbackRegistered(const SinkRegistrationToken token) noexcept
+    {
+        return backend::IsSinkCallbackRegistered(token);
+    }
+
     bool OpenFileSink(const char* const path, const FileMode mode) noexcept
     {
         return backend::OpenFileSink(path, mode);

@@ -1,7 +1,7 @@
 #ifndef VANGUARD_GPU_SCENE_TYPES_HLSLI
 #define VANGUARD_GPU_SCENE_TYPES_HLSLI
 
-static const uint VG_GPU_SCENE_LAYOUT_VERSION = 9;
+static const uint VG_GPU_SCENE_LAYOUT_VERSION = 10;
 static const uint VG_GPU_INSTANCE_NEGATIVE_SCALE = 1u << 5u;
 static const uint VG_GPU_GEOMETRY_NORMAL_PACKED_UNORM10 = 1u << 2u;
 static const uint VG_GPU_GEOMETRY_TANGENT_PACKED_UNORM10 = 1u << 3u;
@@ -107,10 +107,10 @@ struct GpuInstance
     uint layerMaskHigh;
     uint motion;
     uint deformation;
-    uint reserved;
+    uint sceneIndex;
     float4 rotation;
     float3 scale;
-    uint reservedTransform;
+    uint sceneGeneration;
 };
 
 struct GpuMotion

@@ -7,7 +7,7 @@
 
 namespace vanguard::rendering
 {
-    inline constexpr u32 GpuSceneLayoutVersion = 9;
+    inline constexpr u32 GpuSceneLayoutVersion = 10;
     inline constexpr u32 InvalidGpuSceneIndex = 0xffffffffu;
     inline constexpr u32 InvalidGpuDescriptorIndex = 0xffffffffu;
 
@@ -129,12 +129,15 @@ namespace vanguard::rendering
         /// Optional per-instance deformation state. Static instances retain InvalidGpuSceneIndex.
         /// The referenced table is owned by the future deformation system rather than GPU Scene visibility.
         u32 deformation = InvalidGpuSceneIndex;
-        u32 reserved = 0;
+        /// Owning RenderScene identity. Persistent Instance slots may outlive CPU
+        /// proxy membership until their retirement fence completes, so direct
+        /// GPU traversal must reject bytes belonging to another scene generation.
+        u32 sceneIndex = InvalidGpuSceneIndex;
 
         f32 rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
 
         f32 scale[3]{1.0f, 1.0f, 1.0f};
-        u32 reservedTransform = 0;
+        u32 sceneGeneration = 0;
     };
 
     /// Previous transform data exists only for instances that require motion history.
@@ -516,7 +519,8 @@ namespace vanguard::rendering
     [[nodiscard]] bool BuildGpuView(const RenderView& source, GpuView& output) noexcept;
 
     static_assert(sizeof(GpuTableHandle<GpuInstanceTag>) == 8);
-    static_assert(sizeof(GpuInstance) == 112 && offsetof(GpuInstance, rotation) == 80);
+    static_assert(sizeof(GpuInstance) == 112 && offsetof(GpuInstance, rotation) == 80 &&
+                  offsetof(GpuInstance, sceneIndex) == 76 && offsetof(GpuInstance, sceneGeneration) == 108);
     static_assert(sizeof(GpuMotion) == 64);
     static_assert(sizeof(GpuRenderable) == 32);
     static_assert(sizeof(GpuRenderableResidency) == 32);

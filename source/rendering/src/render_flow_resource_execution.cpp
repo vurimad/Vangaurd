@@ -6,14 +6,75 @@
 
 namespace vanguard::rendering
 {
-    ExecutionGenerationRef::Impl::~Impl()
+    namespace
     {
-        if (!resourceDescriptors)
-            return;
-        for (const detail::PhysicalBindingRecord& binding : physicalBindings)
-            for (const rhi::DescriptorHandle descriptor : {binding.shaderResource, binding.unorderedAccess})
-                if (descriptor.IsValid() && !rhi::RetireDescriptor(resourceDescriptors.GetRef(), descriptor, descriptorRetirement) && !descriptorDeviceLost)
-                    VG_FATAL("render-flow descriptor retirement failed");
+        void ResetActiveCompiledRange(detail::PacketExecutionRuntime& runtime) noexcept
+        {
+            runtime.activeRangeEpoch = 0;
+            runtime.activeRangeBeginStep = InvalidRenderFlowResourceIndex;
+            runtime.activeRangeEndStep = InvalidRenderFlowResourceIndex;
+            runtime.activeRangeEndCount = 0;
+        }
+
+        void ReleaseGenerationRuntimeOwnersInternal(ExecutionGenerationRef::Impl& generation) noexcept
+        {
+            for (detail::CompiledPacket& packet : generation.packets)
+            {
+                if (packet.runtime.liveness != nullptr)
+                {
+                    packet.runtime.liveness->ResetCompiledRange();
+                    for (u8& active : packet.runtime.liveness->useActive)
+                        active = 0;
+                    detail::ReleasePacketUseLiveness(packet.runtime.liveness);
+                    packet.runtime.liveness = nullptr;
+                }
+                packet.runtime.activeUseCount = 0;
+                ResetActiveCompiledRange(packet.runtime);
+            }
+            generation.retainedImports.Clear();
+            generation.presentationAcquisition = {};
+            generation.presentationCommandScope = {};
+            generation.pendingExports.Clear();
+            generation.placedBatch.Clear();
+            generation.physicalBindings.Clear();
+        }
+    } // namespace
+
+    void detail::ReleaseGenerationRuntimeOwners(ExecutionGenerationRef::Impl* const generation) noexcept
+    {
+        if (generation != nullptr)
+            ReleaseGenerationRuntimeOwnersInternal(*generation);
+    }
+
+    bool detail::RetireRetainedImportDescriptors(RenderFlowResourceAllocator::Impl& allocator,
+                                                 ExecutionGenerationRef::Impl& generation,
+                                                 const rhi::ResidencyFenceSet& fences,
+                                                 const bool deviceLost,
+                                                 RenderFlowResourceFailure* const failure) noexcept
+    {
+        if (!generation.hasNativeResourceBindings)
+            return true;
+        const rhi::DescriptorRetirement retirement{fences.graphics, fences.compute, fences.copy};
+        for (PhysicalBindingRecord& binding : generation.physicalBindings)
+        {
+            if (binding.kind != PhysicalBindingKind::RetainedImport)
+                continue;
+            for (rhi::DescriptorHandle* const descriptor : {&binding.shaderResource, &binding.unorderedAccess})
+            {
+                if (!descriptor->IsValid())
+                    continue;
+                if (!deviceLost)
+                {
+                    rhi::Failure rhiFailure;
+                    if (!rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), *descriptor, retirement, &rhiFailure))
+                        return Fail(failure, MapRhiFailure(rhiFailure, RhiFailureContext::BackendContract), allocator.state,
+                                    rhiFailure.message[0] != '\0' ? rhiFailure.message : "retained import descriptor retirement failed");
+                }
+                *descriptor = {};
+                allocator.descriptorLedger.Release(1);
+            }
+        }
+        return true;
     }
 
     namespace
@@ -55,48 +116,36 @@ namespace vanguard::rendering
                    completion == QueueDependencyCompletionKind::UnknownDueToDeviceLoss;
         }
 
-        [[nodiscard]] u32 ScopeOrder(const ExecutionGenerationRef::Impl& generation, const CommandScopeId scope) noexcept
+        [[nodiscard]] constexpr u64 ExportSlotKey(const ExportSlotId slot) noexcept
         {
-            for (const CompiledCommandScope& candidate : generation.commandScopes)
-                if (candidate.scope == scope)
-                    return candidate.stableOrder;
-            return InvalidRenderFlowResourceIndex;
+            return (static_cast<u64>(slot.generation) << 32u) | slot.index;
         }
 
-        [[nodiscard]] bool SubmittedQueueOrderProved(const ExecutionGenerationRef::Impl& generation, const TerminalExecutionReceipt& receipt, const detail::CompiledPacket& producer,
-                                                     const detail::CompiledPacket& consumer) noexcept
+        [[nodiscard]] bool SubmittedQueueOrderProved(const ExecutionGenerationRef::Impl& generation, const u32 producerScopeIndex, const u32 consumerScopeIndex,
+                                                     const containers::DynamicArray<u32>& submittedProducerScopes) noexcept
         {
+            if (producerScopeIndex >= generation.commandScopes.Size() || consumerScopeIndex >= generation.commandScopes.Size() || consumerScopeIndex >= submittedProducerScopes.Size())
+                return false;
+            const CompiledCommandScope& producer = generation.commandScopes[producerScopeIndex];
+            const CompiledCommandScope& consumer = generation.commandScopes[consumerScopeIndex];
             const rhi::CommandListSyncType required = detail::RequiredQueueSync(producer.queue, consumer.queue);
             if (required == rhi::CommandListSyncType::None)
                 return false;
-            const u32 producerOrder = ScopeOrder(generation, producer.commandScope);
-            const u32 consumerOrder = ScopeOrder(generation, consumer.commandScope);
-            if (producerOrder == InvalidRenderFlowResourceIndex || consumerOrder == InvalidRenderFlowResourceIndex)
-                return false;
-            for (const CompiledQueueDependency& dependency : generation.queueDependencies)
-            {
-                if (dependency.sync != required)
-                    continue;
-                const u32 boundaryProducerOrder = ScopeOrder(generation, dependency.producerScope);
-                const u32 boundaryConsumerOrder = ScopeOrder(generation, dependency.consumerScope);
-                if (boundaryProducerOrder == InvalidRenderFlowResourceIndex || boundaryConsumerOrder == InvalidRenderFlowResourceIndex || producerOrder > boundaryProducerOrder ||
-                    boundaryConsumerOrder > consumerOrder)
-                    continue;
-                for (const QueueDependencyExecutionReceipt& submitted : receipt.queueDependencies)
-                    if (submitted.producerScope == dependency.producerScope && submitted.consumerScope == dependency.consumerScope && submitted.sync == dependency.sync &&
-                        submitted.completion == QueueDependencyCompletionKind::Submitted)
-                        return true;
-            }
-            return false;
+            const u32 admittedProducerScopeIndex = submittedProducerScopes[consumerScopeIndex];
+            return admittedProducerScopeIndex != InvalidRenderFlowResourceIndex && producerScopeIndex <= admittedProducerScopeIndex;
         }
 
         void FailPacketExecution(detail::CompiledPacket& packet) noexcept
         {
             packet.runtime.state = detail::PacketRuntimeState::Failed;
             packet.runtime.activeUseCount = 0;
+            ResetActiveCompiledRange(packet.runtime);
             if (packet.runtime.liveness != nullptr)
+            {
+                packet.runtime.liveness->ResetCompiledRange();
                 for (u8& active : packet.runtime.liveness->useActive)
                     active = 0;
+            }
         }
 
         [[nodiscard]] bool RecorderMatches(const ExecutionGenerationRef::Impl& generation, const rhi::CommandListRef commandList) noexcept
@@ -158,7 +207,7 @@ namespace vanguard::rendering
                     return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "compiled resource action kind disagrees with its physical assignment", &packet, use);
                 if (!succeeded)
                     return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
-                                         "compiled resource action failed", &packet, use);
+                                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "compiled resource action failed", &packet, use);
             }
             return true;
         }
@@ -201,6 +250,126 @@ namespace vanguard::rendering
                 return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
                                      "placed alias predecessor finalization failed", &packet, use);
             return true;
+        }
+
+        [[nodiscard]] bool ValidateCompiledExecutionRange(const detail::CompiledPacket& packet, const CompiledExecutionRange& range, u32& afterEndStep,
+                                                          RenderFlowResourceFailure* const failure) noexcept
+        {
+            afterEndStep = InvalidRenderFlowResourceIndex;
+            if (range.beginStepCount != range.endStepCount || range.beginStepOffset > packet.steps.Size() ||
+                range.beginStepCount > packet.steps.Size() - range.beginStepOffset || range.endStepOffset > packet.steps.Size() ||
+                range.endStepCount > packet.steps.Size() - range.endStepOffset || range.endStepOffset != range.beginStepOffset + range.beginStepCount)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled execution range has invalid step boundaries", &packet);
+
+            afterEndStep = range.endStepOffset + range.endStepCount;
+            if (range.beginActions.offset > packet.actionTape.Size() || range.beginActions.count > packet.actionTape.Size() - range.beginActions.offset ||
+                range.endActions.offset > packet.actionTape.Size() || range.endActions.count > packet.actionTape.Size() - range.endActions.offset)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled execution range has invalid action-tape boundaries", &packet);
+
+            const auto tapeBoundary = [&](const u32 stepIndex, u32& offset) noexcept -> bool
+            {
+                if (stepIndex == packet.steps.Size())
+                {
+                    offset = packet.exitActionTapeOffset;
+                    return offset <= packet.actionTape.Size();
+                }
+                if (stepIndex > packet.steps.Size())
+                    return false;
+                offset = packet.steps[stepIndex].actionTapeOffset;
+                return offset <= packet.actionTape.Size();
+            };
+
+            u32 beginActionOffset = 0;
+            u32 endActionOffset = 0;
+            u32 afterEndActionOffset = 0;
+            if (!tapeBoundary(range.beginStepOffset, beginActionOffset) || !tapeBoundary(range.endStepOffset, endActionOffset) ||
+                !tapeBoundary(afterEndStep, afterEndActionOffset) || endActionOffset < beginActionOffset || afterEndActionOffset < endActionOffset ||
+                range.beginActions.offset != beginActionOffset || range.beginActions.count != endActionOffset - beginActionOffset ||
+                range.endActions.offset != endActionOffset || range.endActions.count != afterEndActionOffset - endActionOffset)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled execution range disagrees with packet action-tape topology", &packet);
+
+            if (range.beginStepCount == 0)
+                return true;
+
+            const detail::CompiledStep& firstBegin = packet.steps[range.beginStepOffset];
+            const detail::CompiledStep& lastBegin = packet.steps[range.endStepOffset - 1u];
+            const detail::CompiledStep& firstEnd = packet.steps[range.endStepOffset];
+            const detail::CompiledStep& lastEnd = packet.steps[afterEndStep - 1u];
+            const bool firstBeginKind = firstBegin.kind == CompiledResourceStepKind::TextureUseBegin || firstBegin.kind == CompiledResourceStepKind::BufferUseBegin;
+            const bool lastBeginKind = lastBegin.kind == CompiledResourceStepKind::TextureUseBegin || lastBegin.kind == CompiledResourceStepKind::BufferUseBegin;
+            if (!firstBeginKind || !lastBeginKind || firstEnd.kind != CompiledResourceStepKind::UseEnd || lastEnd.kind != CompiledResourceStepKind::UseEnd ||
+                !firstBegin.use.IsValid() || firstBegin.use.flowGroup != packet.flowGroup || lastBegin.use.flowGroup != packet.flowGroup ||
+                firstBegin.use.generation != lastBegin.use.generation ||
+                static_cast<u64>(lastBegin.use.ordinal) != static_cast<u64>(firstBegin.use.ordinal) + range.beginStepCount - 1u ||
+                firstEnd.use != lastBegin.use || lastEnd.use != firstBegin.use)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled execution range has invalid dense begin/end identity boundaries", &packet,
+                                     firstBegin.use);
+            return true;
+        }
+
+        [[nodiscard]] bool ExecuteCompiledRangeTape(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                    const CompiledExecutionActionSegment segment, const detail::CompiledActionTapePhase phase,
+                                                    const u32 stepOffset, const u32 stepCount, RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (segment.offset > packet.actionTape.Size() || segment.count > packet.actionTape.Size() - segment.offset ||
+                stepOffset > packet.steps.Size() || stepCount > packet.steps.Size() - stepOffset)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled range action-tape segment is invalid", &packet);
+            for (u32 tapeIndex = segment.offset; tapeIndex < segment.offset + segment.count; ++tapeIndex)
+            {
+                const detail::CompiledActionTapeEntry& entry = packet.actionTape[tapeIndex];
+                if (entry.phase != phase || entry.stepIndex < stepOffset || entry.stepIndex >= stepOffset + stepCount)
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled range action-tape entry is outside its child step span", &packet);
+                const detail::CompiledStep& step = packet.steps[entry.stepIndex];
+                if (step.actionTapeCount != 1 || step.actionTapeOffset != tapeIndex)
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled range action-tape entry disagrees with its step", &packet, step.use);
+
+                if (phase == detail::CompiledActionTapePhase::Begin)
+                {
+                    if ((step.kind != CompiledResourceStepKind::TextureUseBegin && step.kind != CompiledResourceStepKind::BufferUseBegin) ||
+                        entry.actionOffset != step.beforeActionOffset || entry.actionCount != step.beforeActionCount)
+                        return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                             "compiled begin action-tape entry disagrees with its step semantics", &packet, step.use);
+                    if (!ExecuteAliasActivation(generation, packet, step, step.use, failure) ||
+                        !ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, step.use, failure))
+                        return false;
+                }
+                else if (phase == detail::CompiledActionTapePhase::End)
+                {
+                    if (step.kind != CompiledResourceStepKind::UseEnd || entry.actionOffset != step.afterActionOffset || entry.actionCount != step.afterActionCount)
+                        return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                             "compiled end action-tape entry disagrees with its step semantics", &packet, step.use);
+                    if (!ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, step.use, failure) ||
+                        !FinalizeAliasPredecessor(generation, packet, step, step.use, failure))
+                        return false;
+                }
+                else
+                {
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "compiled child range contains a packet-exit action-tape entry", &packet,
+                                         step.use);
+                }
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool ExecutePacketExitTape(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                 RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (packet.exitActionTapeOffset > packet.actionTape.Size() || packet.exitActionTapeCount > packet.actionTape.Size() - packet.exitActionTapeOffset ||
+                packet.exitActionTapeOffset + packet.exitActionTapeCount != packet.actionTape.Size())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled packet-exit action tape is malformed", &packet);
+            if (packet.exitActions.Empty())
+            {
+                if (packet.exitActionTapeCount != 0)
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "empty packet exit unexpectedly owns an action-tape entry", &packet);
+                return true;
+            }
+            if (packet.exitActionTapeCount != 1)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "packet exit must own exactly one semantic action-tape entry", &packet);
+            const detail::CompiledActionTapeEntry& entry = packet.actionTape[packet.exitActionTapeOffset];
+            if (entry.phase != detail::CompiledActionTapePhase::Exit || entry.stepIndex != InvalidRenderFlowResourceIndex || entry.actionOffset != 0 ||
+                entry.actionCount != packet.exitActions.Size())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled packet-exit action-tape entry disagrees with exit actions", &packet);
+            return ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, {}, failure, true);
         }
 
     } // namespace
@@ -419,17 +588,230 @@ namespace vanguard::rendering
         return packet != nullptr ? packet->steps.Size() : 0;
     }
 
+    u32 CompiledExecutionPacketView::GetUseCount() const noexcept
+    {
+        const detail::CompiledPacket* const packet = GetPacket(m_generation.m_impl, m_packetIndex);
+        return packet != nullptr ? packet->beginStepByUseOrdinal.Size() : 0;
+    }
+
     u32 CompiledExecutionPacketView::GetDecisionCount() const noexcept
     {
         const detail::CompiledPacket* const packet = GetPacket(m_generation.m_impl, m_packetIndex);
         return packet != nullptr ? packet->decisions.Size() : 0;
     }
 
+    CompiledExecutionActionSegment CompiledExecutionPacketView::GetExitActionSegment() const noexcept
+    {
+        const detail::CompiledPacket* const packet = GetPacket(m_generation.m_impl, m_packetIndex);
+        return packet != nullptr ? CompiledExecutionActionSegment{packet->exitActionTapeOffset, packet->exitActionTapeCount}
+                                 : CompiledExecutionActionSegment{};
+    }
+
+    bool CompiledExecutionPacketView::ResolveExecutionRange(const u32 firstUseOrdinal, const u32 useCount, CompiledExecutionRange& range,
+                                                            RenderFlowResourceFailure* const failure) const noexcept
+    {
+        detail::ClearFailure(failure);
+        range = {};
+        if (!IsValid())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "execution range packet is invalid");
+
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        const detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (generation->terminal.GetValue())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "execution range packet generation is terminal", &packet);
+        if (packet.beginStepByUseOrdinal.Size() != packet.endStepByUseOrdinal.Size() ||
+            firstUseOrdinal > packet.beginStepByUseOrdinal.Size() || useCount > packet.beginStepByUseOrdinal.Size() - firstUseOrdinal)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "execution range use ordinals are outside the compiled packet", &packet);
+
+        const auto tapeBoundary = [&](const u32 stepIndex, u32& offset) noexcept -> bool
+        {
+            if (stepIndex == packet.steps.Size())
+            {
+                offset = packet.exitActionTapeOffset;
+                return offset <= packet.actionTape.Size();
+            }
+            if (stepIndex >= packet.steps.Size())
+                return false;
+            offset = packet.steps[stepIndex].actionTapeOffset;
+            return offset <= packet.actionTape.Size();
+        };
+
+        if (useCount == 0)
+        {
+            const u32 stepBoundary = firstUseOrdinal < packet.beginStepByUseOrdinal.Size()
+                                       ? packet.beginStepByUseOrdinal[firstUseOrdinal]
+                                       : packet.steps.Size();
+            u32 actionBoundary = 0;
+            if (!tapeBoundary(stepBoundary, actionBoundary))
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "empty execution range has an invalid packet boundary", &packet);
+            range.beginStepOffset = stepBoundary;
+            range.endStepOffset = stepBoundary;
+            range.beginActions.offset = actionBoundary;
+            range.endActions.offset = actionBoundary;
+            return true;
+        }
+
+        const u32 firstBeginStep = packet.beginStepByUseOrdinal[firstUseOrdinal];
+        const u32 lastUseOrdinal = firstUseOrdinal + useCount - 1u;
+        const u32 lastBeginStep = packet.beginStepByUseOrdinal[lastUseOrdinal];
+        const u32 firstEndStep = packet.endStepByUseOrdinal[lastUseOrdinal];
+        const u32 lastEndStep = packet.endStepByUseOrdinal[firstUseOrdinal];
+        if (firstBeginStep >= packet.steps.Size() || firstEndStep != firstBeginStep + useCount ||
+            useCount > packet.steps.Size() - firstEndStep || lastBeginStep != firstBeginStep + useCount - 1u ||
+            lastEndStep != firstEndStep + useCount - 1u)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "execution range step spans are not contiguous", &packet);
+        const detail::CompiledStep& firstBegin = packet.steps[firstBeginStep];
+        const detail::CompiledStep& lastBegin = packet.steps[lastBeginStep];
+        const detail::CompiledStep& firstEnd = packet.steps[firstEndStep];
+        const detail::CompiledStep& lastEnd = packet.steps[lastEndStep];
+        const ResourceUseId firstUse = firstBegin.use;
+        if (!firstUse.IsValid() || firstUse.flowGroup != packet.flowGroup || firstUse.ordinal != firstUseOrdinal ||
+            (firstBegin.kind != CompiledResourceStepKind::TextureUseBegin && firstBegin.kind != CompiledResourceStepKind::BufferUseBegin))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "execution range first step has an invalid planning-use identity", &packet, firstUse);
+        // Dense ordinal topology is sealed while the packet steps are created (or
+        // copied from the structural plan), so range publication only proves the
+        // two immutable boundaries instead of replaying every use. ResourceUseId is
+        // a planning/session identity and intentionally keeps that generation even
+        // when the published ExecutionGenerationId differs after a rejected Resolve.
+        const ResourceUseId lastUse{packet.flowGroup, lastUseOrdinal, firstUse.generation};
+        if ((lastBegin.kind != CompiledResourceStepKind::TextureUseBegin && lastBegin.kind != CompiledResourceStepKind::BufferUseBegin) ||
+            firstEnd.kind != CompiledResourceStepKind::UseEnd || lastEnd.kind != CompiledResourceStepKind::UseEnd ||
+            lastBegin.use != lastUse || firstEnd.use != lastUse || lastEnd.use != firstUse)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                 "execution range boundaries disagree with the compiled dense use topology", &packet, lastUse);
+
+        const u32 afterEndStep = firstEndStep + useCount;
+        if ((firstUseOrdinal + useCount < packet.beginStepByUseOrdinal.Size() &&
+             packet.beginStepByUseOrdinal[firstUseOrdinal + useCount] != afterEndStep) ||
+            (firstUseOrdinal + useCount == packet.beginStepByUseOrdinal.Size() && afterEndStep != packet.steps.Size()))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "execution range does not end at the next dense packet boundary", &packet);
+
+        u32 beginActionOffset = 0;
+        u32 endActionOffset = 0;
+        u32 afterEndActionOffset = 0;
+        if (!tapeBoundary(firstBeginStep, beginActionOffset) || !tapeBoundary(firstEndStep, endActionOffset) ||
+            !tapeBoundary(afterEndStep, afterEndActionOffset) ||
+            endActionOffset < beginActionOffset || afterEndActionOffset < endActionOffset)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "execution range action tape boundaries are invalid", &packet);
+
+        range.beginStepOffset = firstBeginStep;
+        range.beginStepCount = useCount;
+        range.endStepOffset = firstEndStep;
+        range.endStepCount = useCount;
+        range.beginActions = {beginActionOffset, endActionOffset - beginActionOffset};
+        range.endActions = {endActionOffset, afterEndActionOffset - endActionOffset};
+        return true;
+    }
+
+    bool CompiledExecutionPacketView::ResolveTextureUseBinding(const ResourceUseId use, const u32 rangeEpoch, ResolvedTextureUse& resolved,
+                                                               RenderFlowResourceFailure* const failure) const noexcept
+    {
+        detail::ClearFailure(failure);
+        if (!IsValid() || rangeEpoch == 0 || !use.IsValid())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "texture execution-image binding identity is invalid");
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (generation->terminal.GetValue() || use.flowGroup != packet.flowGroup || use.ordinal >= packet.beginStepByUseOrdinal.Size())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "texture use does not belong to this execution packet", &packet, use);
+        const u32 stepIndex = packet.beginStepByUseOrdinal[use.ordinal];
+        if (stepIndex >= packet.steps.Size())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use has no compiled begin step", &packet, use);
+        const detail::CompiledStep& step = packet.steps[stepIndex];
+        if (step.kind != CompiledResourceStepKind::TextureUseBegin || step.use != use || !step.physical.IsValid() ||
+            step.physical.generation != generation->id.generation || packet.runtime.liveness == nullptr ||
+            packet.runtime.liveness->generation != generation->id || packet.runtime.liveness->packetIndex != m_packetIndex)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture execution-image binding disagrees with the compiled packet", &packet, use);
+
+        ResolvedTextureUse value;
+        detail::RetainPacketUseLiveness(packet.runtime.liveness);
+        value.m_liveness = packet.runtime.liveness;
+        value.m_use = use;
+        value.m_physical = step.physical;
+        value.m_desc = step.texture;
+        value.m_viewDesc = step.textureView;
+        value.m_generation = generation->id;
+        value.m_packetIndex = m_packetIndex;
+        value.m_rangeEpoch = rangeEpoch;
+        value.m_hasExplicitView = step.hasExplicitView;
+        if (generation->hasNativeResourceBindings)
+        {
+            if (step.physical.index >= generation->physicalBindings.Size())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "texture execution-image physical binding is missing", &packet, use);
+            const detail::PhysicalBindingRecord& binding = generation->physicalBindings[step.physical.index];
+            if (!binding.texture.IsValid() || binding.buffer.IsValid())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "texture execution-image physical binding has the wrong kind", &packet, use);
+            value.m_texture = binding.texture;
+            value.m_shaderResource = binding.shaderResource;
+            value.m_unorderedAccess = binding.unorderedAccess;
+        }
+        resolved = static_cast<ResolvedTextureUse&&>(value);
+        return true;
+    }
+
+    bool CompiledExecutionPacketView::ResolveBufferUseBinding(const ResourceUseId use, const u32 rangeEpoch, ResolvedBufferUse& resolved,
+                                                              RenderFlowResourceFailure* const failure) const noexcept
+    {
+        detail::ClearFailure(failure);
+        if (!IsValid() || rangeEpoch == 0 || !use.IsValid())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "buffer execution-image binding identity is invalid");
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (generation->terminal.GetValue() || use.flowGroup != packet.flowGroup || use.ordinal >= packet.beginStepByUseOrdinal.Size())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "buffer use does not belong to this execution packet", &packet, use);
+        const u32 stepIndex = packet.beginStepByUseOrdinal[use.ordinal];
+        if (stepIndex >= packet.steps.Size())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use has no compiled begin step", &packet, use);
+        const detail::CompiledStep& step = packet.steps[stepIndex];
+        if (step.kind != CompiledResourceStepKind::BufferUseBegin || step.use != use || !step.physical.IsValid() ||
+            step.physical.generation != generation->id.generation || packet.runtime.liveness == nullptr ||
+            packet.runtime.liveness->generation != generation->id || packet.runtime.liveness->packetIndex != m_packetIndex)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer execution-image binding disagrees with the compiled packet", &packet, use);
+
+        ResolvedBufferUse value;
+        detail::RetainPacketUseLiveness(packet.runtime.liveness);
+        value.m_liveness = packet.runtime.liveness;
+        value.m_use = use;
+        value.m_physical = step.physical;
+        value.m_desc = step.buffer;
+        value.m_viewDesc = step.bufferView;
+        value.m_generation = generation->id;
+        value.m_packetIndex = m_packetIndex;
+        value.m_rangeEpoch = rangeEpoch;
+        value.m_hasExplicitView = step.hasExplicitView;
+        if (generation->hasNativeResourceBindings)
+        {
+            if (step.physical.index >= generation->physicalBindings.Size())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "buffer execution-image physical binding is missing", &packet, use);
+            const detail::PhysicalBindingRecord& binding = generation->physicalBindings[step.physical.index];
+            if (!binding.buffer.IsValid() || binding.texture.IsValid())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "buffer execution-image physical binding has the wrong kind", &packet, use);
+            value.m_buffer = binding.buffer;
+            value.m_shaderResource = binding.shaderResource;
+            value.m_unorderedAccess = binding.unorderedAccess;
+        }
+        resolved = static_cast<ResolvedBufferUse&&>(value);
+        return true;
+    }
+
     bool CompiledExecutionPacketView::OpenCursor(const CommandScopeId activeScope, const rhi::QueueType activeQueue, ExecutionPacketCursor& cursor, RenderFlowResourceFailure* const failure) const noexcept
+    {
+        return OpenCursorInternal(activeScope, activeQueue, InvalidRenderFlowResourceIndex, false, cursor, failure);
+    }
+
+    bool CompiledExecutionPacketView::OpenCompiledCursor(const CommandScopeId activeScope, const rhi::QueueType activeQueue, const u32 expectedRangeCount,
+                                                         ExecutionPacketCursor& cursor, RenderFlowResourceFailure* const failure) const noexcept
+    {
+        return OpenCursorInternal(activeScope, activeQueue, expectedRangeCount, true, cursor, failure);
+    }
+
+    bool CompiledExecutionPacketView::OpenCursorInternal(const CommandScopeId activeScope, const rhi::QueueType activeQueue, const u32 expectedRangeCount,
+                                                         const bool compiledRanges, ExecutionPacketCursor& cursor, RenderFlowResourceFailure* const failure) const noexcept
     {
         detail::ClearFailure(failure);
         if (!IsValid() || cursor.IsValid())
             return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "execution packet or output cursor is invalid");
+        if (compiledRanges && expectedRangeCount == InvalidRenderFlowResourceIndex)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::CapacityExceeded, "compiled execution range count exceeds addressable capacity");
         ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
         // The scheduled occurrence owns this packet exclusively. Teardown follows
@@ -464,13 +846,14 @@ namespace vanguard::rendering
             }
         }
         packet.runtime.state = detail::PacketRuntimeState::Executing;
+        packet.runtime.mode = compiledRanges ? detail::PacketExecutionMode::CompiledRanges : detail::PacketExecutionMode::Undecided;
         packet.runtime.nextStep = 0;
         packet.runtime.activeUseCount = 0;
+        packet.runtime.lastCompletedRangeEpoch = 0;
+        packet.runtime.expectedRangeCount = compiledRanges ? expectedRangeCount : InvalidRenderFlowResourceIndex;
+        ResetActiveCompiledRange(packet.runtime);
         if (packet.runtime.liveness != nullptr)
-        {
-            for (u8& active : packet.runtime.liveness->useActive)
-                active = 0;
-        }
+            packet.runtime.liveness->ResetCompiledRange();
         cursor.m_generation = m_generation;
         cursor.m_packetIndex = m_packetIndex;
         cursor.m_commandList = commandList;
@@ -485,13 +868,17 @@ namespace vanguard::rendering
 
     ResolvedTextureUse::ResolvedTextureUse(ResolvedTextureUse&& other) noexcept
         : m_liveness(other.m_liveness), m_use(other.m_use), m_physical(other.m_physical), m_texture(other.m_texture), m_desc(other.m_desc), m_viewDesc(other.m_viewDesc),
-          m_runtimeUseSlot(other.m_runtimeUseSlot), m_hasExplicitView(other.m_hasExplicitView), m_shaderResource(other.m_shaderResource), m_unorderedAccess(other.m_unorderedAccess)
+          m_runtimeUseSlot(other.m_runtimeUseSlot), m_generation(other.m_generation), m_packetIndex(other.m_packetIndex), m_rangeEpoch(other.m_rangeEpoch),
+          m_hasExplicitView(other.m_hasExplicitView), m_shaderResource(other.m_shaderResource), m_unorderedAccess(other.m_unorderedAccess)
     {
         other.m_liveness = nullptr;
         other.m_use = {};
         other.m_physical = {};
         other.m_texture = {};
         other.m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
+        other.m_generation = {};
+        other.m_packetIndex = InvalidRenderFlowResourceIndex;
+        other.m_rangeEpoch = 0;
         other.m_hasExplicitView = false;
     }
 
@@ -507,6 +894,9 @@ namespace vanguard::rendering
         m_desc = other.m_desc;
         m_viewDesc = other.m_viewDesc;
         m_runtimeUseSlot = other.m_runtimeUseSlot;
+        m_generation = other.m_generation;
+        m_packetIndex = other.m_packetIndex;
+        m_rangeEpoch = other.m_rangeEpoch;
         m_hasExplicitView = other.m_hasExplicitView;
         m_shaderResource = other.m_shaderResource;
         m_unorderedAccess = other.m_unorderedAccess;
@@ -515,13 +905,21 @@ namespace vanguard::rendering
         other.m_physical = {};
         other.m_texture = {};
         other.m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
+        other.m_generation = {};
+        other.m_packetIndex = InvalidRenderFlowResourceIndex;
+        other.m_rangeEpoch = 0;
         other.m_hasExplicitView = false;
         return *this;
     }
 
     bool ResolvedTextureUse::IsValid() const noexcept
     {
-        return m_liveness != nullptr && m_runtimeUseSlot < m_liveness->useActive.Size() && m_liveness->useActive[m_runtimeUseSlot] != 0 && m_physical.IsValid();
+        if (m_liveness == nullptr || !m_physical.IsValid())
+            return false;
+        if (m_rangeEpoch != 0)
+            return m_liveness->generation == m_generation && m_liveness->packetIndex == m_packetIndex &&
+                   m_liveness->ContainsCompiledUse(m_rangeEpoch, m_use.ordinal);
+        return m_runtimeUseSlot < m_liveness->useActive.Size() && m_liveness->useActive[m_runtimeUseSlot] != 0;
     }
 
     ResourceUseId ResolvedTextureUse::GetUse() const noexcept
@@ -567,13 +965,17 @@ namespace vanguard::rendering
 
     ResolvedBufferUse::ResolvedBufferUse(ResolvedBufferUse&& other) noexcept
         : m_liveness(other.m_liveness), m_use(other.m_use), m_physical(other.m_physical), m_buffer(other.m_buffer), m_desc(other.m_desc), m_viewDesc(other.m_viewDesc), m_runtimeUseSlot(other.m_runtimeUseSlot),
-          m_hasExplicitView(other.m_hasExplicitView), m_shaderResource(other.m_shaderResource), m_unorderedAccess(other.m_unorderedAccess)
+          m_generation(other.m_generation), m_packetIndex(other.m_packetIndex), m_rangeEpoch(other.m_rangeEpoch), m_hasExplicitView(other.m_hasExplicitView),
+          m_shaderResource(other.m_shaderResource), m_unorderedAccess(other.m_unorderedAccess)
     {
         other.m_liveness = nullptr;
         other.m_use = {};
         other.m_physical = {};
         other.m_buffer = {};
         other.m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
+        other.m_generation = {};
+        other.m_packetIndex = InvalidRenderFlowResourceIndex;
+        other.m_rangeEpoch = 0;
         other.m_hasExplicitView = false;
     }
 
@@ -589,6 +991,9 @@ namespace vanguard::rendering
         m_desc = other.m_desc;
         m_viewDesc = other.m_viewDesc;
         m_runtimeUseSlot = other.m_runtimeUseSlot;
+        m_generation = other.m_generation;
+        m_packetIndex = other.m_packetIndex;
+        m_rangeEpoch = other.m_rangeEpoch;
         m_hasExplicitView = other.m_hasExplicitView;
         m_shaderResource = other.m_shaderResource;
         m_unorderedAccess = other.m_unorderedAccess;
@@ -597,13 +1002,21 @@ namespace vanguard::rendering
         other.m_physical = {};
         other.m_buffer = {};
         other.m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
+        other.m_generation = {};
+        other.m_packetIndex = InvalidRenderFlowResourceIndex;
+        other.m_rangeEpoch = 0;
         other.m_hasExplicitView = false;
         return *this;
     }
 
     bool ResolvedBufferUse::IsValid() const noexcept
     {
-        return m_liveness != nullptr && m_runtimeUseSlot < m_liveness->useActive.Size() && m_liveness->useActive[m_runtimeUseSlot] != 0 && m_physical.IsValid();
+        if (m_liveness == nullptr || !m_physical.IsValid())
+            return false;
+        if (m_rangeEpoch != 0)
+            return m_liveness->generation == m_generation && m_liveness->packetIndex == m_packetIndex &&
+                   m_liveness->ContainsCompiledUse(m_rangeEpoch, m_use.ordinal);
+        return m_runtimeUseSlot < m_liveness->useActive.Size() && m_liveness->useActive[m_runtimeUseSlot] != 0;
     }
 
     ResourceUseId ResolvedBufferUse::GetUse() const noexcept
@@ -651,15 +1064,7 @@ namespace vanguard::rendering
         if (packet != nullptr)
         {
             if (packet->runtime.state == detail::PacketRuntimeState::Executing)
-            {
-                packet->runtime.state = detail::PacketRuntimeState::Failed;
-                packet->runtime.activeUseCount = 0;
-                if (packet->runtime.liveness != nullptr)
-                {
-                    for (u8& active : packet->runtime.liveness->useActive)
-                        active = 0;
-                }
-            }
+                FailPacketExecution(*packet);
         }
         m_open = false;
         m_commandList = {};
@@ -684,15 +1089,7 @@ namespace vanguard::rendering
             if (packet != nullptr)
             {
                 if (packet->runtime.state == detail::PacketRuntimeState::Executing)
-                {
-                    packet->runtime.state = detail::PacketRuntimeState::Failed;
-                    packet->runtime.activeUseCount = 0;
-                    if (packet->runtime.liveness != nullptr)
-                    {
-                        for (u8& active : packet->runtime.liveness->useActive)
-                            active = 0;
-                    }
-                }
+                    FailPacketExecution(*packet);
             }
             m_open = false;
         }
@@ -711,6 +1108,68 @@ namespace vanguard::rendering
         return m_open && m_generation.IsValid() && m_packetIndex < m_generation.m_impl->packets.Size();
     }
 
+    bool ExecutionPacketCursor::BeginTextureUse(const ResourceUseId use, RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        if (!IsValid())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "execution cursor is not open", nullptr, use);
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (!RecorderMatches(*generation, m_commandList))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed during texture use", &packet, use);
+        if (packet.runtime.mode == detail::PacketExecutionMode::CompiledRanges)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "legacy texture-use replay cannot follow compiled-range execution", &packet, use);
+        if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.nextStep >= packet.steps.Size())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use cannot begin at the current packet step", &packet, use);
+        const detail::CompiledStep& step = packet.steps[packet.runtime.nextStep];
+        if (step.kind != CompiledResourceStepKind::TextureUseBegin || step.use != use || !step.physical.IsValid() || packet.runtime.liveness == nullptr ||
+            step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use does not match the next compiled packet step", &packet, use);
+        packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
+        if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
+        {
+            FailPacketExecution(packet);
+            m_open = false;
+            m_commandList = {};
+            return false;
+        }
+        packet.runtime.liveness->useActive[step.runtimeUseSlot] = 1;
+        ++packet.runtime.activeUseCount;
+        ++packet.runtime.nextStep;
+        return true;
+    }
+
+    bool ExecutionPacketCursor::BeginBufferUse(const ResourceUseId use, RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        if (!IsValid())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "execution cursor is not open", nullptr, use);
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (!RecorderMatches(*generation, m_commandList))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed during buffer use", &packet, use);
+        if (packet.runtime.mode == detail::PacketExecutionMode::CompiledRanges)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "legacy buffer-use replay cannot follow compiled-range execution", &packet, use);
+        if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.nextStep >= packet.steps.Size())
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use cannot begin at the current packet step", &packet, use);
+        const detail::CompiledStep& step = packet.steps[packet.runtime.nextStep];
+        if (step.kind != CompiledResourceStepKind::BufferUseBegin || step.use != use || !step.physical.IsValid() || packet.runtime.liveness == nullptr ||
+            step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use does not match the next compiled packet step", &packet, use);
+        packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
+        if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
+        {
+            FailPacketExecution(packet);
+            m_open = false;
+            m_commandList = {};
+            return false;
+        }
+        packet.runtime.liveness->useActive[step.runtimeUseSlot] = 1;
+        ++packet.runtime.activeUseCount;
+        ++packet.runtime.nextStep;
+        return true;
+    }
+
     bool ExecutionPacketCursor::BeginTextureUse(const ResourceUseId use, ResolvedTextureUse& resolved, RenderFlowResourceFailure* const failure) noexcept
     {
         detail::ClearFailure(failure);
@@ -720,12 +1179,15 @@ namespace vanguard::rendering
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
         if (!RecorderMatches(*generation, m_commandList))
             return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed during texture use", &packet, use);
+        if (packet.runtime.mode == detail::PacketExecutionMode::CompiledRanges)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "legacy texture-use replay cannot follow compiled-range execution", &packet, use);
         if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.nextStep >= packet.steps.Size())
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use cannot begin at the current packet step", &packet, use);
         const detail::CompiledStep& step = packet.steps[packet.runtime.nextStep];
         if (step.kind != CompiledResourceStepKind::TextureUseBegin || step.use != use || !step.physical.IsValid() || packet.runtime.liveness == nullptr ||
             step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use does not match the next compiled packet step", &packet, use);
+        packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
         if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
         {
             FailPacketExecution(packet);
@@ -764,12 +1226,15 @@ namespace vanguard::rendering
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
         if (!RecorderMatches(*generation, m_commandList))
             return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed during buffer use", &packet, use);
+        if (packet.runtime.mode == detail::PacketExecutionMode::CompiledRanges)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "legacy buffer-use replay cannot follow compiled-range execution", &packet, use);
         if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.nextStep >= packet.steps.Size())
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use cannot begin at the current packet step", &packet, use);
         const detail::CompiledStep& step = packet.steps[packet.runtime.nextStep];
         if (step.kind != CompiledResourceStepKind::BufferUseBegin || step.use != use || !step.physical.IsValid() || packet.runtime.liveness == nullptr ||
             step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use does not match the next compiled packet step", &packet, use);
+        packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
         if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
         {
             FailPacketExecution(packet);
@@ -808,6 +1273,8 @@ namespace vanguard::rendering
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
         if (!RecorderMatches(*generation, m_commandList))
             return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed before resource-use end", &packet, use);
+        if (packet.runtime.mode != detail::PacketExecutionMode::LegacyUseReplay)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "legacy resource-use completion is not active for this packet", &packet, use);
         if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.nextStep >= packet.steps.Size())
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "resource use cannot end at the current packet step", &packet, use);
         const detail::CompiledStep& step = packet.steps[packet.runtime.nextStep];
@@ -826,6 +1293,115 @@ namespace vanguard::rendering
         return true;
     }
 
+    bool ExecutionPacketCursor::BeginRange(const CompiledExecutionRange& range, const u32 rangeEpoch, RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        if (!IsValid() || rangeEpoch == 0)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled execution range identity is invalid");
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (!RecorderMatches(*generation, m_commandList))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed before compiled range begin", &packet);
+        if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "compiled range cannot begin outside packet execution", &packet);
+        if (packet.runtime.mode != detail::PacketExecutionMode::CompiledRanges || packet.runtime.expectedRangeCount == InvalidRenderFlowResourceIndex)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "compiled range requires a compiled-range cursor", &packet);
+        if (packet.runtime.activeRangeEpoch != 0 || packet.runtime.activeUseCount != 0)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "a compiled child range is already active", &packet);
+        if (packet.runtime.lastCompletedRangeEpoch == ~u32{0} || rangeEpoch != packet.runtime.lastCompletedRangeEpoch + 1u ||
+            rangeEpoch > packet.runtime.expectedRangeCount)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child ranges were not entered in declaration order", &packet);
+
+        u32 afterEndStep = InvalidRenderFlowResourceIndex;
+        if (!ValidateCompiledExecutionRange(packet, range, afterEndStep, failure))
+            return false;
+        if (packet.runtime.nextStep != range.beginStepOffset)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range does not begin at the packet execution cursor", &packet);
+        if (packet.runtime.liveness != nullptr)
+        {
+            if (packet.runtime.liveness->generation != generation->id || packet.runtime.liveness->packetIndex != m_packetIndex ||
+                packet.runtime.liveness->activeRangeEpoch.GetValue() != 0)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range liveness belongs to another or already-active range", &packet);
+        }
+        else if (range.beginStepCount != 0)
+        {
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range has resource uses but no range-liveness owner", &packet);
+        }
+
+        if (!ExecuteCompiledRangeTape(*generation, packet, range.beginActions, detail::CompiledActionTapePhase::Begin,
+                                      range.beginStepOffset, range.beginStepCount, failure))
+        {
+            FailPacketExecution(packet);
+            m_open = false;
+            m_commandList = {};
+            return false;
+        }
+
+        packet.runtime.nextStep = range.endStepOffset;
+        packet.runtime.activeUseCount = range.beginStepCount;
+        packet.runtime.activeRangeEpoch = rangeEpoch;
+        packet.runtime.activeRangeBeginStep = range.beginStepOffset;
+        packet.runtime.activeRangeEndStep = range.endStepOffset;
+        packet.runtime.activeRangeEndCount = range.endStepCount;
+        if (packet.runtime.liveness != nullptr)
+        {
+            const u32 firstUseOrdinal = range.beginStepCount != 0 ? packet.steps[range.beginStepOffset].use.ordinal : InvalidRenderFlowResourceIndex;
+            const u32 endUseOrdinal = range.beginStepCount != 0 ? firstUseOrdinal + range.beginStepCount : InvalidRenderFlowResourceIndex;
+            packet.runtime.liveness->PublishCompiledRange(firstUseOrdinal, endUseOrdinal, rangeEpoch);
+        }
+        return true;
+    }
+
+    bool ExecutionPacketCursor::EndRange(const CompiledExecutionRange& range, const u32 rangeEpoch, RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        if (!IsValid() || rangeEpoch == 0)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled execution range identity is invalid");
+        ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
+        detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (!RecorderMatches(*generation, m_commandList))
+            return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed before compiled range end", &packet);
+        if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing ||
+            packet.runtime.mode != detail::PacketExecutionMode::CompiledRanges)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "compiled range cannot end outside compiled-range packet execution", &packet);
+        if (packet.runtime.activeRangeEpoch != rangeEpoch || packet.runtime.activeRangeBeginStep != range.beginStepOffset ||
+            packet.runtime.activeRangeEndStep != range.endStepOffset || packet.runtime.activeRangeEndCount != range.endStepCount)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range end does not match the active range", &packet);
+        if (packet.runtime.nextStep != range.endStepOffset || packet.runtime.activeUseCount != range.endStepCount)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range runtime span is incomplete", &packet);
+
+        u32 afterEndStep = InvalidRenderFlowResourceIndex;
+        if (!ValidateCompiledExecutionRange(packet, range, afterEndStep, failure))
+            return false;
+        if (packet.runtime.liveness != nullptr)
+        {
+            if (packet.runtime.liveness->generation != generation->id || packet.runtime.liveness->packetIndex != m_packetIndex ||
+                packet.runtime.liveness->activeRangeEpoch.GetValue() != rangeEpoch)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range liveness does not match the active range", &packet);
+        }
+        else if (range.endStepCount != 0)
+        {
+            return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range has resource completions but no range-liveness owner", &packet);
+        }
+
+        if (!ExecuteCompiledRangeTape(*generation, packet, range.endActions, detail::CompiledActionTapePhase::End,
+                                      range.endStepOffset, range.endStepCount, failure))
+        {
+            FailPacketExecution(packet);
+            m_open = false;
+            m_commandList = {};
+            return false;
+        }
+
+        packet.runtime.nextStep = afterEndStep;
+        packet.runtime.activeUseCount = 0;
+        if (packet.runtime.liveness != nullptr)
+            packet.runtime.liveness->ResetCompiledRange();
+        packet.runtime.lastCompletedRangeEpoch = rangeEpoch;
+        ResetActiveCompiledRange(packet.runtime);
+        return true;
+    }
+
     bool ExecutionPacketCursor::CapturedDecision(const DecisionId decision, bool& value, RenderFlowResourceFailure* const failure) const noexcept
     {
         detail::ClearFailure(failure);
@@ -835,11 +1411,9 @@ namespace vanguard::rendering
         const detail::CompiledPacket& packet = generation->packets[m_packetIndex];
         if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing)
             return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "execution packet is not active", &packet);
-        for (const detail::CapturedDecisionRecord& captured : packet.decisions)
+        if (decision.ordinal < packet.decisions.Size() && packet.decisions[decision.ordinal].id == decision)
         {
-            if (captured.id != decision)
-                continue;
-            value = captured.value;
+            value = packet.decisions[decision.ordinal].value;
             return true;
         }
         return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "decision does not belong to this execution packet", &packet);
@@ -854,9 +1428,18 @@ namespace vanguard::rendering
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
         if (!RecorderMatches(*generation, m_commandList))
             return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed before packet finalization", &packet);
-        if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.activeUseCount != 0 || packet.runtime.nextStep != packet.steps.Size())
+        if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing || packet.runtime.activeUseCount != 0 ||
+            packet.runtime.activeRangeEpoch != 0 || packet.runtime.nextStep != packet.steps.Size() ||
+            (packet.runtime.liveness != nullptr && packet.runtime.liveness->activeRangeEpoch.GetValue() != 0))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "execution packet still has an active or unconsumed step", &packet);
-        if (!ExecuteActions(*generation, packet, 0, packet.exitActions.Size(), {}, failure, true))
+        if (packet.runtime.mode == detail::PacketExecutionMode::CompiledRanges)
+        {
+            if (packet.runtime.expectedRangeCount == InvalidRenderFlowResourceIndex ||
+                packet.runtime.lastCompletedRangeEpoch != packet.runtime.expectedRangeCount)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                     "compiled-range packet did not complete every declared range epoch", &packet);
+        }
+        if (!ExecutePacketExitTape(*generation, packet, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -864,6 +1447,9 @@ namespace vanguard::rendering
             return false;
         }
         packet.runtime.state = detail::PacketRuntimeState::Complete;
+        ResetActiveCompiledRange(packet.runtime);
+        if (packet.runtime.liveness != nullptr)
+            packet.runtime.liveness->ResetCompiledRange();
         m_open = false;
         m_commandList = {};
         return true;
@@ -879,8 +1465,10 @@ namespace vanguard::rendering
         {
             packet.runtime.state = detail::PacketRuntimeState::Canceled;
             packet.runtime.activeUseCount = 0;
+            ResetActiveCompiledRange(packet.runtime);
             if (packet.runtime.liveness != nullptr)
             {
+                packet.runtime.liveness->ResetCompiledRange();
                 for (u8& active : packet.runtime.liveness->useActive)
                     active = 0;
             }
@@ -899,25 +1487,55 @@ namespace vanguard::rendering
         if (!slot.IsValid() || resource.IsValid())
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, m_impl->state, "terminal export slot or output owner is invalid");
         concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->writerLock);
-        for (u32 index = 0; index < m_impl->publishedExports.Size(); ++index)
+        const u64 key = ExportSlotKey(slot);
+        u32 index = InvalidRenderFlowResourceIndex;
+        if (!m_impl->publishedExportIndices.Find(key, index) || index >= m_impl->publishedExports.Size() || m_impl->publishedExports[index].slot != slot)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, m_impl->state, "terminal export slot has not been published or was already taken");
+
+        const u32 lastIndex = m_impl->publishedExports.Size() - 1u;
+        u64 movedKey = 0;
+        if (index != lastIndex)
         {
-            detail::PublishedExportRecord& published = m_impl->publishedExports[index];
-            if (published.slot != slot)
-                continue;
-            resource.m_slot = published.slot;
-            resource.m_kind = published.kind;
-            resource.m_texture = static_cast<rhi::Texture&&>(published.texture);
-            resource.m_buffer = static_cast<rhi::Buffer&&>(published.buffer);
-            resource.m_textureDesc = published.textureDesc;
-            resource.m_bufferDesc = published.bufferDesc;
-            resource.m_terminalState = published.terminalState;
-            resource.m_terminalQueue = published.terminalQueue;
-            resource.m_readiness = published.readiness;
-            resource.m_readyFence = published.readyFence;
-            static_cast<void>(m_impl->publishedExports.RemoveAt(index));
-            return true;
+            movedKey = ExportSlotKey(m_impl->publishedExports.Back().slot);
+            u32 indexedLast = InvalidRenderFlowResourceIndex;
+            if (!m_impl->publishedExportIndices.Find(movedKey, indexedLast) || indexedLast != lastIndex)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, m_impl->state, "persistent export index lost its swap-removal tail");
         }
-        return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, m_impl->state, "terminal export slot has not been published or was already taken");
+        if (!m_impl->publishedExportIndices.Erase(key))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, m_impl->state, "persistent export index could not erase a published slot");
+        if (index != lastIndex)
+        {
+            if (!m_impl->publishedExportIndices.Erase(movedKey))
+            {
+                static_cast<void>(m_impl->publishedExportIndices.Insert(key, index));
+                return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, m_impl->state, "persistent export index could not relocate its swap-removal tail");
+            }
+            if (!m_impl->publishedExportIndices.Insert(movedKey, index))
+            {
+                static_cast<void>(m_impl->publishedExportIndices.Insert(key, index));
+                static_cast<void>(m_impl->publishedExportIndices.Insert(movedKey, lastIndex));
+                return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, m_impl->state, "persistent export index rejected its relocated swap-removal tail");
+            }
+        }
+
+        detail::PublishedExportRecord& published = m_impl->publishedExports[index];
+        resource.m_slot = published.slot;
+        resource.m_kind = published.kind;
+        resource.m_texture = static_cast<rhi::Texture&&>(published.texture);
+        resource.m_buffer = static_cast<rhi::Buffer&&>(published.buffer);
+        resource.m_textureDesc = published.textureDesc;
+        resource.m_bufferDesc = published.bufferDesc;
+        resource.m_terminalState = published.terminalState;
+        resource.m_terminalQueue = published.terminalQueue;
+        resource.m_readiness = published.readiness;
+        resource.m_readyFence = published.readyFence;
+        if (index != lastIndex)
+        {
+            detail::PublishedExportRecord& moved = m_impl->publishedExports.Back();
+            published = static_cast<detail::PublishedExportRecord&&>(moved);
+        }
+        static_cast<void>(m_impl->publishedExports.PopBack());
+        return true;
     }
 
     bool RenderFlowResourceAllocator::BeginExecution(RenderFlowResourceFailure* const failure) noexcept
@@ -978,17 +1596,47 @@ namespace vanguard::rendering
         if (receipt.completion == TerminalExecutionCompletionKind::Completed && owner->state != RenderFlowResourceSessionState::Executing)
             return detail::Fail(failure, RenderFlowResourceFailureCode::IncompleteExecution, owner->state, "successful terminal completion requires an execution generation that was explicitly started");
 
-        for (const CompiledCommandScope& expected : generation->commandScopes)
+        // Terminal receipts are unordered public evidence. Build one dense
+        // generation-local index, then consume it everywhere below instead of
+        // repeatedly cross-matching S scopes and D dependencies. The backing is
+        // ResolveScratch memory whose Resolve-phase contents are dead once the
+        // execution generation is published.
+        detail::ResolveScratch& terminalScratch = owner->resolveScratch;
+        detail::ResolveScratchHashMap<u64, u32>& scopeIndices = terminalScratch.openScopeIndices;
+        containers::DynamicArray<u32>& scopeReceiptIndices = terminalScratch.batchResourceSlots;
+        containers::DynamicArray<u32>& dependencyByConsumer = terminalScratch.terminalDependencyByConsumer;
+        containers::DynamicArray<u32>& dependencyReceiptIndices = terminalScratch.physicalAssignmentOrder;
+        containers::DynamicArray<u32>& submittedProducerScopes = terminalScratch.crossQueueProducerScopes;
+        containers::DynamicArray<u32>& dependencyProducerScopeIndices = terminalScratch.terminalDependencyProducerScopes;
+        constexpr u32 DuplicateTerminalReceiptIndex = InvalidRenderFlowResourceIndex - 1u;
+
+        scopeIndices.Reset();
+        scopeIndices.Reserve(generation->commandScopes.Size());
+        scopeReceiptIndices.Clear();
+        scopeReceiptIndices.Resize(generation->commandScopes.Size(), InvalidRenderFlowResourceIndex);
+        for (u32 scopeIndex = 0; scopeIndex < generation->commandScopes.Size(); ++scopeIndex)
         {
-            const CommandScopeExecutionReceipt* found = nullptr;
-            for (const CommandScopeExecutionReceipt& candidate : receipt.commandScopes)
-            {
-                if (candidate.scope != expected.scope)
-                    continue;
-                if (found != nullptr)
-                    return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "terminal receipt duplicates a command scope");
-                found = &candidate;
-            }
+            const CompiledCommandScope& expected = generation->commandScopes[scopeIndex];
+            if (!expected.scope.IsValid() || !scopeIndices.Insert(static_cast<u64>(expected.scope.value), scopeIndex))
+                return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "compiled command-scope index is invalid or duplicated");
+        }
+        for (u32 receiptIndex = 0; receiptIndex < receipt.commandScopes.Size(); ++receiptIndex)
+        {
+            const CommandScopeExecutionReceipt& candidate = receipt.commandScopes[receiptIndex];
+            u32 scopeIndex = InvalidRenderFlowResourceIndex;
+            if (!scopeIndices.Find(static_cast<u64>(candidate.scope.value), scopeIndex) || scopeIndex >= scopeReceiptIndices.Size())
+                continue;
+            u32& indexedReceipt = scopeReceiptIndices[scopeIndex];
+            indexedReceipt = indexedReceipt == InvalidRenderFlowResourceIndex ? receiptIndex : DuplicateTerminalReceiptIndex;
+        }
+
+        for (u32 scopeIndex = 0; scopeIndex < generation->commandScopes.Size(); ++scopeIndex)
+        {
+            const CompiledCommandScope& expected = generation->commandScopes[scopeIndex];
+            const u32 indexedReceipt = scopeReceiptIndices[scopeIndex];
+            if (indexedReceipt == DuplicateTerminalReceiptIndex)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "terminal receipt duplicates a command scope");
+            const CommandScopeExecutionReceipt* const found = indexedReceipt < receipt.commandScopes.Size() ? &receipt.commandScopes[indexedReceipt] : nullptr;
             if (found == nullptr || !detail::ValidQueue(found->queue) || found->queue != expected.queue || !ValidScopeCompletion(found->completion))
                 return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "terminal receipt is missing a command scope or reports the wrong queue");
             if (generation->hasNativeResourceBindings && receipt.completion == TerminalExecutionCompletionKind::Completed && found->completion != CommandScopeCompletionKind::Submitted)
@@ -1006,10 +1654,14 @@ namespace vanguard::rendering
             if (!generation->presentationCommandScope.IsValid())
                 return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
                                     "presentation acquisition has no compiled terminal Graphics scope");
+            u32 presentationScopeIndex = InvalidRenderFlowResourceIndex;
             const CommandScopeExecutionReceipt* presentationReceipt = nullptr;
-            for (const CommandScopeExecutionReceipt& candidate : receipt.commandScopes)
-                if (candidate.scope == generation->presentationCommandScope)
-                    presentationReceipt = &candidate;
+            if (scopeIndices.Find(static_cast<u64>(generation->presentationCommandScope.value), presentationScopeIndex) && presentationScopeIndex < scopeReceiptIndices.Size())
+            {
+                const u32 receiptIndex = scopeReceiptIndices[presentationScopeIndex];
+                if (receiptIndex < receipt.commandScopes.Size())
+                    presentationReceipt = &receipt.commandScopes[receiptIndex];
+            }
             if (receipt.completion == TerminalExecutionCompletionKind::Completed &&
                 (presentationReceipt == nullptr || presentationReceipt->completion != CommandScopeCompletionKind::Submitted ||
                  presentationReceipt->queue != rhi::QueueType::Graphics || !presentationReceipt->fence.IsValid() ||
@@ -1018,29 +1670,56 @@ namespace vanguard::rendering
                                     "successful presentation requires its terminal Graphics scope submission receipt");
         }
 
-        for (const CompiledQueueDependency& expected : generation->queueDependencies)
+        dependencyByConsumer.Clear();
+        dependencyByConsumer.Resize(generation->commandScopes.Size(), InvalidRenderFlowResourceIndex);
+        dependencyReceiptIndices.Clear();
+        dependencyReceiptIndices.Resize(generation->queueDependencies.Size(), InvalidRenderFlowResourceIndex);
+        dependencyProducerScopeIndices.Clear();
+        dependencyProducerScopeIndices.Resize(generation->queueDependencies.Size(), InvalidRenderFlowResourceIndex);
+        for (u32 dependencyIndex = 0; dependencyIndex < generation->queueDependencies.Size(); ++dependencyIndex)
         {
-            const QueueDependencyExecutionReceipt* found = nullptr;
-            for (const QueueDependencyExecutionReceipt& candidate : receipt.queueDependencies)
-            {
-                if (candidate.producerScope != expected.producerScope || candidate.consumerScope != expected.consumerScope)
-                    continue;
-                if (found != nullptr)
-                    return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "terminal receipt duplicates a compiled queue dependency");
-                found = &candidate;
-            }
+            const CompiledQueueDependency& expected = generation->queueDependencies[dependencyIndex];
+            u32 producerScopeIndex = InvalidRenderFlowResourceIndex;
+            u32 consumerScopeIndex = InvalidRenderFlowResourceIndex;
+            if (!scopeIndices.Find(static_cast<u64>(expected.producerScope.value), producerScopeIndex) ||
+                !scopeIndices.Find(static_cast<u64>(expected.consumerScope.value), consumerScopeIndex) ||
+                producerScopeIndex >= generation->commandScopes.Size() || consumerScopeIndex >= dependencyByConsumer.Size() ||
+                dependencyByConsumer[consumerScopeIndex] != InvalidRenderFlowResourceIndex)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "compiled queue dependency has invalid or duplicate dense scope indices");
+            dependencyByConsumer[consumerScopeIndex] = dependencyIndex;
+            dependencyProducerScopeIndices[dependencyIndex] = producerScopeIndex;
+        }
+        for (u32 receiptIndex = 0; receiptIndex < receipt.queueDependencies.Size(); ++receiptIndex)
+        {
+            const QueueDependencyExecutionReceipt& candidate = receipt.queueDependencies[receiptIndex];
+            u32 consumerScopeIndex = InvalidRenderFlowResourceIndex;
+            if (!scopeIndices.Find(static_cast<u64>(candidate.consumerScope.value), consumerScopeIndex) || consumerScopeIndex >= dependencyByConsumer.Size())
+                continue;
+            const u32 dependencyIndex = dependencyByConsumer[consumerScopeIndex];
+            if (dependencyIndex >= generation->queueDependencies.Size() || generation->queueDependencies[dependencyIndex].producerScope != candidate.producerScope)
+                continue;
+            u32& indexedReceipt = dependencyReceiptIndices[dependencyIndex];
+            indexedReceipt = indexedReceipt == InvalidRenderFlowResourceIndex ? receiptIndex : DuplicateTerminalReceiptIndex;
+        }
+
+        for (u32 dependencyIndex = 0; dependencyIndex < generation->queueDependencies.Size(); ++dependencyIndex)
+        {
+            const CompiledQueueDependency& expected = generation->queueDependencies[dependencyIndex];
+            const u32 indexedReceipt = dependencyReceiptIndices[dependencyIndex];
+            if (indexedReceipt == DuplicateTerminalReceiptIndex)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "terminal receipt duplicates a compiled queue dependency");
+            const QueueDependencyExecutionReceipt* const found = indexedReceipt < receipt.queueDependencies.Size() ? &receipt.queueDependencies[indexedReceipt] : nullptr;
             if (found == nullptr || found->sync != expected.sync || !ValidQueueDependencyCompletion(found->completion))
                 return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "terminal receipt is missing or disagrees with a compiled queue dependency");
             if (generation->hasNativeResourceBindings && receipt.completion == TerminalExecutionCompletionKind::Completed && found->completion != QueueDependencyCompletionKind::Submitted)
                 return detail::Fail(failure, RenderFlowResourceFailureCode::IncompleteExecution, owner->state, "successful terminal completion requires every queue dependency to be submitted");
             if (found->completion == QueueDependencyCompletionKind::UnknownDueToDeviceLoss && receipt.completion != TerminalExecutionCompletionKind::DeviceLost)
                 return detail::Fail(failure, RenderFlowResourceFailureCode::IncompleteExecution, owner->state, "unknown queue-dependency completion is legal only after device loss");
-            const CommandScopeExecutionReceipt* loweringReceipt = nullptr;
-            for (const CommandScopeExecutionReceipt& candidate : receipt.commandScopes)
-            {
-                if (candidate.scope == expected.producerScope)
-                    loweringReceipt = &candidate;
-            }
+            const u32 producerScopeIndex = dependencyProducerScopeIndices[dependencyIndex];
+            if (producerScopeIndex >= scopeReceiptIndices.Size())
+                return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "compiled queue dependency producer is absent from the dense command-scope index");
+            const u32 loweringReceiptIndex = scopeReceiptIndices[producerScopeIndex];
+            const CommandScopeExecutionReceipt* const loweringReceipt = loweringReceiptIndex < receipt.commandScopes.Size() ? &receipt.commandScopes[loweringReceiptIndex] : nullptr;
             const CommandScopeCompletionKind requiredLowering = found->completion == QueueDependencyCompletionKind::Submitted                   ? CommandScopeCompletionKind::Submitted
                                                                 : found->completion == QueueDependencyCompletionKind::DiscardedBeforeSubmission ? CommandScopeCompletionKind::DiscardedBeforeSubmission
                                                                                                                                                 : CommandScopeCompletionKind::UnknownDueToDeviceLoss;
@@ -1048,6 +1727,43 @@ namespace vanguard::rendering
                 return detail::Fail(failure, RenderFlowResourceFailureCode::IncompleteExecution, owner->state, "queue dependency completion disagrees with its lowering command scope");
         }
 
+        submittedProducerScopes.Clear();
+        if (receipt.completion != TerminalExecutionCompletionKind::DeviceLost && !generation->queueDependencies.Empty())
+        {
+            submittedProducerScopes.Resize(generation->commandScopes.Size(), InvalidRenderFlowResourceIndex);
+            u32 forkProducerScopeIndex = InvalidRenderFlowResourceIndex;
+            u32 joinProducerScopeIndex = InvalidRenderFlowResourceIndex;
+            for (u32 consumerScopeIndex = 0; consumerScopeIndex < generation->commandScopes.Size(); ++consumerScopeIndex)
+            {
+                const u32 dependencyIndex = dependencyByConsumer[consumerScopeIndex];
+                if (dependencyIndex < generation->queueDependencies.Size())
+                {
+                    const u32 dependencyReceiptIndex = dependencyReceiptIndices[dependencyIndex];
+                    if (dependencyReceiptIndex < receipt.queueDependencies.Size() &&
+                        receipt.queueDependencies[dependencyReceiptIndex].completion == QueueDependencyCompletionKind::Submitted)
+                    {
+                        const CompiledQueueDependency& dependency = generation->queueDependencies[dependencyIndex];
+                        const u32 producerScopeIndex = dependencyProducerScopeIndices[dependencyIndex];
+                        if (producerScopeIndex >= consumerScopeIndex)
+                            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "submitted queue dependency is not forward ordered in the dense command-scope stream");
+                        if (dependency.sync == rhi::CommandListSyncType::ForkAsyncCompute)
+                            forkProducerScopeIndex = producerScopeIndex;
+                        else if (dependency.sync == rhi::CommandListSyncType::JoinAsyncCompute)
+                            joinProducerScopeIndex = producerScopeIndex;
+                    }
+                }
+                const rhi::QueueType queue = generation->commandScopes[consumerScopeIndex].queue;
+                submittedProducerScopes[consumerScopeIndex] = queue == rhi::QueueType::Compute ? forkProducerScopeIndex
+                                                               : queue == rhi::QueueType::Graphics ? joinProducerScopeIndex
+                                                                                                    : InvalidRenderFlowResourceIndex;
+            }
+        }
+
+        const bool hasPendingExports = !generation->pendingExports.Empty();
+        rhi::ResidencyFenceSet submittedFences;
+        for (const CommandScopeExecutionReceipt& commandScope : receipt.commandScopes)
+            if (commandScope.completion == CommandScopeCompletionKind::Submitted)
+                submittedFences.Include(commandScope.fence);
         {
             if (generation->terminal.GetValue())
                 return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state, "execution generation is already terminal");
@@ -1063,46 +1779,58 @@ namespace vanguard::rendering
             }
 
             if (receipt.completion != TerminalExecutionCompletionKind::DeviceLost)
-                for (const detail::CompiledPacket& compiled : generation->packets)
+                for (u32 packetIndex = 0; packetIndex < generation->packets.Size(); ++packetIndex)
                 {
-                    const CommandScopeExecutionReceipt* consumer = nullptr;
-                    for (const CommandScopeExecutionReceipt& scope : receipt.commandScopes)
-                        if (scope.scope == compiled.commandScope)
-                            consumer = &scope;
+                    const detail::CompiledPacket& compiled = generation->packets[packetIndex];
+                    if (packetIndex >= generation->commandScopes.Size() || packetIndex >= scopeReceiptIndices.Size() ||
+                        generation->commandScopes[packetIndex].scope != compiled.commandScope)
+                        return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                            "compiled packet and dense command-scope indices diverged before terminal validation", compiled.node);
+                    const u32 consumerReceiptIndex = scopeReceiptIndices[packetIndex];
+                    const CommandScopeExecutionReceipt* const consumer = consumerReceiptIndex < receipt.commandScopes.Size() ? &receipt.commandScopes[consumerReceiptIndex] : nullptr;
                     if (consumer == nullptr || consumer->completion != CommandScopeCompletionKind::Submitted)
                         continue;
                     for (const u32 predecessorIndex : compiled.statePredecessorPackets)
                     {
-                        if (predecessorIndex >= generation->packets.Size())
+                        if (predecessorIndex >= generation->packets.Size() || predecessorIndex >= generation->commandScopes.Size() || predecessorIndex >= scopeReceiptIndices.Size())
                             return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "explicit state predecessor is stale", compiled.node);
                         const detail::CompiledPacket& predecessor = generation->packets[predecessorIndex];
-                        const CommandScopeExecutionReceipt* producer = nullptr;
-                        for (const CommandScopeExecutionReceipt& scope : receipt.commandScopes)
-                            if (scope.scope == predecessor.commandScope)
-                                producer = &scope;
+                        if (generation->commandScopes[predecessorIndex].scope != predecessor.commandScope)
+                            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                                "explicit state predecessor lost its dense command-scope identity", compiled.node);
+                        const u32 producerReceiptIndex = scopeReceiptIndices[predecessorIndex];
+                        const CommandScopeExecutionReceipt* const producer = producerReceiptIndex < receipt.commandScopes.Size() ? &receipt.commandScopes[producerReceiptIndex] : nullptr;
                         const bool ordered = producer != nullptr && producer->completion == CommandScopeCompletionKind::Submitted &&
                                              (producer->queue == consumer->queue ? producer->fence.value <= consumer->fence.value
-                                                                                : SubmittedQueueOrderProved(*generation, receipt, predecessor, compiled));
+                                                                                : SubmittedQueueOrderProved(*generation, predecessorIndex, packetIndex, submittedProducerScopes));
                         if (predecessor.runtime.state != detail::PacketRuntimeState::Complete || !ordered)
                             return detail::Fail(failure, RenderFlowResourceFailureCode::IncompleteExecution, owner->state, "submitted explicit-state consumer requires its complete, ordered submitted producer", compiled.node);
                     }
                 }
 
-            if (receipt.completion == TerminalExecutionCompletionKind::Completed)
+            if (receipt.completion == TerminalExecutionCompletionKind::Completed && hasPendingExports)
             {
                 containers::DynamicArray<detail::PublishedExportRecord> publications{memory::pools::Rendering::GetInstance()};
-                containers::DynamicArray<u32> poolTransfers{memory::pools::Rendering::GetInstance()};
+                containers::DynamicArray<detail::DedicatedResourceTransfer> poolTransfers{memory::pools::Rendering::GetInstance()};
                 publications.Reserve(generation->pendingExports.Size());
                 poolTransfers.Reserve(generation->pendingExports.Size());
-                for (const detail::PendingExportRecord& pending : generation->pendingExports)
+                // Dependency receipt indexing is dead after submitted-order
+                // validation. Reuse the same u32 backing as physical -> export
+                // so retirement can distinguish transferred resources in O(1).
+                dependencyReceiptIndices.Clear();
+                dependencyReceiptIndices.Resize(generation->physicalBindings.Size(), InvalidRenderFlowResourceIndex);
+                for (u32 pendingIndex = 0; pendingIndex < generation->pendingExports.Size(); ++pendingIndex)
                 {
+                    const detail::PendingExportRecord& pending = generation->pendingExports[pendingIndex];
                     if (!pending.slot.IsValid() || !pending.physical.IsValid() || pending.physical.generation != generation->id.generation || pending.physical.index >= generation->physicalBindings.Size() ||
-                        !pending.terminalCommandScope.IsValid())
+                        pending.terminalPacket >= generation->packets.Size() || pending.terminalPacket >= scopeReceiptIndices.Size())
                         return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "compiled terminal export contains an invalid physical or command-scope assignment");
-                    const CommandScopeExecutionReceipt* terminalReceipt = nullptr;
-                    for (const CommandScopeExecutionReceipt& candidate : receipt.commandScopes)
-                        if (candidate.scope == pending.terminalCommandScope)
-                            terminalReceipt = &candidate;
+                    u32& physicalExport = dependencyReceiptIndices[pending.physical.index];
+                    if (physicalExport != InvalidRenderFlowResourceIndex)
+                        return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "multiple terminal exports reference one physical binding");
+                    physicalExport = pendingIndex;
+                    const u32 terminalReceiptIndex = scopeReceiptIndices[pending.terminalPacket];
+                    const CommandScopeExecutionReceipt* const terminalReceipt = terminalReceiptIndex < receipt.commandScopes.Size() ? &receipt.commandScopes[terminalReceiptIndex] : nullptr;
                     if (terminalReceipt == nullptr || terminalReceipt->completion != CommandScopeCompletionKind::Submitted || terminalReceipt->queue != pending.terminalQueue ||
                         !terminalReceipt->fence.IsValid())
                         return detail::Fail(failure, RenderFlowResourceFailureCode::IncompleteExecution, owner->state, "successful terminal export requires the submitted receipt of its final command scope");
@@ -1126,18 +1854,43 @@ namespace vanguard::rendering
                     else
                         return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "terminal export kind disagrees with its physical resource");
                     if (binding.kind == detail::PhysicalBindingKind::DedicatedPool)
-                        poolTransfers.PushBack(binding.poolEntry);
+                        poolTransfers.PushBack({binding.poolEntry});
                     publications.PushBack(static_cast<detail::PublishedExportRecord&&>(publication));
                 }
-                if (!owner->dedicatedPool.TransferOwnership(containers::ArraySpan<const u32>(poolTransfers), failure))
+                const u32 publicationBaseIndex = owner->publishedExports.Size();
+                u32 indexedPublicationCount = 0;
+                for (u32 publicationOffset = 0; publicationOffset < publications.Size(); ++publicationOffset)
+                {
+                    const detail::PublishedExportRecord& publication = publications[publicationOffset];
+                    const u64 publicationKey = ExportSlotKey(publication.slot);
+                    u32 existingPublication = InvalidRenderFlowResourceIndex;
+                    if (owner->publishedExportIndices.Find(publicationKey, existingPublication))
+                    {
+                        for (u32 rollback = 0; rollback < indexedPublicationCount; ++rollback)
+                            static_cast<void>(owner->publishedExportIndices.Erase(ExportSlotKey(publications[rollback].slot)));
+                        return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "terminal export slot is already present in the persistent publication index");
+                    }
+                    if (!owner->publishedExportIndices.Insert(publicationKey, publicationBaseIndex + publicationOffset))
+                    {
+                        for (u32 rollback = 0; rollback < indexedPublicationCount; ++rollback)
+                            static_cast<void>(owner->publishedExportIndices.Erase(ExportSlotKey(publications[rollback].slot)));
+                        return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "persistent publication index rejected a pre-reserved terminal export slot");
+                    }
+                    ++indexedPublicationCount;
+                }
+                if (!owner->dedicatedPool.TransferOwnership(containers::ArraySpan<const detail::DedicatedResourceTransfer>(poolTransfers), submittedFences, failure))
+                {
+                    for (u32 rollback = 0; rollback < indexedPublicationCount; ++rollback)
+                        static_cast<void>(owner->publishedExportIndices.Erase(ExportSlotKey(publications[rollback].slot)));
                     return false;
+                }
                 {
                     concurrency::ScopedLock<concurrency::SpinLock> publicationGuard(owner->writerLock);
                     for (detail::PublishedExportRecord& publication : publications)
                         owner->publishedExports.PushBack(static_cast<detail::PublishedExportRecord&&>(publication));
                 }
             }
-            else
+            else if (receipt.completion != TerminalExecutionCompletionKind::Completed)
             {
                 for (detail::CompiledPacket& compiled : generation->packets)
                 {
@@ -1148,35 +1901,39 @@ namespace vanguard::rendering
             generation->terminal.SetValue(true);
         }
 
-        generation->descriptorDeviceLost = receipt.completion == TerminalExecutionCompletionKind::DeviceLost;
-        for (const CommandScopeExecutionReceipt& commandScope : receipt.commandScopes)
-            if (commandScope.completion == CommandScopeCompletionKind::Submitted)
-                generation->descriptorRetirement.Include(commandScope.fence);
         if (generation->hasNativeResourceBindings)
         {
             if (receipt.completion == TerminalExecutionCompletionKind::DeviceLost)
             {
-                owner->dedicatedPool.DeviceLost();
-                owner->placedPool.DeviceLost();
+                owner->structuralPlan.Clear();
+                detail::ReleasePersistentDedicatedPlan(*owner, false);
+                owner->dedicatedPool.DeviceLost(submittedFences);
+                owner->placedPool.DeviceLost(submittedFences);
                 concurrency::ScopedLock<concurrency::SpinLock> publicationGuard(owner->writerLock);
                 owner->publishedExports.Clear();
+                owner->publishedExportIndices.Reset();
             }
             else
             {
-                rhi::ResidencyFenceSet safeAfter;
-                for (const CommandScopeExecutionReceipt& commandScope : receipt.commandScopes)
-                    if (commandScope.completion == CommandScopeCompletionKind::Submitted)
-                        safeAfter.Include(commandScope.fence);
+                // Receipt/dependency validation is complete here. Reuse its dead
+                // u32 scratch so terminal retirement does not allocate a fresh
+                // vector every frame just to batch pool entries.
+                containers::DynamicArray<u32>& reusableDedicated = dependencyByConsumer;
+                containers::DynamicArray<u32>& quarantinedDedicated = dependencyProducerScopeIndices;
+                reusableDedicated.Clear();
+                quarantinedDedicated.Clear();
                 for (u32 bindingIndex = 0; bindingIndex < generation->physicalBindings.Size(); ++bindingIndex)
                 {
                     const detail::PhysicalBindingRecord& binding = generation->physicalBindings[bindingIndex];
-                    bool exported = false;
-                    if (receipt.completion == TerminalExecutionCompletionKind::Completed)
-                        for (const detail::PendingExportRecord& pending : generation->pendingExports)
-                            exported = exported || pending.physical.index == bindingIndex;
+                    const bool exported = receipt.completion == TerminalExecutionCompletionKind::Completed && hasPendingExports && bindingIndex < dependencyReceiptIndices.Size() &&
+                                          dependencyReceiptIndices[bindingIndex] != InvalidRenderFlowResourceIndex;
                     if (binding.kind == detail::PhysicalBindingKind::DedicatedPool && !exported)
-                        owner->dedicatedPool.Retire(binding.poolEntry, safeAfter, !binding.explicitState || receipt.completion == TerminalExecutionCompletionKind::Completed);
+                    {
+                        const bool reusable = !binding.explicitState || receipt.completion == TerminalExecutionCompletionKind::Completed;
+                        (reusable ? reusableDedicated : quarantinedDedicated).PushBack(binding.poolEntry);
+                    }
                 }
+                owner->dedicatedPool.Retire(reusableDedicated, quarantinedDedicated, submittedFences);
                 bool placedReusable = true;
                 // A placed batch is one heap-ownership unit. Any explicit object with uncertain abort state makes the complete batch unsafe to cache.
                 if (receipt.completion != TerminalExecutionCompletionKind::Completed)
@@ -1186,9 +1943,18 @@ namespace vanguard::rendering
                             placedReusable = false;
                             break;
                         }
-                owner->placedPool.Retire(generation->placedBatch, safeAfter, placedReusable);
+                owner->placedPool.Retire(generation->placedBatch, submittedFences, placedReusable);
             }
+            if (!detail::RetireRetainedImportDescriptors(*owner, *generation, submittedFences,
+                                                         receipt.completion == TerminalExecutionCompletionKind::DeviceLost, failure))
+                return false;
         }
+
+        // The terminal receipt is the ownership boundary. Packet views may keep
+        // immutable compiled metadata alive after Finish, but they must not pin
+        // descriptor slots, imported resources, presentation acquisitions, or
+        // allocator physical bindings after all execution owners have joined.
+        detail::ReleaseGenerationRuntimeOwners(generation);
 
         owner->state = receipt.completion == TerminalExecutionCompletionKind::DeviceLost ? RenderFlowResourceSessionState::DeviceUnavailable : RenderFlowResourceSessionState::TerminalJoined;
         owner->stats.state = owner->state;

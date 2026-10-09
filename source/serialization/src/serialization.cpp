@@ -1,5 +1,7 @@
 #include <vanguard/serialization/serialization.hpp>
 
+#include <cstdio>
+
 namespace
 {
     using namespace vanguard;
@@ -70,6 +72,127 @@ namespace
     {
         return firstOffset < secondOffset + secondSize && secondOffset < firstOffset + firstSize;
     }
+
+    void ClearTextFailure(vanguard::serialization::TextFailure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+    }
+
+    void SetTextFailure(vanguard::serialization::TextFailure* const failure,
+                        const vanguard::serialization::TextErrorCode code, const u32 line, const u32 column) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {code, line, column};
+    }
+
+    void TrimHorizontal(vanguard::containers::StringView& text) noexcept
+    {
+        while (!text.Empty() && (text.Front() == ' ' || text.Front() == '\t'))
+            text.TrimFront(1);
+        while (!text.Empty() && (text.Back() == ' ' || text.Back() == '\t'))
+            text.TrimBack(1);
+    }
+
+    void TrimHorizontalFront(vanguard::containers::StringView& text) noexcept
+    {
+        while (!text.Empty() && (text.Front() == ' ' || text.Front() == '\t'))
+            text.TrimFront(1);
+    }
+
+    void TrimHorizontalBack(vanguard::containers::StringView& text) noexcept
+    {
+        while (!text.Empty() && (text.Back() == ' ' || text.Back() == '\t'))
+            text.TrimBack(1);
+    }
+
+    [[nodiscard]] bool ParseCanonicalU16(const vanguard::containers::StringView text, u16& value) noexcept
+    {
+        if (text.Empty() || (text.Length() > 1 && text.Front() == '0'))
+            return false;
+        u32 number = 0;
+        for (const char character : text)
+        {
+            if (character < '0' || character > '9')
+                return false;
+            number = number * 10u + static_cast<u32>(character - '0');
+            if (number > 65535u)
+                return false;
+        }
+        value = static_cast<u16>(number);
+        return true;
+    }
+
+    void AppendCodepoint(vanguard::containers::String& output, const u32 codepoint) noexcept
+    {
+        if (codepoint <= 0x7fu)
+        {
+            output.Append(static_cast<char>(codepoint));
+            return;
+        }
+
+        char bytes[4]{};
+        u32 count = 0;
+        if (codepoint <= 0x7ffu)
+        {
+            bytes[0] = static_cast<char>(0xc0u | (codepoint >> 6u));
+            bytes[1] = static_cast<char>(0x80u | (codepoint & 0x3fu));
+            count = 2;
+        }
+        else if (codepoint <= 0xffffu)
+        {
+            bytes[0] = static_cast<char>(0xe0u | (codepoint >> 12u));
+            bytes[1] = static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu));
+            bytes[2] = static_cast<char>(0x80u | (codepoint & 0x3fu));
+            count = 3;
+        }
+        else
+        {
+            bytes[0] = static_cast<char>(0xf0u | (codepoint >> 18u));
+            bytes[1] = static_cast<char>(0x80u | ((codepoint >> 12u) & 0x3fu));
+            bytes[2] = static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu));
+            bytes[3] = static_cast<char>(0x80u | (codepoint & 0x3fu));
+            count = 4;
+        }
+        output.Append(bytes, count);
+    }
+
+    [[nodiscard]] vanguard::serialization::Result ReserveAdditional(vanguard::containers::String& destination,
+                                                                    const u32 additional) noexcept
+    {
+        if (additional > destination.MaxSize() - destination.Length())
+            return vanguard::serialization::Result::LimitExceeded;
+        return destination.Reserve(destination.Length() + additional) ? vanguard::serialization::Result::Success
+                                                                      : vanguard::serialization::Result::LimitExceeded;
+    }
+
+    [[nodiscard]] u32 EscapedTextLength(const vanguard::containers::StringView value) noexcept
+    {
+        u32 length = 0;
+        for (const char character : value)
+            length += character == '"' || character == '\\' || character == '\n' || character == '\r' || character == '\t' ? 2u : 1u;
+        return length;
+    }
+
+    void AppendEscapedText(vanguard::containers::String& destination, const vanguard::containers::StringView value) noexcept
+    {
+        for (const char character : value)
+        {
+            if (character == '"' || character == '\\')
+            {
+                destination.Append('\\');
+                destination.Append(character);
+            }
+            else if (character == '\n')
+                destination.Append("\\n", 2);
+            else if (character == '\r')
+                destination.Append("\\r", 2);
+            else if (character == '\t')
+                destination.Append("\\t", 2);
+            else
+                destination.Append(character);
+        }
+    }
 } // namespace
 
 namespace vanguard::serialization
@@ -108,6 +231,362 @@ namespace vanguard::serialization
             return "LimitExceeded";
         }
         return "Unknown";
+    }
+
+    bool IsValidUtf8(const containers::StringView text) noexcept
+    {
+        for (u32 index = 0; index < text.Length();)
+        {
+            const u8 first = static_cast<u8>(text[index++]);
+            if (first < 0x80u)
+                continue;
+
+            u32 continuationCount = 0;
+            u32 codepoint = 0;
+            u32 minimum = 0;
+            if ((first & 0xe0u) == 0xc0u)
+            {
+                continuationCount = 1;
+                codepoint = first & 0x1fu;
+                minimum = 0x80u;
+            }
+            else if ((first & 0xf0u) == 0xe0u)
+            {
+                continuationCount = 2;
+                codepoint = first & 0x0fu;
+                minimum = 0x800u;
+            }
+            else if ((first & 0xf8u) == 0xf0u)
+            {
+                continuationCount = 3;
+                codepoint = first & 0x07u;
+                minimum = 0x10000u;
+            }
+            else
+            {
+                return false;
+            }
+
+            if (index + continuationCount > text.Length())
+                return false;
+            while (continuationCount-- != 0)
+            {
+                const u8 next = static_cast<u8>(text[index++]);
+                if ((next & 0xc0u) != 0x80u)
+                    return false;
+                codepoint = (codepoint << 6u) | (next & 0x3fu);
+            }
+            if (codepoint < minimum || codepoint > 0x10ffffu || (codepoint >= 0xd800u && codepoint <= 0xdfffu))
+                return false;
+        }
+        return true;
+    }
+
+    bool IsValidTextKey(const containers::StringView key) noexcept
+    {
+        if (key.Empty())
+            return false;
+        for (const char character : key)
+        {
+            const bool alpha = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
+            const bool digit = character >= '0' && character <= '9';
+            if (!alpha && !digit && character != '.' && character != '_' && character != '-')
+                return false;
+        }
+        return true;
+    }
+
+    TextDocumentReader::TextDocumentReader(const containers::StringView source) noexcept
+        : m_source(source), m_utf8Valid(IsValidUtf8(source))
+    {
+    }
+
+    bool TextDocumentReader::IsUtf8Valid() const noexcept
+    {
+        return m_utf8Valid;
+    }
+
+    bool TextDocumentReader::NextContentLine(containers::StringView& line, u32& lineNumber) noexcept
+    {
+        line = {};
+        lineNumber = 0;
+        while (m_offset < m_source.Length())
+        {
+            u32 end = m_offset;
+            while (end < m_source.Length() && m_source[end] != '\n')
+                ++end;
+            line = m_source.Slice(m_offset, end);
+            if (!line.Empty() && line.Back() == '\r')
+                line.TrimBack(1);
+            m_offset = end + 1u;
+            ++m_line;
+            TrimHorizontal(line);
+            if (line.Empty() || line.Front() == '#')
+                continue;
+            lineNumber = m_line;
+            return true;
+        }
+        return false;
+    }
+
+    Result TextDocumentReader::ReadHeader(TextDocumentHeader& header, TextFailure* const failure) noexcept
+    {
+        header = {};
+        ClearTextFailure(failure);
+        if (!m_utf8Valid)
+        {
+            SetTextFailure(failure, TextErrorCode::InvalidUtf8, 0, 0);
+            return Result::InvalidEncoding;
+        }
+        if (m_headerRead)
+            return Result::InvalidArgument;
+
+        containers::StringView line;
+        u32 lineNumber = 0;
+        if (!NextContentLine(line, lineNumber))
+            return Result::EndOfStream;
+
+        const u32 comment = line.Find('#');
+        if (comment != containers::StringView::npos)
+        {
+            line = line.Slice(0, comment);
+            TrimHorizontalBack(line);
+        }
+
+        const u32 separator = line.Find(' ');
+        if (separator == containers::StringView::npos || separator == 0 || separator + 1u >= line.Length() ||
+            line.Find(' ', separator + 1u) != containers::StringView::npos || line.Find('\t') != containers::StringView::npos)
+        {
+            SetTextFailure(failure, TextErrorCode::InvalidHeader, lineNumber, 1);
+            return Result::InvalidEncoding;
+        }
+
+        const containers::StringView kind = line.Slice(0, separator);
+        const containers::StringView versionText = line.SubView(separator + 1u);
+        const u32 dot = versionText.Find('.');
+        Version version;
+        if (!IsValidTextKey(kind) || dot == containers::StringView::npos || dot == 0 || dot + 1u >= versionText.Length() ||
+            versionText.Find('.', dot + 1u) != containers::StringView::npos ||
+            !ParseCanonicalU16(versionText.Slice(0, dot), version.major) ||
+            !ParseCanonicalU16(versionText.SubView(dot + 1u), version.minor))
+        {
+            SetTextFailure(failure, TextErrorCode::InvalidHeader, lineNumber, 1);
+            return Result::InvalidEncoding;
+        }
+
+        header.kind = kind;
+        header.version = version;
+        header.line = lineNumber;
+        m_headerRead = true;
+        return Result::Success;
+    }
+
+    Result DecodeTextString(const containers::StringView encoded, containers::String& decoded) noexcept
+    {
+        decoded.Clear();
+        if (!decoded.Reserve(encoded.Length()))
+            return Result::LimitExceeded;
+
+        for (u32 index = 0; index < encoded.Length(); ++index)
+        {
+            char character = encoded[index];
+            if (character != '\\')
+            {
+                if (static_cast<u8>(character) < 0x20u)
+                    return Result::InvalidEncoding;
+                decoded.Append(character);
+                continue;
+            }
+
+            if (++index >= encoded.Length())
+                return Result::InvalidEncoding;
+            character = encoded[index];
+            if (character == '"' || character == '\\')
+                decoded.Append(character);
+            else if (character == 'n')
+                decoded.Append('\n');
+            else if (character == 'r')
+                decoded.Append('\r');
+            else if (character == 't')
+                decoded.Append('\t');
+            else if (character == 'u')
+            {
+                if (index + 4u >= encoded.Length())
+                    return Result::InvalidEncoding;
+                u32 codepoint = 0;
+                for (u32 digit = 0; digit < 4; ++digit)
+                {
+                    const char hex = encoded[++index];
+                    u32 value = 0;
+                    if (hex >= '0' && hex <= '9')
+                        value = static_cast<u32>(hex - '0');
+                    else if (hex >= 'a' && hex <= 'f')
+                        value = static_cast<u32>(hex - 'a') + 10u;
+                    else if (hex >= 'A' && hex <= 'F')
+                        value = static_cast<u32>(hex - 'A') + 10u;
+                    else
+                        return Result::InvalidEncoding;
+                    codepoint = (codepoint << 4u) | value;
+                }
+
+                if (codepoint >= 0xd800u && codepoint <= 0xdbffu)
+                {
+                    if (index + 6u >= encoded.Length() || encoded[index + 1u] != '\\' || encoded[index + 2u] != 'u')
+                        return Result::InvalidEncoding;
+                    index += 2u;
+                    u32 low = 0;
+                    for (u32 digit = 0; digit < 4; ++digit)
+                    {
+                        const char hex = encoded[++index];
+                        u32 value = 0;
+                        if (hex >= '0' && hex <= '9')
+                            value = static_cast<u32>(hex - '0');
+                        else if (hex >= 'a' && hex <= 'f')
+                            value = static_cast<u32>(hex - 'a') + 10u;
+                        else if (hex >= 'A' && hex <= 'F')
+                            value = static_cast<u32>(hex - 'A') + 10u;
+                        else
+                            return Result::InvalidEncoding;
+                        low = (low << 4u) | value;
+                    }
+                    if (low < 0xdc00u || low > 0xdfffu)
+                        return Result::InvalidEncoding;
+                    codepoint = 0x10000u + ((codepoint - 0xd800u) << 10u) + (low - 0xdc00u);
+                }
+                else if (codepoint >= 0xdc00u && codepoint <= 0xdfffu)
+                {
+                    return Result::InvalidEncoding;
+                }
+                AppendCodepoint(decoded, codepoint);
+            }
+            else
+            {
+                return Result::InvalidEncoding;
+            }
+        }
+        return IsValidUtf8(decoded) ? Result::Success : Result::InvalidEncoding;
+    }
+
+    Result TextDocumentReader::ReadAssignment(TextAssignment& assignment, containers::String& decodedValue,
+                                              TextFailure* const failure) noexcept
+    {
+        assignment = {};
+        ClearTextFailure(failure);
+        if (!m_utf8Valid)
+        {
+            SetTextFailure(failure, TextErrorCode::InvalidUtf8, 0, 0);
+            return Result::InvalidEncoding;
+        }
+        if (!m_headerRead)
+            return Result::InvalidArgument;
+
+        containers::StringView line;
+        u32 lineNumber = 0;
+        if (!NextContentLine(line, lineNumber))
+            return Result::EndOfStream;
+
+        const u32 equal = line.Find('=');
+        if (equal == containers::StringView::npos)
+        {
+            SetTextFailure(failure, TextErrorCode::ExpectedAssignment, lineNumber, 1);
+            return Result::InvalidEncoding;
+        }
+
+        containers::StringView key = line.Slice(0, equal);
+        TrimHorizontalBack(key);
+        containers::StringView value = line.SubView(equal + 1u);
+        TrimHorizontalFront(value);
+        if (value.Empty() || value.Front() != '"')
+        {
+            SetTextFailure(failure, TextErrorCode::ExpectedQuotedValue, lineNumber, equal + 2u);
+            return Result::InvalidEncoding;
+        }
+
+        u32 closing = containers::StringView::npos;
+        bool escaped = false;
+        for (u32 index = 1; index < value.Length(); ++index)
+        {
+            const char character = value[index];
+            if (character == '"' && !escaped)
+            {
+                closing = index;
+                break;
+            }
+            if (character == '\\' && !escaped)
+                escaped = true;
+            else
+                escaped = false;
+        }
+        if (closing == containers::StringView::npos)
+        {
+            SetTextFailure(failure, TextErrorCode::UnterminatedQuotedValue, lineNumber, equal + 2u);
+            return Result::InvalidEncoding;
+        }
+
+        containers::StringView trailing = value.SubView(closing + 1u);
+        TrimHorizontalFront(trailing);
+        if (!trailing.Empty() && trailing.Front() != '#')
+        {
+            SetTextFailure(failure, TextErrorCode::UnexpectedTrailingText, lineNumber, equal + closing + 2u);
+            return Result::InvalidEncoding;
+        }
+
+        const containers::StringView encoded = value.Slice(1, closing);
+        const Result decode = DecodeTextString(encoded, decodedValue);
+        if (decode != Result::Success)
+        {
+            SetTextFailure(failure, decode == Result::LimitExceeded ? TextErrorCode::AllocationFailed : TextErrorCode::InvalidEscape,
+                           lineNumber, equal + 2u);
+            return decode;
+        }
+
+        assignment.key = key;
+        assignment.encodedValue = encoded;
+        assignment.line = lineNumber;
+        assignment.valueColumn = equal + 2u;
+        return Result::Success;
+    }
+
+    Result AppendTextDocumentHeader(containers::String& destination, const containers::StringView kind,
+                                    const Version version) noexcept
+    {
+        if (!IsValidTextKey(kind))
+            return Result::InvalidArgument;
+        char versionText[16]{};
+        const int versionLength = std::snprintf(versionText, sizeof(versionText), "%u.%u",
+                                                static_cast<u32>(version.major), static_cast<u32>(version.minor));
+        if (versionLength <= 0 || static_cast<usize>(versionLength) >= sizeof(versionText))
+            return Result::Overflow;
+        const u32 additional = kind.Length() + 1u + static_cast<u32>(versionLength) + 1u;
+        const Result reserve = ReserveAdditional(destination, additional);
+        if (reserve != Result::Success)
+            return reserve;
+        destination.Append(kind);
+        destination.Append(' ');
+        destination.Append(versionText, static_cast<u32>(versionLength));
+        destination.Append('\n');
+        return Result::Success;
+    }
+
+    Result AppendTextAssignment(containers::String& destination, const containers::StringView key,
+                                const containers::StringView value) noexcept
+    {
+        if (!IsValidTextKey(key))
+            return Result::InvalidArgument;
+        const u32 escapedLength = EscapedTextLength(value);
+        if (escapedLength < value.Length())
+            return Result::Overflow;
+        const u64 additional64 = static_cast<u64>(key.Length()) + 4u + escapedLength + 2u;
+        if (additional64 > 0xffffffffu)
+            return Result::LimitExceeded;
+        const Result reserve = ReserveAdditional(destination, static_cast<u32>(additional64));
+        if (reserve != Result::Success)
+            return reserve;
+        destination.Append(key);
+        destination.Append(" = \"", 4);
+        AppendEscapedText(destination, value);
+        destination.Append("\"\n", 2);
+        return Result::Success;
     }
 
     BinaryReader::BinaryReader(filesystem::IFile& file) noexcept : m_file(&file)

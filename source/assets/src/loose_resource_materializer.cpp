@@ -56,8 +56,11 @@ namespace vanguard::assets
                                                                       const DerivedDataArtifactSource& source,
                                                                       const filesystem::AbsolutePath& target,
                                                                       const filesystem::AbsolutePath& temporary,
-                                                                      const LooseMaterializationLimits& limits) const noexcept
+                                                                      const LooseMaterializationLimits& limits,
+                                                                      LooseMaterializationInfo* const info) const noexcept
     {
+        if (info != nullptr)
+            *info = {};
         if (!resource.IsValid() || !resource.IsTyped() || target.Empty() || temporary.Empty() || !target.IsFilePath() ||
             !temporary.IsFilePath() || target == temporary ||
             filesystem::paths::ParentAbsolutePath(target) != filesystem::paths::ParentAbsolutePath(temporary) || !limits.IsValid())
@@ -132,18 +135,70 @@ namespace vanguard::assets
             }
         }
 
-        auto output = manager.CreateFileWriter(temporary, filesystem::FOF_Buffered);
-        if (!output)
-            return LooseMaterializationResult::IoFailure;
-
         containers::DynamicArray<u8> scratch(memory::pools::Assets::GetInstance());
         scratch.Resize(limits.scratchBytes);
         if (scratch.Size() != limits.scratchBytes)
-        {
-            output.Reset();
-            static_cast<void>(manager.DeleteFile(temporary));
             return LooseMaterializationResult::OutOfMemory;
+
+        // Warm restart/reopen must reuse committed loose state rather than
+        // rewriting every publication from VDDC. The deterministic target name
+        // includes the committed build identity, but the file can still have
+        // been externally modified or partially corrupted. Prove byte-exact
+        // equality against the selected current VDDC payload before reusing it;
+        // the same pass computes the CRC needed by ResourceStreamer.
+        if (manager.FileExist(target))
+        {
+            auto existing = manager.CreateFileReader(target, filesystem::FOF_Buffered);
+            if (existing && existing->GetSize() == totalBytes)
+            {
+                crypto::Sha256Builder expectedHash;
+                bool expectedValid = true;
+                for (const IndexedArtifact& indexed : selected)
+                {
+                    const CachedArtifactDescriptor expected{indexed.resource, indexed.segment, indexed.flags,
+                                                            indexed.alignmentLog2, indexed.byteCount};
+                    const DerivedDataArtifactResult hashed = reader.Hash(expected, scratch, expectedHash);
+                    if (hashed != DerivedDataArtifactResult::Success)
+                    {
+                        existing.Reset();
+                        return MapOpenResult(hashed);
+                    }
+                }
+                BuildFingerprint expectedDigest;
+                expectedValid = expectedHash.Finalize(expectedDigest);
+
+                serialization::BinaryReader existingReader(*existing);
+                crypto::Sha256Builder actualHash;
+                u64 contentCrc64 = 0;
+                u64 remaining = totalBytes;
+                while (expectedValid && remaining != 0)
+                {
+                    const u32 batch = static_cast<u32>(remaining < scratch.Size() ? remaining : scratch.Size());
+                    if (!existingReader.ReadBytes(scratch.Data(), batch) || !actualHash.Update(scratch.Data(), batch))
+                    {
+                        expectedValid = false;
+                        break;
+                    }
+                    contentCrc64 = serialization::Crc64(scratch.Data(), batch, contentCrc64);
+                    remaining -= batch;
+                }
+                BuildFingerprint actualDigest;
+                const bool existingExact = expectedValid && existingReader.Position() == totalBytes &&
+                                           !existing->HasErrors() && actualHash.Finalize(actualDigest) &&
+                                           actualDigest == expectedDigest;
+                existing.Reset();
+                if (existingExact)
+                {
+                    if (info != nullptr)
+                        *info = {totalBytes, contentCrc64};
+                    return LooseMaterializationResult::Success;
+                }
+            }
         }
+
+        auto output = manager.CreateFileWriter(temporary, filesystem::FOF_Buffered);
+        if (!output)
+            return LooseMaterializationResult::IoFailure;
 
         crypto::Sha256Builder expectedHash;
         for (const IndexedArtifact& indexed : selected)
@@ -177,6 +232,7 @@ namespace vanguard::assets
         }
         serialization::BinaryReader stagedReader(*staged);
         crypto::Sha256Builder actualHash;
+        u64 contentCrc64 = 0;
         u64 remaining = totalBytes;
         while (remaining != 0)
         {
@@ -187,6 +243,7 @@ namespace vanguard::assets
                 static_cast<void>(manager.DeleteFile(temporary));
                 return LooseMaterializationResult::ValidationFailed;
             }
+            contentCrc64 = serialization::Crc64(scratch.Data(), batch, contentCrc64);
             remaining -= batch;
         }
         BuildFingerprint actualDigest;
@@ -204,6 +261,8 @@ namespace vanguard::assets
             static_cast<void>(manager.DeleteFile(temporary));
             return LooseMaterializationResult::PublicationFailed;
         }
+        if (info != nullptr)
+            *info = {totalBytes, contentCrc64};
         return LooseMaterializationResult::Success;
     }
 } // namespace vanguard::assets

@@ -1,6 +1,7 @@
 #include <vanguard/rendering/material_resource_resolver.hpp>
 
 #include <vanguard/concurrency/thread.hpp>
+#include <vanguard/materials/materials.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/textures/texture_resource.hpp>
@@ -171,6 +172,7 @@ namespace vanguard::rendering
         {
             MaterialResourceProviderDesc desc;
             bool builtinTexture = false;
+            bool builtinStandardSampler = false;
             u32 liveOperations = 0;
         };
 
@@ -228,6 +230,9 @@ namespace vanguard::rendering
         TextureResidencyRuntime* textures = nullptr;
         rhi::DescriptorDomain resourceDescriptors;
         rhi::DescriptorDomain samplerDescriptors;
+        rhi::SamplerState standardFilteringSampler;
+        rhi::SamplerStateDesc standardFilteringSamplerDesc;
+        u64 standardFilteringSamplerNextToken = 1;
         MaterialResourceResolverConfig config;
         MaterialResourceResolverStats stats;
     };
@@ -266,6 +271,131 @@ namespace vanguard::rendering
                     SameShape(fallback.desc.shape, request.role.shape))
                     return &fallback;
             return nullptr;
+        }
+
+        [[nodiscard]] bool BeginStandardFilteringSamplerProvider(
+            void* const userData, const MaterialResourceProviderRequest& request,
+            MaterialResourceProviderToken& token, const char*& failureMessage) noexcept
+        {
+            auto* const impl = static_cast<MaterialResourceResolver::Impl*>(userData);
+            if (impl == nullptr || !request.fallback || request.resource.IsValid() ||
+                request.role.kind != shaders::MaterialResourceKind::Sampler ||
+                request.role.shape.access != shaders::MaterialResourceAccess::Read ||
+                request.role.shape.samplerKind != shaders::MaterialSamplerKind::Filtering ||
+                impl->standardFilteringSamplerNextToken == 0)
+            {
+                failureMessage = "standard filtering-sampler fallback request is invalid";
+                return false;
+            }
+            if (!impl->standardFilteringSampler)
+            {
+                rhi::Failure rhiFailure;
+                impl->standardFilteringSampler = rhi::SamplerState(
+                    rhi::AdoptReference,
+                    rhi::RequestSamplerState(impl->standardFilteringSamplerDesc, &rhiFailure));
+                if (!impl->standardFilteringSampler)
+                {
+                    failureMessage = "standard filtering-sampler creation failed";
+                    return false;
+                }
+                rhi::SetResourceDebugName(impl->standardFilteringSampler, "Material.StandardFilteringSampler");
+            }
+            token.value = impl->standardFilteringSamplerNextToken++;
+            return true;
+        }
+
+        [[nodiscard]] bool PollStandardFilteringSamplerProvider(
+            void* const userData, const MaterialResourceProviderToken token,
+            MaterialResourceProviderResult& result, const char*& failureMessage) noexcept
+        {
+            auto* const impl = static_cast<MaterialResourceResolver::Impl*>(userData);
+            if (impl == nullptr || !impl->standardFilteringSampler || !token.IsValid())
+            {
+                failureMessage = "standard filtering-sampler fallback is unavailable";
+                return false;
+            }
+            result = {};
+            result.state = MaterialResourceProviderState::Ready;
+            result.sampler = impl->standardFilteringSampler.GetRef();
+            result.samplerDesc = impl->standardFilteringSamplerDesc;
+            result.identity = 0x56534d5053544401ull;
+            result.generation = 1;
+            return true;
+        }
+
+        void CancelStandardFilteringSamplerProvider(void*, MaterialResourceProviderToken) noexcept {}
+        void ReleaseStandardFilteringSamplerProvider(void*, MaterialResourceProviderToken, const rhi::ResidencyFenceSet&) noexcept {}
+        void AbandonStandardFilteringSamplerProvider(void*, MaterialResourceProviderToken) noexcept {}
+
+        [[nodiscard]] bool EnsureStandardFilteringSamplerFallback(
+            MaterialResourceResolver::Impl& impl, const MaterialResourceResolveRequest& request,
+            MaterialResourceResolverFailure* const failure) noexcept
+        {
+            if (request.role.kind != shaders::MaterialResourceKind::Sampler ||
+                request.expectedAssetType != materials::StandardSamplerResourceType ||
+                request.role.shape.access != shaders::MaterialResourceAccess::Read ||
+                request.role.shape.samplerKind != shaders::MaterialSamplerKind::Filtering ||
+                request.dependency == resources::DependencyKind::Required || request.resource.IsValid())
+            {
+                return true;
+            }
+
+            u32 providerIndex = FindProvider(impl, shaders::MaterialResourceKind::Sampler,
+                                             materials::StandardSamplerResourceType);
+            const bool fallbackExists = FindFallback(impl, request) != nullptr;
+            if (!fallbackExists && impl.fallbacks.Size() >= impl.config.maximumFallbacks)
+                return Fail(&impl, failure, MaterialResourceResolverFailureCode::CapacityExceeded,
+                            "standard filtering-sampler fallback exceeds material fallback capacity",
+                            shaders::MaterialResourceKind::Sampler, materials::StandardSamplerResourceType);
+            if (providerIndex == InvalidMaterialResourceResolveIndex)
+            {
+                if (impl.providers.Size() >= impl.config.maximumProviders)
+                    return Fail(&impl, failure, MaterialResourceResolverFailureCode::CapacityExceeded,
+                                "standard filtering-sampler provider exceeds material provider capacity",
+                                shaders::MaterialResourceKind::Sampler, materials::StandardSamplerResourceType);
+
+                MaterialResourceResolver::Impl::Provider provider;
+                provider.desc.kind = shaders::MaterialResourceKind::Sampler;
+                provider.desc.assetType = materials::StandardSamplerResourceType;
+                provider.desc.begin = &BeginStandardFilteringSamplerProvider;
+                provider.desc.poll = &PollStandardFilteringSamplerProvider;
+                provider.desc.cancel = &CancelStandardFilteringSamplerProvider;
+                provider.desc.release = &ReleaseStandardFilteringSamplerProvider;
+                provider.desc.abandon = &AbandonStandardFilteringSamplerProvider;
+                provider.desc.userData = &impl;
+                provider.builtinStandardSampler = true;
+                const u32 previousProviderCount = impl.providers.Size();
+                impl.providers.PushBack(provider);
+                if (impl.providers.Size() != previousProviderCount + 1u)
+                    return Fail(&impl, failure, MaterialResourceResolverFailureCode::CapacityExceeded,
+                                "standard filtering-sampler provider allocation failed",
+                                shaders::MaterialResourceKind::Sampler, materials::StandardSamplerResourceType);
+                providerIndex = previousProviderCount;
+                impl.stats.registeredProviders = impl.providers.Size();
+            }
+            else if (!impl.providers[providerIndex].builtinStandardSampler)
+            {
+                return Fail(&impl, failure, MaterialResourceResolverFailureCode::DuplicateProvider,
+                            "standard filtering-sampler resource type is owned by another provider",
+                            shaders::MaterialResourceKind::Sampler, materials::StandardSamplerResourceType);
+            }
+
+            if (fallbackExists)
+                return true;
+
+            MaterialResourceResolver::Impl::Fallback fallback;
+            fallback.desc.kind = shaders::MaterialResourceKind::Sampler;
+            fallback.desc.assetType = materials::StandardSamplerResourceType;
+            fallback.desc.typeFingerprint = request.role.typeFingerprint;
+            fallback.desc.shape = request.role.shape;
+            const u32 previousFallbackCount = impl.fallbacks.Size();
+            impl.fallbacks.PushBack(static_cast<MaterialResourceResolver::Impl::Fallback&&>(fallback));
+            if (impl.fallbacks.Size() != previousFallbackCount + 1u)
+                return Fail(&impl, failure, MaterialResourceResolverFailureCode::CapacityExceeded,
+                            "standard filtering-sampler fallback allocation failed",
+                            shaders::MaterialResourceKind::Sampler, materials::StandardSamplerResourceType);
+            impl.stats.registeredFallbacks = impl.fallbacks.Size();
+            return true;
         }
 
         [[nodiscard]] MaterialResourceResolver::Impl::Operation* FindOperation(MaterialResourceResolver::Impl& impl, const MaterialResourceResolveTicket ticket) noexcept
@@ -755,6 +885,7 @@ namespace vanguard::rendering
             m_impl->recycledDescriptors.PushBack(index);
         }
         m_impl->stats.cachedDescriptors = 0;
+        m_impl->standardFilteringSampler.Reset();
         return true;
     }
 
@@ -772,6 +903,9 @@ namespace vanguard::rendering
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::WrongThread, "material providers must register on the main thread");
         if (!provider.IsValid())
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::InvalidArgument, "material provider descriptor is invalid", provider.kind, provider.assetType);
+        if (provider.kind == shaders::MaterialResourceKind::Sampler && provider.assetType == materials::StandardSamplerResourceType)
+            return Fail(m_impl, failure, MaterialResourceResolverFailureCode::DuplicateProvider,
+                        "standard filtering-sampler resource type is renderer-owned", provider.kind, provider.assetType);
         if (FindProvider(*m_impl, provider.kind, provider.assetType) != InvalidMaterialResourceResolveIndex)
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::DuplicateProvider, "material provider key is already registered", provider.kind, provider.assetType);
         if (m_impl->providers.Size() >= m_impl->config.maximumProviders)
@@ -790,6 +924,9 @@ namespace vanguard::rendering
             return Fail(nullptr, failure, MaterialResourceResolverFailureCode::NotInitialized, "material resource resolver is not initialized");
         if (!concurrency::IsMainThread())
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::WrongThread, "material fallbacks must register on the main thread");
+        if (fallback.kind == shaders::MaterialResourceKind::Sampler && fallback.assetType == materials::StandardSamplerResourceType)
+            return Fail(m_impl, failure, MaterialResourceResolverFailureCode::DuplicateFallback,
+                        "standard filtering-sampler fallback is renderer-owned", fallback.kind, fallback.assetType);
         if (fallback.assetType == resources::InvalidResourceTypeId || fallback.typeFingerprint.IsEmpty() || !shaders::IsValidMaterialResourceShape(fallback.kind, fallback.shape) ||
             FindProvider(*m_impl, fallback.kind, fallback.assetType) == InvalidMaterialResourceResolveIndex || (fallback.resource.IsValid() && fallback.resource.GetType() != fallback.assetType))
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::InvalidArgument, "material fallback descriptor is invalid", fallback.kind, fallback.assetType);
@@ -839,6 +976,8 @@ namespace vanguard::rendering
         if (request.dependency == resources::DependencyKind::Required && !request.resource.IsValid())
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::DependencyUnavailable, "required material role has no exact loaded dependency generation", request.role.kind,
                         request.expectedAssetType);
+        if (!EnsureStandardFilteringSamplerFallback(*m_impl, request, failure))
+            return false;
         if (m_impl->stats.activeOperations >= m_impl->config.maximumOperations)
             return Fail(m_impl, failure, MaterialResourceResolverFailureCode::CapacityExceeded, "material role operation capacity exceeded", request.role.kind, request.expectedAssetType);
 

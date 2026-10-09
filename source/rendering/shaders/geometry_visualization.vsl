@@ -30,3 +30,30 @@ float4 GeometryVisualizationFragmentMain(GeometryVisualizationVertex input) : SV
     uint2 pixel = min(uint2(saturate(input.uv) * float2(width, height)), uint2(width - 1u, height - 1u));
     return float4(source.Load(int3(pixel, 0)).rgb, 1.0);
 }
+
+[shader("fragment")]
+float4 ResolveCameraOutputSceneLinearFragmentMain(GeometryVisualizationVertex input) : SV_Target0
+{
+    Texture2D<float4> source = ResourceDescriptorHeap[visualization.sourceDescriptor];
+    uint width, height;
+    source.GetDimensions(width, height);
+    uint2 pixel = min(uint2(saturate(input.uv) * float2(width, height)), uint2(width - 1u, height - 1u));
+    return float4(source.Load(int3(pixel, 0)).rgb, 1.0);
+}
+
+float LinearToSrgb(float value)
+{
+    value = saturate(value);
+    return value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+[shader("fragment")]
+float4 ResolveCameraOutputDisplaySrgbFragmentMain(GeometryVisualizationVertex input) : SV_Target0
+{
+    Texture2D<float4> source = ResourceDescriptorHeap[visualization.sourceDescriptor];
+    uint width, height;
+    source.GetDimensions(width, height);
+    uint2 pixel = min(uint2(saturate(input.uv) * float2(width, height)), uint2(width - 1u, height - 1u));
+    float3 linear = source.Load(int3(pixel, 0)).rgb;
+    return float4(LinearToSrgb(linear.r), LinearToSrgb(linear.g), LinearToSrgb(linear.b), 1.0);
+}

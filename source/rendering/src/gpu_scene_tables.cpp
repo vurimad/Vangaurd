@@ -3,6 +3,7 @@
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
 
+#include <cstring>
 #include <new>
 
 namespace vanguard::rendering
@@ -346,7 +347,25 @@ namespace vanguard::rendering
                 desc.structureStride = stride;
                 desc.usage = rhi::BufferUsage::Structured | rhi::BufferUsage::ShaderResource | rhi::BufferUsage::UnorderedAccess | rhi::BufferUsage::CopyDestination;
                 desc.initialState = rhi::ResourceState::Common;
-                page.buffer = rhi::CreateBuffer(desc, {}, &rhiFailure);
+                const u64 pageBytes = desc.size;
+                // Direct GPU visibility traverses the Instance-table high-water mark. Slots may be
+                // allocated before their first scene publication, so fresh Instance pages must start
+                // as deterministic inactive tombstones rather than undefined device-local bytes.
+                // This is a one-time page-growth upload on Graphics; geometry visibility also records
+                // on Graphics, preserving queue order without a CPU wait or per-frame initialization.
+                memory::MemoryBlock zeroInitialization;
+                rhi::BufferInitData initialData;
+                if (kind == GpuSceneTableKind::Instance)
+                {
+                    zeroInitialization = memory::Allocate(memory::PoolId::Rendering, static_cast<usize>(pageBytes), 16u);
+                    if (!zeroInitialization)
+                        return Fail(failure, GpuSceneTablesFailureCode::CapacityExceeded, "GPU Scene Instance page initialization allocation failed", kind, pageIndex);
+                    std::memset(zeroInitialization.address, 0, static_cast<usize>(pageBytes));
+                    initialData = {zeroInitialization.address, pageBytes};
+                }
+                page.buffer = rhi::CreateBuffer(desc, initialData, &rhiFailure);
+                if (zeroInitialization)
+                    memory::Free(zeroInitialization);
                 if (!page.buffer)
                 {
                     ++table.stats.pageCreationFailures;

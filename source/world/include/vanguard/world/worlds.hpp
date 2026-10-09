@@ -123,11 +123,21 @@ namespace vanguard::world
         ProxyChildFlags flags = ProxyChildFlags::RequiredForReplacement;
     };
 
+    /// Durable world-local identity for the authored default camera. All-zero is
+    /// the only absent representation; runtime handles remain session-local.
+    struct WorldCameraLocator
+    {
+        u64 cellId = InvalidCellId;
+        u64 entityId = InvalidEntityId;
+        u64 componentStableId = prefabs::InvalidStableId;
+    };
+
     struct WorldBuildDescription
     {
         u64 worldId = 0;
         f64 origin[3]{};
         WorldBounds bounds;
+        WorldCameraLocator startupCamera;
         containers::ArraySpan<const WorldCellBuildRecord> cells;
         containers::ArraySpan<const DistantProxyBuildRecord> distantProxies;
         containers::ArraySpan<const ProxyChildBuildRecord> proxyChildren;
@@ -207,6 +217,8 @@ namespace vanguard::world
         [[nodiscard]] const WorldBounds& Bounds() const noexcept;
         [[nodiscard]] const crypto::Digest256& GetSourceFingerprint() const noexcept;
         [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
+        [[nodiscard]] bool HasStartupCamera() const noexcept;
+        [[nodiscard]] const WorldCameraLocator& GetStartupCamera() const noexcept;
         [[nodiscard]] containers::ArraySpan<const WorldCellRecord> GetCells() const noexcept;
         [[nodiscard]] containers::ArraySpan<const DistantProxyRecord> GetDistantProxies() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ProxyChildRecord> GetProxyChildren() const noexcept;
@@ -221,6 +233,7 @@ namespace vanguard::world
         WorldBounds m_bounds;
         crypto::Digest256 m_sourceFingerprint;
         crypto::Digest256 m_contentFingerprint;
+        WorldCameraLocator m_startupCamera;
         containers::DynamicArray<WorldCellRecord> m_cells;
         containers::DynamicArray<DistantProxyRecord> m_distantProxies;
         containers::DynamicArray<ProxyChildRecord> m_proxyChildren;

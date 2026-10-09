@@ -6,6 +6,10 @@ namespace vanguard::materials
 {
     inline constexpr u32 MaterialMagic = serialization::MakeFourCC('V', 'M', 'A', 'T');
     inline constexpr resources::ResourceTypeId MaterialResourceType = serialization::MakeFourCC('V', 'M', 'A', 'T');
+    // Logical material role type for renderer-owned standard filtering samplers.
+    // It is intentionally not a streamable asset format: Soft sampler roles resolve
+    // through MaterialResourceResolver's provider/fallback path.
+    inline constexpr resources::ResourceTypeId StandardSamplerResourceType = serialization::MakeFourCC('V', 'S', 'M', 'P');
 
     enum class Result : u8
     {

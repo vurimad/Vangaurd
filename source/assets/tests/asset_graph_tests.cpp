@@ -244,34 +244,32 @@ namespace
         return {{source, {bytes, 1}, {}}, output, assets::TargetPlatform::WindowsD3D12, {&fixture.generation, 1}};
     }
 
-    [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::BuildRequest& request, void* const userData) noexcept
+    [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request, void* const userData) noexcept
     {
         auto& fixture = *static_cast<GraphFixture*>(userData);
         if (dependency.identity == fixture.rootOutput)
         {
-            request = MakeRequest(fixture.rootSource, fixture.rootOutput, fixture.rootBytes, fixture);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.rootSource, fixture.rootOutput, fixture.rootBytes, fixture));
         }
         if (dependency.identity == fixture.leftOutput)
         {
-            request = MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftBytes, fixture);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.leftSource, fixture.leftOutput, fixture.leftBytes, fixture));
         }
         if (dependency.identity == fixture.rightOutput)
         {
-            request = MakeRequest(fixture.rightSource, fixture.rightOutput, fixture.rightBytes, fixture);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.rightSource, fixture.rightOutput, fixture.rightBytes, fixture));
         }
         if (dependency.identity == fixture.sharedOutput)
         {
-            request = MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedBytes, fixture);
-            return true;
+            // Resolver storage is intentionally stack-local. BuildGraph must only
+            // observe the ownership-safe copy after this callback returns.
+            const u8 temporaryByte = fixture.sharedBytes[0];
+            return request.CopyFrom(MakeRequest(fixture.sharedSource, fixture.sharedOutput, &temporaryByte, fixture));
         }
         if (dependency.identity == fixture.softDependencyOutput)
         {
             static_cast<void>(fixture.softResolverCalls.Increment());
-            request = MakeRequest(fixture.softDependencySource, fixture.softDependencyOutput, fixture.sharedBytes, fixture);
-            return true;
+            return request.CopyFrom(MakeRequest(fixture.softDependencySource, fixture.softDependencyOutput, fixture.sharedBytes, fixture));
         }
         return false;
     }

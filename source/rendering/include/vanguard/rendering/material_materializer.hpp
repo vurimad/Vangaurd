@@ -82,11 +82,6 @@ namespace vanguard::rendering
 
     class MaterialMaterializer;
 
-    namespace detail
-    {
-        struct MaterialMaterializerAccess;
-    } // namespace detail
-
     /// Move-only ownership of one accepted GPU material definition and its exact
     /// CPU closure/resource references. Retire must cover every renderer queue that
     /// could have consumed the published handle.
@@ -155,6 +150,5 @@ namespace vanguard::rendering
         Impl* m_impl = nullptr;
 
         friend class GpuMaterialReference;
-        friend struct detail::MaterialMaterializerAccess;
     };
 } // namespace vanguard::rendering

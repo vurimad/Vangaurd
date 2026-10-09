@@ -19,13 +19,13 @@ namespace vanguard::entities
             reflection::MakeField("mesh", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
                                   offsetof(Data, mesh), sizeof(Data::mesh), alignof(resources::ResourceReference), 1, 0,
                                   reflection::FieldFlags::Required),
-            reflection::MakeField("scaleX", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleX), sizeof(f32), alignof(f32)),
-            reflection::MakeField("scaleY", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleY), sizeof(f32), alignof(f32)),
-            reflection::MakeField("scaleZ", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleZ), sizeof(f32), alignof(f32)),
-            reflection::MakeField("layerMask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(Data, layerMask), sizeof(u64), alignof(u64)),
-            reflection::MakeField("visibilityMask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(Data, visibilityMask), sizeof(u32), alignof(u32)),
-            reflection::MakeField("castsShadow", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(Data, castsShadow), sizeof(bool), alignof(bool)),
-            reflection::MakeField("receivesDecals", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(Data, receivesDecals), sizeof(bool), alignof(bool))
+            reflection::MakeField("scale_x", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleX), sizeof(f32), alignof(f32)),
+            reflection::MakeField("scale_y", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleY), sizeof(f32), alignof(f32)),
+            reflection::MakeField("scale_z", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleZ), sizeof(f32), alignof(f32)),
+            reflection::MakeField("layer_mask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(Data, layerMask), sizeof(u64), alignof(u64)),
+            reflection::MakeField("visibility_mask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(Data, visibilityMask), sizeof(u32), alignof(u32)),
+            reflection::MakeField("casts_shadow", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(Data, castsShadow), sizeof(bool), alignof(bool)),
+            reflection::MakeField("receives_decals", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(Data, receivesDecals), sizeof(bool), alignof(bool))
         };
         const reflection::Schema Schema{StaticMeshComponentType, "vanguard.static_mesh_component", sizeof(Data), alignof(Data), 1, 1,
                                         Fields, static_cast<u32>(sizeof(Fields) / sizeof(Fields[0]))};
@@ -81,7 +81,7 @@ namespace vanguard::entities
     bool StaticMeshComponent::Start() noexcept
     {
         if (m_rendering == nullptr || m_rendering->GetMeshResidency() == nullptr ||
-            !m_rendering->GetMeshResidency()->IsInitialized() || m_rendering->GetMeshDrawPhases().Empty())
+            !m_rendering->GetMeshResidency()->IsInitialized())
             return false;
         m_failure = nullptr;
         m_mesh = m_resources.TryAcquire(m_data.mesh);
@@ -114,6 +114,13 @@ namespace vanguard::entities
             Fail("static mesh proxy could not be released");
             return;
         }
+        ResetPreparation();
+    }
+
+    void StaticMeshComponent::ResetPreparation() noexcept
+    {
+        if (m_rendering != nullptr)
+            m_rendering->CancelMeshPreparation(*this);
         m_drawable.Reset();
         m_demand.Reset();
         m_mesh.Reset();
@@ -123,13 +130,13 @@ namespace vanguard::entities
 
     void StaticMeshComponent::OnVisualDetach(const ComponentContext&) noexcept
     {
-        Stop();
+        ResetPreparation();
         m_rendering = nullptr;
     }
 
     void StaticMeshComponent::OnVisualUninitialize(const ComponentContext&) noexcept
     {
-        Stop();
+        ResetPreparation();
         m_rendering = nullptr;
         m_resources = {};
     }
@@ -200,7 +207,7 @@ namespace vanguard::entities
             if (info.state != rendering::MeshResidencyState::RenderableTopologySubmitted)
                 return true;
             rendering::MeshResidencyFailure failure;
-            if (!residency.RequestDrawable(m_demand, m_rendering->GetMeshDrawPhases(), m_drawable, &failure))
+            if (!residency.RequestDrawable(m_demand, m_drawable, &failure))
             {
                 // A rapid disable/re-enable can meet the preceding closure's
                 // withdrawal. Keep this independent demand until retirement finishes.

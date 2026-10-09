@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/assets/assets.hpp>
+#include <vanguard/assets/source_database.hpp>
 #include <vanguard/texture_tools/texture_import.hpp>
 
 namespace vanguard::texture_tools
@@ -8,6 +9,7 @@ namespace vanguard::texture_tools
     inline constexpr resources::ResourceTypeId TextureSourceResourceType = serialization::MakeFourCC('V', 'T', 'S', 'R');
     inline constexpr resources::ResourceTypeId TextureCompilerToolResourceType = serialization::MakeFourCC('V', 'T', 'T', 'L');
     inline constexpr u32 TextureAssetCompilerVersion = 1;
+    inline constexpr u32 TextureBuildSettingsVersion = 1;
 
     enum class TextureBuildSourceMode : u8
     {
@@ -44,6 +46,9 @@ namespace vanguard::texture_tools
     /// Produces the canonical fixed-size V1 recipe placed in assets::BuildRequest::settings.
     [[nodiscard]] TextureBuildSettingsResult EncodeTextureBuildSettings(const TextureBuildDescription& description,
                                                                         containers::DynamicArray<u8>& output) noexcept;
+    /// Strict V1 decode. Destination remains unchanged on failure.
+    [[nodiscard]] TextureBuildSettingsResult DecodeTextureBuildSettings(containers::ArraySpan<const u8> settings,
+                                                                        TextureBuildDescription& description) noexcept;
 
     class TextureAssetCompiler final
     {
@@ -61,6 +66,7 @@ namespace vanguard::texture_tools
         [[nodiscard]] bool Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
         [[nodiscard]] assets::CompilerDescriptor GetDescriptor() noexcept;
+        [[nodiscard]] assets::SourceImporterDescriptor GetImporterDescriptor() noexcept;
         [[nodiscard]] assets::Result Register(assets::BuildSystem& buildSystem) noexcept;
         [[nodiscard]] assets::Result Unregister() noexcept;
 

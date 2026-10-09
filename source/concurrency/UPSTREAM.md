@@ -25,7 +25,7 @@ copy operations, return conventions, and 32-bit boolean representation. Reads
 use RED's `FetchValue`; modifications continue to use interlocked operations.
 The workspace explicitly selects `/volatile:ms` for the MSVC x64 load contract.
 Only the prerequisite platform/type headers are included, not the entire
-threading or logger interface. See `docs/development/low-level-reuse-audit.md`
+threading or logger interface. See `docs/development/studies/low-level-reuse-audit.md`
 for the source-review boundary and remaining follow-ups.
 
 All audited files are byte-identical between original RED and the previous

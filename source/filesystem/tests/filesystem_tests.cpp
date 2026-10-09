@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 
@@ -45,7 +46,7 @@ int main()
     namespace io = vanguard::io;
     namespace memory = vanguard::memory;
 
-    const filesystem::AbsolutePath workingDirectory = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath workingDirectory = vanguard::tests::ScratchDirectory("filesystem_tests");
     const filesystem::AbsolutePath testDirectory = workingDirectory.AddDirPath("vanguard_filesystem_conformance");
     const filesystem::AbsolutePath nestedDirectory = testDirectory.AddDirPath("nested");
     const filesystem::AbsolutePath rawPath = testDirectory.AddFilePath("raw.bin");
@@ -55,6 +56,8 @@ int main()
     const filesystem::AbsolutePath safePath = testDirectory.AddFilePath("safe.bin");
     const filesystem::AbsolutePath replacementTarget = testDirectory.AddFilePath("replacement.bin");
     const filesystem::AbsolutePath replacementStaged = testDirectory.AddFilePath("replacement.bin.tmp");
+    const filesystem::AbsolutePath exclusivePath = testDirectory.AddFilePath("exclusive.bin");
+    const filesystem::AbsolutePath missingPath = testDirectory.AddFilePath("missing.bin");
 
     Check(!filesystem::Initialize({workingDirectory, workingDirectory, testDirectory}), "initialization rejects missing dependencies");
     Check(memory::Initialize(), "memory initialization");
@@ -76,6 +79,8 @@ int main()
     static_cast<void>(manager.DeleteFile(safePath));
     static_cast<void>(manager.DeleteFile(replacementTarget));
     static_cast<void>(manager.DeleteFile(replacementStaged));
+    static_cast<void>(manager.DeleteFile(exclusivePath));
+    static_cast<void>(manager.DeleteFile(missingPath));
     static_cast<void>(manager.DeletePath(nestedDirectory));
     static_cast<void>(manager.DeletePath(testDirectory));
 
@@ -190,6 +195,33 @@ int main()
     Check(manager.SetFileReadOnly(movedPath, true), "set read-only");
     Check(manager.IsFileReadOnly(movedPath), "query read-only");
     Check(manager.SetFileReadOnly(movedPath, false), "clear read-only");
+
+    Check(filesystem::WriteExclusiveFile(exclusivePath, g_payload.data(), g_payload.size()) ==
+              filesystem::ExclusiveFileWriteResult::Success,
+          "exclusive complete write creates a new path");
+    Check(filesystem::WriteExclusiveFile(exclusivePath, oldReplacement.data(), oldReplacement.size()) ==
+              filesystem::ExclusiveFileWriteResult::AlreadyExists,
+          "exclusive complete write rejects an existing path");
+    std::array<vanguard::u8, g_payload.size()> completeRead{};
+    vanguard::usize completeReadBytes = 0;
+    Check(filesystem::ReadCompleteFile(exclusivePath, completeRead.data(), completeRead.size(), completeReadBytes) ==
+              filesystem::CompleteFileReadResult::Success &&
+              completeReadBytes == g_payload.size() && completeRead == g_payload,
+          "typed complete read returns the exact file image");
+    completeReadBytes = 77;
+    Check(filesystem::ReadCompleteFile(missingPath, completeRead.data(), completeRead.size(), completeReadBytes) ==
+              filesystem::CompleteFileReadResult::Missing && completeReadBytes == 0,
+          "typed complete read distinguishes a missing path");
+    completeRead.fill(0);
+    completeReadBytes = 77;
+    Check(filesystem::ReadCompleteFile(exclusivePath, completeRead.data(), g_payload.size() - 1u, completeReadBytes) ==
+              filesystem::CompleteFileReadResult::LimitExceeded && completeReadBytes == 0,
+          "typed complete read rejects an oversized file without partial success");
+    completeReadBytes = 0;
+    Check(filesystem::ReadCompleteFile(exclusivePath, completeRead.data(), completeRead.size(), completeReadBytes) ==
+              filesystem::CompleteFileReadResult::Success && completeRead == g_payload,
+          "exclusive second create leaves the first file byte-identical");
+    Check(manager.DeleteFile(exclusivePath), "delete exclusive primitive file");
 
     containers::DynamicArray<filesystem::AbsolutePath> foundFiles(memory::pools::Filesystem::GetInstance());
     manager.FindFiles(testDirectory, containers::String("*.bin"), foundFiles, true);

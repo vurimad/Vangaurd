@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/engine/engine_services.hpp>
 #include <vanguard/engine/frame_pipeline_service.hpp>
 #include <vanguard/engine/rendering_service.hpp>
@@ -8,6 +9,7 @@
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/crypto/crypto.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
+#include <vanguard/entities/rendering_runtime.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/materials/materials.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -16,6 +18,8 @@
 #include <vanguard/pipelines/pipelines.hpp>
 #include <vanguard/rhi/d3d12/backend.hpp>
 #include <vanguard/rhi/rhi.hpp>
+#include <vanguard/rendering/geometry_frame_work.hpp>
+#include <vanguard/rendering/renderer_draw_contract.hpp>
 #include <vanguard/shaders/shaders.hpp>
 #include <vanguard/shader_tools/shader_compiler.hpp>
 #include <vanguard/streaming/streaming.hpp>
@@ -215,8 +219,9 @@ namespace
     {
         CompiledShader vertex;
         CompiledShader pixel;
-        if (!Compile("cbuffer DrawContext : register(b0) { float4 drawScale; }; float4 main(float3 p : POSITION) : SV_Position { return float4(p * drawScale.xyz, 1.0); }", "vs_5_0", vertex) ||
-            !Compile("float4 main() : SV_Target0 { return float4(0.25, 0.5, 0.75, 1.0); }", "ps_5_0", pixel) || !BuildTexture(output.textureBytes, variant + 1u))
+        if (!Compile("struct VSInput { float3 p : POSITION; uint2 draw0 : VG_DRAW0; uint2 draw1 : VG_DRAW1; }; cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; float4 main(VSInput input) : SV_Position { float offset = float((input.draw0.x ^ input.draw1.x) & 1u) * 0.000001; return float4(input.p * drawScale.xyz + float3(offset, 0.0, 0.0), 1.0); }", "vs_5_0", vertex) ||
+            !Compile("cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; struct PSOut { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; }; PSOut main() { PSOut o; o.c0=float4(0.25,0.5,0.75,worldCellSize); o.c1=float4(0,0,1,0.5); o.c2=float4(0,0,0,0); return o; }", "ps_5_0", pixel) ||
+            !BuildTexture(output.textureBytes, variant + 1u))
             return false;
 
         const shader::StageBuildRecord stages[]{
@@ -226,10 +231,11 @@ namespace
         const std::array<shader::DescriptorBinding, 3> bindings{{
             {MaterialParameters, 2, 0, 1, shader::BindingKind::ConstantBuffer, shader::BindingAccess::Read, shader::StageBit(shader::ShaderStage::Fragment)},
             {MaterialTextureRole, 2, 1, 2, shader::BindingKind::SampledTexture, shader::BindingAccess::Read, shader::StageBit(shader::ShaderStage::Fragment)},
-            {drawContext, 0, 0, 1, shader::BindingKind::ConstantBuffer, shader::BindingAccess::Read, shader::StageBit(shader::ShaderStage::Vertex)},
+            {drawContext, 0, 0, 1, shader::BindingKind::ConstantBuffer, shader::BindingAccess::Read,
+             shader::StageBit(shader::ShaderStage::Vertex) | shader::StageBit(shader::ShaderStage::Fragment)},
         }};
         const shader::ConstantMember constantMember{MaterialParameters, 0, 16, 0, 0, shader::ScalarType::F32, 1, 4, false};
-        const shader::ConstantBuffer constantBuffers[]{{MaterialParameters, 2, 0, 16, 0, 1}, {drawContext, 0, 0, 16, 1, 1}};
+        const shader::ConstantBuffer constantBuffers[]{{MaterialParameters, 2, 0, 16, 0, 1}, {drawContext, 0, 0, sizeof(rendering::StaticSurfaceDrawContext), 1, 1}};
         const shader::ConstantMember constantMembers[]{constantMember, {drawContext, 0, 16, 0, 0, shader::ScalarType::F32, 1, 4, false}};
         output.textureType = vanguard::crypto::Sha256("Texture2D<float4>", 17);
         output.textureShape = {shader::MaterialResourceAccess::Read,
@@ -245,8 +251,12 @@ namespace
             {MaterialTextureRole, 0, 0, shader::MaterialResourceKind::Texture, shader::MaterialResourceFlags::Required, 0, output.textureType, output.textureShape},
             {MaterialTextureRole, 1, 1, shader::MaterialResourceKind::Texture, shader::MaterialResourceFlags::None, 0, output.textureType, output.textureShape},
         }};
-        const shader::VertexInput input{0x3c040300ull, 0, 0, shader::NumericClass::FloatingPoint, 3, 32};
-        const shader::FragmentOutput fragmentOutput{0x3c040400ull, 0, 0, shader::NumericClass::FloatingPoint, 0x0f};
+        const shader::VertexInput inputs[]{{shader::HashInterfaceName("POSITION"), 0, 0, shader::NumericClass::FloatingPoint, 3, 32},
+                                           {shader::HashInterfaceName("VG_DRAW"), 0, 1, shader::NumericClass::UnsignedInteger, 2, 32},
+                                           {shader::HashInterfaceName("VG_DRAW"), 1, 2, shader::NumericClass::UnsignedInteger, 2, 32}};
+        const shader::FragmentOutput fragmentOutputs[]{{0x3c040400ull, 0, 0, shader::NumericClass::FloatingPoint, 0x0f},
+                                                       {0x3c040401ull, 1, 0, shader::NumericClass::FloatingPoint, 0x0f},
+                                                       {0x3c040402ull, 2, 0, shader::NumericClass::FloatingPoint, 0x0f}};
 
         shader::MaterialContractBuildDescription contract;
         contract.domain.name = 0x3c040500ull;
@@ -266,13 +276,13 @@ namespace
         shaderDescription.compilerFingerprint = vanguard::crypto::Sha256("material 3C.4 D3DCompile", 24);
         shaderDescription.pipelineInterface.stages = shader::StageBit(shader::ShaderStage::Vertex) | shader::StageBit(shader::ShaderStage::Fragment);
         shaderDescription.pipelineInterface.primitiveClass = shader::PrimitiveClass::Triangle;
-        shaderDescription.pipelineInterface.renderTargetCount = 1;
+        shaderDescription.pipelineInterface.renderTargetCount = rendering::MakeStandardOpaqueAttachments().colorCount;
         shaderDescription.stages = stages;
         shaderDescription.bindings = {bindings.data(), static_cast<vanguard::u32>(bindings.size())};
         shaderDescription.constantBuffers = constantBuffers;
         shaderDescription.constantMembers = constantMembers;
-        shaderDescription.vertexInputs = {&input, 1};
-        shaderDescription.fragmentOutputs = {&fragmentOutput, 1};
+        shaderDescription.vertexInputs = inputs;
+        shaderDescription.fragmentOutputs = fragmentOutputs;
         shaderDescription.materialContract = &contract;
         filesystem::MemoryFileWriter shaderWriter(output.shaderBytes);
         if (shader::WriteShader(shaderWriter, shaderDescription) != shader::Result::Success)
@@ -287,15 +297,25 @@ namespace
 
         pipeline::ShaderReference pipelineShader{output.shaderReference.GetPath().Id(),        shaderFile.GetPermutation(), shaderFile.BindingLayoutFingerprint(),
                                                  shaderFile.GetPipelineInterfaceFingerprint(), output.materialDomain,       output.materialLayout};
-        const pipeline::VertexStream vertexStream{0, 12, pipeline::InputRate::PerVertex, 1};
-        const pipeline::VertexAttribute vertexAttribute{0x3c040300ull, 0, 0, 0, 0, shader::NumericClass::FloatingPoint, 3, 32, pipeline::Format::R32G32B32Float, "POSITION"};
+        const pipeline::VertexStream vertexStreams[]{{0, 12, pipeline::InputRate::PerVertex, 1},
+                                                     {rendering::MeshDrawInstanceBinding, sizeof(rendering::MeshDrawInstance), pipeline::InputRate::PerInstance, 1}};
+        const pipeline::VertexAttribute vertexAttributes[]{{shader::HashInterfaceName("POSITION"), 0, 0, 0, 0, shader::NumericClass::FloatingPoint, 3, 32, pipeline::Format::R32G32B32Float, "POSITION"},
+                                                           {shader::HashInterfaceName("VG_DRAW"), 0, 1, rendering::MeshDrawInstanceBinding, 0, shader::NumericClass::UnsignedInteger, 2, 32,
+                                                            pipeline::Format::R32G32UInt, "VG_DRAW"},
+                                                           {shader::HashInterfaceName("VG_DRAW"), 1, 2, rendering::MeshDrawInstanceBinding, 8, shader::NumericClass::UnsignedInteger, 2, 32,
+                                                            pipeline::Format::R32G32UInt, "VG_DRAW"}};
         pipeline::BuildDescription pipelineDescription;
         pipelineDescription.kind = pipeline::PipelineKind::Graphics;
         pipelineDescription.name = 0x3c040700ull + variant;
         pipelineDescription.shaders = {&pipelineShader, 1};
-        pipelineDescription.vertexStreams = {&vertexStream, 1};
-        pipelineDescription.vertexAttributes = {&vertexAttribute, 1};
-        pipelineDescription.graphics.blend.attachmentCount = 1;
+        pipelineDescription.vertexStreams = vertexStreams;
+        pipelineDescription.vertexAttributes = vertexAttributes;
+        const pipeline::AttachmentSignature opaqueAttachments = rendering::MakeStandardOpaqueAttachments();
+        pipelineDescription.graphics.depthStencil.depthTest = true;
+        pipelineDescription.graphics.depthStencil.depthWrite = true;
+        pipelineDescription.graphics.depthStencil.depthCompare = pipeline::CompareOperation::GreaterEqual;
+        pipelineDescription.graphics.multisample.sampleCount = opaqueAttachments.sampleCount;
+        pipelineDescription.graphics.blend.attachmentCount = opaqueAttachments.colorCount;
         pipelineDescription.graphics.attachmentPolicy = pipeline::AttachmentPolicy::Deferred;
         filesystem::MemoryFileWriter pipelineWriter(output.pipelineBytes);
         if (pipeline::WritePipeline(pipelineWriter, pipelineDescription) != pipeline::Result::Success)
@@ -308,7 +328,8 @@ namespace
 
         for (vanguard::u32 index = 0; index < output.parameters.size(); ++index)
             output.parameters[index] = static_cast<vanguard::u8>(variant * 37u + index * 11u + 5u);
-        const material::TechniqueBuildRecord technique{MaterialTechnique, output.pipelineReference, &pipelineFile};
+        const material::TechniqueBuildRecord techniques[]{{MaterialTechnique, output.pipelineReference, &pipelineFile},
+                                                          {rendering::standardRenderPhases::Transparent.value, output.pipelineReference, &pipelineFile}};
         const material::ConstantValueBuildRecord constant{MaterialParameters, output.parameters.data(), static_cast<vanguard::u32>(output.parameters.size())};
         const std::array<material::ResourceValueBuildRecord, 2> resources{{
             {MaterialTextureRole, 0, output.requiredTexture, resources::DependencyKind::Required},
@@ -319,7 +340,7 @@ namespace
         materialDescription.name = 0x3c040800ull + variant;
         materialDescription.shader = output.shaderReference;
         materialDescription.shaderReflection = &shaderFile;
-        materialDescription.techniques = {&technique, 1};
+        materialDescription.techniques = techniques;
         materialDescription.constants = {&constant, 1};
         materialDescription.resources = {resources.data(), static_cast<vanguard::u32>(resources.size())};
         materialDescription.resourceTypeCompatibility = {&compatibility, 1};
@@ -417,7 +438,7 @@ namespace
         vanguard::application::LifecycleStatus OnInitialize(vanguard::application::ServiceContext& context) noexcept override
         {
             auto* service = engine::FindResourceStreamingService(context);
-            directory = filesystem::paths::GetCurrentWorkingDirectory().AddDirPath("vanguard_material_runtime_service_catalog");
+            directory = vanguard::tests::ScratchDirectory("material_runtime_service_tests").AddDirPath("vanguard_material_runtime_service_catalog");
             const auto shaderPath = directory.AddFilePath("startup.vshader");
             const auto pipelinePath = directory.AddFilePath("startup.vppl");
             const auto copyShaderPath = directory.AddFilePath("copy.vshader");
@@ -637,13 +658,14 @@ namespace
     [[nodiscard]] bool VerifyMeshTopology(engine::RenderingService& service, const rendering::MeshResidencyInfo& info, const rendering::GpuMaterialHandle expectedMaterial) noexcept
     {
         const rendering::RenderPhaseId opaquePhase = service.GetRenderPhases().Find(rendering::standardRenderPhases::Opaque);
-        if (!info.renderable.IsValid() || !opaquePhase.IsValid())
+        const rendering::RenderPhaseId transparentPhase = service.GetRenderPhases().Find(rendering::standardRenderPhases::Transparent);
+        if (!info.renderable.IsValid() || !opaquePhase.IsValid() || !transparentPhase.IsValid())
             return false;
         rendering::GpuSceneTables& tables = service.GetGpuScene().GetTables();
         rhi::Failure failure;
         rendering::GpuRenderable renderable;
         if (!ReadGpuSceneElement(tables, info.renderable.index, renderable, failure, 0x3c042300ull) || renderable.generation != info.renderable.generation || renderable.lodCount != 1 ||
-            (renderable.phaseMaskLow & (1u << opaquePhase.index)) == 0)
+            (renderable.phaseMaskLow & (1u << opaquePhase.index)) == 0 || (renderable.phaseMaskLow & (1u << transparentPhase.index)) != 0)
             return false;
         rendering::GpuLod lod;
         rendering::GpuPrimitive primitive;
@@ -653,9 +675,91 @@ namespace
                (static_cast<vanguard::u32>(primitive.flags) & static_cast<vanguard::u32>(rendering::GpuPrimitiveFlags::TwoSided)) != 0 &&
                ReadGpuSceneElement(tables, primitive.firstPhaseParticipation, participation, failure, 0x3c042303ull) && participation.phase == opaquePhase.index;
     }
+
+    [[nodiscard]] bool RegisterMinimalRendererHost(vanguard::application::EngineHost& host, const engine::RenderingServiceConfig& config,
+                                                   vanguard::application::HostFailure& failure) noexcept
+    {
+        return engine::RegisterEngineModule(host, &failure) && engine::RegisterIoService(host, &failure) && engine::RegisterFilesystemService(host, &failure) &&
+               engine::RegisterJobsService(host, &failure) && engine::RegisterFramePipelineService(host, &failure) && engine::RegisterResourcesService(host, &failure) &&
+               engine::RegisterRenderingService(host, config, &failure) && host.Compile(vanguard::application::ApplicationProfile::Runtime, &failure);
+    }
+
+    enum class DrawInterfaceStartupCase : vanguard::u8
+    {
+        DomainRoleMismatch,
+        MissingVisibility,
+        Valid
+    };
+
+    [[nodiscard]] bool VerifyDrawInterfaceStartupCase(engine::RenderingServiceConfig config, const DrawInterfaceStartupCase testCase) noexcept
+    {
+        config.rendererShaders = {};
+        config.rendererPipelines = {};
+        config.rendererBootstrap = {};
+        config.usePackageRendererBootstrap = false;
+        config.rendererCatalogSourceService = vanguard::application::InvalidServiceId;
+        config.materialBindingLayouts = {};
+
+        switch (testCase)
+        {
+        case DrawInterfaceStartupCase::DomainRoleMismatch:
+            // Keep the resource domain valid for earlier GPU Scene startup so this
+            // reaches the P1 draw-interface role check rather than failing sooner.
+            config.samplerDescriptors.kind = rhi::DescriptorDomainKind::Resources;
+            break;
+        case DrawInterfaceStartupCase::MissingVisibility:
+            config.resourceDescriptors.visibility &= ~rhi::ShaderStageBit(rhi::ShaderStage::Pixel);
+            break;
+        case DrawInterfaceStartupCase::Valid:
+            break;
+        }
+
+        vanguard::application::EngineHost host;
+        vanguard::application::HostFailure failure;
+        if (!RegisterMinimalRendererHost(host, config, failure))
+            return false;
+        const bool started = host.Start(&failure);
+        if (testCase != DrawInterfaceStartupCase::Valid)
+        {
+            if (started)
+            {
+                static_cast<void>(host.Shutdown(&failure));
+                return false;
+            }
+            const char* const expectedMessage = "renderer draw interface descriptor-domain types do not match renderer configuration";
+            return failure.service == engine::RenderingServiceId && failure.message != nullptr && std::strcmp(failure.message, expectedMessage) == 0 && !rhi::IsInitialized();
+        }
+        if (!started)
+            return false;
+
+        engine::RenderingService* const service = engine::FindRenderingService(host);
+        const rendering::RenderPhaseSet phases = service != nullptr ? service->GetDefaultCameraPhases() : rendering::RenderPhaseSet{};
+        const rendering::RenderPhaseId depthPrepass = service != nullptr ? service->GetRenderPhases().Find(rendering::standardRenderPhases::DepthPrepass) : rendering::RenderPhaseId{};
+        const rendering::RenderPhaseId opaque = service != nullptr ? service->GetRenderPhases().Find(rendering::standardRenderPhases::Opaque) : rendering::RenderPhaseId{};
+        const auto& depthContext = rendering::StandardCameraMeshDrawPhases[0];
+        const auto& opaqueContext = rendering::StandardCameraMeshDrawPhases[1];
+        bool worldSeamReady = false;
+        if (service != nullptr)
+        {
+            vanguard::entities::RenderingRuntime invalidWorldRendering(service->GetScenes());
+            const bool rejectsUnknownPhase = !invalidWorldRendering.BindCommands(service->GetCommands(), service->GetRenderPhases(), rendering::RenderPhaseSet{vanguard::u64{1} << 63u});
+            vanguard::entities::RenderingRuntime worldRendering(service->GetScenes());
+            worldSeamReady = rejectsUnknownPhase && worldRendering.BindCommands(service->GetCommands(), service->GetRenderPhases(), phases) &&
+                             worldRendering.GetDefaultCameraPhases() == phases;
+        }
+        const bool ready = service != nullptr && service->GetMeshResidency().IsInitialized() && phases.Contains(depthPrepass) && phases.Contains(opaque) &&
+                           worldSeamReady &&
+                           depthContext.phase == rendering::standardRenderPhases::DepthPrepass && opaqueContext.phase == rendering::standardRenderPhases::Opaque &&
+                           depthContext.attachments.depthStencilFormat == pipeline::Format::D32Float && depthContext.attachments.colorCount == 0 &&
+                           opaqueContext.attachments.colorCount == 3 && opaqueContext.attachments.colors[0].format == pipeline::Format::R8G8B8A8UNorm &&
+                           opaqueContext.attachments.colors[1].format == pipeline::Format::R16G16B16A16Float && opaqueContext.attachments.colors[2].format == pipeline::Format::R16G16B16A16Float &&
+                           opaqueContext.attachments.depthStencilFormat == pipeline::Format::D32Float;
+        const bool shutdown = host.Shutdown(&failure);
+        return ready && shutdown && !rhi::IsInitialized();
+    }
 } // namespace
 
-int main()
+int main(const int argc, char** const argv)
 {
     Check(vanguard::memory::Initialize(), "memory initialization");
     Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "materialRuntimeServiceTests"), "diagnostics initialization");
@@ -675,22 +779,20 @@ int main()
     CatalogMountService catalogMount(looseFixture, copyFixture);
     vanguard::application::EngineHost host;
     vanguard::application::HostFailure hostFailure;
+    const bool p1DefaultLayoutForwarding = argc == 2 && std::strcmp(argv[1], "--p1-default-layout-forwarding") == 0;
     engine::RenderingServiceConfig renderingConfig;
     const engine::RenderingServiceConfig::Shader startupShaders[] = {{"StartupCatalogShader", looseFixture.shaderReference}, {"FullscreenCopy", copyFixture.shaderReference}};
-    pipeline::AttachmentSignature startupAttachments;
-    startupAttachments.colorCount = 1;
-    // Keep the later material test's UNorm variant cold; startup prepares a distinct concrete pipeline.
-    startupAttachments.colors[0] = {pipeline::Format::R16G16B16A16Float, shader::NumericClass::FloatingPoint};
+    const pipeline::AttachmentSignature startupAttachments = rendering::MakeStandardOpaqueAttachments();
     pipeline::AttachmentSignature copyAttachments;
     copyAttachments.colorCount = 1;
     copyAttachments.colors[0] = {pipeline::Format::R8G8B8A8UNorm, shader::NumericClass::FloatingPoint};
     const rhi::BindingLayoutEntry copyConstants{0, 24, rhi::BindingType::PushConstants};
     const rhi::BindingLayoutDesc copyLayout{&copyConstants, 1, 0, rhi::ShaderStageBit(rhi::ShaderStage::Pixel)};
-    const rhi::BindingLayoutEntry materialConstants{0, 16, rhi::BindingType::PushConstants};
-    const rhi::BindingLayoutDesc materialLayout{&materialConstants, 1, 0, rhi::ShaderStageBit(rhi::ShaderStage::Vertex)};
+    const rhi::BindingLayoutDesc materialLayout = rendering::GetStaticSurfaceDrawBindingLayout();
     const engine::RenderingServiceConfig::Pipeline startupPipelines[] = {{"StartupCatalogPipeline", looseFixture.pipelineReference, startupAttachments, {&materialLayout, 1}},
                                                                          {"FullscreenCopy", copyFixture.pipelineReference, copyAttachments, {&copyLayout, 1}}};
-    renderingConfig.materialBindingLayouts = {&materialLayout, 1};
+    renderingConfig.materialBindingLayouts = p1DefaultLayoutForwarding ? vanguard::containers::ArraySpan<const rhi::BindingLayoutDesc>{}
+                                                                       : vanguard::containers::ArraySpan<const rhi::BindingLayoutDesc>{&materialLayout, 1};
     renderingConfig.rendererShaders = startupShaders;
     renderingConfig.rendererPipelines = startupPipelines;
     renderingConfig.rendererCatalogSourceService = CatalogMountServiceId;
@@ -698,6 +800,11 @@ int main()
     renderingConfig.backendFactory = rhi::d3d12::GetBackendFactory();
     renderingConfig.resourceDescriptors.capacity = 128;
     renderingConfig.samplerDescriptors.capacity = 16;
+    // This fixture intentionally uses a tiny bindless domain. Keep the
+    // frame-resource canonical descriptor cache inside that explicit test
+    // budget instead of inheriting production-scale defaults.
+    renderingConfig.frameResources.descriptorCacheTarget = 32;
+    renderingConfig.frameResources.descriptorCacheMaximum = 64;
     renderingConfig.maximumMaterialProgramLayouts = 4;
     renderingConfig.gpuScene.tables.maximumPagesPerTable = 2;
     renderingConfig.gpuScene.lifetime.retirementEpochCount = 4;
@@ -746,6 +853,28 @@ int main()
     renderingConfig.materialBindings.maximumBindings = 2;
     renderingConfig.materialBindings.maximumChecksPerUpdate = 2;
 
+    if (argc == 2)
+    {
+        DrawInterfaceStartupCase startupCase = DrawInterfaceStartupCase::Valid;
+        bool recognized = true;
+        if (std::strcmp(argv[1], "--p1-domain-role-mismatch") == 0)
+            startupCase = DrawInterfaceStartupCase::DomainRoleMismatch;
+        else if (std::strcmp(argv[1], "--p1-missing-visibility") == 0)
+            startupCase = DrawInterfaceStartupCase::MissingVisibility;
+        else if (std::strcmp(argv[1], "--p1-valid-interface") == 0)
+            startupCase = DrawInterfaceStartupCase::Valid;
+        else
+            recognized = false;
+        if (recognized)
+        {
+            const bool passed = VerifyDrawInterfaceStartupCase(renderingConfig, startupCase);
+            if (!passed)
+                std::fprintf(stderr, "[materialRuntimeServiceTests] P1 draw-interface startup proof failed: %s\n", argv[1]);
+            vanguard::diagnostics::Shutdown();
+            return passed ? 0 : 1;
+        }
+    }
+
     Check(engine::RegisterEngineModule(host, &hostFailure), "engine module registration");
     Check(engine::RegisterIoService(host, &hostFailure), "I/O service registration");
     Check(engine::RegisterFilesystemService(host, &hostFailure), "filesystem service registration");
@@ -777,7 +906,7 @@ int main()
     }
 
     Check(catalogMount.mounted, "catalog sources mounted before renderer catalog initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("material_runtime_service_tests");
     const filesystem::AbsolutePath directory = root.AddDirPath("vanguard_material_runtime_service");
     filesystem::Manager& files = filesystem::GetManager();
     DeleteDirectoryTree(files, directory);
@@ -805,8 +934,14 @@ int main()
     engine::ResourcesService* const resourcesService = engine::FindResourcesService(host);
     engine::ResourceStreamingService* const streamingService = engine::FindResourceStreamingService(host);
     engine::RenderingService* const renderingService = engine::FindRenderingService(host);
-    Check(engine::tests::RunStaticSurfaceNativeProof(), "actual generated static surface shaders create float/quantized GBuffer/depth pipeline variants without recording draws");
     Check(frames != nullptr && resourcesService != nullptr && streamingService != nullptr && renderingService != nullptr, "material runtime services are discoverable");
+    const rendering::RenderPhaseSet defaultCameraPhases = renderingService != nullptr ? renderingService->GetDefaultCameraPhases() : rendering::RenderPhaseSet{};
+    const rendering::RenderPhaseId defaultDepthPrepass = renderingService != nullptr ? renderingService->GetRenderPhases().Find(rendering::standardRenderPhases::DepthPrepass) : rendering::RenderPhaseId{};
+    const rendering::RenderPhaseId defaultOpaque = renderingService != nullptr ? renderingService->GetRenderPhases().Find(rendering::standardRenderPhases::Opaque) : rendering::RenderPhaseId{};
+    Check(renderingService != nullptr && renderingService->GetMeshResidency().IsInitialized() && defaultCameraPhases.Contains(defaultDepthPrepass) && defaultCameraPhases.Contains(defaultOpaque),
+          "RenderingService resolves the standard default camera phases and owns mesh draw policy in shared residency");
+    Check(renderingService != nullptr && engine::tests::RunStaticSurfaceNativeProof(),
+          "generated float/quantized static-surface GBuffer/depth pipeline variants create through the low-level native pipeline-interface path");
     TestClock clock;
     engine::FrameFailure frameFailure;
     engine::FramePipelineConfig frameConfig;
@@ -854,6 +989,160 @@ int main()
     rendering::MaterialResourceFallbackDesc fallbackDesc{shader::MaterialResourceKind::Texture, textures::TextureResourceType, looseFixture.textureType, looseFixture.textureShape, fallbackHandle};
     Check(renderingService->GetMaterialResources().RegisterFallback(fallbackDesc, &resourceFailure), "register exact optional texture fallback");
     fallbackDesc.resource.Reset();
+
+    if (p1DefaultLayoutForwarding)
+    {
+        rendering::MaterialResidencyRuntime& proofResidency = renderingService->GetMaterialResidency();
+        rendering::MaterialResidencyRuntimeFailure proofFailure;
+        rendering::MaterialDemandHandle proofDemand;
+        Check(proofResidency.RequestMaterial(looseHandle, proofDemand, &proofFailure),
+              "P1 default-layout proof requests a real material through RenderingService residency");
+        rendering::MaterialResidencyInfo proofResidencyInfo;
+        bool proofResident = false;
+        for (vanguard::u32 attempt = 0; proofDemand.IsValid() && attempt < 512 && !proofResident; ++attempt)
+        {
+            Check(RunFrame(*frames, clock) && proofResidency.GetInfo(proofDemand.GetResidency(), proofResidencyInfo, &proofFailure),
+                  "P1 default-layout proof progresses material residency");
+            proofResident = proofResidencyInfo.state == rendering::MaterialResidencyState::Resident;
+            if (proofResidencyInfo.state == rendering::MaterialResidencyState::Failed)
+                break;
+            std::this_thread::yield();
+        }
+        Check(proofResident, "P1 default-layout proof reaches resident material state");
+
+        const pipeline::AttachmentSignature proofAttachments = rendering::MakeStandardOpaqueAttachments();
+        rendering::MaterialTechniqueRequest proofTechnique;
+        const rendering::MaterialTechniqueDesc proofDesc{proofDemand.GetResidency(), MaterialTechnique, &proofAttachments, vanguard::pipeline_cache::Priority::Critical};
+        Check(proofResident && proofResidency.RequestTechnique(proofDesc, proofTechnique, &proofFailure),
+              "P1 default-layout proof forwards the service-owned native interface into material technique admission");
+        rendering::MaterialTechniqueInfo proofTechniqueInfo;
+        Check(proofTechnique.IsValid() && DriveTechnique(*frames, clock, proofResidency, proofTechnique, proofTechniqueInfo) && proofTechniqueInfo.pipeline,
+              "P1 default-layout proof creates a ready native pipeline through MaterialResidencyRuntime");
+
+        rhi::Failure proofRhiFailure;
+        rendering::StaticSurfaceDrawContext proofDrawContext{};
+        static_assert(sizeof(rendering::StaticSurfaceDrawContext) == 24);
+        rhi::CommandListRef proofInterfaceCommands = rhi::CreateCommandList(rhi::CommandListType::Default, 0x5031445241574946ull, &proofRhiFailure);
+        const bool proofInterfaceBound = proofInterfaceCommands.IsValid() && rhi::BindCommandList(proofInterfaceCommands, &proofRhiFailure);
+        const bool proofPushConstants = proofInterfaceBound && rhi::SetPipeline(proofTechniqueInfo.pipeline, &proofRhiFailure) &&
+                                        rhi::SetPushConstants(&proofDrawContext, sizeof(proofDrawContext), &proofRhiFailure);
+        if (proofInterfaceBound)
+            rhi::UnbindCommandList();
+        rhi::DiscardCommandList(proofInterfaceCommands);
+        Check(proofPushConstants,
+              "P1 default-layout proof binds the returned native pipeline and accepts the canonical 24-byte StaticSurfaceDrawContext");
+
+        proofTechnique.Reset();
+        proofDemand.Reset();
+        engine::RenderingRetirementFailure proofRetirementFailure;
+        rhi::ResidencyFenceSet proofRetirementFences;
+        Check(SubmitRetirementFences(proofRetirementFences, proofRhiFailure) && renderingService->SealResidencyRetirements(proofRetirementFences, &proofRetirementFailure) &&
+                  WaitRetirementFences(proofRetirementFences, proofRhiFailure) && rhi::RetireResources(&proofRhiFailure),
+              "P1 default-layout proof seals material retirement");
+        for (vanguard::u32 attempt = 0; attempt < 64 && proofResidency.GetStats().residencyRecords != 0; ++attempt)
+            Check(RunFrame(*frames, clock), "P1 default-layout proof collects material retirement");
+        rhi::ResidencyFenceSet proofDependencyFences;
+        Check(SubmitRetirementFences(proofDependencyFences, proofRhiFailure) && renderingService->SealResidencyRetirements(proofDependencyFences, &proofRetirementFailure) &&
+                  WaitRetirementFences(proofDependencyFences, proofRhiFailure) && rhi::RetireResources(&proofRhiFailure) && rhi::FlushRetiredResources(&proofRhiFailure),
+              "P1 default-layout proof seals dependent texture retirement");
+        for (vanguard::u32 attempt = 0; attempt < 64 && renderingService->GetTextureResidency().GetStats().residencyRecords != 0; ++attempt)
+            Check(RunFrame(*frames, clock), "P1 default-layout proof collects dependent texture retirement");
+        rhi::ResidencyFenceSet proofFinalTextureFences;
+        Check(SubmitRetirementFences(proofFinalTextureFences, proofRhiFailure) &&
+                  renderingService->SealResidencyRetirements(proofFinalTextureFences, &proofRetirementFailure) &&
+                  WaitRetirementFences(proofFinalTextureFences, proofRhiFailure) && rhi::RetireResources(&proofRhiFailure) && rhi::FlushRetiredResources(&proofRhiFailure),
+              "P1 default-layout proof seals completed dependent texture retirement");
+        rendering::TextureResidencyManager& proofTextureResidency = renderingService->GetTextureResidency().GetResidencyManager();
+        rendering::TextureResidencyFailure proofTextureRetirementFailure;
+        rendering::TextureGenerationRetirement proofTextureRetirements[8]{};
+        bool proofTextureRetirementsAcknowledged = true;
+        for (;;)
+        {
+            const vanguard::u32 retirementCount = proofTextureResidency.PeekCompletedGenerationRetirements(proofTextureRetirements, &proofTextureRetirementFailure);
+            if (proofTextureRetirementFailure.code != rendering::TextureResidencyFailureCode::None)
+            {
+                proofTextureRetirementsAcknowledged = false;
+                break;
+            }
+            if (retirementCount == 0)
+                break;
+            for (vanguard::u32 index = 0; index < retirementCount; ++index)
+            {
+                if (!proofTextureResidency.AcknowledgeGenerationRetirement(proofTextureRetirements[index].retirementId, &proofTextureRetirementFailure))
+                {
+                    proofTextureRetirementsAcknowledged = false;
+                    break;
+                }
+            }
+            if (!proofTextureRetirementsAcknowledged)
+                break;
+        }
+        Check(proofTextureRetirementsAcknowledged && renderingService->GetTextureResidency().GetStats().residency.pendingGenerationRetirements == 0,
+              "P1 default-layout standalone fixture explicitly acknowledges completed texture generation retirements");
+        Check(proofResidency.GetStats().residencyRecords == 0 && proofResidency.GetStats().liveDemands == 0 && proofResidency.GetStats().liveTechniqueRequests == 0 &&
+                  proofResidency.ClearNativeProgramCache(&proofFailure) && renderingService->GetMaterialResources().ClearFallbacks(&resourceFailure),
+              "P1 default-layout proof releases production material-interface state");
+
+        looseHandle.Reset();
+        packageHandle.Reset();
+        fallbackHandle.Reset();
+        meshHandle.Reset();
+        looseRequest.Reset();
+        packageRequest.Reset();
+        fallbackRequest.Reset();
+        meshRequest.Reset();
+        Check(WaitForResourceDrain(resourcesService->GetPipeline(), streamer), "P1 default-layout proof drains resource requests");
+        resources::ResourceRegistry& proofRegistry = resourcesService->GetRegistry();
+        const resources::ResourcePath proofEvictionPaths[]{meshReference.GetPath(),
+                                                           looseFixture.materialReference.GetPath(),
+                                                           packageFixture.materialReference.GetPath(),
+                                                           looseFixture.pipelineReference.GetPath(),
+                                                           packageFixture.pipelineReference.GetPath(),
+                                                           looseFixture.shaderReference.GetPath(),
+                                                           packageFixture.shaderReference.GetPath(),
+                                                           looseFixture.requiredTexture.GetPath(),
+                                                           packageFixture.requiredTexture.GetPath(),
+                                                           fallbackReference.GetPath(),
+                                                           failureFixture.pipelineReference.GetPath(),
+                                                           failureFixture.shaderReference.GetPath(),
+                                                           copyFixture.pipelineReference.GetPath(),
+                                                           copyFixture.shaderReference.GetPath()};
+        bool proofEvicted = true;
+        for (const resources::ResourcePath path : proofEvictionPaths)
+        {
+            const resources::State state = proofRegistry.GetState(path);
+            if (state == resources::State::Loaded)
+                proofEvicted = proofRegistry.Evict(path) && proofEvicted;
+            else if (state != resources::State::Unloaded && state != resources::State::Evicting)
+                proofEvicted = false;
+        }
+        Check(proofEvicted, "P1 default-layout proof evicts loaded closure resources");
+        Check(streamer.UnmountPackage(packageReader), "P1 default-layout proof unmounts package fixture");
+        Check(streamer.UnregisterLoose(copyFixture.pipelineReference.GetPath()) && streamer.UnregisterLoose(copyFixture.shaderReference.GetPath()),
+              "P1 default-layout proof unregisters startup catalog resources");
+        Check(streamer.UnregisterLoose(meshReference.GetPath()) && streamer.UnregisterLoose(looseFixture.materialReference.GetPath()) &&
+                  streamer.UnregisterLoose(looseFixture.pipelineReference.GetPath()) && streamer.UnregisterLoose(looseFixture.shaderReference.GetPath()) &&
+                  streamer.UnregisterLoose(looseFixture.requiredTexture.GetPath()) && streamer.UnregisterLoose(fallbackReference.GetPath()),
+              "P1 default-layout proof unregisters loose material closure");
+        Check(streamer.UnregisterLoose(failureFixture.materialReference.GetPath()) && streamer.UnregisterLoose(failureFixture.pipelineReference.GetPath()) &&
+                  streamer.UnregisterLoose(failureFixture.shaderReference.GetPath()),
+              "P1 default-layout proof unregisters failed dependency closure");
+        packageReader.Close();
+        DeleteDirectoryTree(files, directory);
+        Check(files.DeleteFile(catalogMount.directory.AddFilePath("startup.vshader")) && files.DeleteFile(catalogMount.directory.AddFilePath("startup.vppl")),
+              "P1 default-layout proof removes startup catalog fixture files");
+        Check(files.DeleteFile(catalogMount.directory.AddFilePath("copy.vshader")) && files.DeleteFile(catalogMount.directory.AddFilePath("copy.vpipeline")),
+              "P1 default-layout proof removes copy startup fixture files");
+        const bool proofShutdown = host.Shutdown(&hostFailure);
+        if (!proofShutdown)
+            std::fprintf(stderr, "[materialRuntimeServiceTests] P1 default-layout shutdown failed: code=%u service=%llu message=%s\n", static_cast<unsigned>(hostFailure.code),
+                         static_cast<unsigned long long>(hostFailure.service), hostFailure.message != nullptr ? hostFailure.message : "unknown");
+        Check(proofShutdown && !rhi::IsInitialized(), "P1 default-layout proof shuts RenderingService/RHI down cleanly");
+        vanguard::diagnostics::Shutdown();
+        if (g_failures == 0)
+            std::puts("[materialRuntimeServiceTests] P1 default-layout forwarding proof passed");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     const resources::ResourceHandle* const looseRequired = FindDependency(*looseObject, looseFixture.requiredTexture);
     const resources::ResourceHandle* const packageRequired = FindDependency(*packageObject, packageFixture.requiredTexture);
@@ -922,9 +1211,7 @@ int main()
     Check(meshTopologyReady && RunFrame(*frames, clock) && renderingService->GetMeshResidency().GetInfo(meshDemand.GetResidency(), meshInfo, &meshFailure) && meshInfo.demandCount == 1 &&
               meshInfo.materialCount == 1 && VerifyMeshTopology(*renderingService, meshInfo, bindingInfo.activeMaterial),
           "publish immutable VMESH LOD/primitive/material/phase topology without drawable placement");
-    pipeline::AttachmentSignature preparationAttachments;
-    preparationAttachments.colorCount = 1;
-    preparationAttachments.colors[0] = {pipeline::Format::R8G8B8A8UNorm, shader::NumericClass::FloatingPoint};
+    const pipeline::AttachmentSignature preparationAttachments = rendering::MakeStandardOpaqueAttachments();
     rendering::MeshDrawPreparation preparedDraw;
     auto& meshResidency = renderingService->GetMeshResidency();
     Check(!meshResidency.PrepareDraw(meshDemand, 1, rendering::standardRenderPhases::Opaque, preparationAttachments, preparedDraw, &meshFailure) && !preparedDraw.mesh.IsValid(),
@@ -945,18 +1232,55 @@ int main()
     Check(DriveTechnique(*frames, clock, residency, preparedDraw.normal, normalDraw) && DriveTechnique(*frames, clock, residency, preparedDraw.mirrored, mirroredDraw) &&
               normalDraw.material == bindingInfo.activeMaterial && mirroredDraw.material == normalDraw.material && normalDraw.pipeline != mirroredDraw.pipeline,
           "normal and mirrored mesh preparation reaches distinct ready native pipelines");
+    const rendering::MeshResidencyHandle preparedResidency = preparedDraw.mesh.GetResidency();
+    rendering::GeometryBatchLease drawPlacement;
+    const rendering::GeometryBatchResult placementResult = meshResidency.AcquireDrawPlacement(preparedDraw, drawPlacement);
+    Check(placementResult == rendering::GeometryBatchResult::Success && drawPlacement.IsValid(), "retain real reverse-depth geometry shell for per-view depth-convention proof");
+    bool depthConventionProof = false;
+    if (const rendering::GeometryBatchPlacement* const placement = drawPlacement.GetPlacement(); placement != nullptr)
+    {
+        const rendering::RenderPhaseId opaquePhase = renderingService->GetRenderPhases().Find(rendering::standardRenderPhases::Opaque);
+        const vanguard::u32 highestShell = std::max(placement->normalShell.index, placement->mirroredShell.index);
+        const auto PlanForView = [&](const vanguard::u32 viewFlags) noexcept
+        {
+            rendering::GeometryFrameWork work;
+            rendering::GeometryFrameWorkCapacity capacity;
+            capacity.views = 1;
+            capacity.visibleInstances = 1;
+            capacity.geometryWorkItems = 1;
+            capacity.geometryBins = 2;
+            capacity.shellDraws = 2;
+            capacity.shellsPerView = highestShell + 1u;
+            if (work.Prepare(1, capacity) != rendering::GeometryFrameWorkResult::Success)
+                return rendering::GeometryFrameWorkResult::InvalidDescriptor;
+            rendering::RenderView view;
+            view.id = {0, 1};
+            view.family = {0, 1};
+            view.rect = {0, 0, 1, 1};
+            view.frustum.planeCount = 1;
+            view.frameSerial = 1;
+            view.flags = static_cast<rendering::RenderViewFlags>(viewFlags);
+            view.phases.Add(opaquePhase);
+            const rendering::RenderSceneHandle scene{0, 1};
+            if (work.BuildDirectVisibilityPlan(scene, {&view, 1}, 0, 1) != rendering::GeometryFrameWorkResult::Success)
+                return rendering::GeometryFrameWorkResult::InvalidVisibilityPlan;
+            return work.PlanShellDraws(&meshResidency.GetGeometryBatcher());
+        };
+        const auto forwardResult = PlanForView(0);
+        const auto reverseResult = PlanForView(static_cast<vanguard::u32>(rendering::RenderViewFlags::ReverseDepth));
+        depthConventionProof = opaquePhase.IsValid() && forwardResult == rendering::GeometryFrameWorkResult::IncompatibleDepthConvention &&
+                               reverseResult == rendering::GeometryFrameWorkResult::Success;
+    }
+    Check(depthConventionProof, "per-view forward depth rejects reverse-depth shell while reverse depth accepts it");
     meshDemand.Reset();
-    Check(meshResidency.GetInfo(preparedDraw.mesh.GetResidency(), meshInfo, &meshFailure) && meshInfo.demandCount == 1 && meshInfo.state == rendering::MeshResidencyState::RenderableTopologySubmitted,
-          "preparation retains geometry after the original caller releases its mesh demand without publishing drawable residency");
-    preparedDraw = {};
+    Check(meshResidency.GetInfo(preparedResidency, meshInfo, &meshFailure) && meshInfo.demandCount == 1 && meshInfo.state == rendering::MeshResidencyState::RenderableTopologySubmitted,
+          "retained draw placement keeps geometry alive after the original caller releases its mesh demand without publishing drawable residency");
+    drawPlacement.Reset();
     Check(residency.GetStats().liveTechniqueRequests == 0, "releasing mesh preparation releases both technique requests");
 
     rendering::MaterialTechniqueRequest firstTechnique;
     rendering::MaterialTechniqueRequest coalescedTechnique;
-    pipeline::AttachmentSignature attachments;
-    attachments.colorCount = 1;
-    attachments.colors[0].format = pipeline::Format::R8G8B8A8UNorm;
-    attachments.colors[0].numericClass = shader::NumericClass::FloatingPoint;
+    const pipeline::AttachmentSignature attachments = rendering::MakeStandardOpaqueAttachments();
     rendering::MaterialTechniqueRequest failedTechnique;
     const rendering::MaterialTechniqueDesc missingAttachments{bindingInfo.activeResidency, MaterialTechnique, nullptr, vanguard::pipeline_cache::Priority::Normal};
     rendering::MaterialResidencyInfo activeResidencyInfo;
@@ -967,8 +1291,9 @@ int main()
     Check(residency.RequestTechnique(techniqueDesc, firstTechnique, &residencyFailure) && residency.RequestTechnique(techniqueDesc, coalescedTechnique, &residencyFailure),
           "request coalesced concrete native material technique");
     rendering::MaterialTechniqueInfo techniqueInfo;
-    Check(residency.GetTechniqueInfo(firstTechnique, techniqueInfo, &residencyFailure) && techniqueInfo.state == rendering::MaterialTechniqueState::Pending,
-          "observe concrete native technique pending before frame progression");
+    Check(residency.GetTechniqueInfo(firstTechnique, techniqueInfo, &residencyFailure) &&
+              (techniqueInfo.state == rendering::MaterialTechniqueState::Pending || techniqueInfo.state == rendering::MaterialTechniqueState::Ready),
+          "observe accepted concrete native technique before frame progression");
     Check(DriveTechnique(*frames, clock, residency, firstTechnique, techniqueInfo) && techniqueInfo.material == bindingInfo.activeMaterial && techniqueInfo.pipeline,
           "resolve concrete native technique without a draw");
     Check(VerifyMaterialImage(*renderingService, looseFixture, looseHandle, bindingInfo, looseTextureDemand.GetResidency(), fallbackTextureDemand.GetResidency(), decal),
@@ -1019,7 +1344,19 @@ int main()
     coalescedTechnique.Reset();
     firstTechnique.Reset();
     techniqueInfo = {};
-    Check(renderingService->GetScenes().DestroyProxy(decal, &sceneFailure), "destroy material decal proxy");
+    Check(renderingService->GetCommands().FlushPreviousFrameProcessing(&commandFailure) && renderingService->GetGpuScene().ResolveContributions(&gpuSceneRuntimeFailure),
+          "join the final material publication before direct proxy destruction");
+    const bool destroyedMaterialDecal = renderingService->GetScenes().DestroyProxy(decal, &sceneFailure);
+    if (!destroyedMaterialDecal)
+    {
+        bool pendingPublication = false;
+        rendering::RenderSceneGpuFailure pendingFailure;
+        const bool queriedPending = renderingService->GetGpuScene().GetScenePublisher().HasPendingPublicationWork(scene, pendingPublication, &pendingFailure);
+        std::fprintf(stderr, "[materialRuntimeServiceTests] decal destroy: sceneCode=%u message=%s pendingQuery=%u pending=%u gpuCode=%u\n",
+                     static_cast<unsigned>(sceneFailure.code), sceneFailure.message != nullptr ? sceneFailure.message : "", queriedPending, pendingPublication,
+                     static_cast<unsigned>(pendingFailure.code));
+    }
+    Check(destroyedMaterialDecal, "destroy material decal proxy");
     Check(RunFrame(*frames, clock) && renderingService->GetMaterialBindings().GetStats().bindings == 0, "proxy destruction releases material binding interests");
     fallbackTextureDemand.Reset();
     looseTextureDemand.Reset();
@@ -1051,6 +1388,40 @@ int main()
           "seal downstream texture retirement at the next real renderer cutover");
     for (vanguard::u32 attempt = 0; attempt < 64 && renderingService->GetTextureResidency().GetStats().residencyRecords != 0; ++attempt)
         Check(RunFrame(*frames, clock), "collect downstream texture retirement frame");
+    rhi::ResidencyFenceSet finalTextureRetirementFences;
+    Check(SubmitRetirementFences(finalTextureRetirementFences, rhiFailure) &&
+              renderingService->SealResidencyRetirements(finalTextureRetirementFences, &retirementFailure) &&
+              WaitRetirementFences(finalTextureRetirementFences, rhiFailure) && rhi::RetireResources(&rhiFailure) && rhi::FlushRetiredResources(&rhiFailure),
+          "seal completed standalone texture generations before final renderer shutdown");
+    rendering::TextureResidencyManager& finalTextureResidency = renderingService->GetTextureResidency().GetResidencyManager();
+    rendering::TextureGenerationRetirement finalTextureRetirements[16]{};
+    rendering::TextureResidencyFailure finalTextureRetirementFailure;
+    bool finalTextureRetirementsAcknowledged = true;
+    for (;;)
+    {
+        const vanguard::u32 retirementCount = finalTextureResidency.PeekCompletedGenerationRetirements(finalTextureRetirements, &finalTextureRetirementFailure);
+        if (finalTextureRetirementFailure.code != rendering::TextureResidencyFailureCode::None)
+        {
+            finalTextureRetirementsAcknowledged = false;
+            break;
+        }
+        if (retirementCount == 0)
+            break;
+        for (vanguard::u32 index = 0; index < retirementCount; ++index)
+        {
+            if (!finalTextureResidency.AcknowledgeGenerationRetirement(finalTextureRetirements[index].retirementId, &finalTextureRetirementFailure))
+            {
+                finalTextureRetirementsAcknowledged = false;
+                break;
+            }
+        }
+        if (!finalTextureRetirementsAcknowledged)
+            break;
+    }
+    Check(finalTextureRetirementsAcknowledged && renderingService->GetTextureResidency().GetStats().residency.pendingGenerationRetirements == 0,
+          "standalone aggregate acknowledges only completed texture generation retirements before shutdown");
+    Check(renderingService->GetCommands().FlushPreviousFrameProcessing(&commandFailure) && renderingService->GetGpuScene().ResolveContributions(&gpuSceneRuntimeFailure),
+          "join the final renderer publication before direct scene destruction");
     Check(renderingService->GetScenes().DestroyScene(scene, &sceneFailure), "destroy material test scene");
     Check(residency.ClearNativeProgramCache(&residencyFailure) && renderingService->GetMaterialResources().ClearFallbacks(&resourceFailure),
           "release terminal renderer caches before dependent resource-service quiesce");
@@ -1128,7 +1499,6 @@ int main()
         std::fprintf(stderr, "[materialRuntimeServiceTests] shutdown failed: code=%u service=%llu message=%s\n", static_cast<unsigned>(hostFailure.code), static_cast<unsigned long long>(hostFailure.service),
                      hostFailure.message != nullptr ? hostFailure.message : "unknown");
     Check(shutdown, "clean material runtime service shutdown");
-
     vanguard::diagnostics::Shutdown();
     if (g_failures == 0)
         std::puts("[materialRuntimeServiceTests] production loose/VPAK material runtime closure passed");

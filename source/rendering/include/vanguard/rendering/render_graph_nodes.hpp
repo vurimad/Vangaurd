@@ -32,6 +32,8 @@ namespace vanguard::rendering
     private:
         containers::String m_sourceName{memory::pools::Rendering::GetInstance()};
         containers::String m_targetName{memory::pools::Rendering::GetInstance()};
+        u32 m_sourceNameHash = 0;
+        u32 m_targetNameHash = 0;
         rhi::PipelineRef m_pipeline;
         rhi::TextureRef m_source;
         struct Constants

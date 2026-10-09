@@ -1,4 +1,6 @@
 #include <vanguard/nanovanguard/nanovanguard.hpp>
+#include <vanguard/nanovanguard/command_cancellation.hpp>
+#include <vanguard/nanovanguard/project_asset_commands.hpp>
 
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -96,7 +98,13 @@ int wmain()
 
     vanguard::nanovanguard::Output output(&WriteConsole);
     vanguard::nanovanguard::CommandRegistry registry;
-    if (!vanguard::nanovanguard::RegisterBuiltinCommands(registry))
+    if (!vanguard::nanovanguard::RegisterBuiltinCommands(registry) ||
+        !vanguard::nanovanguard::RegisterProjectAssetCommands(registry))
         return static_cast<int>(vanguard::nanovanguard::ExitCode::InternalFailure);
-    return static_cast<int>(registry.Dispatch(commandLine.argumentCount, commandLine.Arguments(), output));
+    vanguard::nanovanguard::ResetCommandCancellation();
+    if (!vanguard::nanovanguard::InstallCommandCancellationHandler())
+        return static_cast<int>(vanguard::nanovanguard::ExitCode::InternalFailure);
+    const vanguard::nanovanguard::ExitCode result = registry.Dispatch(commandLine.argumentCount, commandLine.Arguments(), output);
+    vanguard::nanovanguard::RemoveCommandCancellationHandler();
+    return static_cast<int>(result);
 }

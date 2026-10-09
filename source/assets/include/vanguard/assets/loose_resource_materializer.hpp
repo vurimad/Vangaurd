@@ -37,18 +37,26 @@ namespace vanguard::assets
         }
     };
 
+    struct LooseMaterializationInfo
+    {
+        u64 byteCount = 0;
+        u64 contentCrc64 = 0;
+    };
+
     class LooseResourceMaterializer final
     {
     public:
-        // Reconstructs one logical resource from the artifacts described by
-        // record. Target and temporary must be sibling file paths. The previous
-        // target is preserved until the completed temporary passes byte-exact
-        // size and digest verification.
+        // Materializes one logical resource from the artifacts described by
+        // record. An existing byte-exact target is validated against the exact
+        // artifact payload and reused in place. Otherwise target and temporary
+        // must be sibling file paths and the previous target is preserved until
+        // the completed temporary passes byte-exact size and digest verification.
         [[nodiscard]] LooseMaterializationResult Materialize(const DependencyRecord& record,
                                                               resources::ResourceReference resource,
                                                               const DerivedDataArtifactSource& source,
                                                               const filesystem::AbsolutePath& target,
                                                               const filesystem::AbsolutePath& temporary,
-                                                              const LooseMaterializationLimits& limits = {}) const noexcept;
+                                                              const LooseMaterializationLimits& limits = {},
+                                                              LooseMaterializationInfo* info = nullptr) const noexcept;
     };
 } // namespace vanguard::assets

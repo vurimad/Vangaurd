@@ -1329,6 +1329,19 @@ namespace nvrhi::d3d12
         srcBox.bottom = resolvedSrcSlice.y + resolvedSrcSlice.height;
         srcBox.back = resolvedSrcSlice.z + resolvedSrcSlice.depth;
 
+        const uint32_t sourceMipWidth = std::max(src->desc.width >> resolvedSrcSlice.mipLevel, 1u);
+        const uint32_t sourceMipHeight = std::max(src->desc.height >> resolvedSrcSlice.mipLevel, 1u);
+        const uint32_t sourceMipDepth = src->desc.dimension == TextureDimension::Texture3D
+            ? std::max(src->desc.depth >> resolvedSrcSlice.mipLevel, 1u)
+            : 1u;
+        const bool wholeSourceSubresource =
+            resolvedSrcSlice.x == 0 &&
+            resolvedSrcSlice.y == 0 &&
+            resolvedSrcSlice.z == 0 &&
+            resolvedSrcSlice.width == sourceMipWidth &&
+            resolvedSrcSlice.height == sourceMipHeight &&
+            resolvedSrcSlice.depth == sourceMipDepth;
+
         if (m_EnableAutomaticBarriers)
         {
             requireTextureState(dst, TextureSubresourceSet(resolvedDstSlice.mipLevel, 1, resolvedDstSlice.arraySlice, 1), ResourceStates::CopyDest);
@@ -1340,12 +1353,15 @@ namespace nvrhi::d3d12
         m_Instance->referencedResources.push_back(dst);
         m_Instance->referencedResources.push_back(src);
 
+        // D3D12 requires explicit source-box edges for block-compressed formats to be block-aligned.
+        // A null source box means the complete source subresource and remains valid for logical edge mips
+        // whose width or height is not a whole compression block.
         m_ActiveCommandList->commandList->CopyTextureRegion(&dstLocation,
             resolvedDstSlice.x,
             resolvedDstSlice.y,
             resolvedDstSlice.z,
             &srcLocation,
-            &srcBox);
+            wholeSourceSubresource ? nullptr : &srcBox);
     }
 
     void CommandList::copyTexture(ITexture* _dst, const TextureSlice& dstSlice, IStagingTexture* _src, const TextureSlice& srcSlice)

@@ -392,7 +392,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool IsValid() const noexcept
         {
-            return !preparedViewFamilyRequired || frame.GetViewFamily().IsValid();
+            return ownerStateReleased.GetValue() || !preparedViewFamilyRequired || frame.GetViewFamily().IsValid();
         }
 
         concurrency::Atomic<u32> references{1};
@@ -408,10 +408,13 @@ namespace vanguard::rendering
         mutable concurrency::SpinLock failureLock;
         char failureMessage[MaximumExecutionFailureMessageBytes]{};
         concurrency::Atomic<bool> jobsFrameInstalled{false};
+        concurrency::Atomic<bool> ownerStateReleased{false};
+        concurrency::Atomic<bool> ownerCompletionPublished{false};
         concurrency::Atomic<bool> terminalCompletionPublished{false};
         bool payloadRetained = false;
         bool preparedViewFamilyRequired = false;
         concurrency::Atomic<bool> terminalCompletionDeferred{false};
+        jobs::CompletionDeferral ownerCompletion;
         bool failurePending = false;
     };
 
@@ -436,6 +439,11 @@ namespace vanguard::rendering
             static void PublishTerminalCompletion(RetainedRenderFrameRef& frame, const bool skipped) noexcept
             {
                 frame.PublishTerminalCompletion(skipped);
+            }
+
+            static void InstallOwnerCompletion(RetainedRenderFrameRef& frame, jobs::CompletionDeferral&& completion) noexcept
+            {
+                frame.InstallOwnerCompletion(static_cast<jobs::CompletionDeferral&&>(completion));
             }
 
             [[nodiscard]] static bool IsTerminalCompletionDeferred(const RetainedRenderFrameRef& frame) noexcept
@@ -497,15 +505,15 @@ namespace vanguard::rendering
 
     PreparedRenderViewFamily& RetainedRenderFrameRef::GetPreparedViewFamily() noexcept
     {
-        if (!IsValid())
-            VG_FATAL("retained render-frame reference is invalid");
+        if (!IsValid() || m_impl->ownerStateReleased.GetValue())
+            VG_FATAL("retained render-frame owner state is unavailable");
         return m_impl->preparedViewFamily;
     }
 
     FrameCustomData& RetainedRenderFrameRef::GetFrameCustomData() noexcept
     {
-        if (!IsValid())
-            VG_FATAL("retained render-frame reference is invalid");
+        if (!IsValid() || m_impl->ownerStateReleased.GetValue())
+            VG_FATAL("retained render-frame owner state is unavailable");
         return m_impl->frameCustomData;
     }
 
@@ -578,8 +586,8 @@ namespace vanguard::rendering
 
     void RetainedRenderFrameRef::InstallJobsRenderFrame() noexcept
     {
-        if (!IsValid())
-            VG_FATAL("retained render-frame reference is invalid");
+        if (!IsValid() || m_impl->ownerStateReleased.GetValue())
+            VG_FATAL("retained render-frame owner state is unavailable");
         if (m_impl->jobsFrameInstalled.Exchange(true))
             VG_FATAL("retained render frame is already installed for render-node jobs");
         RenderNodeJob::SetJobsRenderFrame(&m_impl->frame);
@@ -592,10 +600,52 @@ namespace vanguard::rendering
         RenderNodeJob::ClearJobsRenderFrame(&m_impl->frame);
     }
 
+    void RetainedRenderFrameRef::InstallOwnerCompletion(jobs::CompletionDeferral&& completion) noexcept
+    {
+        if (m_impl == nullptr || !completion.IsValid() || m_impl->ownerCompletion.IsValid())
+            VG_FATAL("retained render-frame owner completion installation is invalid");
+        m_impl->ownerCompletion = static_cast<jobs::CompletionDeferral&&>(completion);
+    }
+
+    void RetainedRenderFrameRef::ReleaseOwnerStateForTerminalCompletion() noexcept
+    {
+        if (m_impl == nullptr)
+            VG_FATAL("retained render-frame reference is invalid");
+        if (m_impl->ownerStateReleased.Exchange(true))
+            return;
+
+        // Terminal output handling only needs the immutable frame identity, output
+        // transaction, command receipts, and diagnostics. Release every retained
+        // camera/view-family owner before publishing the owner-safe boundary so
+        // next-frame scene/camera mutation cannot overlap a late ReleaseFrame().
+        m_impl->frameCustomData = {};
+        m_impl->preparedViewFamily.Release();
+        m_impl->frame.m_viewFamily.Release();
+        if (m_impl->payloadRetained)
+        {
+            m_impl->frame.m_payload.release(m_impl->frame.m_payload.data);
+            m_impl->payloadRetained = false;
+            m_impl->frame.m_payload = {};
+        }
+        m_impl->frame.m_graph = {};
+    }
+
+    void RetainedRenderFrameRef::PublishOwnerCompletion(const bool requiresTerminalResolution) noexcept
+    {
+        if (m_impl == nullptr || m_impl->ownerCompletionPublished.Exchange(true))
+            return;
+        const bool failed = HasFailure();
+        m_impl->commandSystem->PublishFrameOwnerCompletion(failed || requiresTerminalResolution);
+        if (m_impl->ownerCompletion.IsValid() && !m_impl->ownerCompletion.IsFinished())
+            m_impl->ownerCompletion.Finish();
+    }
+
     void RetainedRenderFrameRef::PublishTerminalCompletion(const bool skipped) noexcept
     {
         if (m_impl == nullptr || m_impl->terminalCompletionPublished.Exchange(true))
             return;
+        ReleaseOwnerStateForTerminalCompletion();
+        PublishOwnerCompletion();
         const char* const failure = GetFailureMessage();
         m_impl->commandSystem->PublishFrameCompletion(m_impl->frame.GetSerial(), failure != nullptr, skipped, failure);
     }
@@ -679,9 +729,11 @@ namespace vanguard::rendering
                 return true;
             }
 
-            [[nodiscard]] bool Submit(const RenderFrameInfo& frame, RenderFrameOutputTransaction& output, jobs::Counter& cpuTail, RenderFrameSubmission& submission,
+            [[nodiscard]] bool Submit(const RenderFrameInfo& frame, RenderFrameOutputTransaction& output, jobs::Counter& cpuTail,
+                                      jobs::Counter& frameTickTail, jobs::Counter& ownerTail, RenderFrameSubmission& submission,
                                       RenderCommandFailure* const failure) noexcept
             {
+                // Reject malformed submissions before any ownership changes.
                 if (execute == nullptr)
                     return Fail(failure, RenderCommandFailureCode::InvalidState, "RenderFrameDispatcher is not initialized");
                 if (!concurrency::IsMainThread())
@@ -689,39 +741,60 @@ namespace vanguard::rendering
                 if (frame.GetSerial() == 0 || !frame.GetEngineViewport().IsValid() || frame.GetViewport() == nullptr || !frame.GetViewport()->IsValid() ||
                     !frame.GetRenderExtent().IsValid() || !frame.GetPayload().IsValid())
                     return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame packet is invalid");
+
                 if (frame.HasViewSetup())
                 {
                     const RenderFrameViewSetup setup = frame.GetViewSetup();
-                    if (!setup.scene.IsValid() || setup.rootCameras.Empty() || setup.rootCameras.Size() > MaximumRenderViewsPerFamily ||
-                        frame.GetViewFamily().IsValid())
+                    if (!setup.scene.IsValid() || setup.rootCameras.Empty() || setup.rootCameras.Size() > MaximumRenderViewsPerFamily || frame.GetViewFamily().IsValid())
                         return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame view setup is invalid");
+
                     for (u32 index = 0; index < setup.rootCameras.Size(); ++index)
                     {
                         const RenderCameraHandle camera = setup.rootCameras[index];
                         if (!camera.IsValid() || camera.scene != setup.scene)
-                            return Fail(failure, RenderCommandFailureCode::InvalidDescriptor,
-                                        "render frame root camera is invalid or belongs to another scene");
+                            return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame root camera is invalid or belongs to another scene");
+
                         for (u32 previous = 0; previous < index; ++previous)
+                        {
                             if (setup.rootCameras[previous] == camera)
                                 return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame contains a duplicate root camera");
+                        }
                     }
                 }
 
-                const bool requiresOutput = frame.GetOutputKind() == RenderViewportOutputKind::Texture ||
-                                            (frame.GetOutputKind() == RenderViewportOutputKind::Presentation && frame.ShouldPresent());
+                const bool requiresOutput = frame.GetOutputKind() == RenderViewportOutputKind::Texture || (frame.GetOutputKind() == RenderViewportOutputKind::Presentation && frame.ShouldPresent());
                 if (requiresOutput != output.IsValid() || (requiresOutput && output.GetKind() != frame.GetOutputKind()))
                     return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render frame output transaction does not match the frame packet");
 
+                // Owner-only progression deliberately permits scene/camera mutation while the
+                // prior terminal Present is still active, but it does not begin a new render
+                // generation. Starting another frame after ownerTail was consumed would overlap
+                // two generations in the shared terminal failure latch. The normal engine path
+                // fully drains this tail in RenderUpdate before FrameTick/render submission.
+                if (cpuTail.IsValid() && !ownerTail.IsValid())
+                    return Fail(failure, RenderCommandFailureCode::InvalidState,
+                                "previous render-frame terminal boundary must be consumed before starting a new render-frame owner chain");
+
+                // Retain everything the asynchronous renderer needs before dispatch.
                 RetainedRenderFrameRef retained = detail::RenderCommandRetainedFrameAccess::Create(frame, static_cast<RenderFrameOutputTransaction&&>(output), *owner->commandSystem);
                 if (!retained.IsValid())
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "retained render-frame allocation failed");
+
                 jobs::Task task = jobs::Task::Create(
                     [dispatcher = this, retained](const jobs::JobContext& continuation) mutable noexcept
                     {
                         RenderFrameContext context(retained, continuation);
-                        RenderFrameExecutionStatus status =
-                            context.IsValid() ? dispatcher->execute(context, dispatcher->userData)
-                                              : RenderFrameExecutionStatus::Failure("renderer continuation builder creation failed");
+                        if (!context.IsValid())
+                        {
+                            retained.RecordFailure("renderer continuation builder creation failed");
+                            detail::RenderCommandRetainedFrameAccess::PublishTerminalCompletion(retained, false);
+                            return;
+                        }
+
+                        ////////////////////////////////////////////////////////////////////////////////////////////////////
+                        const RenderFrameExecutionStatus status = dispatcher->execute(context, dispatcher->userData);
+                        ////////////////////////////////////////////////////////////////////////////////////////////////////
+
                         if (status.IsFailure())
                         {
                             retained.RecordFailure(status.message);
@@ -738,32 +811,78 @@ namespace vanguard::rendering
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame job allocation failed");
                 }
 
+                // Keep CPU render-frame preparation ordered without blocking the submitting thread.
                 jobs::Builder builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker}, this);
                 if (!builder.IsValid())
                 {
                     detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame job builder creation failed");
                 }
+
+                // The full frame counter below intentionally remains terminal: it includes
+                // presentation and terminal diagnostics. A separate zero-work counter held
+                // by one completion deferral gives the renderer an explicit earlier point at
+                // which scene/camera owners are no longer retained. Multiple viewport frames
+                // can be accepted in one engine frame, so chain each new owner boundary behind
+                // the preceding aggregate rather than treating ownerTail as a single-frame slot.
+                const bool continuingOwnerChain = ownerTail.IsValid();
+                jobs::Builder ownerCompletionBuilder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker}, this);
+                if (!ownerCompletionBuilder.IsValid())
+                {
+                    detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
+                    return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render-frame owner completion builder creation failed");
+                }
+                if (continuingOwnerChain)
+                    ownerCompletionBuilder.AddDependency(ownerTail);
+                jobs::Counter nextOwnerTail = ownerCompletionBuilder.ExtractCounter();
+                if (!nextOwnerTail.IsValid())
+                {
+                    detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
+                    return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render-frame owner completion extraction failed");
+                }
+                jobs::CompletionDeferral ownerCompletion = nextOwnerTail.CreateDeferral("RenderCommands.RenderFrameOwner", this);
+                if (!ownerCompletion.IsValid())
+                {
+                    detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
+                    return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render-frame owner completion deferral allocation failed");
+                }
+                detail::RenderCommandRetainedFrameAccess::InstallOwnerCompletion(retained, static_cast<jobs::CompletionDeferral&&>(ownerCompletion));
+                if (!continuingOwnerChain)
+                    owner->ownerCompletionFailed.SetValue(false);
+
                 if (cpuTail.IsValid())
                     builder.AddDependency(cpuTail);
+                if (frameTickTail.IsValid())
+                    builder.AddDependency(frameTickTail);
+
                 static_cast<void>(submittedFrames.Increment());
-                if (!builder.Dispatch(jobName, std::move(task)))
+
+                const bool dispatched = builder.Dispatch(jobName, std::move(task));
+
+                if (!dispatched)
                 {
                     static_cast<void>(submittedFrames.Decrement());
+                    if (!continuingOwnerChain)
+                        owner->ownerCompletionFailed.SetValue(false);
                     detail::RenderCommandRetainedFrameAccess::TakeOutput(retained, output);
                     return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "render frame job dispatch failed");
                 }
 
+                ownerTail = static_cast<jobs::Counter&&>(nextOwnerTail);
+                frameTickTail = {};
+
+                // Dispatch already transferred ownership. Prefer the asynchronous completion counter; synchronously join only if that counter cannot be retained.
                 jobs::Counter nextTail = builder.ExtractCounter();
                 if (!nextTail.IsValid())
                 {
                     if (!builder.WaitForCompletion())
                         VG_FATAL("accepted render frame could not establish its completion boundary");
-                    // Dispatch accepted ownership. A synchronous join must not make this frame retryable.
+
                     cpuTail = {};
                     submission.serial = frame.GetSerial();
                     return true;
                 }
+
                 cpuTail = std::move(nextTail);
                 submission.serial = frame.GetSerial();
                 return true;
@@ -783,9 +902,9 @@ namespace vanguard::rendering
             return scenes != nullptr && sceneStamps.Size() == scenes->GetStats().capacity && frameScenes.Size() == scenes->GetStats().capacity;
         }
 
-        void AdoptTail(jobs::Builder& builder) noexcept
+        void AdoptFrameTickTail(jobs::Builder& builder) noexcept
         {
-            cpuTail = builder.ExtractCounter();
+            frameTickTail = builder.ExtractCounter();
         }
 
         RenderSceneManager* scenes = nullptr;
@@ -795,7 +914,12 @@ namespace vanguard::rendering
         void* userData = nullptr;
         jobs::JobName frameTickJobName{"RenderCommands.FrameTick"};
         RenderFrameDispatcher frameDispatcher;
+        jobs::Counter frameTickTail;
+        jobs::Counter ownerTail;
         jobs::Counter cpuTail;
+        concurrency::Atomic<bool> ownerCompletionFailed{false};
+        concurrency::Atomic<bool> frameTickOwnerFailure{false};
+        bool ownerResolutionRequired = false;
         ExecutionFailureLatch executionFailure;
         containers::DynamicArray<u32> sceneStamps;
         containers::DynamicArray<RenderSceneProcessingEpoch> frameScenes;
@@ -879,10 +1003,26 @@ namespace vanguard::rendering
         return m_impl != nullptr && m_impl->initialized;
     }
 
+    bool RenderCommandSystem::FlushRendererOwnerMutationBoundary(RenderCommandFailure* const failure) noexcept
+    {
+        bool requiresTerminalResolution = false;
+        if (!FlushPreviousFrameOwnerProcessing(requiresTerminalResolution, failure))
+            return false;
+        if (!requiresTerminalResolution)
+            return true;
+
+        // Camera/owner mutation helpers may need the stronger wait to make mutation safe,
+        // but they are not the engine-level acknowledgment point for asynchronous core
+        // failure. Re-arm the durable requirement before the terminal wait so a later
+        // RenderingService PreSimulation owner resolution still observes and handles it.
+        m_impl->ownerResolutionRequired = true;
+        return FlushPreviousFrameProcessing(failure);
+    }
+
     bool RenderCommandSystem::RegisterCamera(const RenderCameraDesc& desc, RenderCameraHandle& camera, RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, desc.scene);
         return m_impl->cameras->RegisterCamera(desc, camera, failure);
     }
@@ -890,7 +1030,7 @@ namespace vanguard::rendering
     bool RenderCommandSystem::UnregisterCamera(const RenderCameraHandle camera, RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, camera.scene, camera);
         return m_impl->cameras->UnregisterCamera(camera, failure);
     }
@@ -898,7 +1038,7 @@ namespace vanguard::rendering
     bool RenderCommandSystem::UpdateCamera(const RenderCameraHandle camera, const RenderCameraState& state, RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, camera.scene, camera);
         return m_impl->cameras->UpdateCamera(camera, state, failure);
     }
@@ -906,7 +1046,7 @@ namespace vanguard::rendering
     bool RenderCommandSystem::RequestCameraCut(const RenderCameraHandle camera, RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, camera.scene, camera);
         return m_impl->cameras->RequestCameraCut(camera, failure);
     }
@@ -914,7 +1054,7 @@ namespace vanguard::rendering
     bool RenderCommandSystem::SetCameraEnabled(const RenderCameraHandle camera, const bool enabled, RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, camera.scene, camera);
         return m_impl->cameras->SetEnabled(camera, enabled, failure);
     }
@@ -923,7 +1063,7 @@ namespace vanguard::rendering
                                                     RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, camera.scene, camera);
         return m_impl->cameras->SetRenderPolicy(camera, policy, failure);
     }
@@ -932,7 +1072,7 @@ namespace vanguard::rendering
                                                   RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, parent.scene, parent, child);
         return m_impl->cameras->AddDependency(parent, child, outputs, failure);
     }
@@ -941,7 +1081,7 @@ namespace vanguard::rendering
                                                      RenderCameraFailure* const failure) noexcept
     {
         RenderCommandFailure commandFailure;
-        if (!FlushPreviousFrameProcessing(&commandFailure))
+        if (!FlushRendererOwnerMutationBoundary(&commandFailure))
             return CameraBoundaryFailure(failure, commandFailure, parent.scene, parent, child);
         return m_impl->cameras->RemoveDependency(parent, child, failure);
     }
@@ -964,11 +1104,13 @@ namespace vanguard::rendering
             ++m_impl->rejectedOperations;
             return Fail(failure, RenderCommandFailureCode::InvalidDescriptor, "render command FrameTick requires a non-zero tick");
         }
-        if (m_impl->cpuTail.IsValid())
+        if (m_impl->cpuTail.IsValid() || m_impl->ownerTail.IsValid() || m_impl->frameTickTail.IsValid() || m_impl->ownerResolutionRequired)
         {
             ++m_impl->rejectedOperations;
-            return Fail(failure, RenderCommandFailureCode::InvalidState, "previous CPU rendering must be flushed before render command FrameTick");
+            return Fail(failure, RenderCommandFailureCode::InvalidState,
+                        "previous renderer terminal, owner, and failure acknowledgment work must be resolved before render command FrameTick");
         }
+        m_impl->frameTickOwnerFailure.SetValue(false);
 
         u32 stamp = ++m_impl->sceneStamp;
         if (stamp == 0)
@@ -1008,14 +1150,14 @@ namespace vanguard::rendering
             if (!m_impl->scenes->PrepareSceneUpdate(scene, tickCounter, prepare, &sceneFailure))
             {
                 if (result.asynchronousScenes != 0)
-                    m_impl->AdoptTail(builder);
+                    m_impl->AdoptFrameTickTail(builder);
                 return Fail(failure, RenderCommandFailureCode::SceneFailure, "RenderScene update preparation failed", {scene, &sceneFailure});
             }
             RenderSceneUpdateResult update;
             if (!m_impl->scenes->ExecuteSceneUpdate(scene, builder, update, &sceneFailure))
             {
                 if (result.asynchronousScenes != 0)
-                    m_impl->AdoptTail(builder);
+                    m_impl->AdoptFrameTickTail(builder);
                 return Fail(failure, RenderCommandFailureCode::SceneFailure, "RenderScene update dispatch failed", {scene, &sceneFailure});
             }
             ++result.submittedScenes;
@@ -1032,6 +1174,7 @@ namespace vanguard::rendering
                                                               : RenderFrameExecutionStatus::Failure("renderer FrameTick continuation builder creation failed");
                 if (!status)
                 {
+                    impl->frameTickOwnerFailure.SetValue(true);
                     impl->ReportExecutionFailure(RenderCommandExecutionStage::FrameTick, tickCounter, status.message);
                     static_cast<void>(impl->failedFrameTicks.Increment());
                 }
@@ -1040,12 +1183,12 @@ namespace vanguard::rendering
         if (!frameTickTask || !builder.Dispatch(m_impl->frameTickJobName, std::move(frameTickTask)))
         {
             if (result.asynchronousScenes != 0)
-                m_impl->AdoptTail(builder);
+                m_impl->AdoptFrameTickTail(builder);
             return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "renderer FrameTick dispatch failed");
         }
 
-        m_impl->AdoptTail(builder);
-        if (!m_impl->cpuTail.IsValid())
+        m_impl->AdoptFrameTickTail(builder);
+        if (!m_impl->frameTickTail.IsValid())
             return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "renderer FrameTick completion extraction failed");
         static_cast<void>(m_impl->frameTicks.Increment());
         return true;
@@ -1064,7 +1207,7 @@ namespace vanguard::rendering
         submission = {};
         if (!IsInitialized())
             return Fail(failure, RenderCommandFailureCode::NotInitialized, "RenderCommandSystem is not initialized");
-        const bool submitted = m_impl->frameDispatcher.Submit(frame, output, m_impl->cpuTail, submission, failure);
+        const bool submitted = m_impl->frameDispatcher.Submit(frame, output, m_impl->cpuTail, m_impl->frameTickTail, m_impl->ownerTail, submission, failure);
         if (!submitted)
             ++m_impl->rejectedOperations;
         return submitted;
@@ -1080,26 +1223,108 @@ namespace vanguard::rendering
             ++m_impl->rejectedOperations;
             return Fail(failure, RenderCommandFailureCode::WrongThread, "previous render frame processing must be flushed on the main thread");
         }
-        if (!m_impl->cpuTail.IsValid())
+        bool waited = false;
+        if (m_impl->frameTickTail.IsValid())
+        {
+            if (!m_impl->frameTickTail.WaitOnProcessFrame())
+                return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "previous renderer FrameTick CPU chain flush failed");
+            m_impl->frameTickTail = {};
+            waited = true;
+        }
+        if (m_impl->cpuTail.IsValid())
+        {
+            if (!m_impl->cpuTail.WaitOnProcessFrame())
+                return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "previous CPU rendering terminal chain flush failed");
+            m_impl->cpuTail = {};
+            waited = true;
+        }
+        if (m_impl->ownerTail.IsValid())
+        {
+            if (!m_impl->ownerTail.WaitOnProcessFrame())
+                return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "previous renderer-owner completion flush failed");
+            m_impl->ownerTail = {};
+            waited = true;
+        }
+        // A strong terminal drain is not itself the renderer-owner acknowledgment used by
+        // PreSimulation. Preserve any core/FrameTick failure evidence across callers that
+        // happen to drain the counters early (for example Editor BeginFrame or viewport
+        // mutation) so the later owner boundary still forces deterministic terminal handling.
+        if (m_impl->ownerCompletionFailed.GetValue() || m_impl->frameTickOwnerFailure.GetValue())
+            m_impl->ownerResolutionRequired = true;
+        m_impl->ownerCompletionFailed.SetValue(false);
+        m_impl->frameTickOwnerFailure.SetValue(false);
+        if (waited)
+            ++m_impl->explicitFlushes;
+        return true;
+    }
+
+    bool RenderCommandSystem::FlushPreviousFrameOwnerProcessing(bool& requiresTerminalResolution, RenderCommandFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        requiresTerminalResolution = false;
+        if (!IsInitialized())
+            return Fail(failure, RenderCommandFailureCode::NotInitialized, "RenderCommandSystem is not initialized");
+        if (!concurrency::IsMainThread())
+        {
+            ++m_impl->rejectedOperations;
+            return Fail(failure, RenderCommandFailureCode::WrongThread, "previous renderer-owner processing must be flushed on the main thread");
+        }
+
+        const bool pendingResolution = m_impl->ownerResolutionRequired;
+        if (m_impl->ownerTail.IsValid())
+        {
+            if (!m_impl->ownerTail.WaitOnProcessFrame())
+                return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "previous renderer-owner completion flush failed");
+            m_impl->ownerTail = {};
+            requiresTerminalResolution = pendingResolution || m_impl->ownerCompletionFailed.GetValue();
+            m_impl->ownerResolutionRequired = false;
+            m_impl->ownerCompletionFailed.SetValue(false);
+            m_impl->frameTickOwnerFailure.SetValue(false);
             return true;
-        if (!m_impl->cpuTail.WaitOnProcessFrame())
-            return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "previous CPU rendering chain flush failed");
-        m_impl->cpuTail = {};
-        ++m_impl->explicitFlushes;
+        }
+
+        // A frame tick can exist without a following viewport frame (headless,
+        // rejected or intentionally absent output). It has no presentation tail,
+        // so its own completion is the owner boundary.
+        if (m_impl->frameTickTail.IsValid())
+        {
+            if (!m_impl->frameTickTail.WaitOnProcessFrame())
+                return Fail(failure, RenderCommandFailureCode::SubmissionFailure, "previous renderer FrameTick owner flush failed");
+            m_impl->frameTickTail = {};
+            requiresTerminalResolution = pendingResolution || m_impl->frameTickOwnerFailure.GetValue();
+            m_impl->ownerResolutionRequired = false;
+            m_impl->frameTickOwnerFailure.SetValue(false);
+            return true;
+        }
+        requiresTerminalResolution = pendingResolution;
+        m_impl->ownerResolutionRequired = false;
         return true;
     }
 
     bool RenderCommandSystem::ConsumeExecutionFailure(RenderCommandFailure& failure) noexcept
     {
         failure = {};
-        if (!IsInitialized() || !concurrency::IsMainThread() || m_impl->cpuTail.IsValid())
+        if (!IsInitialized() || !concurrency::IsMainThread() || m_impl->cpuTail.IsValid() || m_impl->frameTickTail.IsValid() || m_impl->ownerTail.IsValid())
             return false;
-        return m_impl->ConsumeExecutionFailure(failure);
+        const bool consumed = m_impl->ConsumeExecutionFailure(failure);
+        if (consumed)
+            m_impl->ownerResolutionRequired = false;
+        return consumed;
+    }
+
+    void RenderCommandSystem::PublishFrameOwnerCompletion(const bool requiresTerminalResolution) noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        if (requiresTerminalResolution || m_impl->frameTickOwnerFailure.GetValue())
+            m_impl->ownerCompletionFailed.SetValue(true);
     }
 
     bool RenderCommandSystem::IsIdle() const noexcept
     {
-        return IsInitialized() && (!m_impl->cpuTail.IsValid() || m_impl->cpuTail.IsReady());
+        return IsInitialized() && (!m_impl->cpuTail.IsValid() || m_impl->cpuTail.IsReady()) &&
+               (!m_impl->frameTickTail.IsValid() || m_impl->frameTickTail.IsReady()) &&
+               (!m_impl->ownerTail.IsValid() || m_impl->ownerTail.IsReady());
     }
 
     void RenderCommandSystem::PublishFrameCompletion(const u64 serial, const bool failed, const bool skipped, const char* const message) noexcept
@@ -1135,7 +1360,9 @@ namespace vanguard::rendering
         stats.rejectedOperations = m_impl->rejectedOperations;
         stats.initialized = true;
         stats.executionFailurePending = m_impl->HasExecutionFailure();
-        stats.workOutstanding = m_impl->cpuTail.IsValid() && !m_impl->cpuTail.IsReady();
+        stats.workOutstanding = (m_impl->cpuTail.IsValid() && !m_impl->cpuTail.IsReady()) ||
+                                (m_impl->frameTickTail.IsValid() && !m_impl->frameTickTail.IsReady()) ||
+                                (m_impl->ownerTail.IsValid() && !m_impl->ownerTail.IsReady());
         return stats;
     }
 } // namespace vanguard::rendering

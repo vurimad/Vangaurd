@@ -121,8 +121,13 @@ namespace vanguard::rendering
         /// May be called by producer jobs after they finish writing their reservation.
         [[nodiscard]] bool Complete(GpuSceneUploadReservation reservation, GpuSceneUploadFailure* failure = nullptr) noexcept;
 
-        /// Records one graphics-queue copy command list, submits it, and publishes newly allocated identities.
+        /// Records one graphics-queue copy command list and submits it. Main-thread callers also publish newly
+        /// allocated identities immediately; renderer-job callers leave that accepted ownership transition pending
+        /// for ResolveSubmittedInitialPublications().
         [[nodiscard]] bool Submit(GpuSceneUploadResult& result, GpuSceneUploadFailure* failure = nullptr) noexcept;
+        /// Main-thread completion for an accepted renderer-job submission. This only activates identities whose
+        /// complete initial payload was already submitted; it never records, submits, or waits for GPU work.
+        [[nodiscard]] bool ResolveSubmittedInitialPublications(GpuSceneUploadFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool Cancel(GpuSceneUploadFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] GpuSceneUploadStats GetStats() const noexcept;

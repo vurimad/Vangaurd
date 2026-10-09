@@ -8,8 +8,106 @@ namespace vanguard::assets
 {
     using BuildFingerprint = crypto::Digest256;
     using CompilerId = u64;
+    using SourceImporterId = u64;
 
     inline constexpr CompilerId InvalidCompilerId = 0;
+    inline constexpr SourceImporterId InvalidSourceImporterId = 0;
+
+    struct ArtifactSetKey
+    {
+        BuildFingerprint build;
+        BuildFingerprint content;
+
+        [[nodiscard]] friend bool operator==(const ArtifactSetKey&, const ArtifactSetKey&) noexcept = default;
+        [[nodiscard]] bool IsValid() const noexcept { return !build.IsEmpty(); }
+    };
+
+    struct PersistentCacheCoordinationLimits
+    {
+        u32 maximumRegisteredRoots = 32;
+        u32 maximumLiveLeasesPerRoot = 65536;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return maximumRegisteredRoots != 0u && maximumLiveLeasesPerRoot != 0u;
+        }
+
+        [[nodiscard]] friend bool operator==(const PersistentCacheCoordinationLimits&,
+                                             const PersistentCacheCoordinationLimits&) noexcept = default;
+    };
+
+    enum class PersistentCacheMaintenanceResult : u8
+    {
+        Success,
+        Deferred,
+        InvalidArgument,
+        InvalidState,
+        ScanFailed,
+        LimitExceeded,
+        OutOfMemory,
+        ProtectionChanged,
+        Cancelled
+    };
+
+    struct PersistentCacheMaintenanceLimits
+    {
+        u64 maximumCacheBytes = 4ull * 1024ull * 1024ull * 1024ull;
+        u32 maximumProtectionRecords = 262144;
+        u64 maximumProtectionBytes = 64ull * 1024ull * 1024ull;
+        u32 maximumScanEntries = 262144;
+        u64 maximumScanBytes = 64ull * 1024ull * 1024ull * 1024ull;
+        u32 maximumDeleteRecords = 1024;
+        u32 maximumDiagnosticRows = 64;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return maximumCacheBytes != 0u && maximumProtectionRecords != 0u && maximumProtectionBytes != 0u &&
+                   maximumScanEntries != 0u && maximumScanBytes >= maximumCacheBytes && maximumDeleteRecords != 0u &&
+                   maximumDiagnosticRows != 0u;
+        }
+    };
+
+    enum class PersistentCacheMaintenanceDiagnosticReason : u8
+    {
+        LeaseBusy,
+        InvalidCandidate,
+        IoFailure
+    };
+
+    struct PersistentCacheMaintenanceDiagnostic
+    {
+        BuildFingerprint build;
+        PersistentCacheMaintenanceDiagnosticReason reason = PersistentCacheMaintenanceDiagnosticReason::LeaseBusy;
+    };
+
+    struct PersistentCacheMaintenanceReport
+    {
+        u32 scannedRecords = 0;
+        u64 scannedBytes = 0;
+        u32 protectedRecords = 0;
+        u64 protectedBytes = 0;
+        u32 eligibleRecords = 0;
+        u64 eligibleBytes = 0;
+        u32 removedRecords = 0;
+        u64 removedBytes = 0;
+        u32 deferredDeletes = 0;
+        u32 failedDeletes = 0;
+        u32 foreignFiles = 0;
+        u32 stageFiles = 0;
+        bool protectedOverBudget = false;
+        bool deleteBatchLimitReached = false;
+        bool budgetSatisfied = false;
+        bool diagnosticsTruncated = false;
+    };
+
+    namespace detail
+    {
+        class PersistentCacheAuthorityAccess;
+    }
+
+    class BuildGraph;
+    class DependencyIndex;
+    class ProjectAssetBuildSystem;
 
     enum class TargetPlatform : u8
     {
@@ -67,6 +165,7 @@ namespace vanguard::assets
         DuplicateDependency,
         CompileFailed,
         InvalidArtifact,
+        PersistentCacheFailure,
         LimitExceeded,
         OutOfMemory,
         Cancelled
@@ -99,6 +198,28 @@ namespace vanguard::assets
             return source.IsValid() && output.IsValid() && output.IsTyped() && target < TargetPlatform::Count &&
                    (settings.Empty() || settings.Data() != nullptr);
         }
+    };
+
+    // Ownership-safe form of BuildRequest for resolver boundaries. BuildRequest
+    // intentionally remains a lightweight borrowed view; this value deep-copies
+    // every byte span so callers can retain the request after importer/source
+    // temporaries have expired.
+    struct OwnedBuildRequest
+    {
+        OwnedBuildRequest() noexcept;
+
+        [[nodiscard]] bool CopyFrom(const BuildRequest& request) noexcept;
+        [[nodiscard]] BuildRequest View() const noexcept;
+        [[nodiscard]] u64 ByteCount() const noexcept;
+        void Reset() noexcept;
+        void ReleasePayload() noexcept;
+
+        resources::ResourceReference sourceReference;
+        resources::ResourceReference outputReference;
+        TargetPlatform target = TargetPlatform::WindowsD3D12;
+        containers::DynamicArray<u8> source;
+        containers::DynamicArray<u8> metadata;
+        containers::DynamicArray<u8> settings;
     };
 
     struct BuildDependency
@@ -134,6 +255,40 @@ namespace vanguard::assets
 
     private:
         containers::DynamicArray<BuildDependency> m_dependencies;
+        Result m_status = Result::Success;
+    };
+
+    enum class AssetReferenceLocation : u8
+    {
+        Primary,
+        Inner
+    };
+
+    struct ScannedAssetReference
+    {
+        resources::ResourceReference target;
+        resources::DependencyKind kind = resources::DependencyKind::Required;
+        AssetReferenceLocation location = AssetReferenceLocation::Primary;
+        bool inPlace = false;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return target.IsValid() && target.IsTyped() && kind <= resources::DependencyKind::Soft && location <= AssetReferenceLocation::Inner;
+        }
+    };
+
+    class AssetReferenceCollector final
+    {
+    public:
+        AssetReferenceCollector() noexcept;
+
+        [[nodiscard]] Result Add(const ScannedAssetReference& reference) noexcept;
+        [[nodiscard]] u32 Count() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const ScannedAssetReference> GetReferences() const noexcept;
+        [[nodiscard]] Result GetStatus() const noexcept;
+
+    private:
+        containers::DynamicArray<ScannedAssetReference> m_references;
         Result m_status = Result::Success;
     };
 
@@ -344,10 +499,6 @@ namespace vanguard::assets
     using EstimateBuildResourcesFunction = bool (*)(const BuildRequest& request, containers::ArraySpan<const BuildDependency> dependencies,
                                                     BuildResourceEstimate& estimate, void* userData) noexcept;
     using CompileFunction = bool (*)(const CompileContext& context, ArtifactWriter& artifacts, void* userData) noexcept;
-    // Optional cheap source-name routing hint. No I/O or decoding; true means
-    // candidate, not a successful import. The tool owns format knowledge.
-    using RecognizeSourceFunction = bool (*)(containers::StringView sourcePath, void* userData) noexcept;
-
     struct CompilerDescriptor
     {
         CompilerId id = InvalidCompilerId;
@@ -361,7 +512,6 @@ namespace vanguard::assets
         /// Optional for direct synchronous BuildSystem use. BuildGraph rejects plans without
         /// an estimate so asynchronous work can never bypass its byte admission limit.
         EstimateBuildResourcesFunction estimateResources = nullptr;
-        RecognizeSourceFunction recognizeSource = nullptr;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
@@ -378,6 +528,34 @@ namespace vanguard::assets
         CacheHit
     };
 
+    enum class BuildOrigin : u8
+    {
+        Unknown,
+        MemoryCacheHit,
+        PersistentCacheHit,
+        CompilerBuilt
+    };
+
+    class BuildOutputProtection final
+    {
+    public:
+        BuildOutputProtection() noexcept = default;
+        BuildOutputProtection(const BuildOutputProtection& other) noexcept;
+        BuildOutputProtection& operator=(const BuildOutputProtection& other) noexcept;
+        BuildOutputProtection(BuildOutputProtection&& other) noexcept;
+        BuildOutputProtection& operator=(BuildOutputProtection&& other) noexcept;
+        ~BuildOutputProtection();
+
+        [[nodiscard]] bool IsValid() const noexcept { return m_impl != nullptr; }
+        void Reset() noexcept;
+
+    private:
+        struct Impl;
+        Impl* m_impl = nullptr;
+
+        friend class detail::PersistentCacheAuthorityAccess;
+    };
+
     class BuildOutput final
     {
     public:
@@ -386,9 +564,17 @@ namespace vanguard::assets
         void Reset() noexcept;
 
         BuildDisposition disposition = BuildDisposition::Built;
+        BuildOrigin origin = BuildOrigin::Unknown;
         BuildFingerprint buildFingerprint;
         BuildFingerprint contentFingerprint;
         containers::DynamicArray<Artifact> artifacts;
+
+    private:
+        BuildOutputProtection m_publicationProtection;
+
+        friend class BuildGraph;
+        friend class BuildSystem;
+        friend class detail::PersistentCacheAuthorityAccess;
     };
 
     struct Config
@@ -405,6 +591,7 @@ namespace vanguard::assets
         // The string is copied during Initialize and may be released after it
         // returns. A null pointer keeps the cache memory-only.
         const char* persistentCacheRoot = nullptr;
+        PersistentCacheCoordinationLimits persistentCacheCoordination;
     };
 
     struct Stats
@@ -419,6 +606,7 @@ namespace vanguard::assets
         u64 cacheMisses = 0;
         u64 cacheStores = 0;
         u64 cacheEvictions = 0;
+        u64 memoryCacheHits = 0;
         u64 persistentCacheHits = 0;
         u64 persistentCacheMisses = 0;
         u64 persistentCacheStores = 0;
@@ -461,6 +649,21 @@ namespace vanguard::assets
         [[nodiscard]] Stats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] bool RegisterPersistentProtectionDomain(const void* owner) noexcept;
+        [[nodiscard]] bool UnregisterPersistentProtectionDomain(const void* owner) noexcept;
+        [[nodiscard]] bool OwnsPersistentPublication(const void* owner, const BuildOutput& output) const noexcept;
+        void AdoptPersistentPublication(const void* owner, BuildOutput& output) noexcept;
+        [[nodiscard]] u64 PersistentProtectionEpoch(const void* owner) const noexcept;
+        [[nodiscard]] PersistentCacheMaintenanceResult MaintainPersistentCache(
+            const void* owner, containers::ArraySpan<const ArtifactSetKey> protectedKeys, u64 protectionEpoch,
+            const PersistentCacheMaintenanceLimits& limits, PersistentCacheMaintenanceReport& report,
+            containers::DynamicArray<PersistentCacheMaintenanceDiagnostic>& diagnostics,
+            IsCancellationRequestedFunction cancellation = nullptr, void* cancellationUserData = nullptr) noexcept;
+
         Impl* m_impl = nullptr;
+
+        friend class BuildGraph;
+        friend class DependencyIndex;
+        friend class ProjectAssetBuildSystem;
     };
 } // namespace vanguard::assets

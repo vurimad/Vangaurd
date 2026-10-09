@@ -118,6 +118,30 @@ namespace vanguard::diagnostics
     using SinkCallback = void (*)(const MessageView& message, void* userData) noexcept;
     using FrameNumberRetriever = u64 (*)();
 
+    inline constexpr u32 MaximumSinkRegistrations = 8;
+
+    struct SinkRegistrationToken
+    {
+        u32 index = ~u32{0};
+        u64 generation = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return index < MaximumSinkRegistrations && generation != 0;
+        }
+    };
+
+    enum class SinkRegistrationResult : u8
+    {
+        Success,
+        InvalidArgument,
+        CapacityExceeded,
+        GenerationExhausted,
+        StaleToken,
+        ReentrantOperation,
+        InternalFailure
+    };
+
     [[nodiscard]] bool Initialize(Mode mode = Mode::Asynchronous, const char* prefix = nullptr) noexcept;
     void Shutdown() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
@@ -138,6 +162,10 @@ namespace vanguard::diagnostics
     void ClearNetworkPeerId() noexcept;
 
     void SetSinkCallback(SinkCallback callback, void* userData = nullptr) noexcept;
+    [[nodiscard]] SinkRegistrationResult RegisterSinkCallback(SinkCallback callback, void* userData,
+                                                              SinkRegistrationToken& token) noexcept;
+    [[nodiscard]] SinkRegistrationResult UnregisterSinkCallback(SinkRegistrationToken token) noexcept;
+    [[nodiscard]] bool IsSinkCallbackRegistered(SinkRegistrationToken token) noexcept;
 
     [[nodiscard]] bool OpenFileSink(const char* path, FileMode mode = FileMode::Truncate) noexcept;
     void CloseFileSink() noexcept;

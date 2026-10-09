@@ -8,6 +8,7 @@
 namespace vanguard::rendering
 {
     class RenderCommandSystem;
+    class RetainedRenderFrameRef;
 
     class RenderNodeGraph;
     class RenderFlowResourceAllocator;
@@ -82,6 +83,62 @@ namespace vanguard::rendering
         Failed
     };
 
+    enum class RenderOutputPublicationReadinessKind : u8
+    {
+        SameQueueContinuation,
+        ExplicitFence
+    };
+
+    enum class RenderOutputColorEncoding : u8
+    {
+        SceneLinear,
+        DisplaySrgb
+    };
+
+    struct RenderTextureOutputContract
+    {
+        rhi::ResourceState restingState = rhi::ResourceState::Common;
+        rhi::QueueType restingQueue = rhi::QueueType::Graphics;
+        // Describes how a consumer may observe the completed producer publication.
+        // Producer entry synchronization is a separate contract.
+        RenderOutputPublicationReadinessKind publicationReadiness = RenderOutputPublicationReadinessKind::SameQueueContinuation;
+
+        [[nodiscard]] constexpr bool IsSupported() const noexcept
+        {
+            return restingState != rhi::ResourceState::Unknown && restingQueue == rhi::QueueType::Graphics &&
+                   (publicationReadiness == RenderOutputPublicationReadinessKind::SameQueueContinuation ||
+                    publicationReadiness == RenderOutputPublicationReadinessKind::ExplicitFence);
+        }
+    };
+
+    enum class RenderOutputReceiptState : u8
+    {
+        Pending,
+        Ready,
+        Failed
+    };
+
+    struct RenderOutputReceipt
+    {
+        RenderViewportHandle viewport;
+        u64 outputRevision = 0;
+        u64 producerSerial = 0;
+        RenderOutputReceiptState state = RenderOutputReceiptState::Pending;
+        rhi::ResourceState terminalState = rhi::ResourceState::Unknown;
+        rhi::QueueType terminalQueue = rhi::QueueType::Graphics;
+        RenderOutputPublicationReadinessKind readiness = RenderOutputPublicationReadinessKind::SameQueueContinuation;
+        rhi::GpuFence readyFence;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return viewport.IsValid() && outputRevision != 0 && producerSerial != 0;
+        }
+        [[nodiscard]] bool IsReady() const noexcept
+        {
+            return IsValid() && state == RenderOutputReceiptState::Ready && readyFence.IsValid();
+        }
+    };
+
     enum class RenderingMode : u8
     {
         Shaded,
@@ -140,6 +197,8 @@ namespace vanguard::rendering
         ViewportExtent outputExtent{1280, 720};
         window::PresentationAttachmentHandle presentation;
         rhi::TextureRef outputTexture;
+        RenderTextureOutputContract textureOutput;
+        RenderOutputColorEncoding outputColorEncoding = RenderOutputColorEncoding::SceneLinear;
     };
 
     struct EngineViewportDesc
@@ -306,6 +365,7 @@ namespace vanguard::rendering
 
     private:
         friend class RenderCommandSystem;
+        friend class RetainedRenderFrameRef;
         friend class ViewportManager;
 
         u64 m_serial = 0;
@@ -384,11 +444,17 @@ namespace vanguard::rendering
         void Reset() noexcept;
         void MarkPresentNodeReached() noexcept { m_presentNodeReached = true; }
         [[nodiscard]] bool WasPresentNodeReached() const noexcept { return m_presentNodeReached; }
+        [[nodiscard]] bool CompleteTextureOutput(rhi::ResourceState terminalState, rhi::QueueType terminalQueue,
+                                                 RenderOutputPublicationReadinessKind readiness, rhi::GpuFence readyFence,
+                                                 ViewportFailure* failure = nullptr) noexcept;
 
         RenderViewport* m_viewport = nullptr;
         RenderOutputAcquisition m_acquisition;
         u32 m_resourceImportIndex = ~u32{0};
         u32 m_resourceImportGeneration = 0;
+        u32 m_resourceExportIndex = ~u32{0};
+        u32 m_resourceExportGeneration = 0;
+        u64 m_producerSerial = 0;
         bool m_presentNodeReached = false;
 
         friend class ViewportManager;
@@ -414,6 +480,8 @@ namespace vanguard::rendering
         }
         [[nodiscard]] RenderViewportOutputKind GetOutputKind() const noexcept { return m_outputKind; }
         [[nodiscard]] RenderViewportState GetState() const noexcept { return m_state; }
+        [[nodiscard]] const RenderTextureOutputContract& GetTextureOutputContract() const noexcept { return m_textureOutput; }
+        [[nodiscard]] RenderOutputColorEncoding GetOutputColorEncoding() const noexcept { return m_outputColorEncoding; }
         [[nodiscard]] ViewportExtent GetRenderExtent() const noexcept { return m_renderExtent; }
         [[nodiscard]] ViewportExtent GetOutputExtent() const noexcept { return m_outputExtent; }
         [[nodiscard]] u32 GetRenderWidth() const noexcept { return m_renderExtent.width; }
@@ -443,6 +511,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool UpdatePresentation(const RenderViewportPresentationUpdate& update, RenderViewportPresentationResult& result,
                                               ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool GetPresentationAcknowledgement(window::PresentationAcknowledgement& acknowledgement) const noexcept;
+        [[nodiscard]] bool QueryOutputReceipt(u64 outputRevision, u64 producerSerial, RenderOutputReceipt& receipt) const noexcept;
         [[nodiscard]] bool Present(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
 
     private:
@@ -460,6 +529,8 @@ namespace vanguard::rendering
         window::PresentationAttachmentHandle m_presentation;
         rhi::SwapChainRef m_swapChain;
         rhi::TextureRef m_outputTexture;
+        RenderTextureOutputContract m_textureOutput;
+        RenderOutputColorEncoding m_outputColorEncoding = RenderOutputColorEncoding::SceneLinear;
         ViewportExtent m_requestedOutputExtent;
         u64 m_requiredPixelExtentRevision = 0;
         u64 m_appliedPixelExtentRevision = 0;
@@ -601,6 +672,8 @@ namespace vanguard::rendering
         [[nodiscard]] bool CompleteOutput(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
         void DeviceLostOutput(RenderOutputAcquisition& acquisition) noexcept;
         [[nodiscard]] bool Present(RenderOutputAcquisition& acquisition, ViewportFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool QueryOutputReceipt(RenderViewportHandle viewport, u64 outputRevision, u64 producerSerial,
+                                              RenderOutputReceipt& receipt) const noexcept;
 
         [[nodiscard]] bool CreateEngineViewport(const EngineViewportDesc& desc, EngineViewportHandle& viewport, ViewportFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool DestroyEngineViewport(EngineViewportHandle viewport, ViewportFailure* failure = nullptr) noexcept;
@@ -622,6 +695,12 @@ namespace vanguard::rendering
         [[nodiscard]] ViewportManagerStats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] bool CompleteProducedTextureOutput(RenderOutputAcquisition& acquisition, u64 producerSerial,
+                                                        rhi::ResourceState terminalState, rhi::QueueType terminalQueue,
+                                                        RenderOutputPublicationReadinessKind readiness, rhi::GpuFence readyFence,
+                                                        ViewportFailure* failure = nullptr) noexcept;
         Impl* m_impl = nullptr;
+
+        friend class RenderFrameOutputTransaction;
     };
 } // namespace vanguard::rendering

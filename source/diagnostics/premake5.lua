@@ -105,6 +105,7 @@ project "diagnosticsSmoke"
 
     includedirs {
         "include",
+        "private",
         "../system/include"
     }
 

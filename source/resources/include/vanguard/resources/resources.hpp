@@ -367,6 +367,14 @@ namespace vanguard::resources
         u64 coalescedRequests = 0;
     };
 
+    struct ResourceRegistryConfig
+    {
+        // Bounds current plus protected retired/replacement generations. Live
+        // strong/weak handles are never invalidated to make room; admission fails
+        // deterministically when every slot is protected.
+        u32 maximumEntries = 262144;
+    };
+
     class ResourceRegistry final
     {
     public:
@@ -379,7 +387,7 @@ namespace vanguard::resources
         ResourceRegistry(const ResourceRegistry&) = delete;
         ResourceRegistry& operator=(const ResourceRegistry&) = delete;
 
-        [[nodiscard]] bool Initialize() noexcept;
+        [[nodiscard]] bool Initialize(const ResourceRegistryConfig& config = {}) noexcept;
         // Startup and shutdown are composition-root operations and must be
         // externally serialized. Shutdown refuses live requests or handles.
         [[nodiscard]] bool Shutdown() noexcept;
@@ -392,6 +400,11 @@ namespace vanguard::resources
         // The first request invokes the registered loader outside the registry
         // lock. Concurrent requests for the same key share one operation.
         [[nodiscard]] ResourceRequest Request(ResourceReference reference) noexcept;
+        // Starts or coalesces one replacement candidate for an already loaded
+        // current path. The current slot remains authoritative until Publish
+        // succeeds for the candidate; old handles continue to resolve their
+        // original slot/generation after cutover until that generation retires.
+        [[nodiscard]] ResourceRequest RequestReplacement(ResourceReference reference) noexcept;
 
         // Loader-facing completion contract. A loader explicitly transitions
         // Queued -> Loading, then publishes one matching object or failure.
@@ -402,6 +415,10 @@ namespace vanguard::resources
 
         [[nodiscard]] ResourceHandle TryAcquire(ResourceReference reference) noexcept;
         [[nodiscard]] bool Evict(ResourcePath path) noexcept;
+        // Generation-specific eviction used by ResourcePipeline operation
+        // ownership. It never evicts a newer current generation for the same path.
+        [[nodiscard]] bool Evict(const ResourceRequest& request) noexcept;
+        [[nodiscard]] bool IsCurrent(const ResourceRequest& request) const noexcept;
         [[nodiscard]] State GetState(ResourcePath path) const noexcept;
         [[nodiscard]] RegistryStats GetStats() const noexcept;
 

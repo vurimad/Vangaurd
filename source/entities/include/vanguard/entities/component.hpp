@@ -88,6 +88,13 @@ namespace vanguard::entities
         game::GameWorld& world;
     };
 
+    enum class ComponentReleaseResult : u8
+    {
+        Complete,
+        Pending,
+        Failed
+    };
+
     struct ComponentInitializeContext
     {
         game::GameWorld& world;
@@ -130,6 +137,9 @@ namespace vanguard::entities
         [[nodiscard]] virtual bool OnAttach(const ComponentContext& context) noexcept;
         virtual void OnPostAttach(const ComponentContext& context) noexcept;
         virtual void OnEnabled(const ComponentContext& context, bool enabled) noexcept;
+        /// Optional transactional cutover invoked before logical detachment. Pending
+        /// preserves attached/initialized state so external ownership transfer can be retried.
+        [[nodiscard]] virtual ComponentReleaseResult OnPrepareDetach(const ComponentContext& context) noexcept;
         virtual void OnDetach(const ComponentContext& context) noexcept;
 
     private:

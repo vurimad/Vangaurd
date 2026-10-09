@@ -1,7 +1,9 @@
 #include <vanguard/application/engine_host.hpp>
 
+#include <vanguard/concurrency/thread.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/memory/pool.hpp>
+#include <vanguard/system/assert.hpp>
 
 #include <new>
 
@@ -192,6 +194,20 @@ namespace vanguard::application
                          static_cast<unsigned long long>(capability), message != nullptr ? message : "unspecified");
         }
 
+        [[nodiscard]] bool ValidateLifecycleThread(HostFailure* const failure, const char* const message) const noexcept
+        {
+            if (concurrency::IsMainThread())
+                return true;
+            for (const ServiceRecord* const service : plan)
+            {
+                if (service->descriptor.affinity != ThreadAffinity::MainThread)
+                    continue;
+                SetFailure(failure, HostFailureCode::WrongThread, service->descriptor.id, InvalidServiceId, InvalidCapabilityId, message);
+                return false;
+            }
+            return true;
+        }
+
         void Emit(const ServiceRecord* const service, const LifecycleStage stage, const ServiceState stateValue,
                   const HostFailureCode result = HostFailureCode::None, const char* const message = nullptr) noexcept
         {
@@ -374,6 +390,10 @@ namespace vanguard::application
             return;
         if (m_impl->state == HostState::Running || m_impl->state == HostState::Starting)
         {
+            if (!m_impl->ValidateLifecycleThread(nullptr, "implicit host teardown of main-thread-affine services requires the main thread"))
+            {
+                VG_FATAL("EngineHost must be shut down on the main thread before destruction when its compiled plan contains main-thread-affine services");
+            }
             HostFailure ignored;
             static_cast<void>(m_impl->Unwind(false, &ignored));
         }
@@ -633,6 +653,8 @@ namespace vanguard::application
                 failure->code = HostFailureCode::InvalidState;
             return false;
         }
+        if (!m_impl->ValidateLifecycleThread(failure, "main-thread-affine service startup requires the main thread"))
+            return false;
         m_impl->state = HostState::Starting;
         for (Impl::ServiceRecord* const service : m_impl->plan)
         {
@@ -678,6 +700,8 @@ namespace vanguard::application
             m_impl->SetFailure(failure, HostFailureCode::InvalidState, InvalidServiceId, InvalidServiceId, InvalidCapabilityId, "host is not running");
             return false;
         }
+        if (!m_impl->ValidateLifecycleThread(failure, "main-thread-affine service shutdown requires the main thread"))
+            return false;
         m_impl->state = HostState::Stopping;
         const bool clean = m_impl->Unwind(false, failure);
         if (!clean)

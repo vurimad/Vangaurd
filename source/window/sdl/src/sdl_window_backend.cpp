@@ -49,6 +49,11 @@ namespace
         return type >= SDL_EVENT_DISPLAY_FIRST && type <= SDL_EVENT_DISPLAY_LAST;
     }
 
+    [[nodiscard]] bool IsFileDropEvent(const u32 type) noexcept
+    {
+        return type == SDL_EVENT_DROP_BEGIN || type == SDL_EVENT_DROP_FILE || type == SDL_EVENT_DROP_COMPLETE;
+    }
+
     [[nodiscard]] bool TranslateEventType(const u32 source, win::BackendEventType& destination) noexcept
     {
         switch (source)
@@ -125,6 +130,8 @@ namespace vanguard::window::sdl
             SDL_Window* native = nullptr;
             BackendWindowId id;
             WindowMode mode = WindowMode::Windowed;
+            WindowFlag flags = WindowFlag::None;
+            WindowHitTestConfig hitTest;
         };
 
         Record records[MaximumWindows]{};
@@ -153,6 +160,46 @@ namespace vanguard::window::sdl
                 if (record.native == nullptr)
                     return &record;
             return nullptr;
+        }
+
+        static SDL_HitTestResult SDLCALL HitTest(SDL_Window*, const SDL_Point* const area, void* const data) noexcept
+        {
+            auto* const record = static_cast<Record*>(data);
+            if (record == nullptr || record->native == nullptr || area == nullptr || !record->hitTest.enabled)
+                return SDL_HITTEST_NORMAL;
+
+            int width = 0;
+            int height = 0;
+            if (!SDL_GetWindowSize(record->native, &width, &height) || width <= 0 || height <= 0)
+                return SDL_HITTEST_NORMAL;
+
+            const SDL_WindowFlags nativeFlags = SDL_GetWindowFlags(record->native);
+            const bool resizable = HasFlag(record->flags, WindowFlag::Resizable) &&
+                                   (nativeFlags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) == 0;
+            const int border = static_cast<int>(record->hitTest.resizeBorder);
+            if (resizable && border > 0)
+            {
+                const bool left = area->x >= 0 && area->x < border;
+                const bool right = area->x < width && area->x >= width - border;
+                const bool top = area->y >= 0 && area->y < border;
+                const bool bottom = area->y < height && area->y >= height - border;
+                if (top && left) return SDL_HITTEST_RESIZE_TOPLEFT;
+                if (top && right) return SDL_HITTEST_RESIZE_TOPRIGHT;
+                if (bottom && left) return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+                if (bottom && right) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+                if (top) return SDL_HITTEST_RESIZE_TOP;
+                if (right) return SDL_HITTEST_RESIZE_RIGHT;
+                if (bottom) return SDL_HITTEST_RESIZE_BOTTOM;
+                if (left) return SDL_HITTEST_RESIZE_LEFT;
+            }
+
+            const WindowRect& drag = record->hitTest.dragRegion;
+            const i64 dragRight = static_cast<i64>(drag.origin.x) + static_cast<i64>(drag.extent.width);
+            const i64 dragBottom = static_cast<i64>(drag.origin.y) + static_cast<i64>(drag.extent.height);
+            if (area->x >= drag.origin.x && area->y >= drag.origin.y &&
+                static_cast<i64>(area->x) < dragRight && static_cast<i64>(area->y) < dragBottom)
+                return SDL_HITTEST_DRAGGABLE;
+            return SDL_HITTEST_NORMAL;
         }
 
         [[nodiscard]] BackendStatus QueryState(Record& record, BackendWindowState& state) noexcept
@@ -313,7 +360,29 @@ namespace vanguard::window::sdl
         destination = {};
         EventTranslation result;
         result.displayTopologyChanged = IsDisplayTopologyEvent(source.type);
-        if (m_impl == nullptr || !IsWindowEvent(source.type))
+        if (m_impl == nullptr)
+            return result;
+        if (IsFileDropEvent(source.type))
+        {
+            Impl::Record* const record = m_impl->Find(source.drop.windowID);
+            if (record == nullptr || !HasFlag(record->flags, WindowFlag::AcceptFileDrop))
+                return result;
+            destination.window = record->id;
+            destination.timestampNanoseconds = source.drop.timestamp;
+            destination.dropPosition = {static_cast<i32>(source.drop.x), static_cast<i32>(source.drop.y)};
+            if (source.type == SDL_EVENT_DROP_BEGIN)
+                destination.type = BackendEventType::FileDropBegin;
+            else if (source.type == SDL_EVENT_DROP_FILE)
+            {
+                destination.type = BackendEventType::FileDropped;
+                destination.dropPath = source.drop.data;
+            }
+            else
+                destination.type = BackendEventType::FileDropComplete;
+            result.windowEvent = true;
+            return result;
+        }
+        if (!IsWindowEvent(source.type))
             return result;
         Impl::Record* const record = m_impl->Find(source.window.windowID);
         if (record == nullptr || !TranslateEventType(source.type, destination.type))
@@ -453,6 +522,7 @@ namespace vanguard::window::sdl
         record->native = native;
         record->id = {static_cast<u64>(SDL_GetWindowID(native))};
         record->mode = WindowMode::Windowed;
+        record->flags = descriptor.flags;
         if (!record->id.IsValid() || !SDL_SetWindowMinimumSize(native, descriptor.constraints.minimum.width, descriptor.constraints.minimum.height) ||
             !SDL_SetWindowMaximumSize(native, descriptor.constraints.maximum.width, descriptor.constraints.maximum.height))
         {
@@ -523,6 +593,11 @@ namespace vanguard::window::sdl
             if (!changed)
                 return SdlFailure("failed to change SDL window visibility");
         }
+        // IWindowBackend commands are synchronous by contract. SDL3 permits window placement,
+        // extent, fullscreen and visibility mutations to settle asynchronously, so establish a
+        // completion barrier before reporting/querying the resulting state.
+        if (!SDL_SyncWindow(record->native))
+            return SdlFailure("timed out synchronizing SDL window state");
         return m_impl->QueryState(*record, state);
     }
 
@@ -556,6 +631,59 @@ namespace vanguard::window::sdl
         if (record == nullptr)
             return BackendStatus::Failure(-1, "SDL window handle is invalid");
         return SDL_RaiseWindow(record->native) ? BackendStatus::Success() : SdlFailure("failed to focus SDL window");
+    }
+
+    BackendStatus SdlWindowBackend::RequestWindowAction(const BackendWindowId window, const WindowAction action) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        Impl::Record* const record = m_impl->Find(window);
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        switch (action)
+        {
+        case WindowAction::Minimize:
+            if (!SDL_MinimizeWindow(record->native))
+                return SdlFailure("failed to minimize SDL window");
+            break;
+        case WindowAction::Maximize:
+            if (!SDL_MaximizeWindow(record->native))
+                return SdlFailure("failed to maximize SDL window");
+            break;
+        case WindowAction::Restore:
+            if (!SDL_RestoreWindow(record->native))
+                return SdlFailure("failed to restore SDL window");
+            break;
+        case WindowAction::RequestClose:
+        {
+            SDL_Event event{};
+            event.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+            event.window.timestamp = SDL_GetTicksNS();
+            event.window.windowID = SDL_GetWindowID(record->native);
+            return SDL_PushEvent(&event) ? BackendStatus::Success() : SdlFailure("failed to queue SDL window close request");
+        }
+        }
+        return SDL_SyncWindow(record->native)
+                   ? BackendStatus::Success()
+                   : SdlFailure("timed out synchronizing SDL window action");
+    }
+
+    BackendStatus SdlWindowBackend::SetWindowHitTest(const BackendWindowId window, const WindowHitTestConfig& config) noexcept
+    {
+        if (m_impl == nullptr)
+            return BackendStatus::Failure(-1, "SDL window backend is not initialized");
+        Impl::Record* const record = m_impl->Find(window);
+        if (record == nullptr)
+            return BackendStatus::Failure(-1, "SDL window handle is invalid");
+        if (record->hitTest.enabled == config.enabled)
+        {
+            record->hitTest = config;
+            return BackendStatus::Success();
+        }
+        if (!SDL_SetWindowHitTest(record->native, config.enabled ? Impl::HitTest : nullptr, config.enabled ? record : nullptr))
+            return SdlFailure(config.enabled ? "failed to enable SDL window hit testing" : "failed to disable SDL window hit testing");
+        record->hitTest = config;
+        return BackendStatus::Success();
     }
 
     BackendStatus SdlWindowBackend::SetCursor(const CursorShape shape, const bool visible) noexcept

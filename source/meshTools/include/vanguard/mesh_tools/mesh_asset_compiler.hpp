@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/assets/assets.hpp>
+#include <vanguard/assets/source_database.hpp>
 #include <vanguard/mesh_tools/mesh_import.hpp>
 
 namespace vanguard::mesh_tools
@@ -68,6 +69,7 @@ namespace vanguard::mesh_tools
         [[nodiscard]] bool Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
         [[nodiscard]] assets::CompilerDescriptor GetDescriptor() noexcept;
+        [[nodiscard]] assets::SourceImporterDescriptor GetImporterDescriptor() noexcept;
         [[nodiscard]] assets::Result Register(assets::BuildSystem& buildSystem) noexcept;
         [[nodiscard]] assets::Result Unregister() noexcept;
 

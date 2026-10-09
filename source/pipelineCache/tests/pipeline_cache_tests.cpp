@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/pipeline_cache/native_cache_store.hpp>
@@ -221,7 +222,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "pipelineCacheTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath working = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath working = vanguard::tests::ScratchDirectory("pipeline_cache_tests");
     const filesystem::AbsolutePath nativeCacheRoot = working.AddDirPath("vanguard_native_pipeline_cache_tests");
     Check(filesystem::Initialize({working, working, nativeCacheRoot}), "filesystem initialization");
     filesystem::Manager& manager = filesystem::GetManager();

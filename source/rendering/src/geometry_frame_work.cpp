@@ -1,8 +1,10 @@
 #include <vanguard/rendering/geometry_frame_work.hpp>
 
+#include <vanguard/profiling/profiling.hpp>
 #include <vanguard/system/assert.hpp>
 #include <vanguard/rhi/rhi.hpp>
 
+#include <cstring>
 #include <new>
 #include <cmath>
 
@@ -11,24 +13,13 @@ namespace vanguard::rendering
     namespace
     {
         constexpr usize StorageAlignment = 16;
-        static_assert(alignof(GpuVisibilityPlanBuilder) <= StorageAlignment);
         static_assert(alignof(GpuView) <= StorageAlignment);
         static_assert(alignof(GpuDirectionalLightSelection) <= StorageAlignment);
-        static_assert(alignof(GpuInstanceIndex) <= StorageAlignment);
-        static_assert(alignof(GpuVisibilityWorkRange) <= StorageAlignment);
         static_assert(alignof(GpuVisibilityResultRange) <= StorageAlignment);
         static_assert(alignof(GpuVisibilityCounters) <= StorageAlignment);
-        static_assert(alignof(GpuGeometryExpansionWorkRange) <= StorageAlignment);
-        static_assert(alignof(GpuGeometryWorkRange) <= StorageAlignment);
-        static_assert(alignof(GpuGeometryPrefixWorkRange) <= StorageAlignment);
         static_assert(alignof(GpuGeometryResultRange) <= StorageAlignment);
         static_assert(alignof(GpuGeometryShellRange) <= StorageAlignment);
         static_assert(alignof(GeometryPhaseDrawRange) <= StorageAlignment);
-        static_assert(alignof(RenderSceneGpuCandidateBatch) <= StorageAlignment);
-        static_assert(alignof(GeometryCandidateView) <= StorageAlignment);
-        static_assert(alignof(GpuVisibilityCandidateRange) <= StorageAlignment);
-        static_assert(alignof(RenderSceneGpuCandidateBatchResult) <= StorageAlignment);
-        static_assert(alignof(RenderSceneFailure) <= StorageAlignment);
 
         template <typename T> [[nodiscard]] bool AppendStorage(const u32 count, usize& size, usize& offset) noexcept
         {
@@ -61,42 +52,19 @@ namespace vanguard::rendering
             return GeometryFrameWorkResult::InvalidDescriptor;
 
         usize viewsOffset = 0;
-        usize candidatesOffset = 0;
-        usize workRangesOffset = 0;
         usize resultRangesOffset = 0;
         usize countersOffset = 0;
-        usize expansionWorkRangesOffset = 0;
-        usize geometryWorkRangesOffset = 0;
-        usize binPrefixRangesOffset = 0;
         usize geometryResultsOffset = 0;
         usize shellDrawsOffset = 0;
         usize phaseDrawRangesOffset = 0;
-        usize candidateBatchesOffset = 0;
-        usize candidateViewsOffset = 0;
-        usize candidateRangesOffset = 0;
-        usize candidateResultsOffset = 0;
-        usize candidateFailuresOffset = 0;
-        usize visibilityBuilderOffset = 0;
         usize directionalLightsOffset = 0;
         usize storageSize = 0;
-        const u32 candidateWrites = capacity.views * capacity.candidateBatches;
-        if (!AppendStorage<GpuVisibilityPlanBuilder>(1u, storageSize, visibilityBuilderOffset) ||
-            !AppendStorage<GpuView>(capacity.views, storageSize, viewsOffset) ||
-            !AppendStorage<GpuInstanceIndex>(capacity.candidates, storageSize, candidatesOffset) ||
-            !AppendStorage<GpuVisibilityWorkRange>(capacity.workRanges, storageSize, workRangesOffset) ||
+        if (!AppendStorage<GpuView>(capacity.views, storageSize, viewsOffset) ||
             !AppendStorage<GpuVisibilityResultRange>(capacity.views, storageSize, resultRangesOffset) ||
             !AppendStorage<GpuVisibilityCounters>(capacity.views, storageSize, countersOffset) ||
-            !AppendStorage<GpuGeometryExpansionWorkRange>(capacity.expansionWorkRanges, storageSize, expansionWorkRangesOffset) ||
-            !AppendStorage<GpuGeometryWorkRange>(capacity.geometryWorkRanges, storageSize, geometryWorkRangesOffset) ||
-            !AppendStorage<GpuGeometryPrefixWorkRange>(capacity.binPrefixRanges, storageSize, binPrefixRangesOffset) ||
             !AppendStorage<GpuGeometryResultRange>(capacity.views, storageSize, geometryResultsOffset) ||
             !AppendStorage<GpuGeometryShellRange>(capacity.shellDraws, storageSize, shellDrawsOffset) ||
-            !AppendStorage<GeometryPhaseDrawRange>(capacity.views * MaximumRenderPhases, storageSize, phaseDrawRangesOffset) ||
-            !AppendStorage<RenderSceneGpuCandidateBatch>(capacity.candidateBatches, storageSize, candidateBatchesOffset) ||
-            !AppendStorage<GeometryCandidateView>(capacity.views, storageSize, candidateViewsOffset) ||
-            !AppendStorage<GpuVisibilityCandidateRange>(candidateWrites, storageSize, candidateRangesOffset) ||
-            !AppendStorage<RenderSceneGpuCandidateBatchResult>(candidateWrites, storageSize, candidateResultsOffset) ||
-            !AppendStorage<RenderSceneFailure>(candidateWrites, storageSize, candidateFailuresOffset))
+            !AppendStorage<GeometryPhaseDrawRange>(capacity.views * MaximumRenderPhases, storageSize, phaseDrawRangesOffset))
             return GeometryFrameWorkResult::CapacityExceeded;
 
         const bool lightsAppended = AppendStorage<GpuDirectionalLightSelection>(capacity.views, storageSize, directionalLightsOffset);
@@ -107,28 +75,15 @@ namespace vanguard::rendering
             return GeometryFrameWorkResult::CapacityExceeded;
 
         m_storage = storage;
-        m_visibilityBuilder = new (static_cast<u8*>(m_storage.address) + visibilityBuilderOffset) GpuVisibilityPlanBuilder();
         m_views = MakeSpan<GpuView>(m_storage, viewsOffset, capacity.views);
         m_directionalLights = MakeSpan<GpuDirectionalLightSelection>(m_storage, directionalLightsOffset, capacity.views);
         for (auto& selection : m_directionalLights)
             new (&selection) GpuDirectionalLightSelection();
-        m_candidates = MakeSpan<GpuInstanceIndex>(m_storage, candidatesOffset, capacity.candidates);
-        m_workRanges = MakeSpan<GpuVisibilityWorkRange>(m_storage, workRangesOffset, capacity.workRanges);
         m_resultRanges = MakeSpan<GpuVisibilityResultRange>(m_storage, resultRangesOffset, capacity.views);
         m_counters = MakeSpan<GpuVisibilityCounters>(m_storage, countersOffset, capacity.views);
-        m_expansionWorkRanges = MakeSpan<GpuGeometryExpansionWorkRange>(m_storage, expansionWorkRangesOffset, capacity.expansionWorkRanges);
-        m_geometryWorkRanges = MakeSpan<GpuGeometryWorkRange>(m_storage, geometryWorkRangesOffset, capacity.geometryWorkRanges);
-        m_binPrefixRanges = MakeSpan<GpuGeometryPrefixWorkRange>(m_storage, binPrefixRangesOffset, capacity.binPrefixRanges);
         m_geometryResults = MakeSpan<GpuGeometryResultRange>(m_storage, geometryResultsOffset, capacity.views);
         m_shellDraws = MakeSpan<GpuGeometryShellRange>(m_storage, shellDrawsOffset, capacity.shellDraws);
         m_phaseDrawRanges = MakeSpan<GeometryPhaseDrawRange>(m_storage, phaseDrawRangesOffset, capacity.views * MaximumRenderPhases);
-        m_candidateBatches = MakeSpan<RenderSceneGpuCandidateBatch>(m_storage, candidateBatchesOffset, capacity.candidateBatches);
-        m_candidateViews = MakeSpan<GeometryCandidateView>(m_storage, candidateViewsOffset, capacity.views);
-        for (u32 viewIndex = 0; viewIndex < capacity.views; ++viewIndex)
-            new (m_candidateViews.Data() + viewIndex) GeometryCandidateView();
-        m_candidateRanges = MakeSpan<GpuVisibilityCandidateRange>(m_storage, candidateRangesOffset, candidateWrites);
-        m_candidateResults = MakeSpan<RenderSceneGpuCandidateBatchResult>(m_storage, candidateResultsOffset, candidateWrites);
-        m_candidateFailures = MakeSpan<RenderSceneFailure>(m_storage, candidateFailuresOffset, candidateWrites);
         for (GpuVisibilityCounters& counters : m_counters)
             counters = {};
         m_capacity = capacity;
@@ -138,77 +93,77 @@ namespace vanguard::rendering
 
     void GeometryFrameWork::Reset() noexcept
     {
-        if (m_visibilityBuilder != nullptr)
-        {
-            m_visibilityBuilder->Cancel();
-            m_visibilityBuilder->~GpuVisibilityPlanBuilder();
-            m_visibilityBuilder = nullptr;
-        }
         m_visibilityPlan = {};
-        m_candidatePlan = {};
         m_graphResources.Reset();
+        m_shellPlanImport = {};
+        m_shellPlanBuffer.Reset();
         m_externalBuffers.Clear();
         m_views = {};
         m_directionalLights = {};
-        m_candidates = {};
-        m_workRanges = {};
         m_resultRanges = {};
         m_counters = {};
-        m_expansionWorkRanges = {};
-        m_geometryWorkRanges = {};
-        m_binPrefixRanges = {};
         m_geometryResults = {};
         m_shellDraws = {};
         m_phaseDrawRanges = {};
-        m_candidateBatches = {};
-        m_candidateViews = {};
-        m_candidateRanges = {};
-        m_candidateResults = {};
-        m_candidateFailures = {};
         m_capacity = {};
-        m_expansionWorkRangeCount = 0;
-        m_geometryWorkRangeCount = 0;
-        m_binPrefixRangeCount = 0;
-        m_prefixBlockCount = 0;
         m_geometryResultCount = 0;
         m_shellDrawCount = 0;
         m_indirectArgumentCapacity = 0;
         m_catalogRevision = 0;
+        m_shellPlanCacheSerial = 0;
         m_shellDrawsPlanned = false;
         m_frameSerial = 0;
         diagnosticSlot = ~u32{0};
         diagnosticReadbackImport = {};
         diagnosticCopyScope = {};
         for (auto& count : diagnosticPipelineBinds) count = 0;
+        gpuTimingFrame = {};
+        geometryTimingScope = {};
+        for (auto& scope : cameraTimingScopes) scope = {};
+        gpuTimingResolveScope = {};
         m_outputRegionCount = 0;
         for (auto& mask : m_cameraInputMasks) mask = 0;
         if (m_storage)
             memory::Free(m_storage);
     }
 
-    GpuVisibilityBuildStorage GeometryFrameWork::GetVisibilityBuildStorage() noexcept
+    GeometryFrameWorkResult GeometryFrameWork::BuildDirectVisibilityPlan(const RenderSceneHandle scene,
+                                                                         const containers::ArraySpan<const RenderView> views,
+                                                                         const u32 instanceTraversalExtent,
+                                                                         const u32 visibleCapacityPerView) noexcept
     {
-        return {m_views, m_candidates, m_workRanges, m_resultRanges};
-    }
+        if (!IsPrepared() || !scene.IsValid() || views.Size() != m_capacity.views || visibleCapacityPerView == 0)
+            return GeometryFrameWorkResult::InvalidDescriptor;
+        const u64 totalVisible = static_cast<u64>(views.Size()) * visibleCapacityPerView;
+        if (totalVisible != m_capacity.visibleInstances || totalVisible >= InvalidGpuSceneIndex)
+            return GeometryFrameWorkResult::InvalidVisibilityPlan;
 
-    GpuVisibilityPlanBuilder& GeometryFrameWork::GetVisibilityBuilder() noexcept
-    {
-        if (m_visibilityBuilder == nullptr)
-            VG_FATAL("geometry frame work must be prepared before accessing its visibility builder");
-        return *m_visibilityBuilder;
+        for (u32 viewIndex = 0; viewIndex < views.Size(); ++viewIndex)
+        {
+            if (views[viewIndex].frameSerial != m_frameSerial || !BuildGpuView(views[viewIndex], m_views[viewIndex]))
+                return GeometryFrameWorkResult::InvalidDescriptor;
+            m_resultRanges[viewIndex] = {viewIndex * visibleCapacityPerView, visibleCapacityPerView, viewIndex, viewIndex};
+        }
+
+        GpuVisibilityPlan plan;
+        plan.frameSerial = m_frameSerial;
+        plan.views = containers::ArraySpan<const GpuView>(m_views.Data(), views.Size());
+        plan.results = containers::ArraySpan<const GpuVisibilityResultRange>(m_resultRanges.Data(), views.Size());
+        plan.visibleCapacity = static_cast<u32>(totalVisible);
+        plan.counterCount = views.Size();
+        plan.sceneIndex = scene.index;
+        plan.sceneGeneration = scene.generation;
+        plan.instanceTraversalExtent = instanceTraversalExtent;
+        return CommitVisibilityPlan(plan);
     }
 
     GeometryFrameWorkResult GeometryFrameWork::CommitVisibilityPlan(const GpuVisibilityPlan& plan) noexcept
     {
         if (!IsPrepared() || !plan.IsValid() || plan.frameSerial != m_frameSerial || plan.views.Data() != m_views.Data() ||
-            plan.candidates.Data() != m_candidates.Data() || plan.workRanges.Data() != m_workRanges.Data() || plan.results.Data() != m_resultRanges.Data() ||
-            plan.views.Size() > m_views.Size() || plan.candidates.Size() > m_candidates.Size() || plan.workRanges.Size() > m_workRanges.Size() ||
+            !plan.candidates.Empty() || !plan.workRanges.Empty() || plan.results.Data() != m_resultRanges.Data() ||
+            plan.views.Size() > m_views.Size() ||
             plan.results.Size() > m_resultRanges.Size() || plan.visibleCapacity > m_capacity.visibleInstances || plan.counterCount > m_counters.Size())
             return GeometryFrameWorkResult::InvalidVisibilityPlan;
-        u32 expansionRangeCount = 0;
-        u32 geometryRangeCount = 0;
-        u32 binPrefixRangeCount = 0;
-        u32 prefixBlockCount = 0;
         u32 workOffset = 0;
         u32 binOffset = 0;
         const u32 binsPerView = m_capacity.geometryBins / m_capacity.views;
@@ -228,75 +183,84 @@ namespace vanguard::rendering
             const u32 workCapacity = static_cast<u32>(requestedWorkCapacity);
 
             GpuGeometryResultRange& result = m_geometryResults[resultIndex];
-            const u32 expansionBlockOffset = prefixBlockCount;
-            for (u32 ordinal = 0; ordinal < visibility.visibleCapacity;)
-            {
-                if (expansionRangeCount >= m_expansionWorkRanges.Size() || prefixBlockCount >= m_capacity.prefixBlocks)
-                    return GeometryFrameWorkResult::InvalidVisibilityPlan;
-                const u32 count = visibility.visibleCapacity - ordinal < GpuVisibilityThreadsPerGroup
-                                      ? visibility.visibleCapacity - ordinal : GpuVisibilityThreadsPerGroup;
-                m_expansionWorkRanges[expansionRangeCount++] = {ordinal, count, resultIndex, prefixBlockCount++};
-                ordinal += count;
-            }
-            for (u32 ordinal = 0; ordinal < workCapacity;)
-            {
-                if (geometryRangeCount >= m_geometryWorkRanges.Size())
-                    return GeometryFrameWorkResult::InvalidVisibilityPlan;
-                const u32 count = workCapacity - ordinal < GpuVisibilityThreadsPerGroup
-                                      ? workCapacity - ordinal : GpuVisibilityThreadsPerGroup;
-                m_geometryWorkRanges[geometryRangeCount++] = {ordinal, count, resultIndex, 0};
-                ordinal += count;
-            }
-            const u32 expansionBlockCount = prefixBlockCount - expansionBlockOffset;
-            const u32 binBlockOffset = prefixBlockCount;
-            for (u32 ordinal = 0; ordinal < binsPerView;)
-            {
-                if (binPrefixRangeCount >= m_binPrefixRanges.Size() || prefixBlockCount >= m_capacity.prefixBlocks)
-                    return GeometryFrameWorkResult::InvalidVisibilityPlan;
-                const u32 count = binsPerView - ordinal < GpuVisibilityThreadsPerGroup
-                                      ? binsPerView - ordinal : GpuVisibilityThreadsPerGroup;
-                m_binPrefixRanges[binPrefixRangeCount++] = {ordinal, count, resultIndex, prefixBlockCount++};
-                ordinal += count;
-            }
             result = {workOffset,
                       workCapacity,
                       binOffset,
                       binsPerView,
                       workOffset,
                       workCapacity,
+                      0,
+                      0,
                       binOffset,
                       binsPerView,
-                      expansionBlockOffset,
-                      expansionBlockCount,
-                      binBlockOffset,
-                      prefixBlockCount - binBlockOffset};
+                      0,
+                      0};
             workOffset += workCapacity;
             binOffset += binsPerView;
         }
         if (workOffset != m_capacity.geometryWorkItems || binOffset != m_capacity.geometryBins)
             return GeometryFrameWorkResult::InvalidVisibilityPlan;
-        m_expansionWorkRangeCount = expansionRangeCount;
-        m_geometryWorkRangeCount = geometryRangeCount;
-        m_binPrefixRangeCount = binPrefixRangeCount;
-        m_prefixBlockCount = prefixBlockCount;
         m_geometryResultCount = plan.results.Size();
         m_visibilityPlan = plan;
         return GeometryFrameWorkResult::Success;
     }
 
-    GeometryFrameWorkResult GeometryFrameWork::PlanShellDraws(const RenderGeometryBatcher* const batcher) noexcept
+    GeometryFrameWorkResult GeometryFrameWork::PlanShellDraws(const RenderGeometryBatcher* const batcher, GeometryShellPlanCache* const cache) noexcept
     {
         if (!m_visibilityPlan.IsValid() || m_shellDrawsPlanned || m_geometryResultCount != m_visibilityPlan.views.Size())
             return GeometryFrameWorkResult::InvalidVisibilityPlan;
         const u64 revision = batcher != nullptr ? batcher->GetCatalogStats().revision : 0;
+        const u32 viewCount = m_visibilityPlan.views.Size();
+        const u32 binsPerView = m_capacity.geometryBins / m_capacity.views;
+        if (binsPerView == 0 || static_cast<u64>(binsPerView) * m_capacity.views != m_capacity.geometryBins)
+            return GeometryFrameWorkResult::InvalidVisibilityPlan;
+
+        GeometryShellPlanCache::ViewKey viewKeys[MaximumRenderViewsPerFamily]{};
+        for (u32 viewIndex = 0; viewIndex < viewCount; ++viewIndex)
+        {
+            const GpuView& view = m_visibilityPlan.views[viewIndex];
+            viewKeys[viewIndex].phases = static_cast<u64>(view.phaseMaskLow) | (static_cast<u64>(view.phaseMaskHigh) << 32u);
+            viewKeys[viewIndex].reverseDepth = (view.flags & static_cast<u32>(RenderViewFlags::ReverseDepth)) != 0;
+        }
+
+        if (cache != nullptr)
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(cache->lock);
+            bool hit = cache->valid && cache->catalogRevision == revision && cache->viewCount == viewCount &&
+                       cache->shellsPerView == m_capacity.shellsPerView && cache->binsPerView == binsPerView &&
+                       cache->shellDraws.Size() <= m_shellDraws.Size();
+            for (u32 viewIndex = 0; hit && viewIndex < viewCount; ++viewIndex)
+                hit = cache->views[viewIndex] == viewKeys[viewIndex];
+            if (hit)
+            {
+                const u64 currentRevision = batcher != nullptr ? batcher->GetCatalogStats().revision : 0;
+                if (currentRevision != revision)
+                    return GeometryFrameWorkResult::InvalidDescriptor;
+                if (!cache->shellDraws.Empty())
+                    std::memcpy(m_shellDraws.Data(), cache->shellDraws.Data(), static_cast<usize>(cache->shellDraws.Size()) * sizeof(GpuGeometryShellRange));
+                const usize phaseBytes = static_cast<usize>(viewCount) * MaximumRenderPhases * sizeof(GeometryPhaseDrawRange);
+                std::memcpy(m_phaseDrawRanges.Data(), cache->phaseDrawRanges, phaseBytes);
+                for (u32 viewIndex = 0; viewIndex < viewCount; ++viewIndex)
+                {
+                    m_geometryResults[viewIndex].argumentOffset = cache->argumentOffsets[viewIndex];
+                    m_geometryResults[viewIndex].argumentCapacity = cache->argumentCapacities[viewIndex];
+                }
+                m_catalogRevision = revision;
+                m_shellDrawCount = cache->shellDraws.Size();
+                m_indirectArgumentCapacity = cache->indirectArgumentCapacity;
+                m_shellPlanCacheSerial = cache->serial;
+                m_shellDrawsPlanned = true;
+                return GeometryFrameWorkResult::Success;
+            }
+        }
+
         u32 drawCount = 0;
         u32 argumentCount = 0;
-        for (u32 viewIndex = 0; viewIndex < m_visibilityPlan.views.Size(); ++viewIndex)
+        for (u32 viewIndex = 0; viewIndex < viewCount; ++viewIndex)
         {
             if (m_visibilityPlan.results[viewIndex].viewIndex != viewIndex)
                 return GeometryFrameWorkResult::InvalidVisibilityPlan;
-            const GpuView& view = m_visibilityPlan.views[viewIndex];
-            const u64 phases = static_cast<u64>(view.phaseMaskLow) | (static_cast<u64>(view.phaseMaskHigh) << 32u);
+            const u64 phases = viewKeys[viewIndex].phases;
             const u32 firstArgument = argumentCount;
             for (u32 phaseIndex = 0; phaseIndex < MaximumRenderPhases; ++phaseIndex)
             {
@@ -310,8 +274,7 @@ namespace vanguard::rendering
                 {
                     if (!shell.active || !shell.id.IsValid() || shell.id.index >= m_capacity.shellsPerView || shell.state.phase != phase)
                         return GeometryFrameWorkResult::InvalidDescriptor;
-                    const bool reverseDepth = (view.flags & static_cast<u32>(RenderViewFlags::ReverseDepth)) != 0;
-                    if (shell.state.depthTest && shell.state.reverseDepth != reverseDepth)
+                    if (shell.state.depthTest && shell.state.reverseDepth != viewKeys[viewIndex].reverseDepth)
                         return GeometryFrameWorkResult::IncompatibleDepthConvention;
                     // RHI indirect byte offsets are currently bounded to u32.
                     const u64 end = static_cast<u64>(argumentCount) + shell.binCount;
@@ -334,6 +297,33 @@ namespace vanguard::rendering
         m_shellDrawCount = drawCount;
         m_indirectArgumentCapacity = argumentCount;
         m_shellDrawsPlanned = true;
+        if (cache != nullptr)
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(cache->lock);
+            if (batcher != nullptr && batcher->GetCatalogStats().revision != revision)
+                return GeometryFrameWorkResult::InvalidDescriptor;
+            cache->shellDraws.Resize(drawCount);
+            if (drawCount != 0)
+                std::memcpy(cache->shellDraws.Data(), m_shellDraws.Data(), static_cast<usize>(drawCount) * sizeof(GpuGeometryShellRange));
+            const usize phaseBytes = static_cast<usize>(viewCount) * MaximumRenderPhases * sizeof(GeometryPhaseDrawRange);
+            std::memcpy(cache->phaseDrawRanges, m_phaseDrawRanges.Data(), phaseBytes);
+            for (u32 viewIndex = 0; viewIndex < viewCount; ++viewIndex)
+            {
+                cache->views[viewIndex] = viewKeys[viewIndex];
+                cache->argumentOffsets[viewIndex] = m_geometryResults[viewIndex].argumentOffset;
+                cache->argumentCapacities[viewIndex] = m_geometryResults[viewIndex].argumentCapacity;
+            }
+            cache->catalogRevision = revision;
+            cache->viewCount = viewCount;
+            cache->shellsPerView = m_capacity.shellsPerView;
+            cache->binsPerView = binsPerView;
+            cache->indirectArgumentCapacity = argumentCount;
+            ++cache->serial;
+            if (cache->serial == 0)
+                ++cache->serial;
+            m_shellPlanCacheSerial = cache->serial;
+            cache->valid = true;
+        }
         return GeometryFrameWorkResult::Success;
     }
 
@@ -369,20 +359,23 @@ namespace vanguard::rendering
             drawContext.pageDirectoryDescriptor == InvalidGpuDescriptorIndex || drawContext.viewDescriptor == InvalidGpuDescriptorIndex ||
             !std::isfinite(drawContext.worldCellSize) || !(drawContext.worldCellSize > 0.0f))
             return fail("geometry phase catalog or draw context is invalid");
-        rhi::BufferDesc instanceDesc, argumentDesc, counterDesc;
-        const bool instancesAvailable = rhi::GetBufferDesc(buffers.instances, instanceDesc, failure);
-        if (!instancesAvailable)
-            return false;
-        const bool argumentsAvailable = rhi::GetBufferDesc(buffers.arguments, argumentDesc, failure);
-        if (!argumentsAvailable)
-            return false;
-        const bool countersAvailable = rhi::GetBufferDesc(buffers.counters, counterDesc, failure);
-        if (!countersAvailable)
-            return false;
-        if (instanceDesc.size < static_cast<u64>(m_capacity.geometryWorkItems) * sizeof(MeshDrawInstance) ||
-            argumentDesc.size < static_cast<u64>(m_indirectArgumentCapacity) * sizeof(GpuGeometryIndirectArguments) ||
-            counterDesc.size < static_cast<u64>(m_shellDrawCount) * sizeof(GpuGeometryShellCounters))
-            return fail("geometry draw buffers do not cover the frame reservations");
+        {
+            VG_PROFILE_ZONE_NAMED("Geometry/RecordPhase/ValidateBuffers");
+            rhi::BufferDesc instanceDesc, argumentDesc, counterDesc;
+            const bool instancesAvailable = rhi::GetBufferDesc(buffers.instances, instanceDesc, failure);
+            if (!instancesAvailable)
+                return false;
+            const bool argumentsAvailable = rhi::GetBufferDesc(buffers.arguments, argumentDesc, failure);
+            if (!argumentsAvailable)
+                return false;
+            const bool countersAvailable = rhi::GetBufferDesc(buffers.counters, counterDesc, failure);
+            if (!countersAvailable)
+                return false;
+            if (instanceDesc.size < static_cast<u64>(m_capacity.geometryWorkItems) * sizeof(MeshDrawInstance) ||
+                argumentDesc.size < static_cast<u64>(m_indirectArgumentCapacity) * sizeof(GpuGeometryIndirectArguments) ||
+                counterDesc.size < static_cast<u64>(m_shellDrawCount) * sizeof(GpuGeometryShellCounters))
+                return fail("geometry draw buffers do not cover the frame reservations");
+        }
         struct PipelineBindCount
         {
             u32* destination;
@@ -399,48 +392,57 @@ namespace vanguard::rendering
                 return fail("geometry shell changed between planning and recording");
             if (plan.argumentCapacity == 0)
                 continue;
-            GeometryVertexArenaView vertices;
-            GeometryIndexArenaView indices;
-            const bool verticesAvailable = geometry.GetVertexArena(shell.state.vertexArena, vertices);
-            if (!verticesAvailable)
-                return fail("geometry shell vertex arena is unavailable");
-            const bool indicesAvailable = geometry.GetIndexArena(shell.state.indexArena, indices);
-            if (!indicesAvailable)
-                return fail("geometry shell index arena is unavailable");
-            if (indices.format != shell.state.indexFormat || vertices.bindingCount == 0 || vertices.bindingCount >= rhi::MaximumVertexBindings)
-                return fail("geometry shell arenas are unavailable or incompatible");
-            const bool pipelineSet = rhi::SetPipeline(shell.state.pipeline, failure);
-            if (!pipelineSet)
-                return false;
-            ++binds.count;
-            const bool constantsSet = rhi::SetPushConstants(&drawContext, sizeof(drawContext), failure);
-            if (!constantsSet)
-                return false;
-            for (u32 bindingIndex = 0; bindingIndex < vertices.bindingCount; ++bindingIndex)
             {
-                const u8 slot = vertices.bindings[bindingIndex].binding;
-                if (slot >= MeshDrawInstanceBinding)
-                    return fail("geometry vertex arena overlaps the instance binding");
-                const rhi::VertexBufferBinding binding{vertices.buffers[bindingIndex], 0, slot};
-                const bool verticesBound = rhi::BindVertexBuffers(slot, {&binding, 1}, failure);
-                if (!verticesBound)
+                VG_PROFILE_ZONE_NAMED("Geometry/RecordPhase/ResolveArenas");
+                GeometryVertexArenaView vertices;
+                GeometryIndexArenaView indices;
+                const bool verticesAvailable = geometry.GetVertexArena(shell.state.vertexArena, vertices);
+                if (!verticesAvailable)
+                    return fail("geometry shell vertex arena is unavailable");
+                const bool indicesAvailable = geometry.GetIndexArena(shell.state.indexArena, indices);
+                if (!indicesAvailable)
+                    return fail("geometry shell index arena is unavailable");
+                if (indices.format != shell.state.indexFormat || vertices.bindingCount == 0 || vertices.bindingCount >= rhi::MaximumVertexBindings)
+                    return fail("geometry shell arenas are unavailable or incompatible");
+                {
+                    VG_PROFILE_ZONE_NAMED("Geometry/RecordPhase/BindState");
+                    const bool pipelineSet = rhi::SetPipeline(shell.state.pipeline, failure);
+                    if (!pipelineSet)
+                        return false;
+                    ++binds.count;
+                    const bool constantsSet = rhi::SetPushConstants(&drawContext, sizeof(drawContext), failure);
+                    if (!constantsSet)
+                        return false;
+                    for (u32 bindingIndex = 0; bindingIndex < vertices.bindingCount; ++bindingIndex)
+                    {
+                        const u8 slot = vertices.bindings[bindingIndex].binding;
+                        if (slot >= MeshDrawInstanceBinding)
+                            return fail("geometry vertex arena overlaps the instance binding");
+                        const rhi::VertexBufferBinding binding{vertices.buffers[bindingIndex], 0, slot};
+                        const bool verticesBound = rhi::BindVertexBuffers(slot, {&binding, 1}, failure);
+                        if (!verticesBound)
+                            return false;
+                    }
+                    const rhi::VertexBufferBinding instanceBinding{buffers.instances, 0, static_cast<u8>(MeshDrawInstanceBinding)};
+                    const bool instancesBound = rhi::BindVertexBuffers(MeshDrawInstanceBinding, {&instanceBinding, 1}, failure);
+                    if (!instancesBound)
+                        return false;
+                    const bool indicesBound = rhi::BindIndexBuffer({indices.buffer, 0, indices.format}, failure);
+                    if (!indicesBound)
+                        return false;
+                    const bool argumentsBound = rhi::BindIndirectArguments(buffers.arguments, buffers.counters, failure);
+                    if (!argumentsBound)
+                        return false;
+                }
+            }
+            {
+                VG_PROFILE_ZONE_NAMED("Geometry/RecordPhase/DrawIndirect");
+                const bool drawRecorded = rhi::DrawIndexedPrimitiveIndirectCount(static_cast<u64>(plan.argumentOffset) * sizeof(GpuGeometryIndirectArguments),
+                                                                                static_cast<u64>(plan.counterIndex) * sizeof(GpuGeometryShellCounters),
+                                                                                plan.argumentCapacity, failure);
+                if (!drawRecorded)
                     return false;
             }
-            const rhi::VertexBufferBinding instanceBinding{buffers.instances, 0, static_cast<u8>(MeshDrawInstanceBinding)};
-            const bool instancesBound = rhi::BindVertexBuffers(MeshDrawInstanceBinding, {&instanceBinding, 1}, failure);
-            if (!instancesBound)
-                return false;
-            const bool indicesBound = rhi::BindIndexBuffer({indices.buffer, 0, indices.format}, failure);
-            if (!indicesBound)
-                return false;
-            const bool argumentsBound = rhi::BindIndirectArguments(buffers.arguments, buffers.counters, failure);
-            if (!argumentsBound)
-                return false;
-            const bool drawRecorded = rhi::DrawIndexedPrimitiveIndirectCount(static_cast<u64>(plan.argumentOffset) * sizeof(GpuGeometryIndirectArguments),
-                                                                            static_cast<u64>(plan.counterIndex) * sizeof(GpuGeometryShellCounters),
-                                                                            plan.argumentCapacity, failure);
-            if (!drawRecorded)
-                return false;
         }
         return true;
     }

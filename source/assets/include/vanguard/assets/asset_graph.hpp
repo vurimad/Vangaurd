@@ -54,9 +54,9 @@ namespace vanguard::assets
     };
 
     // Called only for generated dependencies discovered by BuildSystem::Prepare.
-    // The returned request is copied before the callback returns. Its output
-    // identity must exactly match dependency.identity.
-    using ResolveGeneratedDependencyFunction = bool (*)(const BuildDependency& dependency, BuildRequest& request, void* userData) noexcept;
+    // The resolver fills ownership-safe storage; its output identity must exactly
+    // match dependency.identity.
+    using ResolveGeneratedDependencyFunction = bool (*)(const BuildDependency& dependency, OwnedBuildRequest& request, void* userData) noexcept;
 
     struct BuildGraphStats
     {
@@ -138,6 +138,11 @@ namespace vanguard::assets
         // this returns. Compilation, cache access, and fan-in run on Jobs.
         [[nodiscard]] GraphRequest Request(const BuildRequest& request, BuildPriority priority = BuildPriority::Normal) noexcept;
         [[nodiscard]] BuildGraphStats GetStats() const noexcept;
+        // Captures retained successful exact outputs only while the graph is
+        // quiescent. Active operations are rejected so worker-owned BuildOutput
+        // storage is never read concurrently.
+        [[nodiscard]] Result CaptureProtectionKeys(containers::DynamicArray<ArtifactSetKey>& keys,
+                                                   u32 maximumRecords, u64 maximumBytes) const noexcept;
 
     private:
         void ReleaseInterest(BuildOperation* operation, bool explicitCancellation) noexcept;

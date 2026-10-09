@@ -145,6 +145,7 @@ project "jobsCompat"
     enforceEngineCodePolicy()
     kind "StaticLib"
     applyRedCompatibilitySettings()
+    useVanguardProfiling()
     files { "compat/**.cpp" }
     includedirs {
         "include",

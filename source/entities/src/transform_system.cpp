@@ -144,12 +144,12 @@ namespace vanguard::entities
         containers::DynamicArray<ITransformAttachment*> attachments;
         containers::DynamicArray<IPlacedComponent*> scheduledRoots;
         TransformSystemConfig config;
+        jobs::JobName updateJobName{"EntityTransforms/ApplyScheduledTransformUpdates"};
         concurrency::Atomic<u32> processing{0};
         concurrency::Atomic<u32> scheduledRootCount{0};
         concurrency::Atomic<u64> dispatchedRoots{0};
         concurrency::Atomic<u64> updatedComponents{0};
         concurrency::Atomic<u64> redundantSchedules{0};
-        const char* updateJobName = "EntityTransforms/ApplyScheduledTransformUpdates";
     };
 
     TransformSystem::~TransformSystem()
@@ -351,8 +351,7 @@ namespace vanguard::entities
         jobs::ParallelTask updates = jobs::ParallelTask::Create(
             [impl = m_impl](const u32 index, const jobs::JobContext&) noexcept { impl->ApplyScheduledRoot(index); });
         jobs::Task cleanup = jobs::Task::Create([impl = m_impl](const jobs::JobContext&) noexcept { impl->CompleteUpdates(); });
-        jobs::JobName updateJobName(m_impl->updateJobName);
-        if (!updates || !cleanup || !builder.DispatchParallel(updateJobName, dispatch.roots, static_cast<jobs::ParallelTask&&>(updates),
+        if (!updates || !cleanup || !builder.DispatchParallel(m_impl->updateJobName, dispatch.roots, static_cast<jobs::ParallelTask&&>(updates),
                                                                static_cast<jobs::Task&&>(cleanup), 1u, jobs::Fence::Full))
         {
             m_impl->processing.SetValue(0);

@@ -1,11 +1,56 @@
 #include <vanguard/rendering/mesh_draw_layout.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
+#include <vanguard/meshes/meshes.hpp>
+#include <vanguard/pipelines/pipelines.hpp>
+#include <vanguard/shaders/shaders.hpp>
 
 #include <cstdio>
 #include <cstring>
 
 namespace vanguard::rendering::tests
 {
+    namespace
+    {
+        [[nodiscard]] bool RunStaticSurfaceShaderInterfaceProof() noexcept
+        {
+            const u8 vertexBytecode[]{1, 2, 3, 4};
+            const u8 fragmentBytecode[]{5, 6, 7, 8};
+            const shaders::StageBuildRecord stages[]{{shaders::ShaderStage::Vertex, shaders::NativeFormat::Dxil, 1, vertexBytecode, sizeof(vertexBytecode), "StaticSurfaceVertexMain"},
+                                                      {shaders::ShaderStage::Fragment, shaders::NativeFormat::Dxil, 2, fragmentBytecode, sizeof(fragmentBytecode), "StaticSurfaceGBufferMain"}};
+            const shaders::StageMask expectedStages = shaders::StageBit(shaders::ShaderStage::Vertex) | shaders::StageBit(shaders::ShaderStage::Fragment);
+            for (u32 mismatch = 0; mismatch < 6; ++mismatch)
+            {
+                const u32 space = mismatch == 2 ? 1u : 0u;
+                const u32 bindingIndex = mismatch == 3 ? 1u : 0u;
+                const shaders::StageMask bindingStages = mismatch == 4 ? shaders::StageBit(shaders::ShaderStage::Vertex) : expectedStages;
+                const shaders::DescriptorBinding binding{1, space, bindingIndex, 1, shaders::BindingKind::ConstantBuffer, shaders::BindingAccess::Read, bindingStages};
+                const shaders::ConstantBuffer buffer{1, space, bindingIndex, mismatch == 1 ? 16u : static_cast<u32>(sizeof(StaticSurfaceDrawContext)), 0, 0};
+                shaders::BuildDescription description;
+                description.kind = shaders::ProgramKind::Graphics;
+                description.program = 0x5354415449434142ull + mismatch;
+                description.permutation = crypto::Sha256(&mismatch, sizeof(mismatch));
+                description.compilerFingerprint = crypto::Sha256("static-surface-interface-proof", 30);
+                description.pipelineInterface.stages = expectedStages;
+                description.pipelineInterface.primitiveClass = shaders::PrimitiveClass::Triangle;
+                description.stages = stages;
+                if (mismatch != 5)
+                {
+                    description.bindings = {&binding, 1};
+                    description.constantBuffers = {&buffer, 1};
+                }
+                containers::DynamicArray<u8> bytes(memory::pools::Rendering::GetInstance());
+                filesystem::MemoryFileWriter writer(bytes);
+                if (shaders::WriteShader(writer, description) != shaders::Result::Success)
+                    return false;
+                filesystem::MemoryFileReader reader(bytes, 0);
+                shaders::ShaderFile shader;
+                if (shader.Open(reader) != shaders::Result::Success || ValidateStaticSurfaceShaderInterface(shader) != (mismatch == 0))
+                    return false;
+            }
+            return true;
+        }
+    } // namespace
+
     bool RunMeshDrawLayoutProof() noexcept
     {
         for (u32 variant = 0; variant < 8; ++variant)
@@ -62,11 +107,12 @@ namespace vanguard::rendering::tests
                                                     {2, 0, 1, interleaved ? 0u : 1u, interleaved ? positionBytes : 0u, shaders::NumericClass::FloatingPoint, 2, 32, pipelines::Format::R32G32Float, "TEXCOORD"},
                                                     {3, 0, 2, MeshDrawInstanceBinding, 0, shaders::NumericClass::UnsignedInteger, 2, 32, pipelines::Format::R32G32UInt, "VG_DRAW"},
                                                     {3, 1, 3, MeshDrawInstanceBinding, 8, shaders::NumericClass::UnsignedInteger, 2, 32, pipelines::Format::R32G32UInt, "VG_DRAW"}};
-            for (u32 mismatch = 0; mismatch < 4; ++mismatch)
+            for (u32 mismatch = 0; mismatch < 5; ++mismatch)
             {
                 pipelineStreams[0].stride = stride + (mismatch == 1 ? 4 : 0);
                 std::memcpy(attributes[1].semanticName, mismatch == 2 ? "NORMAL" : "TEXCOORD", mismatch == 2 ? sizeof("NORMAL") : sizeof("TEXCOORD"));
                 pipelineStreams[1].instanceStepRate = mismatch == 3 ? 2 : 1;
+                std::memcpy(attributes[3].semanticName, mismatch == 4 ? "TEXCOORD" : "VG_DRAW", mismatch == 4 ? sizeof("TEXCOORD") : sizeof("VG_DRAW"));
                 pipelines::BuildDescription pipelineDescription;
                 pipelineDescription.name = 1;
                 pipelineDescription.shaders = {&shader, 1};
@@ -86,6 +132,6 @@ namespace vanguard::rendering::tests
                 }
             }
         }
-        return true;
+        return RunStaticSurfaceShaderInterfaceProof();
     }
 } // namespace vanguard::rendering::tests

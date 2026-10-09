@@ -55,6 +55,8 @@ namespace vanguard::textures
         [[nodiscard]] Result Open(streaming::ResourceSource&& source) noexcept;
         void Close() noexcept;
         [[nodiscard]] bool IsOpen() const noexcept;
+        [[nodiscard]] streaming::ResourceSourceKind GetKind() const noexcept;
+        [[nodiscard]] const filesystem::AbsolutePath& GetPhysicalPath() const noexcept;
         [[nodiscard]] u64 GetLogicalSize() const noexcept;
         /// Shared ResourceStreamer staging budget, or zero for an ungoverned tooling source.
         [[nodiscard]] u64 GetStagingBudgetBytes() const noexcept;

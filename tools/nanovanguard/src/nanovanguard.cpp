@@ -26,6 +26,8 @@ namespace vanguard::nanovanguard
                    RegistrationResult::Success &&
                registry.Register({"project", nullptr, "Create, inspect, validate, migrate, and register Vanguard projects.", "<subcommand>", nullptr, 0, 0, 0,
                                   nullptr}) == RegistrationResult::Success &&
+               registry.Register({"sources", nullptr, "Inspect project source inventory without importing.", "<subcommand>", nullptr, 0, 0, 0,
+                                  nullptr}) == RegistrationResult::Success &&
                RegisterProjectCommands(registry);
     }
 } // namespace vanguard::nanovanguard

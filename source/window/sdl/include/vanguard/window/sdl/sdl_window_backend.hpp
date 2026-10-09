@@ -33,6 +33,8 @@ namespace vanguard::window::sdl
         [[nodiscard]] BackendStatus SetWindowTitle(BackendWindowId window, const char* title) noexcept override;
         [[nodiscard]] BackendStatus SetWindowOpacity(BackendWindowId window, f32 opacity) noexcept override;
         [[nodiscard]] BackendStatus RequestWindowFocus(BackendWindowId window) noexcept override;
+        [[nodiscard]] BackendStatus RequestWindowAction(BackendWindowId window, WindowAction action) noexcept override;
+        [[nodiscard]] BackendStatus SetWindowHitTest(BackendWindowId window, const WindowHitTestConfig& config) noexcept override;
         [[nodiscard]] BackendStatus SetCursor(CursorShape shape, bool visible) noexcept override;
         [[nodiscard]] BackendStatus ReadClipboardText(char* destination, u32 capacity, u32& requiredCapacity) noexcept override;
         [[nodiscard]] BackendStatus WriteClipboardText(const char* text) noexcept override;

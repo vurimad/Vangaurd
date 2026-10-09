@@ -7,10 +7,14 @@
 namespace vanguard::rendering
 {
     class FrameRenderer;
+    class RenderNodeFullscreenCopy;
+    struct GeometryExternalBuffer;
+    struct RenderNodeImplContext;
 
     namespace detail
     {
         struct DedicatedResourceProviderTestAccess;
+        struct RenderFlowResourceShutdownTestAccess;
     }
 
     inline constexpr u32 InvalidRenderFlowResourceIndex = 0xffffffffu;
@@ -357,10 +361,124 @@ namespace vanguard::rendering
         BufferClearValue clearValue;
     };
 
+    struct LogicalResourceName
+    {
+        constexpr LogicalResourceName() noexcept = default;
+
+        constexpr LogicalResourceName(const containers::StringView value) noexcept
+            : m_name(value), m_hash(CalculateHash(value))
+        {
+        }
+
+        LogicalResourceName(const containers::String& value) noexcept
+            : LogicalResourceName(containers::StringView(value))
+        {
+        }
+
+        constexpr LogicalResourceName(const char* const value) noexcept
+            : LogicalResourceName(containers::StringView(value))
+        {
+        }
+
+        template <size_t Size> [[nodiscard]] static consteval LogicalResourceName Literal(const char (&value)[Size]) noexcept
+        {
+            static_assert(Size > 0);
+            const containers::StringView view(value, Size - 1u);
+            return LogicalResourceName(view, CalculateHash(view), PrehashedTag{});
+        }
+
+        [[nodiscard]] static constexpr u32 CalculateHash(const containers::StringView value) noexcept
+        {
+            u32 result = 2166136261u;
+            const char* const data = value.Data();
+            for (u32 index = 0; index < value.Length(); ++index)
+            {
+                result ^= static_cast<u8>(data[index]);
+                result *= 16777619u;
+            }
+            return result;
+        }
+
+        [[nodiscard]] constexpr containers::StringView GetName() const noexcept { return m_name; }
+        [[nodiscard]] constexpr u32 GetHash() const noexcept { return m_hash; }
+
+    private:
+        struct PrehashedTag
+        {
+        };
+
+        constexpr LogicalResourceName(const containers::StringView value, const u32 precomputedHash, PrehashedTag) noexcept
+            : m_name(value), m_hash(precomputedHash)
+        {
+        }
+
+        containers::StringView m_name;
+        u32 m_hash = 2166136261u;
+
+        friend class RenderNodeFullscreenCopy;
+        friend struct GeometryExternalBuffer;
+    };
+
+#define VG_RENDER_FLOW_NAME(name) ::vanguard::rendering::LogicalResourceName::Literal(name)
+
     struct LogicalResourceKey
     {
-        FlowSpaceId flowSpace;
-        containers::StringView name;
+        constexpr LogicalResourceKey() noexcept = default;
+
+        constexpr LogicalResourceKey(const FlowSpaceId flowSpaceValue, const LogicalResourceName resourceName) noexcept
+            : m_flowSpace(flowSpaceValue), m_name(resourceName.GetName()), m_nameHash(resourceName.GetHash())
+        {
+        }
+
+        constexpr LogicalResourceKey(const FlowSpaceId flowSpaceValue, const containers::StringView nameValue) noexcept
+            : LogicalResourceKey(flowSpaceValue, LogicalResourceName(nameValue))
+        {
+        }
+
+        LogicalResourceKey(const FlowSpaceId flowSpaceValue, const containers::String& nameValue) noexcept
+            : LogicalResourceKey(flowSpaceValue, LogicalResourceName(nameValue))
+        {
+        }
+
+        constexpr LogicalResourceKey(const FlowSpaceId flowSpaceValue, const char* const nameValue) noexcept
+            : LogicalResourceKey(flowSpaceValue, LogicalResourceName(nameValue))
+        {
+        }
+
+        [[nodiscard]] constexpr u32 CalcHash() const noexcept
+        {
+            u32 result = m_nameHash ^ (m_flowSpace.value * 0x9e3779b9u);
+            result ^= result >> 16;
+            result *= 0x7feb352du;
+            result ^= result >> 15;
+            result *= 0x846ca68bu;
+            result ^= result >> 16;
+            return result;
+        }
+
+        [[nodiscard]] constexpr FlowSpaceId GetFlowSpace() const noexcept { return m_flowSpace; }
+        [[nodiscard]] constexpr containers::StringView GetName() const noexcept { return m_name; }
+
+    private:
+        struct TemporaryTag
+        {
+        };
+
+        constexpr LogicalResourceKey(const FlowSpaceId flowSpaceValue, const containers::StringView nameValue, TemporaryTag) noexcept
+            : m_flowSpace(flowSpaceValue), m_name(nameValue), m_nameHash(0)
+        {
+        }
+
+        [[nodiscard]] static constexpr LogicalResourceKey Temporary(const FlowSpaceId flowSpaceValue, const containers::StringView nameValue) noexcept
+        {
+            return LogicalResourceKey(flowSpaceValue, nameValue, TemporaryTag{});
+        }
+
+        FlowSpaceId m_flowSpace;
+        containers::StringView m_name;
+        u32 m_nameHash = 2166136261u;
+
+        friend struct RenderNodeImplContext;
     };
 
     enum class RenderFlowResourceSessionState : u8
@@ -410,6 +528,12 @@ namespace vanguard::rendering
     struct RenderFlowResourceAllocatorConfig
     {
         u32 maximumPlanningWriters = 4096;
+        // RED keeps a hard request cap per parallel group independently from
+        // its aggregate request cap. Keep the same two-level bound here so one
+        // writer cannot transiently consume the whole allocator-wide budget.
+        // The default is 12x the aggregate-per-writer average (262144 / 4096),
+        // closely matching RED's fixed-storage/global-request ratio.
+        u32 maximumOperationsPerPlanningWriter = 768;
         u32 maximumOperations = 262'144;
         u32 maximumLogicalResources = 65'536;
         u32 maximumViews = 65'536;
@@ -427,12 +551,18 @@ namespace vanguard::rendering
         // placed heaps. Pending native destruction remains physically charged.
         u64 textureSoftTargetBytes = ~u64{0};
         u64 bufferSoftTargetBytes = ~u64{0};
+        // Allocator-owned canonical whole-resource descriptor slots are bounded
+        // independently from the shared RHI descriptor-domain capacity. The
+        // target drives cold reusable eviction; the maximum is a hard live cap.
+        u32 descriptorCacheTarget = 8'192;
+        u32 descriptorCacheMaximum = 16'384;
         // Explicit planning/execution validation seam for allocator tests that
         // run without an RHI device. Production must leave this disabled: a
         // resolved use then requires a real dedicated-resource assignment.
         bool allowLogicalOnlyValidation = false;
-        // Optional shared bindless domain. Resolve creates whole-resource
-        // descriptors; the execution generation retires them with its receipts.
+        // Optional shared bindless domain. Persistent physical owners borrow from
+        // this domain for canonical whole-resource descriptors; exceptional
+        // generation-owned publication remains during the RF migration.
         rhi::DescriptorDomainRef resourceDescriptors;
     };
 
@@ -459,8 +589,24 @@ namespace vanguard::rendering
         u64 chargedNativeBytes = 0;
         u64 chargedTextureBytes = 0;
         u64 chargedBufferBytes = 0;
+        u32 canonicalDescriptorLiveSlots = 0;
+        u32 canonicalDescriptorReusableSlots = 0;
+        u32 canonicalDescriptorPeakLiveSlots = 0;
+        u32 canonicalDescriptorPeakReusableSlots = 0;
+        u64 canonicalDescriptorPublicationHits = 0;
+        u64 canonicalDescriptorPublicationMisses = 0;
+        u64 canonicalDescriptorPressureEvictions = 0;
+        u64 canonicalDescriptorMaintenanceEvictions = 0;
+        u64 canonicalDescriptorRejectedReservations = 0;
         u64 dedicatedResourcePoolHits = 0;
         u64 dedicatedResourcePoolMisses = 0;
+        u64 persistentDedicatedPlanHits = 0;
+        u64 persistentDedicatedPlanBuilds = 0;
+        u64 persistentDedicatedLeaseHits = 0;
+        u64 persistentDedicatedLeaseFallbacks = 0;
+        u64 structuralPlanHits = 0;
+        u64 structuralPlanMisses = 0;
+        u64 structuralPlanBuilds = 0;
         u64 placedHeapPoolHits = 0;
         u64 placedHeapPoolMisses = 0;
         u64 placedObjectPoolHits = 0;
@@ -635,5 +781,6 @@ namespace vanguard::rendering
         friend class ResourcePlanningWriter;
         friend class RenderNodeGraph;
         friend struct detail::DedicatedResourceProviderTestAccess;
+        friend struct detail::RenderFlowResourceShutdownTestAccess;
     };
 } // namespace vanguard::rendering

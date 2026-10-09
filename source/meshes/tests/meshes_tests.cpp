@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/meshes/mesh_page_source.hpp>
@@ -200,7 +201,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "meshesTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("meshes_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
 
     Fixture fixture;
@@ -375,6 +376,12 @@ int main()
         invalid.pages[2].bufferOffset = 4;
         ByteArray output(memory::pools::Rendering::GetInstance());
         Check(WriteFixture(invalid.description, output) == meshes::Result::InvalidPage, "gapped buffer page coverage rejected");
+    }
+    {
+        Fixture invalid;
+        invalid.description.bounds.sphereRadius = -1.0f;
+        ByteArray output(memory::pools::Rendering::GetInstance());
+        Check(WriteFixture(invalid.description, output) == meshes::Result::InvalidArgument, "invalid local mesh bounds rejected");
     }
     {
         Fixture invalid;

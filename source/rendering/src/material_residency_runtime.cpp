@@ -3,6 +3,8 @@
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/materials/materials.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/rendering/mesh_draw_layout.hpp>
+#include <vanguard/rendering/render_phase.hpp>
 #include <vanguard/system/assert.hpp>
 
 #include <new>
@@ -938,6 +940,8 @@ namespace vanguard::rendering
         const containers::ArraySpan<const pipelines::ShaderReference> shaderReferences = pipelineObject->GetFile().GetShaders();
         if (shaderDependencies.Size() != shaderReferences.Size())
             return Fail(failure, MaterialResidencyRuntimeFailureCode::InvalidMaterial, "material technique shader closure is inconsistent");
+        const bool standardStaticSurfacePhase = desc.technique == standardRenderPhases::DepthPrepass.value || desc.technique == standardRenderPhases::Opaque.value;
+        const bool staticSurfaceTechnique = standardStaticSurfacePhase && IsStaticSurfaceDrawPipeline(pipelineObject->GetFile());
         const u32 techniqueIndex = m_impl->AllocateTechnique();
         if (techniqueIndex == InvalidMaterialTechniqueIndex)
             return Fail(failure, MaterialResidencyRuntimeFailureCode::CapacityExceeded, "material technique request capacity is exhausted");
@@ -952,6 +956,7 @@ namespace vanguard::rendering
         ++m_impl->stats.liveTechniqueRequests;
         containers::DynamicArray<ResolvedRenderShader> resolved{memory::pools::Rendering::GetInstance()};
         resolved.Reserve(shaderDependencies.Size());
+        bool staticSurfaceShaderValidated = false;
 
         for (u32 shaderIndex = 0; shaderIndex < shaderDependencies.Size(); ++shaderIndex)
         {
@@ -960,6 +965,17 @@ namespace vanguard::rendering
             {
                 m_impl->RecycleTechnique(techniqueIndex);
                 return Fail(failure, MaterialResidencyRuntimeFailureCode::InvalidMaterial, "material technique contains an invalid shader dependency");
+            }
+            const auto* const shaderObject = static_cast<const shaders::ShaderResourceObject*>(shaderResource.Get());
+            const shaders::ShaderFile& shaderFile = shaderObject->GetFile();
+            if (staticSurfaceTechnique && shaderFile.GetMaterialContract() != nullptr)
+            {
+                if (!ValidateStaticSurfaceShaderInterface(shaderFile))
+                {
+                    m_impl->RecycleTechnique(techniqueIndex);
+                    return Fail(failure, MaterialResidencyRuntimeFailureCode::InvalidMaterial, "static-surface material shader does not match the renderer draw interface");
+                }
+                staticSurfaceShaderValidated = true;
             }
             u32 programIndex = m_impl->FindProgram(shaderResource);
             if (programIndex == InvalidMaterialTechniqueIndex)
@@ -978,9 +994,8 @@ namespace vanguard::rendering
                     m_impl->RecycleTechnique(techniqueIndex);
                     return Fail(failure, MaterialResidencyRuntimeFailureCode::CapacityExceeded, "native material program allocation failed");
                 }
-                const auto* const shaderObject = static_cast<const shaders::ShaderResourceObject*>(shaderResource.Get());
                 rhi::Failure rhiFailure;
-                const RenderShaderResult shaderResult = program.shader->Load(shaderObject->GetFile(), &rhiFailure);
+                const RenderShaderResult shaderResult = program.shader->Load(shaderFile, &rhiFailure);
                 if (shaderResult != RenderShaderResult::Success)
                 {
                     DeleteObject(program.shader);
@@ -1013,6 +1028,25 @@ namespace vanguard::rendering
             program.lastUse = ++m_impl->useSerial;
             techniqueSlot.programs.PushBack(programIndex);
             resolved.PushBack({shaderReferences[shaderIndex].resource, program.shader});
+        }
+
+        if (staticSurfaceTechnique && !staticSurfaceShaderValidated)
+        {
+            m_impl->RecycleTechnique(techniqueIndex);
+            return Fail(failure, MaterialResidencyRuntimeFailureCode::InvalidMaterial, "static-surface technique has no material shader with the renderer draw interface");
+        }
+        if (staticSurfaceTechnique)
+        {
+            rhi::BindingLayout expectedLayout(rhi::AdoptReference, rhi::RequestBindingLayout(GetStaticSurfaceDrawBindingLayout()));
+            bool hasExpectedLayout = false;
+            if (expectedLayout)
+                for (const rhi::BindingLayoutRef layout : m_impl->bindingLayouts)
+                    hasExpectedLayout = layout == expectedLayout.GetRef() || hasExpectedLayout;
+            if (!hasExpectedLayout)
+            {
+                m_impl->RecycleTechnique(techniqueIndex);
+                return Fail(failure, MaterialResidencyRuntimeFailureCode::InvalidMaterial, "static-surface technique is missing the renderer-owned draw binding layout");
+            }
         }
 
         const PipelineInterfaceResources interfaceResources{

@@ -43,16 +43,17 @@ project "rhiNvrhiTests"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
+    enableVanguardD3D12Agility(true)
     files { "tests/**.cpp" }
     includedirs {
         "include", "private", "../include", "../../system/include", "../../memory/include", "../../containers/include",
         "../../concurrency/include", "../../diagnostics/include", "../../jobs/include", "../../rendering/include",
         "../../pipelineCache/include", "../../pipelines/include", "../../shaders/include", "../../crypto/include",
-        "../../serialization/include", "../../resources/include", "../../filesystem/include", "../../io/include",
+        "../../serialization/include", "../../resources/include", "../../materials/include", "../../meshes/include", "../../filesystem/include", "../../io/include",
         "../../window/include"
     }
     links {
-        "rendering", "pipelineCache", "pipelines", "shaders", "crypto", "serialization", "resources", "filesystem", "io", "window",
+        "rendering", "pipelineCache", "pipelines", "shaders", "materials", "meshes", "crypto", "serialization", "resources", "filesystem", "io", "window",
         "rhiNvrhi", "rhi", "nvrhiD3D12", "nvrhiCore", "directXGuids", "jobs", "diagnostics", "concurrency", "containers",
         "containersCompat", "memory", "redSystemCompat", "system", "d3d12", "dxgi",
         "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Version"

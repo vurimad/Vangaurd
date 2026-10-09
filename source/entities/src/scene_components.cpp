@@ -4,7 +4,6 @@
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/entities/rendering_runtime.hpp>
-#include <vanguard/rendering/mesh_residency.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
 #include <vanguard/system/assert.hpp>
 
@@ -24,18 +23,18 @@ namespace vanguard::entities
             reflection::MakeField("blue", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, blue), sizeof(f32), alignof(f32)),
             reflection::MakeField("intensity", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, intensity), sizeof(f32), alignof(f32)),
             reflection::MakeField("range", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, range), sizeof(f32), alignof(f32)),
-            reflection::MakeField("innerConeRadians", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, innerConeRadians), sizeof(f32), alignof(f32)),
-            reflection::MakeField("outerConeRadians", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, outerConeRadians), sizeof(f32), alignof(f32)),
-            reflection::MakeField("castsShadow", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(L, castsShadow), sizeof(bool), alignof(bool)),
-            reflection::MakeField("layerMask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(L, layerMask), sizeof(u64), alignof(u64), 2),
-            reflection::MakeField("visibilityMask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(L, visibilityMask), sizeof(u32), alignof(u32), 2)
+            reflection::MakeField("inner_cone_radians", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, innerConeRadians), sizeof(f32), alignof(f32)),
+            reflection::MakeField("outer_cone_radians", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(L, outerConeRadians), sizeof(f32), alignof(f32)),
+            reflection::MakeField("casts_shadow", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(L, castsShadow), sizeof(bool), alignof(bool)),
+            reflection::MakeField("layer_mask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(L, layerMask), sizeof(u64), alignof(u64), 2),
+            reflection::MakeField("visibility_mask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(L, visibilityMask), sizeof(u32), alignof(u32), 2)
         };
         const reflection::SchemaField CameraFields[]{
-            reflection::MakeField("verticalFieldOfViewRadians", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(C, verticalFieldOfViewRadians), sizeof(f32), alignof(f32)),
-            reflection::MakeField("nearPlane", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(C, nearPlane), sizeof(f32), alignof(f32)),
-            reflection::MakeField("farPlane", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(C, farPlane), sizeof(f32), alignof(f32)),
-            reflection::MakeField("layerMask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(C, layerMask), sizeof(u64), alignof(u64)),
-            reflection::MakeField("visibilityMask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(C, visibilityMask), sizeof(u32), alignof(u32))
+            reflection::MakeField("vertical_field_of_view_radians", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(C, verticalFieldOfViewRadians), sizeof(f32), alignof(f32)),
+            reflection::MakeField("near_plane", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(C, nearPlane), sizeof(f32), alignof(f32)),
+            reflection::MakeField("far_plane", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(C, farPlane), sizeof(f32), alignof(f32)),
+            reflection::MakeField("layer_mask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(C, layerMask), sizeof(u64), alignof(u64)),
+            reflection::MakeField("visibility_mask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(C, visibilityMask), sizeof(u32), alignof(u32))
         };
         const reflection::Schema LightSchema{LightComponentType, "vanguard.light_component", sizeof(L), alignof(L), 2, 1, LightFields, 11};
         const reflection::Schema CameraSchema{CameraComponentType, "vanguard.camera_component", sizeof(C), alignof(C), 1, 1, CameraFields, 5};
@@ -209,28 +208,19 @@ namespace vanguard::entities
         state.projection.farPlane = m_data.farPlane;
         state.layerMask = m_data.layerMask;
         state.visibilityMask = m_data.visibilityMask;
-        state.phases = m_phases;
+        state.phases = m_rendering->GetDefaultCameraPhases();
         return state;
     }
 
     bool CameraComponent::OnAttach(const ComponentContext& context) noexcept
     {
         m_rendering = static_cast<RenderingRuntime*>(context.world.GetSystem(RenderingRuntimeSystemId));
-        if (m_rendering == nullptr || m_rendering->GetCommands() == nullptr || m_rendering->GetRenderPhases() == nullptr)
+        if (m_rendering == nullptr || m_rendering->GetCommands() == nullptr || m_rendering->GetDefaultCameraPhases().Empty())
         {
             m_rendering = nullptr;
             return false;
         }
         rendering::RenderCameraDesc desc;
-        m_phases.Clear();
-        for (const auto& phase : m_rendering->GetMeshDrawPhases())
-        {
-            if (!m_phases.Add(m_rendering->GetRenderPhases()->Find(phase.phase)))
-            {
-                m_rendering = nullptr;
-                return false;
-            }
-        }
         desc.scene = m_rendering->GetScene();
         desc.name = "CameraComponent";
         desc.enabled = IsEnabled();
@@ -243,7 +233,7 @@ namespace vanguard::entities
         ForceUpdateCallbackOnce();
         if (IsRegistered() && !ScheduleTransformUpdate())
         {
-            ReleaseCamera();
+            static_cast<void>(ReleaseCamera());
             return false;
         }
         return true;
@@ -267,19 +257,25 @@ namespace vanguard::entities
         return m_rendering->GetCommands()->UpdateCamera(m_camera, MakeState());
     }
 
-    void CameraComponent::ReleaseCamera() noexcept
+    ComponentReleaseResult CameraComponent::ReleaseCamera() noexcept
     {
         if (m_rendering == nullptr)
-            return;
+            return !m_camera.IsValid() ? ComponentReleaseResult::Complete : ComponentReleaseResult::Failed;
         m_rendering->CancelCameraTransform(*this);
-        if (m_camera.IsValid() && !m_rendering->GetCommands()->UnregisterCamera(m_camera))
+        rendering::RenderCameraFailure failure;
+        if (m_camera.IsValid() && !m_rendering->GetCommands()->UnregisterCamera(m_camera, &failure))
         {
+            if (failure.code == rendering::RenderCameraFailureCode::Busy ||
+                failure.code == rendering::RenderCameraFailureCode::CameraStillReferenced)
+                return ComponentReleaseResult::Pending;
             m_rendering->ReportComponentFailure("camera removal failed");
-            return;
+            return ComponentReleaseResult::Failed;
         }
         m_camera = {};
         m_rendering = nullptr;
+        return ComponentReleaseResult::Complete;
     }
-    void CameraComponent::OnDetach(const ComponentContext&) noexcept { ReleaseCamera(); }
-    void CameraComponent::OnUninitialize(const ComponentContext&) noexcept { ReleaseCamera(); }
+    ComponentReleaseResult CameraComponent::OnPrepareDetach(const ComponentContext&) noexcept { return ReleaseCamera(); }
+    void CameraComponent::OnDetach(const ComponentContext&) noexcept {}
+    void CameraComponent::OnUninitialize(const ComponentContext&) noexcept { static_cast<void>(ReleaseCamera()); }
 }

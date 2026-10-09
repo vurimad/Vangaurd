@@ -10,9 +10,9 @@ project "engine"
     disablewarnings { "4127", "4324" }
     targetdir(output_root)
     objdir(object_root)
-    files { "include/**.hpp", "src/**.cpp", "README.md", "UPSTREAM.md" }
+    files { "include/**.hpp", "private/**.hpp", "src/**.cpp", "README.md", "UPSTREAM.md" }
     includedirs {
-        "include", "../application/include", "../filesystem/include", "../io/include", "../jobs/include", "../resources/include",
+        "include", "private", "../application/include", "../filesystem/include", "../io/include", "../jobs/include", "../resources/include",
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include",
@@ -25,7 +25,7 @@ project "engine"
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links { "application", "gameInput", "input", "window", "rendering", "pipelineCache", "rhi", "entities", "gameWorld", "ecs", "flecs", "world", "meshes", "textures", "materials", "pipelines", "shaders", "streaming", "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "jobs", "memory", "system" }
     vpaths {
-        ["Public API/*"] = { "include/**.hpp" }, ["Source/*"] = { "src/**.cpp" },
+        ["Public API/*"] = { "include/**.hpp" }, ["Private API/*"] = { "private/**.hpp" }, ["Source/*"] = { "src/**.cpp" },
         ["Documentation"] = { "README.md", "UPSTREAM.md" }
     }
 
@@ -40,9 +40,9 @@ project "engineServicesTests"
     disablewarnings { "4127", "4324" }
     targetdir(output_root)
     objdir(object_root)
-    files { "tests/engine_services_tests.cpp" }
+    files { "tests/engine_services_tests.cpp", "private/vanguard/engine/game_world_service_detail.hpp", "private/vanguard/engine/rendering_service_detail.hpp" }
     includedirs {
-        "include", "../application/include", "../filesystem/include", "../io/include", "../jobs/include", "../resources/include",
+        "include", "private", "../application/include", "../filesystem/include", "../io/include", "../jobs/include", "../resources/include",
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include",
@@ -134,6 +134,7 @@ project "textureResidencyServiceTests"
     disablewarnings { "4127", "4324" }
     targetdir(output_root)
     objdir(object_root)
+    enableVanguardD3D12Agility()
     files { "tests/texture_residency_service_tests.cpp" }
     includedirs {
         "include", "../application/include", "../filesystem/include", "../io/include", "../jobs/include", "../resources/include",
@@ -178,6 +179,7 @@ project "materialRuntimeServiceTests"
     disablewarnings { "4127", "4324" }
     targetdir(output_root)
     objdir(object_root)
+    enableVanguardD3D12Agility()
     files { "tests/material_runtime_service_tests.cpp" }
     includedirs {
         "include", "../application/include", "../filesystem/include", "../io/include", "../jobs/include", "../resources/include",

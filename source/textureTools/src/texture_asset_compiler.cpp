@@ -15,7 +15,7 @@ namespace
     namespace tools = vanguard::texture_tools;
 
     constexpr u32 SettingsMagic = vanguard::serialization::MakeFourCC('V', 'T', 'C', 'B');
-    constexpr u16 SettingsVersion = 1;
+    constexpr u16 SettingsVersion = static_cast<u16>(tools::TextureBuildSettingsVersion);
     constexpr u32 SettingsSize = 24;
     constexpr u8 KnownRouteFlags = static_cast<u8>(tools::TextureBuildRouteFlags::Streamable);
     constexpr u32 MaximumCompilerSubresources = 4095;
@@ -58,10 +58,11 @@ namespace
                ((streamable && settings.ddsMipTailCount != 0) || (!streamable && settings.ddsMipTailCount == 1));
     }
 
-    [[nodiscard]] bool ParseSettings(const containers::ArraySpan<const u8> bytes, ParsedSettings& settings) noexcept
+    [[nodiscard]] tools::TextureBuildSettingsResult ParseSettings(const containers::ArraySpan<const u8> bytes,
+                                                                  ParsedSettings& settings) noexcept
     {
         if (bytes.Size() != SettingsSize || bytes.Data() == nullptr)
-            return false;
+            return tools::TextureBuildSettingsResult::InvalidArgument;
         filesystem::MemoryFileReader file(bytes.Data(), bytes.Size(), 0);
         vanguard::serialization::BinaryReader reader(file);
         u32 magic = 0;
@@ -77,14 +78,17 @@ namespace
         if (!reader.ReadU32(magic) || !reader.ReadU16(version) || !reader.ReadU16(reserved) || !reader.ReadU8(mode) ||
             !reader.ReadU8(colorSpace) || !reader.ReadU8(red) || !reader.ReadU8(green) || !reader.ReadU8(blue) || !reader.ReadU8(alpha) ||
             !reader.ReadU8(flags) || !reader.ReadU8(settings.ddsMipTailCount) || !reader.ReadU64(settings.profile) || reader.GetRemaining() != 0 ||
-            magic != SettingsMagic || version != SettingsVersion || reserved != 0)
-            return false;
+            magic != SettingsMagic || reserved != 0)
+            return tools::TextureBuildSettingsResult::InvalidArgument;
+        if (version != SettingsVersion)
+            return tools::TextureBuildSettingsResult::UnsupportedVersion;
         settings.mode = static_cast<tools::TextureBuildSourceMode>(mode);
         settings.colorSpace = static_cast<tools::ImportedColorSpace>(colorSpace);
         settings.channels = {static_cast<tools::ImportedChannel>(red), static_cast<tools::ImportedChannel>(green),
                              static_cast<tools::ImportedChannel>(blue), static_cast<tools::ImportedChannel>(alpha)};
         settings.routeFlags = static_cast<tools::TextureBuildRouteFlags>(flags);
-        return ValidateSettings(settings);
+        return ValidateSettings(settings) ? tools::TextureBuildSettingsResult::Success
+                                          : tools::TextureBuildSettingsResult::InvalidArgument;
     }
 
     [[nodiscard]] bool AddChecked(const u64 left, const u64 right, u64& result) noexcept
@@ -163,6 +167,56 @@ namespace
     {
         return settings.mode == tools::TextureBuildSourceMode::PreservedDds ? source.kind == tools::TextureSourceKind::Dds
                                                                             : source.kind != tools::TextureSourceKind::Dds;
+    }
+
+    [[nodiscard]] bool RecognizeTextureSourcePath(const containers::StringView path, void*) noexcept
+    {
+        const containers::StringView extension = filesystem::paths::GetExtension(path);
+        return (extension.Length() == 3u && (extension.StartsWithIgnoreCase("png") || extension.StartsWithIgnoreCase("jpg") ||
+                                              extension.StartsWithIgnoreCase("tif") || extension.StartsWithIgnoreCase("exr") ||
+                                              extension.StartsWithIgnoreCase("dds"))) ||
+               (extension.Length() == 4u && (extension.StartsWithIgnoreCase("jpeg") || extension.StartsWithIgnoreCase("tiff")));
+    }
+
+    [[nodiscard]] bool CreateTextureImportDescription(const assets::SourceRecord& candidate,
+                                                      assets::SourceImportDescription& output, void*) noexcept
+    {
+        if (!RecognizeTextureSourcePath(candidate.path.AsStringView(), nullptr))
+            return false;
+        const containers::StringView extension = filesystem::paths::GetExtension(candidate.path.AsStringView());
+        tools::TextureBuildDescription build;
+        if (extension.Length() == 3u && extension.StartsWithIgnoreCase("dds"))
+        {
+            build.sourceMode = tools::TextureBuildSourceMode::PreservedDds;
+            build.colorSpace = tools::ImportedColorSpace::Automatic;
+            build.channels = {};
+            build.routeFlags = tools::TextureBuildRouteFlags::None;
+            build.ddsMipTailCount = 1u;
+            build.profile = 0;
+        }
+
+        assets::SourceImportDescription description;
+        description.settingsVersion = tools::TextureBuildSettingsVersion;
+        if (tools::EncodeTextureBuildSettings(build, description.settings) != tools::TextureBuildSettingsResult::Success)
+            return false;
+        assets::AssetOutput main;
+        main.key = "main";
+        main.type = textures::TextureResourceType;
+        const u32 previous = description.outputs.Size();
+        description.outputs.PushBack(static_cast<assets::AssetOutput&&>(main));
+        if (description.outputs.Size() != previous + 1u || description.outputs[previous].key != "main")
+            return false;
+        output = static_cast<assets::SourceImportDescription&&>(description);
+        return true;
+    }
+
+    [[nodiscard]] bool ValidateTextureSourceSettings(const u32 settingsVersion,
+                                                     const containers::ArraySpan<const u8> settings, void*) noexcept
+    {
+        if (settingsVersion != tools::TextureBuildSettingsVersion)
+            return false;
+        tools::TextureBuildDescription description;
+        return tools::DecodeTextureBuildSettings(settings, description) == tools::TextureBuildSettingsResult::Success;
     }
 
     [[nodiscard]] bool OutputShape(const ParsedSettings& settings, const tools::TextureSourceInspection& source, u32& width, u32& height,
@@ -343,13 +397,34 @@ namespace vanguard::texture_tools
         return TextureBuildSettingsResult::Success;
     }
 
+    TextureBuildSettingsResult DecodeTextureBuildSettings(const containers::ArraySpan<const u8> settings,
+                                                           TextureBuildDescription& description) noexcept
+    {
+        ParsedSettings parsed;
+        const TextureBuildSettingsResult result = ParseSettings(settings, parsed);
+        if (result != TextureBuildSettingsResult::Success)
+            return result;
+        if (IsImageMode(parsed.mode) && FindCookingProfile(parsed.profile) == nullptr)
+            return TextureBuildSettingsResult::InvalidArgument;
+        TextureBuildDescription decoded;
+        decoded.sourceMode = parsed.mode;
+        decoded.colorSpace = parsed.colorSpace;
+        decoded.channels = parsed.channels;
+        decoded.routeFlags = parsed.routeFlags;
+        decoded.ddsMipTailCount = parsed.ddsMipTailCount;
+        decoded.profile = parsed.profile;
+        description = decoded;
+        return TextureBuildSettingsResult::Success;
+    }
+
     namespace
     {
         [[nodiscard]] bool Discover(const assets::BuildRequest& request, assets::DependencyCollector& dependencies, void* userData) noexcept
         {
             TextureAssetCompiler::Impl& implementation = *static_cast<TextureAssetCompiler::Impl*>(userData);
             ParsedSettings settings;
-            if (!ParseSettings(request.settings, settings) || (IsImageMode(settings.mode) && FindCookingProfile(settings.profile) == nullptr))
+            if (ParseSettings(request.settings, settings) != vanguard::texture_tools::TextureBuildSettingsResult::Success ||
+                (IsImageMode(settings.mode) && FindCookingProfile(settings.profile) == nullptr))
                 return false;
             const crypto::Digest256 fingerprint = ToolFingerprint(settings, request.target, implementation.frozen);
             const resources::ResourceReference tool(resources::ResourcePath::FromString(CompilerToolPath), TextureCompilerToolResourceType);
@@ -357,11 +432,19 @@ namespace vanguard::texture_tools
                    dependencies.Add({tool, fingerprint, assets::DependencyRole::Tool, assets::DependencyRequirement::Required}) == assets::Result::Success;
         }
 
+        [[nodiscard]] bool ScanReferences(const assets::BuildRequest& request, assets::AssetReferenceCollector&, void*) noexcept
+        {
+            ParsedSettings settings;
+            return ParseSettings(request.settings, settings) == vanguard::texture_tools::TextureBuildSettingsResult::Success &&
+                   (!IsImageMode(settings.mode) || FindCookingProfile(settings.profile) != nullptr);
+        }
+
         [[nodiscard]] bool EstimateResources(const assets::BuildRequest& request, containers::ArraySpan<const assets::BuildDependency>,
                                              assets::BuildResourceEstimate& estimate, void*) noexcept
         {
             ParsedSettings settings;
-            return ParseSettings(request.settings, settings) && Estimate(request, settings, estimate);
+            return ParseSettings(request.settings, settings) == vanguard::texture_tools::TextureBuildSettingsResult::Success &&
+                   Estimate(request, settings, estimate);
         }
 
         [[nodiscard]] bool CompileAsset(const assets::CompileContext& context, assets::ArtifactWriter& artifacts, void*) noexcept
@@ -370,7 +453,7 @@ namespace vanguard::texture_tools
                 return false;
             ParsedSettings settings;
             TextureSourceInspection inspection;
-            if (!ParseSettings(context.request.settings, settings) ||
+            if (ParseSettings(context.request.settings, settings) != vanguard::texture_tools::TextureBuildSettingsResult::Success ||
                 InspectTextureSource(context.request.source.content, inspection) != TextureImportResult::Success || !RouteMatches(settings, inspection) ||
                 artifacts.GetRemainingArtifactCount() < 2 || artifacts.GetRemainingByteCount() == 0)
                 return false;
@@ -420,6 +503,10 @@ namespace vanguard::texture_tools
                 }
                 CookSettings cook;
                 cook.profile = settings.profile;
+                // BuildGraph executes compilers inside Vanguard Jobs. CookTexture's parallel mode synchronously joins its
+                // child block jobs, which RED Jobs explicitly forbids from dispatcher work. The graph already supplies
+                // outer asset-level concurrency, so compiler-owned texture cooking stays serial until it is made continuation-based.
+                cook.execution = CookSettings::Execution::Serial;
                 cook.maximumSubresources = artifacts.GetRemainingArtifactCount() - 1u;
                 cook.maximumOutputBytes = artifacts.GetRemainingByteCount();
                 cook.cancellation = cancellation;
@@ -476,8 +563,15 @@ namespace vanguard::texture_tools
     {
         if (m_impl == nullptr)
             return {};
-        return {m_impl->compilerId, CompilerName, TextureAssetCompilerVersion, TextureSourceResourceType, textures::TextureResourceType,
-                Discover, CompileAsset, m_impl, EstimateResources};
+        return {m_impl->compilerId, CompilerName, TextureAssetCompilerVersion, TextureSourceResourceType, textures::TextureResourceType, Discover,
+                CompileAsset, m_impl, EstimateResources};
+    }
+
+    assets::SourceImporterDescriptor TextureAssetCompiler::GetImporterDescriptor() noexcept
+    {
+        return assets::MakeDirectSourceImporterDescriptor(GetDescriptor(), RecognizeTextureSourcePath, ScanReferences, nullptr,
+                                                          assets::RelocateSourceUnchanged, CreateTextureImportDescription,
+                                                          ValidateTextureSourceSettings);
     }
 
     assets::Result TextureAssetCompiler::Register(assets::BuildSystem& buildSystem) noexcept

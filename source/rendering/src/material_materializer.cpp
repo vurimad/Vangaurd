@@ -1,7 +1,6 @@
 #include <vanguard/rendering/material_materializer.hpp>
 
 #include <vanguard/materials/materials.hpp>
-#include <vanguard/rendering/material_materializer_internal.hpp>
 
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
@@ -918,46 +917,4 @@ namespace vanguard::rendering
         return m_impl != nullptr ? m_impl->stats : MaterialMaterializerStats{};
     }
 
-    namespace detail
-    {
-        bool MaterialMaterializerAccess::BeginResolved(MaterialMaterializer& materializer, const MaterialProgramLayoutId layout, const containers::ArraySpan<const u8> parameterBytes,
-                                                       const containers::ArraySpan<MaterialResourceReference> references, MaterialMaterializationTicket& ticket,
-                                                       MaterialMaterializerFailure* const failure) noexcept
-        {
-            ClearFailure(failure);
-            ticket = {};
-            MaterialMaterializer::Impl* const impl = materializer.m_impl;
-            if (impl == nullptr)
-                return Fail(failure, MaterialMaterializerFailureCode::NotInitialized, "material materializer is not initialized");
-            if (!concurrency::IsMainThread())
-                return Fail(failure, MaterialMaterializerFailureCode::WrongThread, "resolved material injection must run on the main thread");
-            MaterialProgramLayoutView layoutView;
-            if (!impl->layouts->Get(layout, layoutView) || layoutView.resources.Size() != references.Size() || layoutView.parameterByteSize != parameterBytes.Size() ||
-                references.Size() > impl->config.maximumRolesPerMaterial)
-                return Fail(failure, MaterialMaterializerFailureCode::InvalidArgument, "resolved material image disagrees with its program layout");
-            for (const MaterialResourceReference& reference : references)
-                if (!reference.IsValid())
-                    return Fail(failure, MaterialMaterializerFailureCode::InvalidArgument, "resolved material image contains an invalid resource reference");
-            const u32 operationIndex = impl->AllocateOperation();
-            if (operationIndex == InvalidMaterialMaterializationIndex)
-                return Fail(failure, MaterialMaterializerFailureCode::CapacityExceeded, "material materialization operation capacity is exhausted");
-            MaterialMaterializer::Impl::Operation& operation = impl->operations[operationIndex];
-            operation.layout = layout;
-            operation.resourceReferences.Resize(references.Size());
-            operation.gpuResources.Resize(references.Size());
-            operation.parameterBytes = parameterBytes;
-            for (u32 index = 0; index < references.Size(); ++index)
-            {
-                operation.resourceReferences[index] = static_cast<MaterialResourceReference&&>(references[index]);
-                operation.gpuResources[index] = operation.resourceReferences[index].GetGpuResource();
-            }
-            operation.key = impl->BuildKey(operation, layoutView, operation.parameterBytes);
-            operation.state = OperationState::ReadyForBatch;
-            operation.resolvedRoleCount = references.Size();
-            impl->AddReadyWork(operationIndex);
-            ticket = {operationIndex, operation.generation};
-            ++impl->stats.requestsBegun;
-            return true;
-        }
-    } // namespace detail
 } // namespace vanguard::rendering

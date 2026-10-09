@@ -29,8 +29,8 @@ renderer-owned scene and camera state alive until execution finishes. `FlushPrev
 RED-style CPU barrier used by viewport destruction and exceptional ownership transitions; it never waits for GPU queue
 completion. GPU safety remains an RHI-fence contract.
 
-`RenderingService` owns the command system and viewport manager. `WorldRenderBridge` and future editor/tool bridges are
-producers of scene mutations, not hard-coded stages of this generic rendering service. A retained `RenderFrame` now enters
+`RenderingService` owns the command system and viewport manager. World, editor, and tool integrations are producers of scene
+mutations, not hard-coded stages of this generic rendering service. A retained `RenderFrame` now enters
 the service with a Jobs continuation builder, allowing future Render Graph work to extend the same CPU command tail. Until
 that graph is installed the destination fails explicitly instead of reporting an unrendered frame as successful. Automatic
 engine-frame ordering, camera/frame publication, and Render Graph execution remain the next integration layer.

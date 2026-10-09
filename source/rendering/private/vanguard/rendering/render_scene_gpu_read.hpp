@@ -13,6 +13,7 @@ namespace vanguard::rendering
         const RenderProxyVisibilityFlags* visibility = nullptr;
         const u64* layerMask = nullptr;
         const u32* visibilityMask = nullptr;
+        const RenderProxySpatialMode* spatialMode = nullptr;
         RenderProxyPayloadKind payloadKind = RenderProxyPayloadKind::None;
 
         const RenderLightKind* lightKind = nullptr;
@@ -29,7 +30,7 @@ namespace vanguard::rendering
 
         [[nodiscard]] bool HasCommonData() const noexcept
         {
-            return transform != nullptr && bounds != nullptr && visibility != nullptr && layerMask != nullptr && visibilityMask != nullptr;
+            return transform != nullptr && bounds != nullptr && visibility != nullptr && layerMask != nullptr && visibilityMask != nullptr && spatialMode != nullptr;
         }
     };
 } // namespace vanguard::rendering

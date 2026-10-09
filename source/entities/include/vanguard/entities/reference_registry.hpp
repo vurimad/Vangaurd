@@ -51,6 +51,9 @@ namespace vanguard::entities
         u32 unresolvedRequiredReferences = 0;
         u32 unresolvedOptionalReferences = 0;
         u64 resolutionRevision = 0;
+        u64 registrationEntitiesVisited = 0;
+        u64 registrationReferencesVisited = 0;
+        u64 registrationSlotLookups = 0;
     };
 
     /// World-scoped stable-identity registry. Runtime Flecs handles are transient observations and must
@@ -91,6 +94,8 @@ namespace vanguard::entities
         [[nodiscard]] bool IsCellReady(u64 cellId, u32 generation) const noexcept;
         [[nodiscard]] bool IsPartitionReady(u64 cellId, u32 generation, u64 partitionId) const noexcept;
         [[nodiscard]] bool HasEntity(ecs::EntityId entityId) const noexcept;
+        /// O(1) live-identity lookup that also proves the publishing cell generation and partition.
+        [[nodiscard]] bool HasEntityInPartition(ecs::EntityId entityId, u64 cellId, u32 generation, u64 partitionId) const noexcept;
         [[nodiscard]] ReferenceRegistryStats GetStats() const noexcept;
         [[nodiscard]] ecs::World* RegisteredWorld() const noexcept;
 

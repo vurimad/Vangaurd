@@ -171,7 +171,9 @@ int main()
     Check(world.DetachGame(&gameInstance), "detach game in reverse system order");
     Check(!world.Shutdown(), "shutdown refuses until post-world-detach and entities complete");
     Check(world.PostWorldDetached(), "run post-world-detach in reverse system order");
-    Check(world.GetEntities().QueueDestroy(0xabc) && world.Tick(0.0f), "destroy final entity through world sync point");
+    Check(world.GetEntities().QueueDestroy(0xabc) && !world.Shutdown(),
+          "shutdown refuses accepted structural work instead of committing it implicitly");
+    Check(world.Tick(0.0f), "destroy final entity through an explicit world synchronization point");
     Check(world.Shutdown(), "uninitialize systems in reverse order and shutdown empty ECS world");
 
     const vanguard::u32 expected[] = {110, 120, 210, 220, 310, 320, 410, 420, 510, 520, 610, 620, 510,  520,

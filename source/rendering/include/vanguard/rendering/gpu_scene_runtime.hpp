@@ -68,6 +68,11 @@ namespace vanguard::rendering
     {
         GpuSceneRuntimeFailureCode code = GpuSceneRuntimeFailureCode::None;
         const char* message = nullptr;
+        // True when accepted publication ownership can no longer be completed or
+        // rolled back safely. The renderer owner must terminalize its device-scoped
+        // owners instead of retrying a non-progressing transaction or fabricating
+        // completion.
+        bool requiresRendererAbandonment = false;
         GpuSceneTablesFailure tablesFailure;
         GpuSceneLifetimeFailure lifetimeFailure;
         GpuSceneUploadFailure uploadFailure;
@@ -124,14 +129,20 @@ namespace vanguard::rendering
         [[nodiscard]] bool StageContribution(const GpuSceneContributionDesc& contribution, GpuSceneRuntimeFailure* failure = nullptr) noexcept;
         /// Main-thread admission budget after already staged producers.
         [[nodiscard]] GpuSceneContributionBudget GetContributionBudget() const noexcept;
-        /// Main-thread after the renderer CPU tail is flushed. Accepts submitted contributions or returns
-        /// pre-submit failures to their producer queues.
+        /// Main-thread after the renderer CPU tail is flushed. Finalizes accepted initial-allocation and
+        /// RenderScene ownership transitions, then accepts submitted contributions or returns pre-submit failures
+        /// to their producer queues.
         [[nodiscard]] bool ResolveContributions(GpuSceneRuntimeFailure* failure = nullptr) noexcept;
         /// Consumes the first asynchronous publication failure after the owning RenderCommandSystem CPU tail is flushed.
         [[nodiscard]] bool ConsumePublicationFailure(GpuSceneRuntimeFailure& failure) noexcept;
         [[nodiscard]] GpuSceneRuntimeStats GetStats() const noexcept;
         // Read only after the existing publication CPU continuation has joined.
         [[nodiscard]] rhi::GpuFence GetPublicationFence() const noexcept { return m_lastPublicationFence; }
+        // CPU-owned submission witness, never GPU readback. True means the exact
+        // scene epoch was admitted to the most recent GPU Scene submission (or
+        // required no upload), so consumers may rely on GetPublicationFence for
+        // the corresponding table bytes without waiting on the CPU.
+        [[nodiscard]] bool IsScenePublicationSubmitted(RenderSceneHandle scene, u64 mutationEpoch) const noexcept;
 
         [[nodiscard]] GpuSceneTables& GetTables() noexcept;
         [[nodiscard]] const GpuSceneTables& GetTables() const noexcept;
@@ -156,5 +167,7 @@ namespace vanguard::rendering
         PublicationState* m_publication = nullptr;
         bool m_initialized = false;
         rhi::GpuFence m_lastPublicationFence;
+        RenderSceneHandle m_submittedScenes[MaximumRenderScenes]{};
+        u64 m_submittedSceneEpochs[MaximumRenderScenes]{};
     };
 } // namespace vanguard::rendering

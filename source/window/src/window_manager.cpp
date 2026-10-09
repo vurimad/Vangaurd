@@ -1196,6 +1196,113 @@ namespace vanguard::window
         return static_cast<bool>(status);
     }
 
+    bool WindowManager::RequestAction(const WindowHandle window, const WindowAction action, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "window actions require the owner thread", window);
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter window actions", window);
+            return false;
+        }
+        if (action > WindowAction::RequestClose)
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window action is invalid", window);
+            return false;
+        }
+        concurrency::ScopedLock guard(m_impl->lock);
+        Impl::WindowRecord* const record = m_impl->FindWindow(window);
+        if (record == nullptr || record->snapshot.lifecycle != WindowLifecycleState::Alive)
+        {
+            m_impl->Reject(failure, record == nullptr ? FailureCode::InvalidHandle : FailureCode::InvalidState,
+                           record == nullptr ? "window handle is stale or invalid" : "window does not accept actions", window);
+            return false;
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->RequestWindowAction(record->backend, action);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure,
+                           status.message != nullptr ? status.message : "window backend rejected the action", window, {}, status.code);
+        return static_cast<bool>(status);
+    }
+
+    bool WindowManager::SetHitTest(const WindowHandle window, const WindowHitTestConfig& config, Failure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {FailureCode::NotInitialized, window, {}, 0, "WindowManager is not initialized"};
+            return false;
+        }
+        if (!m_impl->IsOwnerThread())
+        {
+            m_impl->Reject(failure, FailureCode::WrongThread, "window hit-test mutation requires the owner thread", window);
+            return false;
+        }
+        if (m_impl->IsBackendReentry())
+        {
+            m_impl->Reject(failure, FailureCode::BackendReentry, "window backend commands must not re-enter hit-test mutation", window);
+            return false;
+        }
+        if (config.resizeBorder > 64u ||
+            (config.enabled && (config.dragRegion.origin.x < 0 || config.dragRegion.origin.y < 0 ||
+                                (!config.dragRegion.extent.IsValid() && config.resizeBorder == 0))))
+        {
+            m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window hit-test configuration is invalid", window);
+            return false;
+        }
+
+        concurrency::ScopedLock guard(m_impl->lock);
+        Impl::WindowRecord* const record = m_impl->FindWindow(window);
+        if (record == nullptr || record->snapshot.lifecycle != WindowLifecycleState::Alive)
+        {
+            m_impl->Reject(failure, record == nullptr ? FailureCode::InvalidHandle : FailureCode::InvalidState,
+                           record == nullptr ? "window handle is stale or invalid" : "window does not accept hit-test changes", window);
+            return false;
+        }
+        if (config.enabled)
+        {
+            if (!HasFlag(record->snapshot.flags, WindowFlag::Borderless))
+            {
+                m_impl->Reject(failure, FailureCode::InvalidState, "custom hit testing requires a borderless window", window);
+                return false;
+            }
+            const i64 right = static_cast<i64>(config.dragRegion.origin.x) + static_cast<i64>(config.dragRegion.extent.width);
+            const i64 bottom = static_cast<i64>(config.dragRegion.origin.y) + static_cast<i64>(config.dragRegion.extent.height);
+            if (right > record->snapshot.nativeState.placement.logicalExtent.width ||
+                bottom > record->snapshot.nativeState.placement.logicalExtent.height)
+            {
+                m_impl->Reject(failure, FailureCode::InvalidDescriptor, "window hit-test drag region exceeds the window extent", window);
+                return false;
+            }
+        }
+        BackendStatus status;
+        {
+            const BackendCallGuard backendCall(m_impl->backendCallActive);
+            status = m_impl->backend->SetWindowHitTest(record->backend, config);
+        }
+        if (!status)
+            m_impl->Reject(failure, FailureCode::BackendFailure,
+                           status.message != nullptr ? status.message : "window backend rejected hit testing", window, {}, status.code);
+        return static_cast<bool>(status);
+    }
+
     bool WindowManager::SetCursor(const CursorShape shape, const bool visible, Failure* const failure) noexcept
     {
         if (failure != nullptr)

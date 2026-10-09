@@ -238,6 +238,110 @@ int main()
               journalWorld.Shutdown(),
           "drain the bounded committed-change journal test world");
 
+    ecs::World terminalCommitWorld;
+    ecs::WorldConfig terminalCommitConfig;
+    constexpr vanguard::u32 terminalEntityCount = 64u * 1024u + 1u;
+    constexpr vanguard::u32 terminalSlice = 1024u;
+    terminalCommitConfig.initialEntityCapacity = terminalEntityCount;
+    terminalCommitConfig.initialActionCapacity = terminalEntityCount;
+    terminalCommitConfig.committedChangeCapacity = 64u * 1024u;
+    Check(terminalCommitWorld.Initialize(terminalCommitConfig), "initialize terminal bounded-commit world");
+    bool terminalQueued = true;
+    for (vanguard::u32 index = 0; index < terminalEntityCount; ++index)
+        terminalQueued = terminalCommitWorld.QueueCreate(10'000u + index) && terminalQueued;
+    Check(terminalQueued, "queue more structural work than one committed-change retention window");
+    ecs::CommittedChangeCursor terminalCursor{terminalCommitWorld.GetNextCommittedChangeSequence()};
+    vanguard::u64 terminalRecords = 0;
+    vanguard::u64 terminalLost = 0;
+    while (terminalCommitWorld.GetStats().pendingActions != 0)
+    {
+        ecs::ActionReport terminalReport;
+        Check(terminalCommitWorld.FlushActions(terminalSlice, &terminalReport) && terminalReport.rejected == 0,
+              "commit one bounded terminal structural slice");
+        journalChanges.Clear();
+        Check(terminalCommitWorld.ReadCommittedChanges(terminalCursor, journalChanges, terminalSlice, &journalRead),
+              "consume one bounded terminal committed-change slice");
+        terminalRecords += journalRead.records;
+        terminalLost += journalRead.lostRecords;
+    }
+    Check(terminalRecords == terminalEntityCount && terminalLost == 0 && terminalCommitWorld.GetStats().overwrittenCommittedChanges != 0,
+          "bounded consumer synchronization delivers more than 65,536 accepted changes without subscriber loss");
+
+    const ecs::ComponentType<Position> terminalPositionType = ecs::RegisterComponent<Position>(terminalCommitWorld);
+    terminalQueued = static_cast<bool>(terminalPositionType);
+    for (vanguard::u32 index = 0; index < terminalEntityCount; ++index)
+        terminalQueued = terminalCommitWorld.QueueAddComponent(10'000u + index, terminalPositionType) && terminalQueued;
+    Check(terminalQueued, "queue more component actions than one committed-change retention window");
+    terminalRecords = 0;
+    terminalLost = 0;
+    while (terminalCommitWorld.GetStats().pendingComponentActions != 0)
+    {
+        Check(terminalCommitWorld.FlushComponentActions(terminalSlice, &componentReport) && componentReport.rejected == 0,
+              "commit one bounded terminal component-action slice");
+        journalChanges.Clear();
+        Check(terminalCommitWorld.ReadCommittedChanges(terminalCursor, journalChanges, terminalSlice, &journalRead),
+              "consume one bounded terminal component committed-change slice");
+        terminalRecords += journalRead.records;
+        terminalLost += journalRead.lostRecords;
+    }
+    Check(terminalRecords == terminalEntityCount && terminalLost == 0,
+          "bounded component-action synchronization delivers more than 65,536 accepted changes without subscriber loss");
+
+    ecs::World orderedTerminalWorld;
+    ecs::WorldConfig orderedTerminalConfig;
+    orderedTerminalConfig.initialEntityCapacity = terminalSlice + 1u;
+    orderedTerminalConfig.initialActionCapacity = terminalSlice + 2u;
+    orderedTerminalConfig.committedChangeCapacity = terminalSlice + 2u;
+    Check(orderedTerminalWorld.Initialize(orderedTerminalConfig), "initialize mixed terminal ordering fixture");
+    const ecs::ComponentType<Position> orderedPositionType = ecs::RegisterComponent<Position>(orderedTerminalWorld);
+    bool orderedQueued = static_cast<bool>(orderedPositionType);
+    for (vanguard::u32 index = 0; index <= terminalSlice; ++index)
+        orderedQueued = orderedTerminalWorld.QueueCreate(90'000u + index) && orderedQueued;
+    orderedQueued = orderedTerminalWorld.QueueAddComponent(90'000u + terminalSlice, orderedPositionType) && orderedQueued;
+    Check(orderedQueued && orderedTerminalWorld.FlushActions(terminalSlice, &report) &&
+              orderedTerminalWorld.GetStats().pendingActions == 1u &&
+              orderedTerminalWorld.GetStats().pendingComponentActions == 1u,
+          "bounded terminal structural slice leaves dependent component work queued while later entity creation remains pending");
+    Check(orderedTerminalWorld.FlushActions(terminalSlice, &report) && report.rejected == 0 &&
+              orderedTerminalWorld.GetStats().pendingActions == 0u &&
+              orderedTerminalWorld.FlushComponentActions(terminalSlice, &componentReport) && componentReport.rejected == 0 &&
+              orderedTerminalWorld.Resolve(90'000u + terminalSlice),
+          "terminal ordering drains all structural work before dependent component actions");
+    for (vanguard::u32 index = 0; index <= terminalSlice; ++index)
+        orderedQueued = orderedTerminalWorld.QueueDestroy(90'000u + index) && orderedQueued;
+    Check(orderedQueued && orderedTerminalWorld.FlushActions() && orderedTerminalWorld.Shutdown(),
+          "shutdown mixed terminal ordering fixture after explicit cleanup");
+
+    const ecs::CommandBatch partialBatch = terminalCommitWorld.BeginCommandBatch();
+    Check(partialBatch && terminalCommitWorld.QueueDestroy(partialBatch, 10'000u) &&
+              terminalCommitWorld.QueueDestroy(partialBatch, 10'001u) && terminalCommitWorld.QueueDestroy(partialBatch, 10'002u) &&
+              terminalCommitWorld.QueueDestroy(partialBatch, 10'003u) && terminalCommitWorld.QueueDestroy(partialBatch, 10'004u) &&
+              terminalCommitWorld.SealCommandBatch(partialBatch),
+          "seal a structural batch that spans bounded commit slices");
+    Check(terminalCommitWorld.FlushActions(2u, &report) &&
+              terminalCommitWorld.GetCommandBatchStatus(partialBatch, &batchReport) == ecs::CommandBatchStatus::Pending &&
+              batchReport.completed == 2u && terminalCommitWorld.FlushActions(2u, &report) &&
+              terminalCommitWorld.GetCommandBatchStatus(partialBatch, &batchReport) == ecs::CommandBatchStatus::Pending &&
+              batchReport.completed == 4u && terminalCommitWorld.FlushActions(2u, &report) &&
+              terminalCommitWorld.GetCommandBatchStatus(partialBatch, &batchReport) == ecs::CommandBatchStatus::Succeeded &&
+              batchReport.completed == 5u && terminalCommitWorld.RetireCommandBatch(partialBatch),
+          "bounded structural commits preserve command-batch completion across slices");
+    journalChanges.Clear();
+    Check(terminalCommitWorld.ReadCommittedChanges(terminalCursor, journalChanges, terminalSlice, &journalRead) && journalRead.lostRecords == 0,
+          "bounded command-batch completion remains visible to a synchronized committed-change consumer");
+    for (vanguard::u32 index = 5; index < terminalEntityCount; ++index)
+        terminalQueued = terminalCommitWorld.QueueDestroy(10'000u + index) && terminalQueued;
+    Check(terminalQueued, "queue remaining terminal bounded-commit entities for destruction");
+    while (terminalCommitWorld.GetStats().pendingActions != 0)
+    {
+        Check(terminalCommitWorld.FlushActions(terminalSlice, &report) && report.rejected == 0,
+              "commit bounded cleanup structural slice");
+        journalChanges.Clear();
+        Check(terminalCommitWorld.ReadCommittedChanges(terminalCursor, journalChanges, terminalSlice, &journalRead) && journalRead.lostRecords == 0,
+              "consume bounded cleanup committed-change slice without loss");
+    }
+    Check(terminalCommitWorld.Shutdown(), "shutdown empty terminal bounded-commit world");
+
     vanguard::diagnostics::Shutdown();
     std::printf("ecsTests: %s\n", g_failures == 0 ? "PASS" : "FAIL");
     return g_failures == 0 ? 0 : 1;

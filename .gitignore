@@ -2,14 +2,23 @@
 /build/projects/
 /build/obj/
 /build/output/
+/build/*
+!/build/premake/
 /bin/
 /obj/
+/editor/bin/
+/runtime/bin/
+/external/tracy/upstream/**/build-vs2022/
 
 # Runtime output
 /cache/
 /logs/
 /temp/
 /*.log
+/games/*/DerivedData/
+/games/*/Intermediate/
+/games/*/Saved/
+/editor/tests/Saved/
 /vanguard_*_tests/
 /vanguard_*_conformance/
 
@@ -20,6 +29,8 @@
 /*.vcxproj.filters
 /*.vcxproj.user
 /.vscode/
+/.pi/
+/.planning/
 
 # Operating-system files
 Thumbs.db

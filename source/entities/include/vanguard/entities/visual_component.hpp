@@ -105,8 +105,9 @@ namespace vanguard::entities
         [[nodiscard]] bool BeginProxyAdmission(RenderingRuntime& runtime, rendering::LightProxyDesc desc) noexcept;
         [[nodiscard]] bool BeginProxyAdmission(RenderingRuntime& runtime, rendering::DecalProxyDesc desc) noexcept;
         /// Cancels pending admission or transfers an admitted proxy into runtime retirement.
-        [[nodiscard]] bool ReleaseVisualProxy(bool retire = true) noexcept;
+        [[nodiscard]] bool ReleaseVisualProxy(bool retire = true, rendering::RenderSceneFailure* failure = nullptr) noexcept;
 
+        [[nodiscard]] ComponentReleaseResult OnPrepareDetach(const ComponentContext& context) noexcept final;
         void OnUninitialize(const ComponentContext& context) noexcept final;
         void OnDetach(const ComponentContext& context) noexcept final;
         void OnTransformUpdated(math::Box& worldBounds) noexcept override;

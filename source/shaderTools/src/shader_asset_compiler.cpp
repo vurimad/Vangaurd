@@ -483,6 +483,33 @@ namespace vanguard::shader_tools
             return ScanIncludes(settings.sourceName, request.source.content, 0, context, dependencies);
         }
 
+        [[nodiscard]] bool ScanReferences(const assets::BuildRequest& request, assets::AssetReferenceCollector&, void*) noexcept
+        {
+            ParsedSettings settings;
+            return ParseSettings(request.settings, request.target, settings) &&
+                   request.source.identity.GetPath() == resources::ResourcePath::FromString(settings.sourceName);
+        }
+
+        [[nodiscard]] bool RelocateSource(const assets::SourceRecord& source, const assets::SourceDataView& data,
+                                          const containers::StringView newSourceIdentity,
+                                          containers::DynamicArray<u8>& relocatedSource,
+                                          assets::AssetMetadata& relocatedMetadata, void*) noexcept
+        {
+            if (newSourceIdentity.Empty() || newSourceIdentity.Length() >= MaximumPathBytes || data.target >= assets::TargetPlatform::Count)
+                return false;
+            char sourceName[MaximumPathBytes]{};
+            for (u32 index = 0; index < newSourceIdentity.Length(); ++index)
+                sourceName[index] = newSourceIdentity[index];
+            ParsedSettings settings;
+            if (!ParseSettings(source.metadata.settings, data.target, settings) ||
+                !assets::RelocateSourceUnchanged(source, data, newSourceIdentity, relocatedSource, relocatedMetadata, nullptr))
+                return false;
+            const ShaderBuildDescription description{sourceName, settings.program, settings.permutation, settings.entries, settings.defines,
+                                                     settings.compile.optimization, settings.compile.debugInformation, settings.compile.profile,
+                                                     settings.compile.warningsAsErrors, settings.compile.preciseFloatingPoint};
+            return EncodeShaderBuildSettings(description, relocatedMetadata.settings) == BuildSettingsResult::Success;
+        }
+
         [[nodiscard]] bool CompileAsset(const assets::CompileContext& context, assets::ArtifactWriter& artifacts, void* userData) noexcept
         {
             ShaderAssetCompiler::Impl& implementation = *static_cast<ShaderAssetCompiler::Impl*>(userData);
@@ -584,7 +611,16 @@ namespace vanguard::shader_tools
         if (m_impl == nullptr)
             return {};
         return {m_impl->compilerId, CompilerName, ShaderAssetCompilerVersion, ShaderSourceResourceType, shaders::ShaderResourceType, Discover,
-                CompileAsset,       m_impl,        EstimateAsset};
+                CompileAsset, m_impl, EstimateAsset};
+    }
+
+    assets::SourceImporterDescriptor ShaderAssetCompiler::GetImporterDescriptor() noexcept
+    {
+        return assets::MakeDirectSourceImporterDescriptor(GetDescriptor(), [](const containers::StringView path, void*) noexcept
+        {
+            const containers::StringView extension = filesystem::paths::GetExtension(path);
+            return extension.Length() == 3u && extension.StartsWithIgnoreCase("vsl");
+        }, ScanReferences, nullptr, RelocateSource);
     }
 
     assets::Result ShaderAssetCompiler::Register(assets::BuildSystem& buildSystem) noexcept

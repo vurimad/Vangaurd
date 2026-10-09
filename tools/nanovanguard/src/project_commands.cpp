@@ -475,18 +475,92 @@ namespace
         {"technical-name", 'n', nano::OptionValue::Required, "identifier", "Set the stable technical project name.", false},
         {"target", 't', nano::OptionValue::Required, "triplet", "Add a supported target triplet.", true},
         {"format", '\0', nano::OptionValue::Required, "human|jsonl", "Select stable human or JSON Lines output.", false}};
+
+    [[nodiscard]] const char* MetadataResultToken(const assets::MetadataResult result) noexcept
+    {
+        switch (result)
+        {
+        case assets::MetadataResult::Success: return "success";
+        case assets::MetadataResult::InvalidData: return "invalid-data";
+        case assets::MetadataResult::UnsupportedVersion: return "unsupported-version";
+        case assets::MetadataResult::LimitExceeded: return "limit-exceeded";
+        case assets::MetadataResult::DuplicateOutput: return "duplicate-output";
+        case assets::MetadataResult::IdentityCollision: return "identity-collision";
+        }
+        return "unknown";
+    }
+
+    [[nodiscard]] const char* ImportStateToken(const assets::SourceImportState state) noexcept
+    {
+        switch (state)
+        {
+        case assets::SourceImportState::NotClassified: return "not-classified";
+        case assets::SourceImportState::MetadataSelected: return "metadata-selected";
+        case assets::SourceImportState::Candidate: return "candidate";
+        case assets::SourceImportState::Unsupported: return "unsupported";
+        case assets::SourceImportState::DiscoveryUnavailable: return "discovery-unavailable";
+        case assets::SourceImportState::Ambiguous: return "ambiguous";
+        case assets::SourceImportState::ImporterUnavailable: return "importer-unavailable";
+        case assets::SourceImportState::VersionMismatch: return "version-mismatch";
+        case assets::SourceImportState::SourceMismatch: return "source-mismatch";
+        case assets::SourceImportState::InvalidMetadata: return "invalid-metadata";
+        }
+        return "unknown";
+    }
+
+    void AppendIssue(containers::String& text, const u32 issues, const u32 issue, const char* const token) noexcept
+    {
+        if ((issues & issue) == 0u)
+            return;
+        if (!text.Empty())
+            text.Append(',');
+        text.Append(containers::StringView(token));
+    }
+
+    [[nodiscard]] containers::String SourceIssuesToken(const u32 issues) noexcept
+    {
+        containers::String text;
+        AppendIssue(text, issues, assets::SourceMissing, "source-missing");
+        AppendIssue(text, issues, assets::MetadataMissing, "metadata-missing");
+        AppendIssue(text, issues, assets::MetadataUnreadable, "metadata-unreadable");
+        AppendIssue(text, issues, assets::MetadataInvalid, "metadata-invalid");
+        AppendIssue(text, issues, assets::AssetIdentityConflict, "asset-identity-conflict");
+        AppendIssue(text, issues, assets::OutputIdentityConflict, "output-identity-conflict");
+        AppendIssue(text, issues, assets::SourceIdentityConflict, "source-identity-conflict");
+        if (text.Empty())
+            text.Append(containers::StringView("none"));
+        return text;
+    }
+
+    [[nodiscard]] nano::ExitCode SourcesTerminal(nano::Output& output, const nano::OutputFormat format,
+                                                 const nano::SemanticEventKind kind, const nano::ExitCode code,
+                                                 const char* const reason, const char* const message = nullptr) noexcept
+    {
+        nano::SemanticEvent event;
+        event.event = kind;
+        event.operation = "sources-inspect";
+        if (reason != nullptr && !event.AddString("reason", reason))
+            return nano::ExitCode::InternalFailure;
+        if (message != nullptr && !event.AddString("message", message))
+            return nano::ExitCode::InternalFailure;
+        return nano::WriteSemanticEvent(output, format, event) ? code : nano::ExitCode::InternalFailure;
+    }
+
     nano::ExitCode InspectSources(const nano::Invocation& invocation, nano::Output& output) noexcept
     {
         ResolvedProject resolved;
         if (!ResolveProject(invocation.Positional(0), resolved))
-            return ReportProjectFailure(output, invocation.Format(), "sources inspect", "could not resolve exactly one .vproject document");
+            return SourcesTerminal(output, invocation.Format(), nano::SemanticEventKind::Failed, nano::ExitCode::InvalidProject,
+                                   "project-not-found", "could not resolve exactly one .vproject document");
         projects::ProjectDescriptor project;
         projects::Diagnostic diagnostic;
         if (!LoadProject(resolved, project, diagnostic))
-            return ReportProjectFailure(output, invocation.Format(), "sources inspect", diagnostic.message, &diagnostic);
+            return SourcesTerminal(output, invocation.Format(), nano::SemanticEventKind::Failed, nano::ExitCode::InvalidProject,
+                                   "invalid-project-document", diagnostic.message);
         projects::ProjectWorkspace workspace;
         if (projects::ResolveWorkspace(filesystem::AbsolutePath::CreateFilePath(resolved.file), project, workspace, &diagnostic) != projects::Result::Success)
-            return ReportProjectFailure(output, invocation.Format(), "sources inspect", diagnostic.message, &diagnostic);
+            return SourcesTerminal(output, invocation.Format(), nano::SemanticEventKind::Failed, nano::ExitCode::InvalidProject,
+                                   "invalid-project-workspace", diagnostic.message);
         // Absolute-path reads use the native manager, without installing a
         // global manager, resource loader, or editor service.
         filesystem::Manager files(workspace.root, workspace.root, workspace.derivedData);
@@ -494,28 +568,28 @@ namespace
         const assets::SourceRoot root{workspace.assets, false};
         filesystem::ScanResult scanFailure;
         if (sources.Rescan(files, {&root, 1}, &scanFailure) != assets::SourceDatabaseResult::Success)
-            return ReportProjectFailure(output, invocation.Format(), "sources inspect", "source inventory failed; no partial inventory was published");
+            return SourcesTerminal(output, invocation.Format(), nano::SemanticEventKind::Failed, nano::ExitCode::OperationFailed,
+                                   "source-inventory-failed", "source inventory failed; no partial inventory was published");
         for (const assets::SourceRecord& record : sources.GetResources())
         {
-            containers::String line;
-            if (invocation.Format() == nano::OutputFormat::JsonLines)
-            {
-                line.Append("{\"schema\":1,\"event\":\"source-inspected\",\"path\":");
-                AppendJsonString(line, record.path.AsStringView());
-                line.Append(containers::String::Printf(",\"issues\":%u,\"metadataResult\":%u,\"importState\":%u}\n", record.issues, static_cast<u32>(record.metadataResult), static_cast<u32>(record.importState)));
-            }
-            else
-            {
-                line.Append(record.path.AsStringView());
-                line.Append(containers::String::Printf(" issues=%u metadata=%u import=%u\n", record.issues, static_cast<u32>(record.metadataResult), static_cast<u32>(record.importState)));
-            }
-            if (!output.Write(line.AsChar(), line.Length()))
+            containers::String issues = SourceIssuesToken(record.issues);
+            nano::SemanticEvent event;
+            event.event = nano::SemanticEventKind::Status;
+            event.operation = "sources-inspect";
+            if (!event.AddString("path", record.path.AsChar()) || !event.AddString("issues", issues.AsChar()) ||
+                !event.AddString("metadata", MetadataResultToken(record.metadataResult)) ||
+                !event.AddString("import-state", ImportStateToken(record.importState)) ||
+                !nano::WriteSemanticEvent(output, invocation.Format(), event))
                 return nano::ExitCode::InternalFailure;
         }
-        const containers::String summary = invocation.Format() == nano::OutputFormat::JsonLines
-            ? containers::String::Printf("{\"schema\":1,\"event\":\"sources-inspected\",\"count\":%u}\n", sources.GetResources().Count())
-            : containers::String::Printf("Sources: %u (importers not composed)\n", sources.GetResources().Count());
-        return output.Write(summary.AsChar(), summary.Length()) ? nano::ExitCode::Success : nano::ExitCode::InternalFailure;
+        nano::SemanticEvent completed;
+        completed.event = nano::SemanticEventKind::Completed;
+        completed.operation = "sources-inspect";
+        if (!completed.AddUnsigned("count", sources.GetResources().Count()) ||
+            !completed.AddString("classification", "importers-not-composed") ||
+            !nano::WriteSemanticEvent(output, invocation.Format(), completed))
+            return nano::ExitCode::InternalFailure;
+        return nano::ExitCode::Success;
     }
 
     inline constexpr nano::OptionDescriptor InspectOptions[]{

@@ -6,10 +6,13 @@
 
 namespace vanguard::streaming
 {
+    class ResourceSource;
     namespace detail
     {
         struct ResourceSourceAccounting;
         struct ResourceSourcePackageGeneration;
+        struct ManagedLooseGeneration;
+        [[nodiscard]] ManagedLooseGeneration* GetManagedLooseGeneration(const ResourceSource& source) noexcept;
     } // namespace detail
     enum class ResourceSourceResult : u8
     {
@@ -224,6 +227,7 @@ namespace vanguard::streaming
         friend class ResourceSourceReader;
         friend class ResourceRangeReadQueue;
         friend class ResourceStreamer;
+        friend detail::ManagedLooseGeneration* detail::GetManagedLooseGeneration(const ResourceSource& source) noexcept;
     };
 
     /// Independently seekable logical view over an owned ResourceSource.

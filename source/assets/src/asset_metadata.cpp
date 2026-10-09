@@ -1,20 +1,12 @@
 #include <vanguard/assets/asset_metadata.hpp>
 
+#include <vanguard/crypto/crypto.hpp>
+
 namespace vanguard::assets
 {
     namespace
     {
         constexpr char HexDigits[] = "0123456789abcdef";
-
-        bool ValidKey(const containers::StringView key) noexcept
-        {
-            if (key.Empty() || key.Length() > 64)
-                return false;
-            for (const char c : key)
-                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
-                    return false;
-            return true;
-        }
 
         bool ReadHex(const containers::StringView text, u64& value) noexcept
         {
@@ -46,9 +38,46 @@ namespace vanguard::assets
         return false;
     }
 
+    bool GenerateAssetId(AssetId& id) noexcept
+    {
+        AssetId generated;
+        if (!crypto::SecureRandom(generated.bytes, sizeof(generated.bytes)))
+            return false;
+        generated.bytes[6] = static_cast<u8>((generated.bytes[6] & 0x0fu) | 0x40u);
+        generated.bytes[8] = static_cast<u8>((generated.bytes[8] & 0x3fu) | 0x80u);
+        id = generated;
+        return true;
+    }
+
+    bool IsValidAssetOutputKey(const containers::StringView key) noexcept
+    {
+        if (key.Empty() || key.Length() > 64u)
+            return false;
+        for (const char c : key)
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+                return false;
+        return true;
+    }
+
+    resources::ResourcePath GetAssetOutputResourcePath(const AssetId& id, const containers::StringView key) noexcept
+    {
+        if (!id.IsValid() || !IsValidAssetOutputKey(key))
+            return {};
+        char path[7u + 32u + 1u + 64u];
+        char* out = path;
+        for (const char c : containers::StringView("assets/"))
+            *out++ = c;
+        for (const u8 byte : id.bytes)
+            WriteHex(out, byte, 2u);
+        *out++ = '/';
+        for (const char c : key)
+            *out++ = c;
+        return resources::ResourcePath::FromString(containers::StringView(path, static_cast<u32>(out - path)));
+    }
+
     bool GetAssetOutputPath(const AssetId& id, const containers::StringView key, containers::String& path) noexcept
     {
-        if (!id.IsValid() || !ValidKey(key))
+        if (!id.IsValid() || !IsValidAssetOutputKey(key))
             return false;
         containers::String result;
         if (!result.Resize(7u + 32u + 1u + key.Length()))
@@ -67,19 +96,22 @@ namespace vanguard::assets
 
     resources::ResourceReference GetAssetOutputReference(const AssetId& id, const AssetOutput& output) noexcept
     {
-        containers::String path;
-        if (output.type == resources::InvalidResourceTypeId || !GetAssetOutputPath(id, output.key, path))
+        const resources::ResourcePath path = GetAssetOutputResourcePath(id, output.key);
+        if (output.type == resources::InvalidResourceTypeId || !path.IsValid())
             return {};
-        return resources::ResourceReference(resources::ResourcePath::FromString(path), output.type);
+        return resources::ResourceReference(path, output.type);
     }
 
     MetadataResult ValidateMetadata(const AssetMetadata& metadata) noexcept
     {
-        if (!metadata.id.IsValid() || metadata.importer == InvalidCompilerId || metadata.importerVersion == 0 || metadata.settingsVersion == 0)
+        if (!metadata.id.IsValid() || metadata.importer == InvalidSourceImporterId || metadata.importerVersion == 0 || metadata.settingsVersion == 0)
             return MetadataResult::InvalidData;
         if (metadata.settings.Size() > MaximumAssetSettingsBytes || metadata.outputs.Size() > MaximumAssetOutputs)
             return MetadataResult::LimitExceeded;
         containers::HashMap<resources::ResourceId, u32> identities(memory::pools::Assets::GetInstance());
+        identities.Reserve(metadata.outputs.Size());
+        if (identities.Capacity() < metadata.outputs.Size())
+            return MetadataResult::LimitExceeded;
         for (u32 i = 0; i < metadata.outputs.Size(); ++i)
         {
             const AssetOutput& output = metadata.outputs[i];

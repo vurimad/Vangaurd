@@ -14,10 +14,11 @@ namespace vanguard::rendering
     {
         u32 index = InvalidTextureUploadRequestIndex;
         u32 generation = 0;
+        u32 session = 0;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return index != InvalidTextureUploadRequestIndex && generation != 0;
+            return index != InvalidTextureUploadRequestIndex && generation != 0 && session != 0;
         }
 
         [[nodiscard]] constexpr bool operator==(const TextureUploadRequestId&) const noexcept = default;
@@ -160,6 +161,19 @@ namespace vanguard::rendering
         /// residency streaming must use the manager-owned overload below.
         [[nodiscard]] bool RequestMipTail(const resources::ResourceHandle& resource, GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
                                           io::AsyncPriority priority = io::eAsyncPriority_Streaming, TextureUploadFailure* failure = nullptr) noexcept;
+        /// Uploads a complete fresh-generation mip tail for an existing stable
+        /// residency identity. Unlike manager-owned mip transitions this never
+        /// attempts shared-mip reuse across source generations; the caller owns
+        /// final installation/cutover policy through the residency manager.
+        [[nodiscard]] bool RequestGenerationReplacement(const resources::ResourceHandle& resource, GpuTextureResidencyHandle residency,
+                                                        u32 targetFirstResidentMip, TextureUploadRequestId& request,
+                                                        io::AsyncPriority priority = io::eAsyncPriority_Streaming,
+                                                        TextureUploadFailure* failure = nullptr) noexcept;
+        /// Tail-compatible wrapper retained for existing callers.
+        [[nodiscard]] bool RequestGenerationReplacement(const resources::ResourceHandle& resource, GpuTextureResidencyHandle residency,
+                                                        TextureUploadRequestId& request,
+                                                        io::AsyncPriority priority = io::eAsyncPriority_Streaming,
+                                                        TextureUploadFailure* failure = nullptr) noexcept;
         /// Requests the guaranteed tail as the initial manager-owned residency transition.
         [[nodiscard]] bool RequestMipTail(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, GpuTextureResidencyHandle residency, TextureUploadRequestId& request,
                                           io::AsyncPriority priority = io::eAsyncPriority_Streaming, TextureUploadFailure* failure = nullptr) noexcept;
@@ -195,5 +209,6 @@ namespace vanguard::rendering
         [[nodiscard]] bool RequestInternal(const resources::ResourceHandle& resource, TextureResidencyManager* residencyManager, GpuTextureResidencyHandle residency, u32 targetFirstResidentMip,
                                            TextureUploadRequestId& request, io::AsyncPriority priority, TextureUploadFailure* failure) noexcept;
         Impl* m_impl = nullptr;
+        u32 m_session = 0;
     };
 } // namespace vanguard::rendering

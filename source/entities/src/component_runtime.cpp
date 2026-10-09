@@ -51,10 +51,10 @@ namespace vanguard::entities
         m_disabledEntityComponent = ecs::InvalidComponentId;
     }
 
-    void ComponentRuntime::OnAfterWorldFlush(game::GameWorld& world) noexcept
+    bool ComponentRuntime::SynchronizeCommittedChanges(game::GameWorld& world) noexcept
     {
         if (!m_directory.IsInitialized() || m_readinessBlocker != nullptr || m_disabledEntityComponent == ecs::InvalidComponentId)
-            return;
+            return false;
 
         constexpr u32 MaximumChangesPerRead = 4096u;
         for (;;)
@@ -64,12 +64,12 @@ namespace vanguard::entities
             if (!world.GetEntities().ReadCommittedChanges(m_changeCursor, m_changes, MaximumChangesPerRead, &read))
             {
                 m_readinessBlocker = "ComponentRuntime failed to read committed ECS changes";
-                return;
+                return false;
             }
             if (read.lostRecords != 0)
             {
                 m_readinessBlocker = "ComponentRuntime lost committed ECS enabled-state changes";
-                return;
+                return false;
             }
 
             for (const ecs::CommittedChange& change : m_changes)
@@ -90,7 +90,7 @@ namespace vanguard::entities
                     if (m_directory.GetEntityComponentCount(change.entity) != 0)
                     {
                         m_readinessBlocker = "disabled-state change lost its live ECS entity before stable components were updated";
-                        return;
+                        return false;
                     }
                     continue;
                 }
@@ -98,18 +98,23 @@ namespace vanguard::entities
                 if (ecs_has_id(world.GetEntities().GetNative(), runtimeEntity.value, EcsDisabled) == entityEnabled)
                 {
                     m_readinessBlocker = "Flecs entity enabled-state transition failed";
-                    return;
+                    return false;
                 }
                 ComponentDirectoryFailure failure;
                 if (!m_directory.SetEntityEnabled(change.entity, entityEnabled, &failure))
                 {
                     m_readinessBlocker = failure.message != nullptr ? failure.message : "stable component entity-enabled transition failed";
-                    return;
+                    return false;
                 }
             }
             if (read.records < MaximumChangesPerRead)
-                return;
+                return true;
         }
+    }
+
+    void ComponentRuntime::OnAfterWorldFlush(game::GameWorld& world) noexcept
+    {
+        static_cast<void>(SynchronizeCommittedChanges(world));
     }
 
     const char* ComponentRuntime::ReadinessBlocker() const noexcept

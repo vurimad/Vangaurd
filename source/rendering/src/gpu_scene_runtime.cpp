@@ -119,6 +119,8 @@ namespace vanguard::rendering
         ContributionOutcome contributionOutcome = ContributionOutcome::None;
         u64 uploadBytesPerBatch = 0;
         rhi::GpuFence contributionCompletion;
+        u32 submittedUniqueUpdates = 0;
+        bool submissionAccepted = false;
         bool failurePending = false;
     };
 
@@ -220,6 +222,11 @@ namespace vanguard::rendering
 
         m_publication->uploadBytesPerBatch = config.upload.bytesPerSegment;
         m_scenes = &scenes;
+        for (u32 index = 0; index < MaximumRenderScenes; ++index)
+        {
+            m_submittedScenes[index] = {};
+            m_submittedSceneEpochs[index] = 0;
+        }
         m_initialized = true;
         m_lastPublicationFence = {};
         return true;
@@ -234,6 +241,8 @@ namespace vanguard::rendering
             return Fail(failure, GpuSceneRuntimeFailureCode::WrongThread, "GPU Scene runtime must shutdown on the main thread");
         if (m_publication != nullptr && m_publication->publicationOpen.GetValue())
             return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene runtime shutdown requires its publication batch to complete");
+        if (m_publication != nullptr && (m_publication->publicationCount != 0 || m_publication->submissionAccepted))
+            return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene runtime shutdown requires accepted publications to be resolved");
         if (m_publication != nullptr && m_publication->contributionCount != 0)
             return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene runtime shutdown requires staged contributions to be resolved");
         if (m_scenes == nullptr || m_scenes->GetStats().activeScenes != 0)
@@ -430,10 +439,56 @@ namespace vanguard::rendering
         PublicationState& state = *m_publication;
         if (state.publicationOpen.GetValue())
             return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene contributions cannot resolve while their renderer job is active");
+
+        GpuSceneUploadFailure uploadFailure;
+        if (!m_uploader.ResolveSubmittedInitialPublications(&uploadFailure))
+        {
+            if (failure != nullptr)
+            {
+                failure->code = GpuSceneRuntimeFailureCode::UploadFailure;
+                failure->message = "submitted GPU Scene initial publication resolution failed";
+                failure->requiresRendererAbandonment = state.submissionAccepted || uploadFailure.code == GpuSceneUploadFailureCode::RhiFailure ||
+                                                       uploadFailure.code == GpuSceneUploadFailureCode::LifetimeFailure;
+                failure->uploadFailure = uploadFailure;
+            }
+            return false;
+        }
+
+        for (u32 index = 0; index < state.publicationCount; ++index)
+        {
+            RenderSceneGpuFailure sceneFailure;
+            if (!m_scenePublisher.Complete(state.publications[index].token, &sceneFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = GpuSceneRuntimeFailureCode::ScenePublicationFailure;
+                    failure->message = "RenderScene GPU publication main-thread completion failed";
+                    failure->requiresRendererAbandonment = state.submissionAccepted;
+                    failure->scenePublicationFailure = sceneFailure;
+                }
+                return false;
+            }
+        }
+        if (state.publicationCount != 0 || state.submittedUniqueUpdates != 0)
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(state.lock);
+            state.stats.completedPublications += state.publicationCount;
+            state.stats.publishedObjects += state.submittedUniqueUpdates;
+        }
+        state.publicationCount = 0;
+        state.submittedUniqueUpdates = 0;
+        state.submissionAccepted = false;
+
         if (state.contributionCount == 0)
             return true;
         if (state.contributionOutcome == PublicationState::ContributionOutcome::SubmittedFailure)
-            return Fail(failure, GpuSceneRuntimeFailureCode::UploadFailure, "submitted GPU Scene failure retains contributions until device abandonment");
+        {
+            const bool failed = Fail(failure, GpuSceneRuntimeFailureCode::UploadFailure,
+                                     "submitted GPU Scene failure retains contributions until device abandonment");
+            if (failure != nullptr)
+                failure->requiresRendererAbandonment = true;
+            return failed;
+        }
 
         if (state.contributionOutcome == PublicationState::ContributionOutcome::Submitted)
         {
@@ -460,6 +515,11 @@ namespace vanguard::rendering
                     {
                         failure->code = GpuSceneRuntimeFailureCode::ContributionFailure;
                         failure->message = "GPU Scene producer could not retry its contribution";
+                        // The contribution remains owned here and there is no separate
+                        // producer-abort callback. Repeating resolution would invoke the
+                        // same failed rollback forever, so the renderer owner must use its
+                        // terminal abandonment path while preserving this exact cause.
+                        failure->requiresRendererAbandonment = true;
                         failure->contributionFailure = contributionFailure;
                     }
                     return false;
@@ -471,7 +531,10 @@ namespace vanguard::rendering
         }
         else
         {
-            return Fail(failure, GpuSceneRuntimeFailureCode::ContributionFailure, "GPU Scene contribution outcome is invalid");
+            const bool failed = Fail(failure, GpuSceneRuntimeFailureCode::ContributionFailure, "GPU Scene contribution outcome is invalid");
+            if (failure != nullptr)
+                failure->requiresRendererAbandonment = true;
+            return failed;
         }
 
         state.contributionRequestCount = 0;
@@ -491,11 +554,15 @@ namespace vanguard::rendering
         PublicationState& state = *m_publication;
         if (state.contributionCount != 0 && state.contributionOutcome != PublicationState::ContributionOutcome::Staged)
             return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene contribution outcome must resolve before another publication");
+        if (state.publicationCount != 0 || state.submissionAccepted)
+            return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene accepted publication must resolve before another publication");
         if (state.publicationOpen.Exchange(true))
             return Fail(failure, GpuSceneRuntimeFailureCode::Busy, "GPU Scene runtime already has an open publication batch");
         state.publicationCount = 0;
         state.requestCount = 0;
         state.writeWorkCount = 0;
+        state.submittedUniqueUpdates = 0;
+        state.submissionAccepted = false;
         state.writeFailed.SetValue(false);
         const auto requestBytes = [this](const GpuSceneUploadRequest& request) noexcept
         {
@@ -553,16 +620,49 @@ namespace vanguard::rendering
                 return false;
             }
 
-            if (publication.changeCount > state.requests.Size() - state.requestCount)
+            // Prepare snapshots the exact scene epoch plus any same-epoch binding
+            // changes owned by RenderSceneGpuPublisher. Invalidate the previous
+            // submission witness immediately: if this publication is later deferred
+            // for batch capacity or upload-segment pressure, consumers must not
+            // mistake an older submission of the same RenderScene mutation epoch for
+            // the newly prepared GPU Scene contents. Successful no-upload and upload
+            // paths republish the witness below.
+            if (publication.scene.index < MaximumRenderScenes)
             {
-                static_cast<void>(m_scenePublisher.Cancel(publication));
+                m_submittedScenes[publication.scene.index] = {};
+                m_submittedSceneEpochs[publication.scene.index] = 0;
+            }
+
+            if (publication.uploadRequestCount > state.requests.Size() - state.requestCount)
+            {
+                if (!m_scenePublisher.Defer(publication, &sceneFailure))
+                {
+                    RenderSceneGpuFailure cleanupFailure;
+                    const bool cleanedCurrent = m_scenePublisher.Cancel(publication, &cleanupFailure);
+                    cancelPrepared();
+                    if (failure != nullptr)
+                    {
+                        failure->code = GpuSceneRuntimeFailureCode::ScenePublicationFailure;
+                        failure->message = "RenderScene GPU capacity deferral failed";
+                        failure->scenePublicationFailure = sceneFailure;
+                        failure->requiresRendererAbandonment = !cleanedCurrent;
+                    }
+                    state.publicationOpen.SetValue(false);
+                    return false;
+                }
+                for (u32 deferredIndex = sceneIndex; deferredIndex < scenes.Size(); ++deferredIndex)
+                    if (scenes[deferredIndex].scene.index < MaximumRenderScenes)
+                    {
+                        m_submittedScenes[scenes[deferredIndex].scene.index] = {};
+                        m_submittedSceneEpochs[scenes[deferredIndex].scene.index] = 0;
+                    }
                 concurrency::ScopedLock<concurrency::SpinLock> guard(state.lock);
                 state.stats.deferredScenes += scenes.Size() - sceneIndex;
                 break;
             }
 
             state.scratchRequests.Clear();
-            if (!m_scenePublisher.BuildUploadRequests(publication, state.scratchRequests, &sceneFailure) || state.scratchRequests.Size() != publication.changeCount)
+            if (!m_scenePublisher.BuildUploadRequests(publication, state.scratchRequests, &sceneFailure) || state.scratchRequests.Size() != publication.uploadRequestCount)
             {
                 static_cast<void>(m_scenePublisher.Cancel(publication));
                 cancelPrepared();
@@ -590,13 +690,33 @@ namespace vanguard::rendering
             }
             if (!fits)
             {
-                static_cast<void>(m_scenePublisher.Cancel(publication));
+                if (!m_scenePublisher.Defer(publication, &sceneFailure))
+                {
+                    RenderSceneGpuFailure cleanupFailure;
+                    const bool cleanedCurrent = m_scenePublisher.Cancel(publication, &cleanupFailure);
+                    cancelPrepared();
+                    if (failure != nullptr)
+                    {
+                        failure->code = GpuSceneRuntimeFailureCode::ScenePublicationFailure;
+                        failure->message = "RenderScene GPU staging-budget deferral failed";
+                        failure->scenePublicationFailure = sceneFailure;
+                        failure->requiresRendererAbandonment = !cleanedCurrent;
+                    }
+                    state.publicationOpen.SetValue(false);
+                    return false;
+                }
                 if (plannedBytes == 0)
                 {
                     cancelPrepared();
                     state.publicationOpen.SetValue(false);
                     return Fail(failure, GpuSceneRuntimeFailureCode::UploadFailure, "one RenderScene publication exceeds the entire staging segment");
                 }
+                for (u32 deferredIndex = sceneIndex; deferredIndex < scenes.Size(); ++deferredIndex)
+                    if (scenes[deferredIndex].scene.index < MaximumRenderScenes)
+                    {
+                        m_submittedScenes[scenes[deferredIndex].scene.index] = {};
+                        m_submittedSceneEpochs[scenes[deferredIndex].scene.index] = 0;
+                    }
                 concurrency::ScopedLock<concurrency::SpinLock> guard(state.lock);
                 state.stats.deferredScenes += scenes.Size() - sceneIndex;
                 break;
@@ -632,23 +752,13 @@ namespace vanguard::rendering
         {
             for (u32 index = 0; index < state.publicationCount; ++index)
             {
-                RenderSceneGpuFailure sceneFailure;
-                if (!m_scenePublisher.Complete(state.publications[index].token, &sceneFailure))
+                const RenderSceneGpuPublication& publication = state.publications[index].token;
+                if (publication.scene.index < MaximumRenderScenes)
                 {
-                    cancelPrepared();
-                    if (failure != nullptr)
-                    {
-                        failure->code = GpuSceneRuntimeFailureCode::ScenePublicationFailure;
-                        failure->message = "RenderScene retirement-only publication failed";
-                        failure->scenePublicationFailure = sceneFailure;
-                    }
-                    state.publicationOpen.SetValue(false);
-                    return false;
+                    m_submittedScenes[publication.scene.index] = publication.scene;
+                    m_submittedSceneEpochs[publication.scene.index] = publication.mutationEpoch;
                 }
             }
-            concurrency::ScopedLock<concurrency::SpinLock> guard(state.lock);
-            state.stats.completedPublications += state.publicationCount;
-            state.publicationCount = 0;
             state.publicationOpen.SetValue(false);
             return true;
         }
@@ -656,6 +766,52 @@ namespace vanguard::rendering
         GpuSceneUploadFailure uploadFailure;
         if (!m_uploader.Begin({state.requests.TypedData(), state.requestCount}, {state.reservations.TypedData(), state.requestCount}, &uploadFailure))
         {
+            const bool transientSegmentPressure = uploadFailure.code == GpuSceneUploadFailureCode::StagingExhausted && uploadFailure.request == 0xffffffffu;
+            if (transientSegmentPressure)
+            {
+                // All mapped upload segments are still owned by prior GPU work.
+                // This is ordinary backpressure, not a failed publication. Rebase
+                // prepared scene work into the serial mutation queue so later scene
+                // updates can coalesce normally before a future FrameTick retries.
+                bool deferred = true;
+                u32 deferredCount = 0;
+                for (u32 index = 0; index < state.publicationCount; ++index)
+                {
+                    RenderSceneGpuFailure sceneFailure;
+                    if (!m_scenePublisher.Defer(state.publications[index].token, &sceneFailure))
+                    {
+                        deferred = false;
+                        bool cleanupSucceeded = true;
+                        for (u32 cleanupIndex = index; cleanupIndex < state.publicationCount; ++cleanupIndex)
+                        {
+                            RenderSceneGpuFailure cleanupFailure;
+                            if (!m_scenePublisher.Cancel(state.publications[cleanupIndex].token, &cleanupFailure))
+                                cleanupSucceeded = false;
+                        }
+                        if (failure != nullptr)
+                        {
+                            failure->code = GpuSceneRuntimeFailureCode::ScenePublicationFailure;
+                            failure->message = "RenderScene GPU transient publication deferral failed";
+                            failure->scenePublicationFailure = sceneFailure;
+                            failure->requiresRendererAbandonment = !cleanupSucceeded;
+                        }
+                        break;
+                    }
+                    ++deferredCount;
+                }
+                state.publicationCount = 0;
+                state.requestCount = 0;
+                state.writeWorkCount = 0;
+                if (state.contributionCount != 0)
+                    state.contributionOutcome = PublicationState::ContributionOutcome::Retry;
+                if (deferredCount != 0)
+                {
+                    concurrency::ScopedLock<concurrency::SpinLock> guard(state.lock);
+                    state.stats.deferredScenes += deferredCount;
+                }
+                state.publicationOpen.SetValue(false);
+                return deferred;
+            }
             cancelPrepared();
             if (state.contributionCount != 0)
                 state.contributionOutcome = PublicationState::ContributionOutcome::Retry;
@@ -696,7 +852,7 @@ namespace vanguard::rendering
 
                     const PublicationState::Publication& record = state.publications[work.publicationIndex];
                     RenderSceneGpuFailure sceneFailure;
-                    if (!m_scenePublisher.WriteRange(record.token, {state.reservations.TypedData() + record.reservationOffset, record.token.changeCount}, work.rangeIndex, &sceneFailure))
+                    if (!m_scenePublisher.WriteRange(record.token, {state.reservations.TypedData() + record.reservationOffset, record.token.uploadRequestCount}, work.rangeIndex, &sceneFailure))
                     {
                         if (!state.writeFailed.Exchange(true))
                         {
@@ -749,11 +905,24 @@ namespace vanguard::rendering
                         runtimeFailure.code = GpuSceneRuntimeFailureCode::UploadFailure;
                         runtimeFailure.message = "GPU Scene upload submission failed";
                         runtimeFailure.uploadFailure = uploadFailure;
+                        runtimeFailure.requiresRendererAbandonment =
+                            submitted || uploadFailure.rhiFailure.code == rhi::FailureCode::DeviceLost;
                         succeeded = false;
                     }
                     else
                     {
                         submitted = true;
+                        state.submissionAccepted = true;
+                        state.submittedUniqueUpdates = uploadResult.uniqueUpdates;
+                        for (u32 index = 0; index < state.publicationCount; ++index)
+                        {
+                            const RenderSceneGpuPublication& publication = state.publications[index].token;
+                            if (publication.scene.index < MaximumRenderScenes)
+                            {
+                                m_submittedScenes[publication.scene.index] = publication.scene;
+                                m_submittedSceneEpochs[publication.scene.index] = publication.mutationEpoch;
+                            }
+                        }
                         if (state.contributionCount != 0)
                         {
                             state.contributionOutcome = PublicationState::ContributionOutcome::Submitted;
@@ -763,17 +932,6 @@ namespace vanguard::rendering
                 }
                 if (uploadResult.completion.IsValid())
                     m_lastPublicationFence = uploadResult.completion;
-                for (u32 index = 0; succeeded && index < state.publicationCount; ++index)
-                {
-                    RenderSceneGpuFailure sceneFailure;
-                    if (!m_scenePublisher.Complete(state.publications[index].token, &sceneFailure))
-                    {
-                        runtimeFailure.code = GpuSceneRuntimeFailureCode::ScenePublicationFailure;
-                        runtimeFailure.message = "RenderScene GPU publication completion failed";
-                        runtimeFailure.scenePublicationFailure = sceneFailure;
-                        succeeded = false;
-                    }
-                }
                 if (!succeeded)
                 {
                     if (!submitted)
@@ -784,6 +942,8 @@ namespace vanguard::rendering
                         if (state.contributionCount != 0)
                             state.contributionOutcome = PublicationState::ContributionOutcome::Retry;
                     }
+                    if (submitted)
+                        runtimeFailure.requiresRendererAbandonment = true;
                     if (runtimeFailure.code != GpuSceneRuntimeFailureCode::None)
                         state.Report(runtimeFailure);
                 }
@@ -791,10 +951,7 @@ namespace vanguard::rendering
                 {
                     concurrency::ScopedLock<concurrency::SpinLock> guard(state.lock);
                     ++state.stats.submittedBatches;
-                    state.stats.completedPublications += state.publicationCount;
-                    state.stats.publishedObjects += uploadResult.uniqueUpdates;
                 }
-                state.publicationCount = 0;
                 state.requestCount = 0;
                 state.writeWorkCount = 0;
                 state.publicationOpen.SetValue(false);
@@ -832,6 +989,12 @@ namespace vanguard::rendering
             return {};
         concurrency::ScopedLock<concurrency::SpinLock> guard(m_publication->lock);
         return m_publication->stats;
+    }
+
+    bool GpuSceneRuntime::IsScenePublicationSubmitted(const RenderSceneHandle scene, const u64 mutationEpoch) const noexcept
+    {
+        return scene.IsValid() && scene.index < MaximumRenderScenes && mutationEpoch != 0 &&
+               m_submittedScenes[scene.index] == scene && m_submittedSceneEpochs[scene.index] == mutationEpoch;
     }
 
     GpuSceneTables& GpuSceneRuntime::GetTables() noexcept

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/rendering/gpu_scene_runtime.hpp>
+#include <vanguard/rendering/frame_gpu_timings.hpp>
 #include <vanguard/rendering/geometry_frame_work.hpp>
 #include <vanguard/rendering/geometry_diagnostics.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
@@ -8,11 +10,41 @@
 #include <vanguard/rendering/render_graph_cache.hpp>
 #include <vanguard/rendering/render_shader_map.hpp>
 #include <vanguard/rendering/render_pipeline_factory.hpp>
+#include <vanguard/rhi/gpu_counters.hpp>
 
 namespace vanguard::rendering
 {
     class RenderNodeGraph;
     struct RenderNodeImplContext;
+
+    namespace detail
+    {
+        enum class RetainedOutputFinalizationAction : u8
+        {
+            None,
+            DeviceLost,
+            Abandon,
+            CompleteTexture,
+            Present
+        };
+
+        [[nodiscard]] constexpr RetainedOutputFinalizationAction SelectRetainedOutputFinalizationAction(
+            const bool outputValid, const RenderViewportOutputKind outputKind, const bool deviceLost,
+            const bool allocatorCompleted, const bool frameFailed, const bool presentNodeReached) noexcept
+        {
+            if (!outputValid)
+                return RetainedOutputFinalizationAction::None;
+            if (deviceLost)
+                return RetainedOutputFinalizationAction::DeviceLost;
+            if (!allocatorCompleted || frameFailed || !presentNodeReached)
+                return RetainedOutputFinalizationAction::Abandon;
+            if (outputKind == RenderViewportOutputKind::Texture)
+                return RetainedOutputFinalizationAction::CompleteTexture;
+            if (outputKind == RenderViewportOutputKind::Presentation)
+                return RetainedOutputFinalizationAction::Present;
+            return RetainedOutputFinalizationAction::Abandon;
+        }
+    } // namespace detail
 
     struct NamedRenderPipeline
     {
@@ -61,6 +93,12 @@ namespace vanguard::rendering
         [[nodiscard]] GeometryDiagnosticsPoll PollGeometryDiagnostics(GeometryFrameDiagnostics& output, rhi::Failure* failure = nullptr) noexcept
         { return m_geometryDiagnostics.Poll(output, failure); }
         [[nodiscard]] u64 GetDroppedGeometryDiagnosticSamples() const noexcept { return m_geometryDiagnostics.GetDroppedSamples(); }
+        [[nodiscard]] bool InitializeGpuTimings(rhi::Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ShutdownGpuTimings(rhi::Failure* failure = nullptr) noexcept;
+        void AbandonGpuTimings() noexcept;
+        [[nodiscard]] bool IsGpuTimingAvailable() const noexcept { return m_gpuTimings.IsInitialized(); }
+        [[nodiscard]] FrameGpuTimingPoll PollGpuTimings(FrameGpuTimingSample& output, rhi::Failure* failure = nullptr) noexcept;
+        [[nodiscard]] u64 GetDroppedGpuTimingFrames() const noexcept { return m_droppedGpuTimingFrames.GetValue(); }
 
         [[nodiscard]] RenderFrameExecutionStatus FrameTick(RenderFrameTickContext& context) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus RenderFrame(RenderFrameContext& context) noexcept;
@@ -70,6 +108,12 @@ namespace vanguard::rendering
 
     private:
         friend class RenderNodeReduceGeometryDiagnostics;
+        friend class RenderNodeBeginFrameGpuTiming;
+        friend class RenderNodeBeginGeometryGpuTiming;
+        friend class RenderNodeEndGeometryGpuTiming;
+        friend class RenderNodeBeginCameraGpuTiming;
+        friend class RenderNodeEndCameraGpuTiming;
+        friend class RenderNodeEndFrameGpuTiming;
         [[nodiscard]] const GeometryFrameDiagnostics& GetGeometryDiagnosticPlan(u32 slot) const noexcept { return m_geometryDiagnostics.GetReport(slot); }
         void BuildRenderGraphBlank(RenderNodeGraph& graph, NodesContainer& nodes, bool isWireframe, bool isPrewarm) noexcept;
         void BuildRenderGraphHitProxies(RenderNodeGraph& graph, NodesContainer& nodes, bool isMultiLayer, bool isDebugView) noexcept;
@@ -83,8 +127,16 @@ namespace vanguard::rendering
                                                                    const PreparedRenderViewFamily*& family) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus PrepareGeometryWork(RenderFrameContext& context, const PreparedRenderViewFamily& family) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus RenderPreparedFrame(RenderFrameContext& context) noexcept;
-        void FinishGeometryCandidates(RetainedRenderFrameRef& retainedFrame) noexcept;
+        void BeginFrameGpuTiming(const RenderNodeImplContext& context) noexcept;
+        void BeginGeometryGpuTiming(const RenderNodeImplContext& context) noexcept;
+        void EndGeometryGpuTiming(const RenderNodeImplContext& context) noexcept;
+        void BeginCameraGpuTiming(const RenderNodeImplContext& context) noexcept;
+        void EndCameraGpuTiming(const RenderNodeImplContext& context) noexcept;
+        void EndFrameGpuTiming(const RenderNodeImplContext& context) noexcept;
+        void FinalizeGpuTiming(GeometryFrameWork& work, containers::ArraySpan<const CommandScopeExecutionReceipt> receipts,
+                               bool deviceLost) noexcept;
         [[nodiscard]] bool RegisterGeometryImports(GeometryFrameWork& work, RenderFlowResourceFailure* failure) noexcept;
+        [[nodiscard]] bool EnsureGeometryShellPlanBuffer(GeometryFrameWork& work, rhi::Failure* failure = nullptr) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus ExecuteBuiltGraph(RenderFrameContext& context, RenderNodeGraph& graph,
                                                                    const FrameResourcePolicy& resourcePolicy) noexcept;
         void FinishBuiltGraph(RetainedRenderFrameRef& retainedFrame, RenderNodeGraph& graph) noexcept;
@@ -107,6 +159,9 @@ namespace vanguard::rendering
         };
         containers::DynamicArray<FeaturePipeline> m_pipelines{memory::pools::Rendering::GetInstance()};
         RenderGraphCache m_graphCache;
+        GeometryShellPlanCache m_geometryShellPlanCache;
         GeometryDiagnosticReadbacks m_geometryDiagnostics;
+        rhi::GpuCounterSystem m_gpuTimings;
+        concurrency::Atomic<u64> m_droppedGpuTimingFrames{0};
     };
 } // namespace vanguard::rendering

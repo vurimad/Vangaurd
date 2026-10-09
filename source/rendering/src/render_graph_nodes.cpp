@@ -1,5 +1,4 @@
 #include <vanguard/rendering/render_graph_nodes.hpp>
-
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/rendering/frame_renderer.hpp>
 #include <vanguard/rhi/rhi.hpp>
@@ -14,10 +13,12 @@ namespace vanguard::rendering
         if (desc.sourceName.Empty() || desc.targetName.Empty() || desc.sourceName == desc.targetName || !desc.source.IsValid() || !desc.sourceDescriptor.IsValid() || !desc.samplerDescriptor.IsValid())
             VG_FATAL("fullscreen copy requires distinct resource names and valid imported source descriptors");
         m_sourceName.Set(desc.sourceName);
+        m_sourceNameHash = LogicalResourceName::CalculateHash(containers::StringView(m_sourceName));
         rhi::TextureDesc sourceDesc;
         if (!rhi::GetTextureDesc(m_source, sourceDesc) || sourceDesc.dimension != rhi::TextureDimension::Texture2D || sourceDesc.arraySize != 1 || sourceDesc.sampleCount != 1)
             VG_FATAL("fullscreen copy requires a single-sample non-array 2D source");
         m_targetName.Set(desc.targetName);
+        m_targetNameHash = LogicalResourceName::CalculateHash(containers::StringView(m_targetName));
         m_constants = {desc.sourceDescriptor.GpuIndex(), desc.samplerDescriptor.GpuIndex(), {desc.uvScale[0], desc.uvScale[1]}, {desc.uvOffset[0], desc.uvOffset[1]}};
     }
 
@@ -30,17 +31,23 @@ namespace vanguard::rendering
         target.access = LogicalAccessIntent::Write;
         target.content = ResourceContentIntent::Discard;
         target.subresources = {0, 1, 0, 1};
-        context.RTUseBegin(m_sourceName, source);
-        context.RTUseBegin(m_targetName, target);
-        context.RTUseEnd(m_targetName);
-        context.RTUseEnd(m_sourceName);
+        const LogicalResourceName sourceName(containers::StringView(m_sourceName), m_sourceNameHash, LogicalResourceName::PrehashedTag{});
+        const LogicalResourceName targetName(containers::StringView(m_targetName), m_targetNameHash, LogicalResourceName::PrehashedTag{});
+        const RenderFlowNameTag sourceTag = context.RTNameTag(sourceName);
+        const RenderFlowNameTag targetTag = context.RTNameTag(targetName);
+        context.RTUseBegin(sourceTag, source);
+        context.RTUseBegin(targetTag, target);
+        context.RTUseEnd(targetTag);
+        context.RTUseEnd(sourceTag);
         return true;
     }
 
     void RenderNodeFullscreenCopy::Execute(const RenderNodeImplContext& context, jobs::Builder*) const
     {
-        const rhi::TextureRef source = context.RTTexture(m_sourceName).GetTexture();
-        const rhi::TextureRef target = context.RTTexture(m_targetName).GetTexture();
+        const LogicalResourceName sourceName(containers::StringView(m_sourceName), m_sourceNameHash, LogicalResourceName::PrehashedTag{});
+        const LogicalResourceName targetName(containers::StringView(m_targetName), m_targetNameHash, LogicalResourceName::PrehashedTag{});
+        const rhi::TextureRef source = context.RTTexture(sourceName).GetTexture();
+        const rhi::TextureRef target = context.RTTexture(targetName).GetTexture();
         if (source != m_source || source == target || !target.IsValid())
             VG_FATAL("fullscreen copy source binding changed or aliases its target");
         rhi::Failure failure;
@@ -61,6 +68,7 @@ namespace vanguard::rendering
     bool RenderNodeEndRender::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure*) const noexcept
     {
         context.RTUsePresentationOutput();
+        context.RTExportFrameOutput();
         return true;
     }
     void RenderNodeEndRender::Execute(const RenderNodeImplContext& context, jobs::Builder*) const
@@ -75,7 +83,7 @@ namespace vanguard::rendering
     void RenderNodeEndFrame::Execute(const RenderNodeImplContext&, jobs::Builder*) const {}
     bool RenderNodeDeclareCommonResourceAllocsFinalOnly::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure*) const noexcept
     {
-        context.RTImportPresentationOutput();
+        context.RTImportFrameOutput();
         return true;
     }
     void RenderNodeDeclareCommonResourceAllocsFinalOnly::Execute(const RenderNodeImplContext&, jobs::Builder*) const {}

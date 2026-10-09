@@ -283,24 +283,37 @@ namespace vanguard::rhi
                     return false;
                 }
         }
-        m_impl->statisticsPool.Reset();
-        m_impl->timestampPool.Reset();
-        const u32 sampleCapacity = m_impl->config.bufferedFrames * m_impl->config.maximumScopesPerFrame;
-        for (u32 index = 0; index < m_impl->config.maximumRegisteredScopes; ++index)
-            m_impl->definitions[index].~ScopeDefinition();
-        for (u32 index = 0; index < sampleCapacity; ++index)
-            m_impl->samples[index].~GpuCounterSample();
-        for (u32 index = 0; index < m_impl->config.bufferedFrames; ++index)
-            m_impl->frames[index].~FrameRecord();
-        FreeAllocation(m_impl->definitions, sizeof(ScopeDefinition) * m_impl->config.maximumRegisteredScopes);
-        FreeAllocation(m_impl->sampleStates, sizeof(SampleState) * sampleCapacity);
-        FreeAllocation(m_impl->samples, sizeof(GpuCounterSample) * sampleCapacity);
-        FreeAllocation(m_impl->frames, sizeof(FrameRecord) * m_impl->config.bufferedFrames);
+        DestroyImpl();
+        return true;
+    }
+
+    void GpuCounterSystem::AbandonDevice() noexcept
+    {
+        if (m_impl != nullptr)
+            DestroyImpl();
+    }
+
+    void GpuCounterSystem::DestroyImpl() noexcept
+    {
         Impl* const impl = m_impl;
+        if (impl == nullptr)
+            return;
         m_impl = nullptr;
+        impl->statisticsPool.Reset();
+        impl->timestampPool.Reset();
+        const u32 sampleCapacity = impl->config.bufferedFrames * impl->config.maximumScopesPerFrame;
+        for (u32 index = 0; index < impl->config.maximumRegisteredScopes; ++index)
+            impl->definitions[index].~ScopeDefinition();
+        for (u32 index = 0; index < sampleCapacity; ++index)
+            impl->samples[index].~GpuCounterSample();
+        for (u32 index = 0; index < impl->config.bufferedFrames; ++index)
+            impl->frames[index].~FrameRecord();
+        FreeAllocation(impl->definitions, sizeof(ScopeDefinition) * impl->config.maximumRegisteredScopes);
+        FreeAllocation(impl->sampleStates, sizeof(SampleState) * sampleCapacity);
+        FreeAllocation(impl->samples, sizeof(GpuCounterSample) * sampleCapacity);
+        FreeAllocation(impl->frames, sizeof(FrameRecord) * impl->config.bufferedFrames);
         impl->~Impl();
         FreeAllocation(impl, sizeof(Impl));
-        return true;
     }
 
     bool GpuCounterSystem::IsInitialized() const noexcept

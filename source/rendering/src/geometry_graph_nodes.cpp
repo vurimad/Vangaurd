@@ -1,7 +1,11 @@
 #include <vanguard/rendering/geometry_graph_nodes.hpp>
 #include <vanguard/rendering/frame_renderer.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
+#include <vanguard/rendering/renderer_draw_contract.hpp>
+#include <vanguard/concurrency/atomic.hpp>
+#include <vanguard/profiling/profiling.hpp>
 #include <vanguard/system/assert.hpp>
+#include <vanguard/system/time.hpp>
 
 namespace vanguard::rendering
 {
@@ -9,12 +13,12 @@ namespace vanguard::rendering
     {
         enum Resource : u32
         {
-            Views, Candidates, VisibilityRanges, VisibilityResults, VisibilityCounters, Visible,
-            ExpansionRanges, ExpansionItems, Work, WorkRanges, BinRanges, PrefixBlocks,
-            Results, Counters, Bins, Instances, Arguments, ShellPlans, ShellRanges, ShellCounters, DirectionalLights, ResourceCount
+            Views, VisibilityResults, VisibilityCounters, Visible,
+            Work, Results, Counters, Bins, ActiveBins, Instances, Arguments,
+            ShellPlans, ShellRanges, ShellCounters, DirectionalLights, ResourceCount
         };
         constexpr u32 Bit(Resource r) noexcept { return 1u << r; }
-        constexpr u32 VisibilityInput = Bit(Views) | Bit(Visible) | Bit(VisibilityResults) | Bit(VisibilityCounters) | Bit(ExpansionRanges);
+        constexpr u32 VisibilityInput = Bit(Views) | Bit(Visible) | Bit(VisibilityResults) | Bit(VisibilityCounters);
         struct Stage
         {
             const char* shader;
@@ -23,37 +27,38 @@ namespace vanguard::rendering
             u32 discard;
         };
         constexpr Stage Stages[] = {
-            {"InitializeGpuSceneGeometryShellRanges", Bit(ShellPlans), Bit(ShellRanges)|Bit(ShellCounters), Bit(ShellCounters)},
-            {"CullGpuSceneCandidates", Bit(Views)|Bit(Candidates)|Bit(VisibilityRanges)|Bit(VisibilityResults), Bit(Visible)|Bit(VisibilityCounters), Bit(Visible)},
-            {"CountGpuSceneGeometryWork", VisibilityInput, Bit(ExpansionItems), Bit(ExpansionItems)},
-            {"ScanGpuSceneGeometryWorkBlocks", Bit(VisibilityResults)|Bit(VisibilityCounters)|Bit(ExpansionRanges), Bit(ExpansionItems)|Bit(PrefixBlocks), Bit(PrefixBlocks)},
-            {"PrefixGpuSceneGeometryWorkBlocks", Bit(Results), Bit(PrefixBlocks)|Bit(Counters), Bit(Counters)},
-            {"ResolveGpuSceneGeometryWorkOffsets", Bit(VisibilityResults)|Bit(VisibilityCounters)|Bit(ExpansionRanges)|Bit(PrefixBlocks), Bit(ExpansionItems), 0},
-            {"ScatterGpuSceneGeometryWork", VisibilityInput|Bit(ExpansionItems), Bit(Work), Bit(Work)},
-            {"CountGpuSceneGeometryBins", Bit(Work)|Bit(WorkRanges)|Bit(Results), Bit(Counters)|Bit(Bins), 0},
-            {"ScanGpuSceneGeometryBinBlocks", Bit(Results)|Bit(BinRanges), Bit(Bins)|Bit(PrefixBlocks), 0},
-            {"PrefixGpuSceneGeometryBinBlocks", Bit(Results), Bit(PrefixBlocks)|Bit(Counters), 0},
-            {"ResolveGpuSceneGeometryBinOffsets", Bit(Results)|Bit(BinRanges)|Bit(PrefixBlocks), Bit(Bins), 0},
-            {"ScatterGpuSceneGeometryInstances", Bit(Work)|Bit(WorkRanges)|Bit(Results)|Bit(Counters), Bit(Bins)|Bit(Instances), Bit(Instances)},
-            {"BuildGpuSceneGeometryIndirectArguments", Bit(Results)|Bit(Bins)|Bit(BinRanges)|Bit(ShellRanges), Bit(ShellCounters)|Bit(Counters)|Bit(Arguments), Bit(Arguments)}
+            {"InitializeGpuSceneGeometryShellRanges", Bit(ShellPlans), Bit(ShellRanges)|Bit(ShellCounters)|Bit(Counters), Bit(ShellCounters)|Bit(Counters)},
+            {"CullGpuSceneInstances", Bit(Views)|Bit(VisibilityResults), Bit(Visible)|Bit(VisibilityCounters), Bit(Visible)},
+            {"ExpandAppendGpuSceneGeometry", VisibilityInput|Bit(Results), Bit(Work)|Bit(Counters)|Bit(Bins)|Bit(ActiveBins), Bit(Work)|Bit(ActiveBins)},
+            {"AllocateGpuSceneGeometryBins", Bit(Results)|Bit(ActiveBins)|Bit(ShellRanges), Bit(Bins)|Bit(Counters)|Bit(ShellCounters)|Bit(Arguments), Bit(Arguments)},
+            {"ScatterGpuSceneGeometryInstances", Bit(Work)|Bit(Results)|Bit(Counters)|Bit(Bins), Bit(Instances), Bit(Instances)}
         };
         static_assert(sizeof(Stages) / sizeof(Stages[0]) == static_cast<u32>(GeometryComputeStage::Count));
-        constexpr const char* Names[] = {
-            "Geometry.Views", "Geometry.Candidates", "Geometry.VisibilityRanges", "Geometry.VisibilityResults",
-            "Geometry.VisibilityCounters", "Geometry.Visible", "Geometry.ExpansionRanges", "Geometry.ExpansionItems",
-            "Geometry.Work", "Geometry.WorkRanges", "Geometry.BinRanges", "Geometry.PrefixBlocks", "Geometry.Results",
-            "Geometry.Counters", "Geometry.Bins", "Geometry.Instances", "Geometry.Arguments", "Geometry.ShellPlans",
-            "Geometry.ShellRanges", "Geometry.ShellCounters", "Lighting.DirectionalSelections"
+        concurrency::Atomic<u64> g_geometryInitializeTicks;
+        concurrency::Atomic<u64> g_geometryInitializeUploadTicks;
+        concurrency::Atomic<u64> g_geometryInitializeClearTicks;
+        concurrency::Atomic<u32> g_geometryInitializeCalls;
+        concurrency::Atomic<u64> g_geometryStageTicks[static_cast<u32>(GeometryComputeStage::Count)];
+        concurrency::Atomic<u32> g_geometryStageCalls[static_cast<u32>(GeometryComputeStage::Count)];
+        constexpr LogicalResourceName Names[] = {
+            VG_RENDER_FLOW_NAME("Geometry.Views"), VG_RENDER_FLOW_NAME("Geometry.VisibilityResults"),
+            VG_RENDER_FLOW_NAME("Geometry.VisibilityCounters"), VG_RENDER_FLOW_NAME("Geometry.Visible"),
+            VG_RENDER_FLOW_NAME("Geometry.Work"), VG_RENDER_FLOW_NAME("Geometry.Results"), VG_RENDER_FLOW_NAME("Geometry.Counters"),
+            VG_RENDER_FLOW_NAME("Geometry.Bins"), VG_RENDER_FLOW_NAME("Geometry.ActiveBins"),
+            VG_RENDER_FLOW_NAME("Geometry.Instances"), VG_RENDER_FLOW_NAME("Geometry.Arguments"), VG_RENDER_FLOW_NAME("Geometry.ShellPlans"),
+            VG_RENDER_FLOW_NAME("Geometry.ShellRanges"), VG_RENDER_FLOW_NAME("Geometry.ShellCounters"), VG_RENDER_FLOW_NAME("Lighting.DirectionalSelections")
         };
+        constexpr LogicalResourceName CameraColorName = VG_RENDER_FLOW_NAME("CameraColor");
+        constexpr LogicalResourceName DepthName = VG_RENDER_FLOW_NAME("Depth");
+        constexpr LogicalResourceName FrameOutputName = VG_RENDER_FLOW_NAME("FrameOutput");
+        constexpr LogicalResourceName DiagnosticSummaryName = VG_RENDER_FLOW_NAME("Geometry.DiagnosticSummary");
+        constexpr LogicalResourceName DiagnosticReadbackName = VG_RENDER_FLOW_NAME("Geometry.DiagnosticReadback");
         constexpr LogicalResourceId GeometryFrameGraphResources::* ResourceIds[] = {
-            &GeometryFrameGraphResources::views, &GeometryFrameGraphResources::candidates,
-            &GeometryFrameGraphResources::workRanges, &GeometryFrameGraphResources::resultRanges,
+            &GeometryFrameGraphResources::views, &GeometryFrameGraphResources::resultRanges,
             &GeometryFrameGraphResources::counters, &GeometryFrameGraphResources::visibleInstances,
-            &GeometryFrameGraphResources::expansionWorkRanges, &GeometryFrameGraphResources::expansionItems,
-            &GeometryFrameGraphResources::geometryWork, &GeometryFrameGraphResources::geometryWorkRanges,
-            &GeometryFrameGraphResources::binPrefixRanges, &GeometryFrameGraphResources::prefixBlocks,
-            &GeometryFrameGraphResources::geometryResults, &GeometryFrameGraphResources::geometryCounters,
-            &GeometryFrameGraphResources::binItems, &GeometryFrameGraphResources::drawInstances,
+            &GeometryFrameGraphResources::geometryWork, &GeometryFrameGraphResources::geometryResults,
+            &GeometryFrameGraphResources::geometryCounters, &GeometryFrameGraphResources::binItems,
+            &GeometryFrameGraphResources::activeBins, &GeometryFrameGraphResources::drawInstances,
             &GeometryFrameGraphResources::indirectArguments, &GeometryFrameGraphResources::shellPlans,
             &GeometryFrameGraphResources::shellRanges, &GeometryFrameGraphResources::shellCounters, &GeometryFrameGraphResources::directionalLights
         };
@@ -68,20 +73,14 @@ namespace vanguard::rendering
             switch (resource)
             {
             case Views: return Upload(plan.views);
-            case Candidates: return Upload(plan.candidates);
-            case VisibilityRanges: return Upload(plan.workRanges);
             case VisibilityResults: return Upload(plan.results);
             case VisibilityCounters: return {capacity.views, sizeof(GpuVisibilityCounters)};
             case Visible: return {capacity.visibleInstances, sizeof(GpuVisibleInstance)};
-            case ExpansionRanges: return Upload(work.GetExpansionWorkRanges());
-            case ExpansionItems: return {capacity.visibleInstances, sizeof(GpuGeometryExpansionItem)};
             case Work: return {capacity.geometryWorkItems, sizeof(GpuGeometryWork)};
-            case WorkRanges: return Upload(work.GetGeometryWorkRanges());
-            case BinRanges: return Upload(work.GetBinPrefixRanges());
-            case PrefixBlocks: return {work.GetPrefixBlockCount(), sizeof(GpuGeometryPrefixBlock)};
             case Results: return Upload(work.GetGeometryResults());
             case Counters: return {capacity.views, sizeof(GpuGeometryCounters)};
             case Bins: return {capacity.geometryBins, sizeof(GpuGeometryBinItem)};
+            case ActiveBins: return {capacity.geometryBins, sizeof(u32)};
             case Instances: return {capacity.geometryWorkItems, sizeof(MeshDrawInstance)};
             case Arguments: return {work.GetIndirectArgumentCapacity(), sizeof(GpuGeometryIndirectArguments)};
             case ShellPlans: return Upload(work.GetShellDraws());
@@ -91,8 +90,7 @@ namespace vanguard::rendering
             default: VG_FATAL("unknown geometry graph resource");
             }
         }
-        constexpr u32 UploadMask = Bit(Views)|Bit(Candidates)|Bit(VisibilityRanges)|Bit(VisibilityResults)|Bit(ExpansionRanges)|
-                                   Bit(WorkRanges)|Bit(BinRanges)|Bit(Results)|Bit(ShellPlans)|Bit(DirectionalLights);
+        constexpr u32 UploadMask = Bit(Views)|Bit(VisibilityResults)|Bit(Results)|Bit(DirectionalLights);
         constexpr u32 ClearMask = Bit(VisibilityCounters)|Bit(Bins)|Bit(ShellRanges);
         RenderFlowNameTag Tag(Resource resource) noexcept { return RenderNodeImplContext::RTSharedNameTag(Names[resource]); }
         void Use(const RenderNodeImplContext& context, Resource resource, rhi::ResourceState state,
@@ -108,9 +106,15 @@ namespace vanguard::rendering
                 VG_FATAL("geometry graph requires a prepared view-family plan");
             return *work;
         }
-        constexpr const char* Colors[] = {"GBuffer.BaseColor", "GBuffer.NormalRoughness", "GBuffer.EmissiveMetallic"};
-        constexpr rhi::Format ColorFormats[] = {rhi::Format::R8G8B8A8UNorm, rhi::Format::R16G16B16A16Float, rhi::Format::R16G16B16A16Float};
-        void TextureUse(const RenderNodeImplContext& context, const char* name, rhi::ResourceState state, LogicalAccessIntent access,
+        constexpr LogicalResourceName Colors[] = {VG_RENDER_FLOW_NAME("GBuffer.BaseColor"), VG_RENDER_FLOW_NAME("GBuffer.NormalRoughness"),
+                                                  VG_RENDER_FLOW_NAME("GBuffer.EmissiveMetallic")};
+        constexpr pipelines::AttachmentSignature DepthPrepassAttachments = MakeStandardDepthPrepassAttachments();
+        constexpr pipelines::AttachmentSignature OpaqueAttachments = MakeStandardOpaqueAttachments();
+        static_assert(OpaqueAttachments.colorCount == sizeof(Colors) / sizeof(Colors[0]));
+        static_assert(DepthPrepassAttachments.depthStencilFormat == OpaqueAttachments.depthStencilFormat);
+        static_assert(DepthPrepassAttachments.depthStencilClass == OpaqueAttachments.depthStencilClass);
+        static_assert(DepthPrepassAttachments.sampleCount == OpaqueAttachments.sampleCount);
+        void TextureUse(const RenderNodeImplContext& context, const LogicalResourceName name, rhi::ResourceState state, LogicalAccessIntent access,
                         ResourceContentIntent content = ResourceContentIntent::Preserve) noexcept
         {
             context.RTUseBegin(name, TextureUseDesc{state, {0,1,0,1}, access, content});
@@ -118,6 +122,7 @@ namespace vanguard::rendering
         }
         void SetupCamera(const RenderNodeImplContext& context, const rhi::RenderTargetSetup& targets)
         {
+            VG_PROFILE_ZONE_NAMED("CameraGeometry/SetupCamera");
             const auto* view = context.GetView();
             if (view == nullptr)
                 VG_FATAL("camera view is unavailable");
@@ -133,12 +138,29 @@ namespace vanguard::rendering
         }
     }
 
+    GeometryCpuTimingSample ConsumeGeometryCpuTimingSample() noexcept
+    {
+        GeometryCpuTimingSample sample;
+        sample.initializeTicks = g_geometryInitializeTicks.Exchange(0);
+        sample.initializeUploadTicks = g_geometryInitializeUploadTicks.Exchange(0);
+        sample.initializeClearTicks = g_geometryInitializeClearTicks.Exchange(0);
+        sample.initializeCalls = g_geometryInitializeCalls.Exchange(0);
+        for (u32 stage = 0; stage < static_cast<u32>(GeometryComputeStage::Count); ++stage)
+        {
+            sample.stageTicks[stage] = g_geometryStageTicks[stage].Exchange(0);
+            sample.stageCalls[stage] = g_geometryStageCalls[stage].Exchange(0);
+        }
+        return sample;
+    }
+
 
     bool AreGeometryGraphPipelinesReady(const FrameRenderer& renderer, const bool gBufferOnly) noexcept
     {
         for (const auto& stage : Stages)
             if (!renderer.FindPipeline(stage.shader).IsValid()) return false;
-        return renderer.FindPipeline("ResolveCameraOutput").IsValid() && renderer.FindPipeline(gBufferOnly ? "VisualizeGBuffer" : "DirectionalDiffuse").IsValid();
+        return renderer.FindPipeline("ResolveCameraOutput").IsValid() &&
+               renderer.FindPipeline("ResolveCameraOutputDisplaySrgb").IsValid() &&
+               renderer.FindPipeline(gBufferOnly ? "VisualizeGBuffer" : "DirectionalDiffuse").IsValid();
     }
 
     bool RenderNodeBeginCameraDependencies::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure*) const noexcept
@@ -147,7 +169,7 @@ namespace vanguard::rendering
         for (u32 producer = 0; producer < MaximumRenderViewsPerFamily; ++producer)
         {
             if ((inputs & (u32{1} << producer)) == 0) continue;
-            context.RTUseBegin(context.RTCameraNameTag(producer, "CameraColor"),
+            context.RTUseBegin(context.RTCameraNameTag(producer, CameraColorName),
                                TextureUseDesc{rhi::ResourceState::ShaderResourceGraphics, {0,1,0,1}, LogicalAccessIntent::Read});
         }
         return true;
@@ -159,7 +181,7 @@ namespace vanguard::rendering
         for (u32 producer = 0; producer < MaximumRenderViewsPerFamily; ++producer)
         {
             if ((inputs & (u32{1} << producer)) == 0) continue;
-            context.RTUseEnd(context.RTCameraNameTag(producer, "CameraColor"));
+            context.RTUseEnd(context.RTCameraNameTag(producer, CameraColorName));
         }
         return true;
     }
@@ -170,7 +192,7 @@ namespace vanguard::rendering
         for (u32 producer = 0; producer < MaximumRenderViewsPerFamily; ++producer)
         {
             if ((inputs & (u32{1} << producer)) == 0) continue;
-            static_cast<void>(context.RTTexture(context.RTCameraNameTag(producer, "CameraColor")));
+            static_cast<void>(context.RTTexture(context.RTCameraNameTag(producer, CameraColorName)));
         }
     }
 
@@ -181,27 +203,29 @@ namespace vanguard::rendering
         FrameTextureDesc desc;
         desc.active.extent = {view->rect.width, view->rect.height, 1};
         desc.maximumExtent = desc.active.extent;
+        desc.maximumMipCount = desc.active.mipCount;
         desc.active.keepInitialState = false;
+        desc.active.sampleCount = OpaqueAttachments.sampleCount;
         desc.active.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        for (u32 index = 0; index < 3; ++index)
+        for (u32 index = 0; index < OpaqueAttachments.colorCount; ++index)
         {
-            desc.active.format = ColorFormats[index];
+            desc.active.format = ToRhiFormat(OpaqueAttachments.colors[index].format);
             static_cast<void>(context.RTAlloc(Colors[index], desc));
         }
         // Keep the simple diffuse result linear/HDR; output conversion remains
         // the explicit resolve pass. No exposure or tone-mapping policy here.
         desc.active.format = rhi::Format::R16G16B16A16Float;
-        static_cast<void>(context.RTAlloc("CameraColor", desc));
-        desc.active.format = rhi::Format::D32Float;
+        static_cast<void>(context.RTAlloc(CameraColorName, desc));
+        desc.active.format = ToRhiFormat(DepthPrepassAttachments.depthStencilFormat);
         desc.active.usage = rhi::TextureUsage::DepthStencil;
-        static_cast<void>(context.RTAlloc("Depth", desc));
+        static_cast<void>(context.RTAlloc(DepthName, desc));
         return true;
     }
 
     bool RenderNodeClearCameraTargets::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure*) const noexcept
     {
-        TextureUse(context, "Depth", rhi::ResourceState::DepthWrite, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
-        for (const char* name : Colors)
+        TextureUse(context, DepthName, rhi::ResourceState::DepthWrite, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
+        for (const LogicalResourceName name : Colors)
             TextureUse(context, name, rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
         return true;
     }
@@ -210,10 +234,10 @@ namespace vanguard::rendering
     {
         const auto* view = context.GetView();
         const f32 clearDepth = view != nullptr && (view->flags & RenderViewFlags::ReverseDepth) != RenderViewFlags::None ? 0.0f : 1.0f;
-        const bool depthCleared = rhi::ClearDepthTarget(context.RTTexture("Depth").GetTexture(), clearDepth);
+        const bool depthCleared = rhi::ClearDepthTarget(context.RTTexture(DepthName).GetTexture(), clearDepth);
         if (!depthCleared)
             VG_FATAL("camera depth clear failed");
-        for (const char* name : Colors)
+        for (const LogicalResourceName name : Colors)
         {
             const bool colorCleared = rhi::ClearColorTarget(context.RTTexture(name).GetTexture(), {});
             if (!colorCleared)
@@ -241,6 +265,7 @@ namespace vanguard::rendering
 
         void RecordGeometryDraw(const FrameRenderer& renderer, const RenderNodeImplContext& context, RenderPhaseId phase)
         {
+            VG_PROFILE_ZONE_NAMED("CameraGeometry/RecordGeometryDraw");
             const auto& work = WorkFor(context);
             const auto directory = renderer.GetGeometryDirectoryBinding();
             const auto viewDescriptor = context.RTBuffer(Tag(Views)).GetShaderResourceDescriptor();
@@ -268,7 +293,7 @@ namespace vanguard::rendering
         if (!context.GetView()->phases.Contains(m_phase)) return true;
         const bool inputsDeclared = DeclareGeometryDrawInputs(m_renderer, context, failure);
         if (!inputsDeclared) return false;
-        TextureUse(context, "Depth", rhi::ResourceState::DepthWrite, LogicalAccessIntent::ReadWrite);
+        TextureUse(context, DepthName, rhi::ResourceState::DepthWrite, LogicalAccessIntent::Write);
         return true;
     }
 
@@ -276,7 +301,7 @@ namespace vanguard::rendering
     {
         if (context.GetView() == nullptr || !context.GetView()->phases.Contains(m_phase)) return;
         rhi::RenderTargetSetup targets;
-        targets.depthStencilTarget = {context.RTTexture("Depth").GetTexture(), rhi::Format::D32Float};
+        targets.depthStencilTarget = {context.RTTexture(DepthName).GetTexture(), ToRhiFormat(DepthPrepassAttachments.depthStencilFormat)};
         SetupCamera(context, targets);
         RecordGeometryDraw(m_renderer, context, m_phase);
     }
@@ -294,9 +319,9 @@ namespace vanguard::rendering
         if (!inputsDeclared) return false;
         // Opaque remains depth-writable: cameras may legitimately omit a depth
         // prepass, and the cooked shell PSO defines its exact depth behavior.
-        TextureUse(context, "Depth", rhi::ResourceState::DepthWrite, LogicalAccessIntent::ReadWrite);
-        for (const char* name : Colors)
-            TextureUse(context, name, rhi::ResourceState::RenderTarget, LogicalAccessIntent::ReadWrite);
+        TextureUse(context, DepthName, rhi::ResourceState::DepthWrite, LogicalAccessIntent::Write);
+        for (const LogicalResourceName name : Colors)
+            TextureUse(context, name, rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write);
         return true;
     }
 
@@ -304,10 +329,10 @@ namespace vanguard::rendering
     {
         if (context.GetView() == nullptr || !context.GetView()->phases.Contains(m_phase)) return;
         rhi::RenderTargetSetup targets;
-        targets.depthStencilTarget = {context.RTTexture("Depth").GetTexture(), rhi::Format::D32Float};
-        targets.colorTargetCount = 3;
-        for (u32 index = 0; index < 3; ++index)
-            targets.colorTargets[index] = {context.RTTexture(Colors[index]).GetTexture(), ColorFormats[index]};
+        targets.depthStencilTarget = {context.RTTexture(DepthName).GetTexture(), ToRhiFormat(OpaqueAttachments.depthStencilFormat)};
+        targets.colorTargetCount = OpaqueAttachments.colorCount;
+        for (u32 index = 0; index < OpaqueAttachments.colorCount; ++index)
+            targets.colorTargets[index] = {context.RTTexture(Colors[index]).GetTexture(), ToRhiFormat(OpaqueAttachments.colors[index].format)};
         SetupCamera(context, targets);
         RecordGeometryDraw(m_renderer, context, m_phase);
     }
@@ -325,7 +350,7 @@ namespace vanguard::rendering
         Use(context, DirectionalLights, rhi::ResourceState::ShaderResourceGraphics);
         TextureUse(context, Colors[0], rhi::ResourceState::ShaderResourceGraphics, LogicalAccessIntent::Read);
         TextureUse(context, Colors[1], rhi::ResourceState::ShaderResourceGraphics, LogicalAccessIntent::Read);
-        TextureUse(context, "CameraColor", rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
+        TextureUse(context, CameraColorName, rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
         return true;
     }
 
@@ -348,7 +373,7 @@ namespace vanguard::rendering
         static_assert(sizeof(constants) == 32);
         rhi::RenderTargetSetup targets;
         targets.colorTargetCount = 1;
-        targets.colorTargets[0] = {context.RTTexture("CameraColor").GetTexture(), rhi::Format::R16G16B16A16Float};
+        targets.colorTargets[0] = {context.RTTexture(CameraColorName).GetTexture(), rhi::Format::R16G16B16A16Float};
         const bool pipelineSet = rhi::SetPipeline(m_pipeline);
         if (!pipelineSet)
             VG_FATAL("directional diffuse pipeline setup failed");
@@ -368,7 +393,7 @@ namespace vanguard::rendering
     {
         if (!m_pipeline.IsValid()) return false;
         TextureUse(context, Colors[0], rhi::ResourceState::ShaderResourceGraphics, LogicalAccessIntent::Read);
-        TextureUse(context, "CameraColor", rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
+        TextureUse(context, CameraColorName, rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
         return true;
     }
 
@@ -416,23 +441,50 @@ namespace vanguard::rendering
         const auto* view = context.GetView();
         if (view == nullptr) VG_FATAL("GBuffer visualization view is unavailable");
         const auto& source = context.RTTexture(Colors[0]);
-        const auto target = context.RTTexture("CameraColor").GetTexture();
+        const auto target = context.RTTexture(CameraColorName).GetTexture();
         CopyCameraColor(source, target, m_pipeline, {0, 0, view->rect.width, view->rect.height});
     }
 
     RenderNodeComposeCameraOutput::RenderNodeComposeCameraOutput(const FrameRenderer& renderer) noexcept
-        : m_pipeline(renderer.FindPipeline("ResolveCameraOutput")) {}
+        : m_sceneLinearPipeline(renderer.FindPipeline("ResolveCameraOutput")),
+          m_displaySrgbPipeline(renderer.FindPipeline("ResolveCameraOutputDisplaySrgb")) {}
 
-    bool RenderNodeComposeCameraOutput::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure*) const noexcept
+    bool RenderNodeComposeCameraOutput::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure* const failure) const noexcept
     {
-        if (!m_pipeline.IsValid()) return false;
+        if (!context.HasFrameOutput())
+            return true;
+        const RenderViewport* const viewport = context.GetViewport();
+        rhi::TextureDesc outputDesc;
+        CameraOutputResolveKind resolve;
+        if (viewport == nullptr || !rhi::GetTextureDesc(context.GetFrameOutputTexture(), outputDesc) ||
+            !SelectCameraOutputResolve(viewport->GetOutputKind(), viewport->GetOutputColorEncoding(), outputDesc.format, resolve))
+        {
+            if (failure != nullptr)
+            {
+                failure->code = RenderFlowResourceFailureCode::UnsupportedCapability;
+                failure->phase = RenderFlowResourceSessionState::Planning;
+                failure->message = "frame output encoding is unsupported for the acquired target format";
+            }
+            return false;
+        }
+        const rhi::PipelineRef pipeline = resolve == CameraOutputResolveKind::DisplaySrgb ? m_displaySrgbPipeline : m_sceneLinearPipeline;
+        if (!pipeline.IsValid())
+        {
+            if (failure != nullptr)
+            {
+                failure->code = RenderFlowResourceFailureCode::IncompletePlanning;
+                failure->phase = RenderFlowResourceSessionState::Planning;
+                failure->message = "camera output resolve pipeline is missing from the prepared renderer catalog";
+            }
+            return false;
+        }
         for (const auto& region : WorkFor(context).GetOutputRegions())
         {
-            const auto source = context.RTCameraNameTag(region.viewIndex, "CameraColor");
+            const auto source = context.RTCameraNameTag(region.viewIndex, CameraColorName);
             context.RTUseBegin(source, TextureUseDesc{rhi::ResourceState::ShaderResourceGraphics, {0,1,0,1}, LogicalAccessIntent::Read});
             context.RTUseEnd(source);
         }
-        const auto output = context.RTSharedNameTag("FrameOutput");
+        const auto output = context.RTSharedNameTag(FrameOutputName);
         context.RTUseBegin(output, TextureUseDesc{rhi::ResourceState::RenderTarget, {0,1,0,1}, LogicalAccessIntent::Write, ResourceContentIntent::Discard});
         context.RTUseEnd(output);
         return true;
@@ -440,15 +492,26 @@ namespace vanguard::rendering
 
     void RenderNodeComposeCameraOutput::Execute(const RenderNodeImplContext& context, jobs::Builder*) const
     {
-        const auto target = context.RTTexture(context.RTSharedNameTag("FrameOutput")).GetTexture();
+        if (!context.HasFrameOutput())
+            return;
+        const auto target = context.RTTexture(context.RTSharedNameTag(FrameOutputName)).GetTexture();
+        const RenderViewport* const viewport = context.GetViewport();
+        rhi::TextureDesc targetDesc;
+        CameraOutputResolveKind resolve;
+        if (viewport == nullptr || !rhi::GetTextureDesc(target, targetDesc) ||
+            !SelectCameraOutputResolve(viewport->GetOutputKind(), viewport->GetOutputColorEncoding(), targetDesc.format, resolve))
+            VG_FATAL("frame output encoding changed to an unsupported target after planning");
+        const rhi::PipelineRef pipeline = resolve == CameraOutputResolveKind::DisplaySrgb ? m_displaySrgbPipeline : m_sceneLinearPipeline;
+        if (!pipeline.IsValid())
+            VG_FATAL("camera output resolve pipeline became unavailable after planning");
         // The only output writer clears once, then draws regions in caller order.
         // Camera jobs never race on the output; gaps are deterministic black.
         const bool cleared = rhi::ClearColorTarget(target, {0,0,0,1});
         if (!cleared) VG_FATAL("frame output clear failed");
         for (const auto& region : WorkFor(context).GetOutputRegions())
         {
-            const auto& source = context.RTTexture(context.RTCameraNameTag(region.viewIndex, "CameraColor"));
-            CopyCameraColor(source, target, m_pipeline, region.rect);
+            const auto& source = context.RTTexture(context.RTCameraNameTag(region.viewIndex, CameraColorName));
+            CopyCameraColor(source, target, pipeline, region.rect);
         }
     }
 
@@ -466,10 +529,10 @@ namespace vanguard::rendering
         desc.active.structureStride = sizeof(GeometryGpuDiagnostics);
         desc.active.keepInitialState = false;
         desc.active.usage = rhi::BufferUsage::Structured | rhi::BufferUsage::UnorderedAccess | rhi::BufferUsage::CopySource;
-        static_cast<void>(context.RTSharedAlloc("Geometry.DiagnosticSummary", desc));
+        static_cast<void>(context.RTSharedAlloc(DiagnosticSummaryName, desc));
         for (const auto resource : {VisibilityCounters, Counters, ShellCounters, ShellPlans})
             Use(context, resource, rhi::ResourceState::ShaderResourceCompute);
-        const auto output = context.RTSharedNameTag("Geometry.DiagnosticSummary");
+        const auto output = context.RTSharedNameTag(DiagnosticSummaryName);
         context.RTUseBegin(output, BufferUseDesc{rhi::ResourceState::UnorderedAccess, LogicalAccessIntent::Write, ResourceContentIntent::Discard});
         context.RTUseEnd(output);
         return true;
@@ -484,7 +547,7 @@ namespace vanguard::rendering
         const auto geometry = context.RTBuffer(Tag(Counters)).GetShaderResourceDescriptor();
         const auto counters = context.RTBuffer(Tag(ShellCounters)).GetShaderResourceDescriptor();
         const auto plans = context.RTBuffer(Tag(ShellPlans)).GetShaderResourceDescriptor();
-        const auto output = context.RTBuffer(context.RTSharedNameTag("Geometry.DiagnosticSummary")).GetUnorderedAccessDescriptor();
+        const auto output = context.RTBuffer(context.RTSharedNameTag(DiagnosticSummaryName)).GetUnorderedAccessDescriptor();
         if (!visibility.IsValid() || !geometry.IsValid() || !counters.IsValid() || !plans.IsValid() || !output.IsValid())
             VG_FATAL("geometry diagnostic descriptors are unavailable");
         const auto pipeline = m_renderer.FindPipeline("GeometryDiagnostics");
@@ -508,8 +571,8 @@ namespace vanguard::rendering
     {
         const auto& work = WorkFor(context);
         if (work.diagnosticSlot == GeometryDiagnosticReadbacks::InvalidSlot) return true;
-        const auto source = context.RTSharedNameTag("Geometry.DiagnosticSummary");
-        const auto destination = context.RTSharedInjectBuffer("Geometry.DiagnosticReadback", work.diagnosticReadbackImport);
+        const auto source = context.RTSharedNameTag(DiagnosticSummaryName);
+        const auto destination = context.RTSharedInjectBuffer(DiagnosticReadbackName, work.diagnosticReadbackImport);
         context.RTUseBegin(source, BufferUseDesc{rhi::ResourceState::CopySource, LogicalAccessIntent::Read});
         context.RTUseEnd(source);
         context.RTUseBegin(destination, BufferUseDesc{rhi::ResourceState::CopyDestination, LogicalAccessIntent::Write, ResourceContentIntent::Discard});
@@ -521,8 +584,8 @@ namespace vanguard::rendering
     {
         auto& work = *context.GetGeometryFrameWork();
         if (work.diagnosticSlot == GeometryDiagnosticReadbacks::InvalidSlot) return;
-        const auto source = context.RTBuffer(context.RTSharedNameTag("Geometry.DiagnosticSummary")).GetBuffer();
-        const auto destination = context.RTBuffer(context.RTSharedNameTag("Geometry.DiagnosticReadback")).GetBuffer();
+        const auto source = context.RTBuffer(context.RTSharedNameTag(DiagnosticSummaryName)).GetBuffer();
+        const auto destination = context.RTBuffer(context.RTSharedNameTag(DiagnosticReadbackName)).GetBuffer();
         const bool copied = rhi::CopyBuffer(destination, 0, source, 0, work.GetVisibilityPlan().views.Size() * sizeof(GeometryGpuDiagnostics));
         if (!copied) VG_FATAL("geometry diagnostic copy recording failed");
         work.diagnosticCopyScope = context.GetCommandScope();
@@ -533,10 +596,18 @@ namespace vanguard::rendering
         const auto& work = WorkFor(context);
         context.RTImportFrameOutput();
         for (const auto& external : work.GetExternalBuffers())
-            static_cast<void>(context.RTSharedInjectBuffer(external.name, external.imported));
+            static_cast<void>(context.RTSharedInjectBuffer(external.GetLogicalName(), external.imported));
         for (u32 index = 0; index < ResourceCount; ++index)
         {
             const auto resource = static_cast<Resource>(index);
+            if (resource == ShellPlans)
+            {
+                const auto tag = context.RTSharedInjectBuffer(Names[index], work.GetShellPlanImport());
+                if (!tag.resource.IsValid())
+                    return false;
+                context.GetGeometryFrameWork()->GetGraphResources().*ResourceIds[index] = tag.resource;
+                continue;
+            }
             const auto info = Describe(work, resource);
             FrameBufferDesc desc;
             desc.active.size = static_cast<u64>(info.count != 0 ? info.count : 1u) * info.stride;
@@ -569,28 +640,41 @@ namespace vanguard::rendering
     }
     void RenderNodeInitializeGeometryWork::Execute(const RenderNodeImplContext& context, jobs::Builder*) const
     {
+        const u64 cpuBegin = system::GetMonotonicTicks();
+        u64 uploadTicks = 0;
+        u64 clearTicks = 0;
         const auto& work = WorkFor(context);
         for (u32 index = 0; index < ResourceCount; ++index)
         {
             const auto resource = static_cast<Resource>(index);
             if ((UploadMask & Bit(resource)) != 0)
             {
+                VG_PROFILE_ZONE_NAMED("Geometry/Initialize/UploadResource");
                 const auto info = Describe(work, resource);
                 const auto buffer = context.RTBuffer(Tag(resource)).GetBuffer();
                 if (info.count != 0)
                 {
+                    const u64 operationBegin = system::GetMonotonicTicks();
                     const bool bufferWritten = rhi::WriteBuffer(buffer, info.data, static_cast<u64>(info.count) * info.stride);
+                    uploadTicks += system::GetMonotonicTicks() - operationBegin;
                     if (!bufferWritten)
                         VG_FATAL("geometry frame upload failed");
                 }
             }
             if ((ClearMask & Bit(resource)) != 0)
             {
+                VG_PROFILE_ZONE_NAMED("Geometry/Initialize/ClearResource");
+                const u64 operationBegin = system::GetMonotonicTicks();
                 const bool bufferCleared = rhi::ClearBufferUav(context.RTBuffer(Tag(resource)).GetBuffer(), 0);
+                clearTicks += system::GetMonotonicTicks() - operationBegin;
                 if (!bufferCleared)
                     VG_FATAL("geometry scratch initialization failed");
             }
         }
+        static_cast<void>(g_geometryInitializeTicks.ExchangeAdd(system::GetMonotonicTicks() - cpuBegin));
+        static_cast<void>(g_geometryInitializeUploadTicks.ExchangeAdd(uploadTicks));
+        static_cast<void>(g_geometryInitializeClearTicks.ExchangeAdd(clearTicks));
+        static_cast<void>(g_geometryInitializeCalls.Increment());
     }
 
     RenderNodeGeometryCompute::RenderNodeGeometryCompute(const FrameRenderer& renderer, GeometryComputeStage stage) noexcept
@@ -609,8 +693,8 @@ namespace vanguard::rendering
             }
             return false;
         }
-        const bool sceneConsumer = m_stage == GeometryComputeStage::Cull || m_stage == GeometryComputeStage::CountWork ||
-                                   m_stage == GeometryComputeStage::ScatterWork || m_stage == GeometryComputeStage::BuildArguments;
+        const bool sceneConsumer = m_stage == GeometryComputeStage::Cull || m_stage == GeometryComputeStage::ExpandAppend ||
+                                   m_stage == GeometryComputeStage::AllocateBins;
         if (sceneConsumer)
         {
             const bool sceneUsesDeclared = m_renderer.DeclareGeometrySceneUses(context, failure);
@@ -633,6 +717,8 @@ namespace vanguard::rendering
 
     void RenderNodeGeometryCompute::Execute(const RenderNodeImplContext& context, jobs::Builder*) const
     {
+        VG_PROFILE_ZONE_NAMED("Geometry/Compute/Execute");
+        const u64 cpuBegin = system::GetMonotonicTicks();
         const auto& work = WorkFor(context);
         const auto& plan = work.GetVisibilityPlan();
         const auto& stage = Stages[static_cast<u32>(m_stage)];
@@ -644,17 +730,18 @@ namespace vanguard::rendering
             if (!handle.IsValid()) VG_FATAL("geometry graph descriptor is unavailable");
             return handle.GpuIndex();
         };
-        const auto dispatch = [&](const auto& constants, u32 groups) {
-            if (groups == 0) return;
-            if (groups > 65535u || !m_pipeline.IsValid())
-                VG_FATAL("geometry compute pipeline is unavailable or dispatch exceeded the one-dimensional limit");
+        const auto dispatch = [&](const auto& constants, u32 groupsX, u32 groupsY) {
+            if (groupsX == 0 || groupsY == 0) return;
+            VG_PROFILE_ZONE_NAMED("Geometry/Compute/DispatchRecord");
+            if (groupsX > 65535u || groupsY > 65535u || !m_pipeline.IsValid())
+                VG_FATAL("geometry compute pipeline is unavailable or dispatch exceeded the dimension limit");
             const bool pipelineSet = rhi::SetPipeline(m_pipeline);
             if (!pipelineSet)
                 VG_FATAL("geometry compute pipeline setup failed");
             const bool constantsSet = rhi::SetPushConstants(&constants, sizeof(constants));
             if (!constantsSet)
                 VG_FATAL("geometry compute constants setup failed");
-            const bool dispatchRecorded = rhi::DispatchCompute(groups, 1, 1);
+            const bool dispatchRecorded = rhi::DispatchCompute(groupsX, groupsY, 1);
             if (!dispatchRecorded)
                 VG_FATAL("geometry compute dispatch failed");
         };
@@ -662,53 +749,60 @@ namespace vanguard::rendering
         {
             GpuVisibilityConstants c;
             c.tableDirectoryDescriptor = directory.tableDirectoryDescriptor; c.pageDirectoryDescriptor = directory.pageDirectoryDescriptor;
-            c.candidateDescriptor = descriptor(Candidates); c.workRangeDescriptor = descriptor(VisibilityRanges);
             c.viewDescriptor = descriptor(Views); c.resultRangeDescriptor = descriptor(VisibilityResults);
             c.visibleDescriptor = descriptor(Visible); c.counterDescriptor = descriptor(VisibilityCounters);
-            c.workRangeCount = plan.workRanges.Size(); c.worldCellSize = m_renderer.GetGeometryWorldCellSize();
-            dispatch(c, c.workRangeCount);
+            c.sceneIndex = plan.sceneIndex; c.sceneGeneration = plan.sceneGeneration;
+            c.instanceTraversalExtent = plan.instanceTraversalExtent; c.viewCount = plan.views.Size();
+            c.worldCellSize = m_renderer.GetGeometryWorldCellSize();
+            const u32 groups = (c.instanceTraversalExtent + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup;
+            dispatch(c, groups, c.viewCount);
         }
-        else if (m_stage == GeometryComputeStage::CountWork || m_stage == GeometryComputeStage::ScatterWork)
+        else if (m_stage == GeometryComputeStage::ExpandAppend)
         {
-            GpuGeometryExpansionConstants c;
+            GpuGeometryExpandConstants c;
             c.tableDirectoryDescriptor = directory.tableDirectoryDescriptor; c.pageDirectoryDescriptor = directory.pageDirectoryDescriptor;
             c.visibleDescriptor = descriptor(Visible); c.visibilityResultDescriptor = descriptor(VisibilityResults);
-            c.visibilityCounterDescriptor = descriptor(VisibilityCounters); c.workRangeDescriptor = descriptor(ExpansionRanges);
-            c.itemDescriptor = descriptor(ExpansionItems); c.workDescriptor = descriptor(Work); c.viewDescriptor = descriptor(Views);
-            c.workRangeCount = work.GetExpansionWorkRanges().Size();
-            dispatch(c, c.workRangeCount);
+            c.visibilityCounterDescriptor = descriptor(VisibilityCounters); c.viewDescriptor = descriptor(Views);
+            c.workDescriptor = descriptor(Work); c.resultDescriptor = descriptor(Results); c.counterDescriptor = descriptor(Counters);
+            c.binItemDescriptor = descriptor(Bins); c.activeBinDescriptor = descriptor(ActiveBins); c.resultCount = plan.results.Size();
+            if (c.resultCount == 0 || work.GetCapacity().visibleInstances % c.resultCount != 0)
+                VG_FATAL("sparse geometry visible partitions are not uniform");
+            c.visibleCapacityPerResult = work.GetCapacity().visibleInstances / c.resultCount;
+            dispatch(c, (work.GetCapacity().visibleInstances + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup, 1u);
         }
-        else if (m_stage == GeometryComputeStage::CountBins || m_stage == GeometryComputeStage::ScatterInstances)
+        else if (m_stage == GeometryComputeStage::AllocateBins)
         {
-            GpuGeometryBinningConstants c;
-            c.workDescriptor = descriptor(Work); c.workRangeDescriptor = descriptor(WorkRanges); c.resultDescriptor = descriptor(Results);
-            c.counterDescriptor = descriptor(Counters); c.binItemDescriptor = descriptor(Bins); c.instanceDescriptor = descriptor(Instances);
-            c.workRangeCount = work.GetGeometryWorkRanges().Size(); c.resultCount = plan.results.Size();
-            dispatch(c, c.workRangeCount);
-        }
-        else if (m_stage == GeometryComputeStage::InitializeShells || m_stage == GeometryComputeStage::BuildArguments)
-        {
-            GpuGeometryIndirectConstants c;
+            GpuGeometryAllocateConstants c;
             c.tableDirectoryDescriptor = directory.tableDirectoryDescriptor; c.pageDirectoryDescriptor = directory.pageDirectoryDescriptor;
-            c.resultDescriptor = descriptor(Results); c.binItemDescriptor = descriptor(Bins); c.shellPlanDescriptor = descriptor(ShellPlans);
-            c.shellRangeDescriptor = descriptor(ShellRanges); c.shellCounterDescriptor = descriptor(ShellCounters);
-            c.argumentDescriptor = descriptor(Arguments); c.binRangeDescriptor = descriptor(BinRanges);
-            c.binRangeCount = work.GetBinPrefixRanges().Size(); c.shellPlanCount = work.GetShellDraws().Size();
-            c.shellCapacity = work.GetCapacity().shellsPerView; c.counterDescriptor = descriptor(Counters); c.resultCount = plan.results.Size();
-            dispatch(c, m_stage == GeometryComputeStage::InitializeShells ? (c.shellPlanCount + 127u) / 128u : c.binRangeCount);
+            c.resultDescriptor = descriptor(Results); c.counterDescriptor = descriptor(Counters); c.binItemDescriptor = descriptor(Bins);
+            c.activeBinDescriptor = descriptor(ActiveBins); c.shellRangeDescriptor = descriptor(ShellRanges);
+            c.shellCounterDescriptor = descriptor(ShellCounters); c.argumentDescriptor = descriptor(Arguments);
+            c.resultCount = plan.results.Size(); c.shellCapacity = work.GetCapacity().shellsPerView; c.shellPlanCount = work.GetShellDraws().Size();
+            dispatch(c, c.resultCount, 1u);
         }
-        else
+        else if (m_stage == GeometryComputeStage::ScatterInstances)
         {
-            GpuGeometryPrefixConstants c;
-            c.visibilityResultDescriptor = descriptor(VisibilityResults); c.visibilityCounterDescriptor = descriptor(VisibilityCounters);
-            c.itemDescriptor = descriptor(ExpansionItems); c.resultDescriptor = descriptor(Results); c.counterDescriptor = descriptor(Counters);
-            c.expansionRangeDescriptor = descriptor(ExpansionRanges); c.binRangeDescriptor = descriptor(BinRanges);
-            c.binItemDescriptor = descriptor(Bins); c.prefixBlockDescriptor = descriptor(PrefixBlocks);
-            c.expansionRangeCount = work.GetExpansionWorkRanges().Size(); c.binRangeCount = work.GetBinPrefixRanges().Size();
-            c.resultCount = plan.results.Size();
-            const bool summary = m_stage == GeometryComputeStage::PrefixWork || m_stage == GeometryComputeStage::PrefixBins;
-            const bool expansion = m_stage == GeometryComputeStage::ScanWork || m_stage == GeometryComputeStage::ResolveWork;
-            dispatch(c, summary ? c.resultCount : expansion ? c.expansionRangeCount : c.binRangeCount);
+            GpuGeometryScatterConstants c;
+            c.workDescriptor = descriptor(Work); c.resultDescriptor = descriptor(Results); c.counterDescriptor = descriptor(Counters);
+            c.binItemDescriptor = descriptor(Bins); c.instanceDescriptor = descriptor(Instances); c.resultCount = plan.results.Size();
+            if (c.resultCount == 0 || work.GetCapacity().geometryWorkItems % c.resultCount != 0)
+                VG_FATAL("sparse geometry work partitions are not uniform");
+            c.workCapacityPerResult = work.GetCapacity().geometryWorkItems / c.resultCount;
+            dispatch(c, (work.GetCapacity().geometryWorkItems + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup, 1u);
         }
+        else if (m_stage == GeometryComputeStage::InitializeShells)
+        {
+            GpuGeometryInitializeConstants c;
+            c.shellPlanDescriptor = descriptor(ShellPlans);
+            c.shellRangeDescriptor = descriptor(ShellRanges); c.shellCounterDescriptor = descriptor(ShellCounters);
+            c.counterDescriptor = descriptor(Counters); c.shellPlanCount = work.GetShellDraws().Size();
+            c.shellCapacity = work.GetCapacity().shellsPerView; c.resultCount = plan.results.Size();
+            const u32 shellGroups = (c.shellPlanCount + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup;
+            const u32 counterGroups = (c.resultCount + GpuVisibilityThreadsPerGroup - 1u) / GpuVisibilityThreadsPerGroup;
+            dispatch(c, shellGroups > counterGroups ? shellGroups : counterGroups, 1u);
+        }
+        const u32 stageIndex = static_cast<u32>(m_stage);
+        static_cast<void>(g_geometryStageTicks[stageIndex].ExchangeAdd(system::GetMonotonicTicks() - cpuBegin));
+        static_cast<void>(g_geometryStageCalls[stageIndex].Increment());
     }
 }

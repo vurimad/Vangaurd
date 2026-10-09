@@ -598,6 +598,17 @@ namespace vanguard::entities
         if (m_impl->lifecycleMutation || !slot->component->m_attached)
             return Fail(failure, ComponentDirectoryFailureCode::InvalidState, "component is not attached", handle, slot->entity, slot->stableId);
         m_impl->lifecycleMutation = true;
+        const ComponentReleaseResult release = slot->component->OnPrepareDetach({*m_impl->world});
+        if (release != ComponentReleaseResult::Complete)
+        {
+            m_impl->lifecycleMutation = false;
+            return Fail(failure,
+                        release == ComponentReleaseResult::Pending ? ComponentDirectoryFailureCode::Busy
+                                                                   : ComponentDirectoryFailureCode::AttachmentFailure,
+                        release == ComponentReleaseResult::Pending ? "component detachment is waiting for external ownership transfer"
+                                                                   : "component detachment ownership transfer failed",
+                        handle, slot->entity, slot->stableId);
+        }
         slot->component->OnDetach({*m_impl->world});
         m_impl->lifecycleMutation = false;
         if (slot->component->m_postAttached)

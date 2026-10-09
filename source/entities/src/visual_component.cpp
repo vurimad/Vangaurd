@@ -158,16 +158,28 @@ namespace vanguard::entities
         return BeginAdmission(runtime, producerGeneration, admission);
     }
 
-    bool VisualComponent::ReleaseVisualProxy(const bool retire) noexcept
+    bool VisualComponent::ReleaseVisualProxy(const bool retire, rendering::RenderSceneFailure* const failure) noexcept
     {
+        if (failure != nullptr)
+            *failure = {};
         if (!concurrency::IsMainThread())
+        {
+            if (failure != nullptr)
+                *failure = {rendering::RenderSceneFailureCode::WrongThread, m_binding.proxy.scene, m_binding.proxy,
+                            "visual proxy release requires the owner thread"};
             return false;
+        }
         if (m_runtime == nullptr)
             return !m_admission.IsValid() && !IsProxyBound();
         if (m_admission.IsValid())
         {
             if (!m_runtime->CancelProxyAdmission(m_admission))
+            {
+                if (failure != nullptr)
+                    *failure = {rendering::RenderSceneFailureCode::InvalidState, {}, {},
+                                "visual proxy admission could not be cancelled"};
                 return false;
+            }
             m_admission = {};
             m_admissionProducerGeneration = 0;
             m_runtime = nullptr;
@@ -180,19 +192,44 @@ namespace vanguard::entities
         }
 
         const VisualProxyBinding binding = m_binding;
+        const bool teleport = m_teleport;
         if (!UnbindProxy())
+        {
+            if (failure != nullptr)
+                *failure = {rendering::RenderSceneFailureCode::InvalidState, binding.proxy.scene, binding.proxy,
+                            "visual proxy binding could not be detached"};
             return false;
-        rendering::RenderSceneFailure failure;
-        const bool succeeded = retire ? m_runtime->RetireProxy(binding.proxy, &failure) : m_runtime->DestroyProxy(binding.proxy, &failure);
+        }
+        rendering::RenderSceneFailure sceneFailure;
+        const bool succeeded = retire ? m_runtime->RetireProxy(binding.proxy, &sceneFailure) : m_runtime->DestroyProxy(binding.proxy, &sceneFailure);
         if (!succeeded)
         {
-            static_cast<void>(BindProxy(binding));
-            ReportFailure(failure);
+            // Roll back the ownership cutover without invoking the normal binding path:
+            // BindProxy schedules transform work, which is forbidden after terminal
+            // release admission has closed.
+            m_binding = binding;
+            m_teleport = teleport;
+            if (failure != nullptr)
+                *failure = sceneFailure;
+            if (sceneFailure.code != rendering::RenderSceneFailureCode::Busy &&
+                sceneFailure.code != rendering::RenderSceneFailureCode::PendingDestroy)
+                ReportFailure(sceneFailure);
             return false;
         }
         m_runtime = nullptr;
         m_admissionProducerGeneration = 0;
         return true;
+    }
+
+    ComponentReleaseResult VisualComponent::OnPrepareDetach(const ComponentContext&) noexcept
+    {
+        rendering::RenderSceneFailure failure;
+        if (ReleaseVisualProxy(true, &failure))
+            return ComponentReleaseResult::Complete;
+        return failure.code == rendering::RenderSceneFailureCode::Busy ||
+                       failure.code == rendering::RenderSceneFailureCode::PendingDestroy
+                   ? ComponentReleaseResult::Pending
+                   : ComponentReleaseResult::Failed;
     }
 
     void VisualComponent::OnUninitialize(const ComponentContext& context) noexcept
@@ -205,8 +242,6 @@ namespace vanguard::entities
     void VisualComponent::OnDetach(const ComponentContext& context) noexcept
     {
         OnVisualDetach(context);
-        if (!ReleaseVisualProxy(true))
-            static_cast<void>(ReleaseVisualProxy(false));
     }
 
     void VisualComponent::OnTransformUpdated(math::Box& worldBounds) noexcept

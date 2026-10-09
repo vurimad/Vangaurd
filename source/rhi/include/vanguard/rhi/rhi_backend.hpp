@@ -101,7 +101,7 @@ namespace vanguard::rhi
 
         // Vertex layouts are backend-interned non-owning references. Query pools are uniquely owned. Command lists
         // are single-owner consumable references. None participate in the intrusive ResourceRef count.
-        [[nodiscard]] virtual CommandListRef CreateCommandList(CommandListType type, u64 debugHash) noexcept = 0;
+        [[nodiscard]] virtual CommandListRef CreateCommandList(CommandListType type, u64 debugHash, CommandListRetentionPolicy retentionPolicy) noexcept = 0;
         virtual void DiscardCommandList(CommandListRef commandList) noexcept = 0;
         [[nodiscard]] virtual CommandListType GetCommandListType(CommandListRef commandList) const noexcept = 0;
         [[nodiscard]] virtual BackendStatus CloseCommandList(CommandListRef commandList) noexcept = 0;

@@ -26,6 +26,16 @@ below so physical folders, include paths, Premake projects, and Visual Studio fi
 
 `build/`, `bin/`, and `cache/` are outputs. Source code and durable authored data never belong there.
 
+## Documentation layout
+
+Use [the documentation map](README.md) for navigation. Shared contracts remain
+under `docs/architecture`, wire formats under `docs/formats`, standards under
+`docs/engineering`, and migration guidance under `docs/migration`.
+Development documents are separated into `docs/development/plans`, `designs`,
+`studies`, `progress`, and `checkpoints`; see [development entry points](development/README.md).
+Module-local documents stay with their module. Task execution triplets stay
+together under `.planning/<task>/`; root `AGENTS.md` remains the stable agent entry.
+
 ## Engine module layout
 
 ```text

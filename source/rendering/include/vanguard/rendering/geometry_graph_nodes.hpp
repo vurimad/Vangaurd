@@ -2,20 +2,62 @@
 
 #include <vanguard/rendering/render_node_graph.hpp>
 #include <vanguard/rendering/render_phase.hpp>
+#include <vanguard/rendering/viewport.hpp>
 
 namespace vanguard::rendering
 {
     class FrameRenderer;
     [[nodiscard]] bool AreGeometryGraphPipelinesReady(const FrameRenderer& renderer, bool gBufferOnly) noexcept;
 
+    enum class CameraOutputResolveKind : u8
+    {
+        SceneLinearCopy,
+        DisplaySrgb
+    };
+
+    /// Selects resolve behavior from the viewport lifecycle, neutral output encoding and
+    /// actual acquired output format. DisplaySrgb is limited to supported non-sRGB SDR
+    /// UNorm targets; presentation without an explicit supported transfer fails closed.
+    [[nodiscard]] constexpr bool SelectCameraOutputResolve(const RenderViewportOutputKind outputKind,
+                                                           const RenderOutputColorEncoding encoding, const rhi::Format format,
+                                                           CameraOutputResolveKind& resolve) noexcept
+    {
+        if (encoding == RenderOutputColorEncoding::SceneLinear)
+        {
+            if (outputKind == RenderViewportOutputKind::Presentation || format == rhi::Format::Unknown ||
+                format == rhi::Format::R8G8B8A8UNormSrgb ||
+                format == rhi::Format::B8G8R8A8UNormSrgb)
+                return false;
+            resolve = CameraOutputResolveKind::SceneLinearCopy;
+            return true;
+        }
+        if (encoding == RenderOutputColorEncoding::DisplaySrgb &&
+            (format == rhi::Format::R8G8B8A8UNorm || format == rhi::Format::B8G8R8A8UNorm))
+        {
+            resolve = CameraOutputResolveKind::DisplaySrgb;
+            return true;
+        }
+        return false;
+    }
+
     // One implementation for the fixed shader stages; each occurrence declares
     // its own dependencies. Frame sizes and descriptor indices are never cached.
     enum class GeometryComputeStage : u8
     {
-        InitializeShells, Cull, CountWork, ScanWork, PrefixWork, ResolveWork,
-        ScatterWork, CountBins, ScanBins, PrefixBins, ResolveBins,
-        ScatterInstances, BuildArguments, Count
+        InitializeShells, Cull, ExpandAppend, AllocateBins, ScatterInstances, Count
     };
+
+    struct GeometryCpuTimingSample final
+    {
+        u64 initializeTicks = 0;
+        u64 initializeUploadTicks = 0;
+        u64 initializeClearTicks = 0;
+        u32 initializeCalls = 0;
+        u64 stageTicks[static_cast<u32>(GeometryComputeStage::Count)]{};
+        u32 stageCalls[static_cast<u32>(GeometryComputeStage::Count)]{};
+    };
+
+    [[nodiscard]] GeometryCpuTimingSample ConsumeGeometryCpuTimingSample() noexcept;
 
     class RenderNodeDeclareGeometryWorkResources final : public RenderNodeImpl
     {
@@ -166,6 +208,7 @@ namespace vanguard::rendering
         bool DeclareResources(const RenderNodeImplContext&, RenderFlowResourceFailure*) const noexcept override;
         void Execute(const RenderNodeImplContext&, jobs::Builder*) const override;
     private:
-        rhi::PipelineRef m_pipeline;
+        rhi::PipelineRef m_sceneLinearPipeline;
+        rhi::PipelineRef m_displaySrgbPipeline;
     };
 }

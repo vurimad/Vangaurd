@@ -449,7 +449,7 @@ namespace
             return lifetimeStats;
         }
 
-        gpu::CommandListRef CreateCommandList(const gpu::CommandListType type, vanguard::u64) noexcept override
+        gpu::CommandListRef CreateCommandList(const gpu::CommandListType type, vanguard::u64, gpu::CommandListRetentionPolicy) noexcept override
         {
             commandListType = type;
             return {20, 1};

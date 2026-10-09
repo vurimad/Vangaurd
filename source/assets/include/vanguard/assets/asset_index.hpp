@@ -110,7 +110,12 @@ namespace vanguard::assets
         [[nodiscard]] bool Shutdown() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
-        [[nodiscard]] IndexResult Publish(const BuildRequest& request, const BuildPlan& plan, const BuildOutput& output) noexcept;
+        // Joins this index to the one persistent VDDC protection domain that
+        // may publish durable VADI rows for the managed root. Binding is only
+        // accepted while the index is clean and transaction-free.
+        [[nodiscard]] bool BindPersistentProtectionDomain(BuildSystem& buildSystem) noexcept;
+
+        [[nodiscard]] IndexResult Publish(const BuildRequest& request, const BuildPlan& plan, BuildOutput& output) noexcept;
         [[nodiscard]] IndexResult Remove(resources::ResourceReference output) noexcept;
         void Clear() noexcept;
 
@@ -121,17 +126,41 @@ namespace vanguard::assets
                                                       containers::DynamicArray<resources::ResourceReference>& dependants) const noexcept;
         [[nodiscard]] IndexResult CollectAffected(resources::ResourceReference changed,
                                                   containers::DynamicArray<resources::ResourceReference>& affected) const noexcept;
+        // Materializes committed Generated-dependency content into a prepared
+        // plan. Preferred records (for example staged transaction rows) win over
+        // committed rows. Missing Optional Generated dependencies are ignored;
+        // missing Required Generated dependencies are left unresolved and yield
+        // NotFound after all available rows have been applied. Soft Generated
+        // dependencies are never materialized here.
+        [[nodiscard]] IndexResult MaterializeGeneratedDependencyContent(
+            BuildPlan& plan, containers::ArraySpan<const DependencyRecord> preferredRecords = {}) const noexcept;
         [[nodiscard]] DirtyReason Evaluate(const BuildRequest& request, const BuildPlan& plan) const noexcept;
+        // Bounded immutable exact-key snapshot for cache-lifecycle protection.
+        // Includes committed records and any currently staged transaction rows;
+        // no mutable index storage escapes this owner.
+        [[nodiscard]] IndexResult CaptureProtectionKeys(containers::DynamicArray<ArtifactSetKey>& keys,
+                                                        u32 maximumRecords, u64 maximumBytes) const noexcept;
 
         [[nodiscard]] IndexResult Save() noexcept;
         [[nodiscard]] bool HasChanges() const noexcept;
         [[nodiscard]] IndexResult BeginTransaction() noexcept;
+        // Deep-copy the currently staged transaction records for validation.
+        // Normal Find/Evaluate readers remain committed-only. The returned
+        // snapshot owns all dependency/artifact arrays, so callers may perform
+        // filesystem/importer/compiler work after this function releases the
+        // index lock. Hard bounds prevent unbounded pre-commit capture.
+        [[nodiscard]] IndexResult CaptureTransactionRecords(containers::DynamicArray<DependencyRecord>& records,
+                                                            u32 maximumRecords, u64 maximumBytes) const noexcept;
         [[nodiscard]] IndexResult CommitTransaction() noexcept;
         [[nodiscard]] IndexResult RollbackTransaction() noexcept;
         [[nodiscard]] bool HasActiveTransaction() const noexcept;
         [[nodiscard]] DependencyIndexStats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] bool DetachPersistentProtectionDomain(BuildSystem& buildSystem) noexcept;
         Impl* m_impl = nullptr;
+
+        friend class BuildGraph;
+        friend class BuildSystem;
     };
 } // namespace vanguard::assets

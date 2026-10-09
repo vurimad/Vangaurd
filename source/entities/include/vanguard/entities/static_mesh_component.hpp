@@ -60,6 +60,7 @@ namespace vanguard::entities
         friend class RenderingRuntime;
         [[nodiscard]] bool Start() noexcept;
         void Stop() noexcept;
+        void ResetPreparation() noexcept;
         // Returns true while work remains. Called only by RenderingRuntime's bounded queue.
         [[nodiscard]] bool Progress() noexcept;
         void Fail(const char* message) noexcept;

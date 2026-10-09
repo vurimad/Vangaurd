@@ -46,6 +46,31 @@ namespace vanguard::entities
         u64 downstreamFailures = 0;
     };
 
+    enum class CellStreamingReleaseStatus : u8
+    {
+        Complete,
+        Pending,
+        Failed
+    };
+
+    enum class CellStreamingReleaseFailureCode : u8
+    {
+        None,
+        InvalidState,
+        Executor,
+        Materializer,
+        ReleaseAcknowledgement
+    };
+
+    struct CellStreamingReleaseFailure
+    {
+        CellStreamingReleaseFailureCode code = CellStreamingReleaseFailureCode::None;
+        world::StreamingNodeKey key;
+        Result materializerResult = Result::Success;
+        ComponentDirectoryFailure componentFailure;
+        const char* message = nullptr;
+    };
+
     /// Cell-side streaming runtime system. Resource completion queues one materialization transaction;
     /// the post-world-flush epilogue publishes readiness and acknowledges release only after Flecs commits.
     class CellStreamingSystem final : public game::RuntimeSystem
@@ -60,6 +85,10 @@ namespace vanguard::entities
         CellStreamingSystem& operator=(const CellStreamingSystem&) = delete;
 
         [[nodiscard]] bool SetProcessInput(const world::StreamingProcessInput& input) noexcept;
+        /// Closes cell materialization admission. Subsequent executor events are consumed
+        /// only to cancel/release ownership already accepted before the cutover.
+        [[nodiscard]] bool BeginReleaseOnly() noexcept;
+        [[nodiscard]] CellStreamingReleaseStatus ProgressReleaseOnly(CellStreamingReleaseFailure* failure = nullptr) noexcept;
         [[nodiscard]] Result AcquireActivationGroup(u64 cellId, u64 groupId, ActivationOwnerId ownerId) noexcept;
         [[nodiscard]] Result ReleaseActivationGroup(u64 cellId, u64 groupId, ActivationOwnerId ownerId) noexcept;
         [[nodiscard]] ComponentRegistry* GetComponents() noexcept;

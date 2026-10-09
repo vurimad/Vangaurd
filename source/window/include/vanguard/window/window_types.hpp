@@ -279,6 +279,24 @@ namespace vanguard::window
         bool activateWhenShown = true;
     };
 
+    enum class WindowAction : u8
+    {
+        Minimize,
+        Maximize,
+        Restore,
+        RequestClose
+    };
+
+    struct WindowHitTestConfig
+    {
+        // Window-local logical coordinates. The native backend still owns resize/move semantics;
+        // this only identifies the editor-authored draggable header and border thickness. An enabled
+        // configuration may omit the drag region when only native resize-border hit testing is needed.
+        WindowRect dragRegion;
+        u32 resizeBorder = 0;
+        bool enabled = false;
+    };
+
     struct WindowSnapshot
     {
         WindowHandle handle;

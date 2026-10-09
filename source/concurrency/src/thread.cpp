@@ -1,6 +1,7 @@
 #include <vanguard/concurrency/thread.hpp>
 
 #include <vanguard/concurrency/concurrency_backend.hpp>
+#include <vanguard/profiling/profiling.hpp>
 
 namespace
 {
@@ -28,6 +29,7 @@ namespace vanguard::concurrency
     void SetCurrentThreadName(const char* const name) noexcept
     {
         backend::SetCurrentThreadName(name);
+        VG_PROFILE_THREAD_NAME(name);
     }
     u32 GetMaxHardwareConcurrency() noexcept
     {

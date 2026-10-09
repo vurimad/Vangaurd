@@ -1,10 +1,19 @@
 #include <vanguard/application/application.hpp>
+#include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/memory/pool.hpp>
 
+#include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <new>
+
+#if defined(_WIN32)
+#include <Windows.h>
+#else
+#include <sys/wait.h>
+#endif
 
 namespace
 {
@@ -154,6 +163,140 @@ namespace
             if (call == value)
                 return true;
         return false;
+    }
+
+    class HostLifecycleWorker final : public vanguard::concurrency::Thread
+    {
+    public:
+        enum class Operation : vanguard::u8
+        {
+            Start,
+            Shutdown
+        };
+
+        HostLifecycleWorker(app::EngineHost& host, const Operation operation) noexcept
+            : Thread("hostLifecycleWorker"), m_host(host), m_operation(operation)
+        {
+        }
+
+        void ThreadFunction() noexcept override
+        {
+            m_result = m_operation == Operation::Start ? m_host.Start(&m_failure) : m_host.Shutdown(&m_failure);
+        }
+
+        [[nodiscard]] bool Result() const noexcept { return m_result; }
+        [[nodiscard]] const app::HostFailure& Failure() const noexcept { return m_failure; }
+
+    private:
+        app::EngineHost& m_host;
+        Operation m_operation;
+        app::HostFailure m_failure;
+        bool m_result = false;
+    };
+
+    class HostDestructorWorker final : public vanguard::concurrency::Thread
+    {
+    public:
+        explicit HostDestructorWorker(app::EngineHost& host) noexcept : Thread("hostDestructorWorker"), m_host(host) {}
+
+        void ThreadFunction() noexcept override
+        {
+            m_host.~EngineHost();
+        }
+
+    private:
+        app::EngineHost& m_host;
+    };
+
+    [[nodiscard]] int RunWrongThreadDestructorFatalCase() noexcept
+    {
+        vanguard::memory::Pool& pool = vanguard::memory::pools::Runtime::GetInstance();
+        Fixture fixture(pool);
+        FactoryData factory{10, &fixture};
+        app::ServiceDescriptor descriptor = Descriptor(10, "main-thread-destructor-service", factory);
+        descriptor.affinity = app::ThreadAffinity::MainThread;
+
+        app::EngineHost host;
+        app::HostFailure failure;
+        if (!host.RegisterModule({1, "main-thread-destructor-test", 1}, &failure) || !host.RegisterService(1, descriptor, &failure) ||
+            !host.Compile(app::ApplicationProfile::Test, &failure) || !host.Start(&failure))
+            return 2;
+
+        HostDestructorWorker worker(host);
+        worker.InitThread();
+        worker.JoinThread();
+        return 3;
+    }
+
+    [[nodiscard]] bool RunWrongThreadDestructorFatalSubprocess(const char* const executable) noexcept
+    {
+        if (executable == nullptr || executable[0] == '\0')
+            return false;
+#if defined(_WIN32)
+        char command[2048]{};
+        const int written = std::snprintf(command, sizeof(command), "\"%s\" --wrong-thread-host-destructor", executable);
+        if (written <= 0 || static_cast<vanguard::usize>(written) >= sizeof(command))
+            return false;
+
+        STARTUPINFOA startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessA(executable, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+            return false;
+        const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+        DWORD exitCode = 0;
+        const bool exited = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exitCode) != FALSE;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return exited && exitCode == 0xc0000602u;
+#else
+        char command[2048]{};
+        const int written = std::snprintf(command, sizeof(command), "\"%s\" --wrong-thread-host-destructor", executable);
+        if (written <= 0 || static_cast<vanguard::usize>(written) >= sizeof(command))
+            return false;
+        const int result = std::system(command);
+        return result != -1 && WIFSIGNALED(result);
+#endif
+    }
+
+    void TestMainThreadLifecycleAffinity(vanguard::memory::Pool& pool) noexcept
+    {
+        constexpr app::ModuleId module = 1;
+        constexpr app::ServiceId serviceId = 10;
+        Fixture fixture(pool);
+        FactoryData factory{serviceId, &fixture};
+        app::ServiceDescriptor descriptor = Descriptor(serviceId, "main-thread-service", factory);
+        descriptor.affinity = app::ThreadAffinity::MainThread;
+
+        app::EngineHost host;
+        app::HostFailure failure;
+        Check(host.RegisterModule({module, "main-thread-test", 1}, &failure), "main-thread affinity module registers");
+        Check(host.RegisterService(module, descriptor, &failure), "main-thread affinity service registers");
+        Check(host.Compile(app::ApplicationProfile::Test, &failure), "main-thread affinity graph compiles");
+
+        HostLifecycleWorker wrongStart(host, HostLifecycleWorker::Operation::Start);
+        wrongStart.InitThread();
+        wrongStart.JoinThread();
+        Check(!wrongStart.Result() && wrongStart.Failure().code == app::HostFailureCode::WrongThread,
+              "worker-thread Start rejects a selected main-thread service before construction");
+        Check(host.State() == app::HostState::Compiled && fixture.liveInstances == 0,
+              "wrong-thread Start leaves the compiled host retryable and unconstructed");
+
+        Check(host.Start(&failure), "main-thread retry starts the host");
+        Check(host.State() == app::HostState::Running && fixture.liveInstances == 1,
+              "main-thread service is running before shutdown-affinity proof");
+
+        HostLifecycleWorker wrongShutdown(host, HostLifecycleWorker::Operation::Shutdown);
+        wrongShutdown.InitThread();
+        wrongShutdown.JoinThread();
+        Check(!wrongShutdown.Result() && wrongShutdown.Failure().code == app::HostFailureCode::WrongThread,
+              "worker-thread Shutdown rejects before destructive unwind");
+        Check(host.State() == app::HostState::Running && fixture.liveInstances == 1 && !Contains(fixture.calls, 3010),
+              "wrong-thread Shutdown leaves the running host retryable without quiesce callbacks");
+
+        Check(host.Shutdown(&failure), "main-thread shutdown retry succeeds");
+        Check(fixture.liveInstances == 0 && Contains(fixture.calls, 3010) && Contains(fixture.calls, 7010),
+              "main-thread shutdown performs lifecycle cleanup and destroys the service");
     }
 
     void TestDeterministicGraphAndShutdown(vanguard::memory::Pool& pool) noexcept
@@ -465,13 +608,20 @@ namespace
     }
 } // namespace
 
-int main()
+int main(const int argumentCount, char** const arguments)
 {
+    vanguard::concurrency::InitializeMainThread();
     Check(vanguard::memory::Initialize(), "memory initializes");
     Check(vanguard::diagnostics::Initialize(vanguard::diagnostics::Mode::Synchronous, "applicationTests"), "diagnostics initializes");
     Check(vanguard::containers::Initialize(), "containers initialize");
 
+    if (argumentCount == 2 && std::strcmp(arguments[1], "--wrong-thread-host-destructor") == 0)
+        return RunWrongThreadDestructorFatalCase();
+
     vanguard::memory::Pool& pool = vanguard::memory::pools::Runtime::GetInstance();
+    Check(RunWrongThreadDestructorFatalSubprocess(arguments[0]),
+          "destroying a running host with main-thread-affine services from a worker fails fast before implicit unwind");
+    TestMainThreadLifecycleAffinity(pool);
     TestDeterministicGraphAndShutdown(pool);
     TestValidationAndRollback(pool);
     TestCleanupFailureWithoutOutput(pool);

@@ -25,6 +25,8 @@ namespace vanguard::assets
         DependencyPreparationFailed,
         IndexQueryFailed,
         TransactionFailed,
+        PreCommitRejected,
+        PreCommitValidationFailed,
         BuildFailed,
         Cancelled,
         OutOfMemory,
@@ -41,12 +43,17 @@ namespace vanguard::assets
         u32 maximumChangesPerBatch = 4096;
         u32 maximumAffectedOutputsPerBatch = 65536;
         u32 maximumRootRequestsPerBatch = 4096;
+        u32 maximumValidationRecordsPerBatch = 65536;
+        u64 maximumValidationEvidenceBytes = 256ull * 1024ull * 1024ull;
     };
 
     struct RecookStats
     {
         u32 inputChanges = 0;
         u32 unchangedChanges = 0;
+        u32 explicitOutputs = 0;
+        u32 unchangedOutputs = 0;
+        u32 firstCookOutputs = 0;
         u32 dirtySeeds = 0;
         u32 affectedOutputs = 0;
         u32 rootRequests = 0;
@@ -57,9 +64,33 @@ namespace vanguard::assets
         u64 cancelledBatches = 0;
     };
 
-    // Resolves a cooked output identity to its current source bytes, metadata,
-    // settings, and target. The request is copied before the callback returns.
-    using ResolveIndexedBuildRequestFunction = bool (*)(resources::ResourceReference output, BuildRequest& request, void* userData) noexcept;
+    // Resolves a cooked output identity to ownership-safe current source bytes,
+    // metadata, settings, and target.
+    using ResolveIndexedBuildRequestFunction = bool (*)(resources::ResourceReference output, OwnedBuildRequest& request, void* userData) noexcept;
+
+    enum class RecookPreCommitValidationResult : u8
+    {
+        Accept,
+        Reject,
+        Failed
+    };
+
+    // For a transactional batch, runs after every owned graph root succeeds and
+    // after the recooker has captured an owned snapshot of the staged VADI
+    // records, but before DependencyIndex::CommitTransaction. A no-work batch
+    // also invokes the validator before reporting success, with an empty record
+    // span and no active transaction, so callers can fence freshness decisions
+    // that produced no dirty roots. Reject/Failed rolls back an active
+    // transaction when present and otherwise simply rejects that no-work
+    // completion. Omitting the callback preserves the legacy commit path.
+    using ValidateRecookPreCommitFunction = RecookPreCommitValidationResult (*)(
+        containers::ArraySpan<const DependencyRecord> records, void* userData) noexcept;
+
+    struct RecookPreCommitValidator
+    {
+        ValidateRecookPreCommitFunction validate = nullptr;
+        void* userData = nullptr;
+    };
 
     class RecookBatch final
     {
@@ -81,6 +112,14 @@ namespace vanguard::assets
         void Wait() noexcept;
         [[nodiscard]] bool Cancel() noexcept;
         [[nodiscard]] RecookStats GetStats() const noexcept;
+        // Moves the exact bounded transaction-record snapshot that passed the
+        // pre-commit validator and then committed successfully. Records are
+        // available only for a successful transactional batch that used a
+        // validator, are returned at most once, and are never produced for a
+        // no-work completion or any failed/cancelled/rejected transaction.
+        // `records` must be empty so the handoff is O(1) and does not retire an
+        // unrelated payload on the caller thread.
+        [[nodiscard]] bool TakeCommittedRecords(containers::DynamicArray<DependencyRecord>& records) noexcept;
         void Reset() noexcept;
 
     private:
@@ -109,9 +148,33 @@ namespace vanguard::assets
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         [[nodiscard]] RecookBatch Request(containers::ArraySpan<const AssetChange> changes, BuildPriority priority = BuildPriority::Normal) noexcept;
+        // Combined incremental/first-cook entry point. Explicit cooked outputs
+        // are evaluated in the same planning pass and VADI transaction as
+        // indexed input changes. Untracked inputs are tolerated here because a
+        // corresponding explicit output may be a legitimate first cook; the
+        // legacy changes-only overload keeps its explicit UntrackedChange
+        // contract.
+        [[nodiscard]] RecookBatch Request(containers::ArraySpan<const AssetChange> changes,
+                                          containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                          BuildPriority priority = BuildPriority::Normal,
+                                          const RecookPreCommitValidator& validator = {}) noexcept;
+        // `forcedOutputs` must be a subset of `explicitOutputs`. Those current
+        // outputs are submitted through the normal graph/VADI transaction even
+        // when VADI build evidence itself is UpToDate. This is used for exact
+        // durable-record repair without introducing another scheduler.
+        [[nodiscard]] RecookBatch Request(containers::ArraySpan<const AssetChange> changes,
+                                          containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                          containers::ArraySpan<const resources::ResourceReference> forcedOutputs,
+                                          BuildPriority priority = BuildPriority::Normal,
+                                          const RecookPreCommitValidator& validator = {}) noexcept;
         [[nodiscard]] RecookStats GetStats() const noexcept;
 
     private:
+        [[nodiscard]] RecookBatch RequestInternal(containers::ArraySpan<const AssetChange> changes,
+                                                  containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                                  containers::ArraySpan<const resources::ResourceReference> forcedOutputs,
+                                                  bool rejectUntrackedChanges, BuildPriority priority,
+                                                  const RecookPreCommitValidator& validator) noexcept;
         [[nodiscard]] bool Poll(RecookOperation& operation, bool wait) noexcept;
         [[nodiscard]] bool Cancel(RecookOperation& operation) noexcept;
         void Release(RecookOperation& operation) noexcept;

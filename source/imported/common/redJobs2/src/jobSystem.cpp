@@ -65,6 +65,23 @@ Uint32 GetApproximateQueueDepth( Priority priority )
 		: 0;
 }
 
+DependencyContinuationStats GetDependencyContinuationStats()
+{
+	DependencyContinuationStats stats;
+	if ( prv::gDispatcher )
+	{
+		stats.pendingRecruitmentControls = prv::gDispatcher->GetPendingRecruitmentControls();
+		stats.recruitmentControlsAdmitted = prv::gDispatcher->GetRecruitmentControlsAdmitted();
+		stats.recruitmentControlsPopped = prv::gDispatcher->GetRecruitmentControlsPopped();
+		stats.recruitmentControlsDroppedBound = prv::gDispatcher->GetRecruitmentControlsDroppedBound();
+		stats.recruitmentControlsDroppedQueueFull = prv::gDispatcher->GetRecruitmentControlsDroppedQueueFull();
+		stats.recruitmentControlsAbandoned = prv::gDispatcher->GetRecruitmentControlsAbandoned();
+		stats.relaysInlined = prv::gDispatcher->GetDependencyRelaysInlined();
+		stats.relaysQueuedFallback = prv::gDispatcher->GetDependencyRelaysQueuedFallback();
+	}
+	return stats;
+}
+
 void DumpToLog()
 {
 }

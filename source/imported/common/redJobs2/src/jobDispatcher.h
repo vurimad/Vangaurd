@@ -46,12 +46,21 @@ public:
 	
 	void RunJob( const JobDecl& job, const CounterEntry* waitForZeroCounterEntry, CounterEntry* accumulateCounterEntry );
 	void InitWithEmptyJob( JobDecl& outJob );
+	void InitWithDependencyRelayJob( JobDecl& outJob );
 
 	Uint32 GetNumDispatcherThreads(Bool includeCore7) const;
 	Uint32 GetApproximateQueueDepth( Priority priority ) const
 	{
 		return m_dispatcherQueue.GetApproximateDepth( priority );
 	}
+	Uint32 GetPendingRecruitmentControls() const { return m_pendingRecruitmentControls.GetValue(); }
+	Uint64 GetRecruitmentControlsAdmitted() const { return m_recruitmentControlsAdmitted.GetValue(); }
+	Uint64 GetRecruitmentControlsPopped() const { return m_recruitmentControlsPopped.GetValue(); }
+	Uint64 GetRecruitmentControlsDroppedBound() const { return m_recruitmentControlsDroppedBound.GetValue(); }
+	Uint64 GetRecruitmentControlsDroppedQueueFull() const { return m_recruitmentControlsDroppedQueueFull.GetValue(); }
+	Uint64 GetRecruitmentControlsAbandoned() const { return m_recruitmentControlsAbandoned.GetValue(); }
+	Uint64 GetDependencyRelaysInlined() const { return m_dependencyRelaysInlined.GetValue(); }
+	Uint64 GetDependencyRelaysQueuedFallback() const { return m_dependencyRelaysQueuedFallback.GetValue(); }
 	Bool FlushCounter( const CounterEntry* entry, Bool processLatent, Int32 timeoutMillseconds );
 	Bool FlushCounter( const CounterEntry* entry, Priority processPriority, Int32 timeoutMillseconds, Bool processLarge );
 
@@ -77,13 +86,24 @@ public:
 	void AnalyzeCounter(const CounterEntry& counter);
 
 private:
+	struct ContinuationReleaseContext
+	{
+		Priority releasePriority{ Priority::COUNT };
+		Uint32 inlineRelayDepth{ 0 };
+		Uint32 inlineRelayTransitions{ 0 };
+	};
+
 	void Init();
 	void InitJobQueue( const InitParam& setup );
 
 	void Shutdown();
 
 	Bool TryPopJobQueueEntry( JobQueueEntry& outEntry, Priority& outPriority );
-	void QueueJobAndSignal( const JobDecl& job, CounterEntry* accumulateCounterEntry, TLocalQueue* optLocalQueue );
+	void QueueJobAndSignal( const JobDecl& job, CounterEntry* accumulateCounterEntry, TLocalQueue* optLocalQueue,
+		ContinuationReleaseContext* optContinuationContext = nullptr, Bool singleWaiterRelease = false );
+	void DecrementCounterEntryInternal( CounterEntry* counterEntry, TLocalQueue* optLocalQueue, ContinuationReleaseContext* optContinuationContext );
+	Bool TryQueueRecruitmentControl( const JobQueueEntry& relayEntry );
+	void OnQueueEntryPopped( const JobQueueEntry& entry );
 	Bool TryPutOnWaitingList( const JobDecl& job, const CounterEntry& waitForZeroCounterEntry, CounterEntry* accumulateCounterEntry, const StackTraceCacheEntryPath* debugTrace );
 	void QueueJobOrWait( const JobDecl& job, const CounterEntry* waitForZeroCounterEntry, CounterEntry* accumulateCounterEntry );
 	Priority MapPriority( Priority priority ) const;
@@ -101,6 +121,14 @@ private:
 
 	red::Atomic< Bool > m_isExitRequested;
 	red::Atomic< Bool > m_shouldPumpMessagesForDXGI;
+	red::Atomic< Uint32 > m_pendingRecruitmentControls{ 0 };
+	red::Atomic< Uint64 > m_recruitmentControlsAdmitted{ 0 };
+	red::Atomic< Uint64 > m_recruitmentControlsPopped{ 0 };
+	red::Atomic< Uint64 > m_recruitmentControlsDroppedBound{ 0 };
+	red::Atomic< Uint64 > m_recruitmentControlsDroppedQueueFull{ 0 };
+	red::Atomic< Uint64 > m_recruitmentControlsAbandoned{ 0 };
+	red::Atomic< Uint64 > m_dependencyRelaysInlined{ 0 };
+	red::Atomic< Uint64 > m_dependencyRelaysQueuedFallback{ 0 };
 	Bool m_isFlushingCounter;
 };
 

@@ -63,14 +63,20 @@ namespace
         ResourceReference cancelB;
         ResourceReference slowShared;
         ResourceReference soloSlow;
+        ResourceReference replacementRoot;
+        ResourceReference replacementParent;
         concurrency::ManualResetEvent slowEntered{false};
         concurrency::ManualResetEvent releaseSlow{false};
+        concurrency::ManualResetEvent replacementEntered{false};
+        concurrency::ManualResetEvent releaseReplacement{false};
         concurrency::Atomic<u32> discoveries{0};
         concurrency::Atomic<u32> constructions{0};
         concurrency::Atomic<u32> destructions{0};
         concurrency::Atomic<u32> sharedConstructions{0};
         concurrency::Atomic<u32> slowConstructions{0};
         concurrency::Atomic<u32> optionalObserved{0};
+        concurrency::Atomic<u32> replacementConstructions{0};
+        concurrency::Atomic<u32> observedReplacementDependencyGeneration{0};
         concurrency::Atomic<u32> highestSlowPriority{static_cast<u32>(LoadPriority::Background)};
     };
 
@@ -133,6 +139,11 @@ namespace
                 return Failure::OutOfMemory;
             }
         }
+        else if (reference == graph.replacementParent)
+        {
+            if (!dependencies.Add(graph.replacementRoot))
+                return Failure::OutOfMemory;
+        }
         return Failure::None;
     }
 
@@ -159,6 +170,20 @@ namespace
                 return nullptr;
             }
         }
+        if (reference == graph.replacementRoot)
+        {
+            static_cast<void>(graph.replacementConstructions.Increment());
+            if (graph.replacementConstructions.GetValue() > 1)
+            {
+                graph.replacementEntered.Signal();
+                graph.releaseReplacement.Wait();
+                if (context.IsCancellationRequested())
+                {
+                    failure = Failure::Cancelled;
+                    return nullptr;
+                }
+            }
+        }
 
         for (u32 index = 0; index < context.GetDependencyCount(); ++index)
         {
@@ -175,6 +200,12 @@ namespace
             {
                 graph.optionalObserved.SetValue(1);
             }
+        }
+        if (reference == graph.replacementParent && context.GetDependencyCount() == 1)
+        {
+            const ResourceHandle dependency = context.GetDependency(0);
+            if (dependency)
+                graph.observedReplacementDependencyGeneration.SetValue(dependency.GetGeneration());
         }
         if (reference == graph.shared)
         {
@@ -219,6 +250,8 @@ int main()
     graph.cancelB = MakeReference("graph/cancel-b.vgraph", graph.type);
     graph.slowShared = MakeReference("graph/slow-shared.vgraph", graph.type);
     graph.soloSlow = MakeReference("graph/solo-slow.vgraph", graph.type);
+    graph.replacementRoot = MakeReference("graph/replacement-root.vgraph", graph.type);
+    graph.replacementParent = MakeReference("graph/replacement-parent.vgraph", graph.type);
 
     const AsyncLoaderDescriptor loader{graph.type, "graph test loader", &DiscoverGraphDependencies, &ConstructGraphResource, &DestroyGraphResource, &graph};
     Check(pipeline.RegisterLoader(loader), "asynchronous graph loader registers");
@@ -282,17 +315,82 @@ int main()
     Check(graph.slowConstructions.GetValue() == 1, "shared dependency is not restarted after one cancellation");
     ResourceHandle cancelHandle = cancelSecond.Acquire();
 
+    // P3: a runtime resident normally outlives the PipelineRequest that loaded it.
+    // Releasing that request exact-evicts the pipeline operation while the strong
+    // handle deliberately keeps the registry generation alive. Replacement must
+    // still load a distinct candidate, cut the path over atomically, and leave the
+    // old handle/weak generation valid until their own references drain.
+    PipelineRequest replacementInitial = pipeline.Request(graph.replacementRoot);
+    Check(replacementInitial.TryWait(5000) && replacementInitial.HasLoaded(), "replacement fixture initial generation loads");
+    ResourceHandle replacementOld = replacementInitial.Acquire();
+    WeakResourceHandle replacementOldWeak = replacementOld.ToWeak();
+    const u32 replacementOldGeneration = replacementOld.GetGeneration();
+    replacementInitial.Reset();
+    Check(registry.GetState(graph.replacementRoot.GetPath()) == State::Evicting && replacementOld.IsValid(),
+          "strong resident keeps old generation alive after its pipeline request releases");
+
+    PipelineRequest replacement = pipeline.Replace(graph.replacementRoot, LoadPriority::High);
+    Check(replacement.IsValid() && graph.replacementEntered.TryWait(5000),
+          "replacement can start from a strongly retained current generation without an old pipeline request");
+
+    PipelineRequest replacementDuring = pipeline.Request(graph.replacementRoot);
+    Check(replacementDuring.IsValid() && replacementDuring.HasLoaded(),
+          "ordinary request during replacement resolves to the anchored old-current operation");
+    ResourceHandle replacementDuringHandle = replacementDuring.Acquire();
+    Check(replacementDuringHandle.IsValid() && replacementDuringHandle.GetGeneration() == replacementOldGeneration,
+          "pre-cutover ordinary request cannot create a duplicate wrapper for the replacement candidate");
+
+    PipelineRequest replacementParent = pipeline.Request(graph.replacementParent);
+    Check(replacementParent.TryWait(5000) && replacementParent.HasLoaded() &&
+              graph.observedReplacementDependencyGeneration.GetValue() == replacementOldGeneration,
+          "dependency attachment during replacement resolves through the same anchored old-current operation");
+
+    graph.releaseReplacement.Signal();
+    Check(replacement.TryWait(5000) && replacement.HasLoaded(), "replacement candidate completes after the cutover barrier releases");
+    ResourceHandle replacementNew = replacement.Acquire();
+    Check(replacementNew.IsValid() && replacementNew.GetGeneration() != replacementOldGeneration && replacementOld.IsValid(),
+          "replacement publishes a distinct current generation while the old strong handle remains live");
+    ResourceHandle replacementOldWeakLock = replacementOldWeak.Lock();
+    Check(replacementOldWeakLock.IsValid() && replacementOldWeakLock.GetGeneration() == replacementOldGeneration,
+          "old weak handle remains generation-safe across replacement cutover");
+    PipelineRequest replacementCurrent = pipeline.Request(graph.replacementRoot);
+    ResourceHandle replacementCurrentHandle = replacementCurrent.Acquire();
+    Check(replacementCurrent.IsSameOperation(replacement) && replacementCurrentHandle.IsValid() &&
+              replacementCurrentHandle.GetGeneration() == replacementNew.GetGeneration(),
+          "ordinary requests route to the replacement operation after cutover");
+
+    replacementOldWeakLock.Reset();
+    replacementDuringHandle.Reset();
+    replacementDuring.Reset();
+    replacementParent.Reset();
+    replacementOld.Reset();
+    Check(replacementOldWeak.IsStale() && !replacementOldWeak.Lock(),
+          "retired old weak generation becomes stale after its last strong handle drains");
+    replacementOldWeak.Reset();
+
     graph.slowEntered.Reset();
     graph.releaseSlow.Reset();
     PipelineRequest soloCancellation = pipeline.Request(graph.soloSlow, LoadPriority::Normal);
     Check(graph.slowEntered.TryWait(5000), "single-interest construction begins");
-    Check(soloCancellation.Cancel(), "last caller explicitly cancels running construction");
+    Failure cancellationFailure = Failure::None;
+    Check(soloCancellation.CancelWithStatus(&cancellationFailure) == PipelineCancelStatus::Cancelled &&
+              cancellationFailure == Failure::None,
+          "P4 atomic cancellation reports unfinished caller-interest withdrawal");
     graph.releaseSlow.Signal();
     Check(soloCancellation.HasFailed() && soloCancellation.GetError() == Failure::Cancelled, "running loader observes last-interest cancellation");
 
     const ResourceTypeId unknownType = HashTypeName("vanguard.pipeline-unknown");
     PipelineRequest unknown = pipeline.Request(MakeReference("graph/unknown.vgraph", unknownType));
     Check(unknown.TryWait(5000) && unknown.HasFailed() && unknown.GetError() == Failure::UnknownType, "unregistered dependency type fails asynchronously");
+    Failure terminalCancellationFailure = Failure::None;
+    Check(unknown.CancelWithStatus(&terminalCancellationFailure) == PipelineCancelStatus::Failed &&
+              terminalCancellationFailure == Failure::UnknownType,
+          "P4 atomic cancellation preserves an already-terminal load failure instead of rewriting it as Cancelled");
+    PipelineRequest completedCancellation = pipeline.Request(graph.shared);
+    Check(completedCancellation.TryWait(5000) && completedCancellation.HasLoaded() &&
+              completedCancellation.CancelWithStatus(&terminalCancellationFailure) == PipelineCancelStatus::Completed &&
+              terminalCancellationFailure == Failure::None,
+          "P4 atomic cancellation distinguishes already-completed success from unfinished cancellation");
 
     const PipelineStats stats = pipeline.GetStats();
     Check(stats.registeredLoaders == 1 && stats.coalescedRequests >= 1 && stats.priorityPromotions >= 1 && stats.dependencyEdges >= 9,
@@ -311,17 +409,77 @@ int main()
     cancelSecond.Reset();
     soloCancellation.Reset();
     unknown.Reset();
+    completedCancellation.Reset();
+    replacement.Reset();
+    replacementCurrent.Reset();
     rootHandle.Reset();
     optionalHandle.Reset();
     cancelHandle.Reset();
+    replacementNew.Reset();
+    replacementCurrentHandle.Reset();
 
     for (u32 attempt = 0; attempt < 500 && pipeline.GetStats().activeJobs != 0; ++attempt)
     {
         concurrency::SleepOnCurrentThread(1);
     }
 
-    Check(pipeline.GetStats().activeJobs == 0, "all asynchronous pipeline stages drain");
+    Check(pipeline.GetStats().activeJobs == 0 && pipeline.GetStats().externalRequests == 0,
+          "P4 atomic cancellation and terminal release return external request ownership to baseline");
     Check(pipeline.Shutdown(), "pipeline shuts down after requests and handles release");
+
+    // P4: terminal operation metadata is reclaimed at runtime and the configured
+    // bound is a deterministic admission guard rather than permanent history
+    // growth. A graph needing more than one simultaneous operation fails at a
+    // one-operation cap; after that failed root retires, a leaf can use the same
+    // bounded slot without reinitializing the pipeline or registry.
+    PipelineConfig boundedPipelineConfig;
+    boundedPipelineConfig.maximumRetainedOperations = 1u;
+    ResourcePipeline boundedPipeline;
+    Check(boundedPipeline.Initialize(registry, boundedPipelineConfig) && boundedPipeline.RegisterLoader(loader),
+          "P4 bounded resource pipeline initializes and registers its loader");
+    PipelineRequest boundedOverflow = boundedPipeline.Request(graph.root);
+    Check(boundedOverflow.TryWait(5000) && boundedOverflow.HasFailed(),
+          "P4 operation-history cap rejects graph expansion without unbounded metadata growth");
+    boundedOverflow.Reset();
+    for (u32 attempt = 0; attempt < 500 && boundedPipeline.GetStats().activeJobs != 0; ++attempt)
+        concurrency::SleepOnCurrentThread(1);
+    PipelineRequest boundedRecovered = boundedPipeline.Request(graph.shared);
+    Check(boundedRecovered.TryWait(5000) && boundedRecovered.HasLoaded() && boundedPipeline.GetStats().knownOperations <= 1u,
+          "P4 terminal no-interest operation is reclaimed so bounded pipeline admission recovers");
+    boundedRecovered.Reset();
+    for (u32 attempt = 0; attempt < 500 && boundedPipeline.GetStats().activeJobs != 0; ++attempt)
+        concurrency::SleepOnCurrentThread(1);
+
+    // A cancellation can publish terminal completion before the scheduled
+    // construction job returns from user code. The retained-operation collector
+    // must keep that captured PipelineOperation storage alive until the worker is
+    // actually gone; at a one-operation cap, a different request therefore stays
+    // inadmissible while the cancelled worker is deliberately held.
+    graph.slowEntered.Reset();
+    graph.releaseSlow.Reset();
+    PipelineRequest boundedCancelledWorker = boundedPipeline.Request(graph.soloSlow);
+    Check(boundedCancelledWorker.IsValid() && graph.slowEntered.TryWait(5000),
+          "P4 bounded reclamation fixture holds a scheduled construction job live");
+    Check(boundedCancelledWorker.Cancel(),
+          "P4 bounded reclamation fixture publishes cancellation while worker remains captured");
+    concurrency::SleepOnCurrentThread(20);
+    PipelineRequest boundedWhileWorkerAlive =
+        boundedPipeline.Request(MakeReference("graph/bounded-worker-owner.vgraph", unknownType));
+    Check(!boundedWhileWorkerAlive.IsValid() && boundedPipeline.GetStats().knownOperations == 1u,
+          "P4 retained-operation cap cannot recycle terminal storage still captured by a scheduled worker");
+    graph.releaseSlow.Signal();
+    for (u32 attempt = 0; attempt < 500 && boundedPipeline.GetStats().activeJobs != 0; ++attempt)
+        concurrency::SleepOnCurrentThread(1);
+    boundedCancelledWorker.Reset();
+    PipelineRequest boundedAfterWorkerDrain =
+        boundedPipeline.Request(MakeReference("graph/bounded-worker-owner.vgraph", unknownType));
+    Check(boundedAfterWorkerDrain.TryWait(5000) && boundedAfterWorkerDrain.HasFailed() &&
+              boundedAfterWorkerDrain.GetError() == Failure::UnknownType,
+          "P4 retained-operation admission recovers after the captured worker returns");
+    boundedAfterWorkerDrain.Reset();
+    for (u32 attempt = 0; attempt < 500 && boundedPipeline.GetStats().activeJobs != 0; ++attempt)
+        concurrency::SleepOnCurrentThread(1);
+    Check(boundedPipeline.Shutdown(), "P4 bounded pipeline shuts down after reclaimed operation churn");
     Check(registry.Shutdown(), "registry shuts down after pipeline removal");
     Check(jobs::Shutdown(), "Vanguard Jobs shuts down after resource work drains");
 

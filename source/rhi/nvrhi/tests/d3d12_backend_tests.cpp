@@ -4,6 +4,7 @@
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/rhi/d3d12/backend.hpp>
+#include <vanguard/rhi/backend/command_list_retention.hpp>
 #include <vanguard/rhi/backend/resource_lifetime.hpp>
 #include <vanguard/rhi/gpu_counters.hpp>
 #include <vanguard/rhi/rhi.hpp>
@@ -24,6 +25,8 @@
 #include <vanguard/rendering/gpu_scene_runtime.hpp>
 #include <vanguard/rendering/gpu_scene_upload.hpp>
 #include <vanguard/rendering/render_scene_gpu.hpp>
+#include <vanguard/materials/materials.hpp>
+#include <vanguard/meshes/meshes.hpp>
 #include <vanguard/window/window_manager.hpp>
 
 #include <cstdio>
@@ -745,6 +748,579 @@ namespace
         return destructions.destroyed.GetValue() == ResourceCount + 1 && lifetime.ShutdownAfterGpuIdle();
     }
 
+    [[nodiscard]] bool TestCommandListRetentionPolicy() noexcept
+    {
+        // Upload-manager users are destroyed by default. Explicit bounded-upload roles may retain their
+        // manager, but only after the normal GPU-completion boundary has made the native list recyclable.
+        return gpu::backend::ShouldRecycleCommandList(true, false, gpu::CommandListRetentionPolicy::Default) &&
+               !gpu::backend::ShouldRecycleCommandList(false, false, gpu::CommandListRetentionPolicy::Default) &&
+               !gpu::backend::ShouldRecycleCommandList(true, true, gpu::CommandListRetentionPolicy::Default) &&
+               gpu::backend::ShouldRecycleCommandList(true, true, gpu::CommandListRetentionPolicy::BoundedUploadReuse) &&
+               !gpu::backend::ShouldRecycleCommandList(false, true, gpu::CommandListRetentionPolicy::BoundedUploadReuse);
+    }
+
+    [[nodiscard]] bool TestCommandListLeaseLifecycle(gpu::Failure& failure) noexcept
+    {
+        constexpr vanguard::u64 BoundedRole = 0x434d444c424f554eull;
+
+        gpu::Failure boundedRoleFailure{};
+        if (gpu::CreateCommandList(gpu::CommandListType::Default, 0, &boundedRoleFailure, gpu::CommandListRetentionPolicy::BoundedUploadReuse) ||
+            boundedRoleFailure.code != gpu::FailureCode::InvalidArgument)
+            return false;
+
+        gpu::BufferDesc uploadDesc{};
+        uploadDesc.size = 4u * 1024u * 1024u;
+        uploadDesc.usage = gpu::BufferUsage::CopyDestination;
+        uploadDesc.initialState = gpu::ResourceState::CopyDestination;
+        gpu::Buffer upload(gpu::AdoptReference, gpu::CreateBuffer(uploadDesc, {}, &failure));
+        if (!upload)
+            return false;
+
+        vanguard::u32 payload[64u * 1024u]{};
+        for (vanguard::u32 index = 0; index < static_cast<vanguard::u32>(sizeof(payload) / sizeof(payload[0])); ++index)
+            payload[index] = index;
+
+        gpu::CommandListRef bounded =
+            gpu::CreateCommandList(gpu::CommandListType::Default, BoundedRole, &failure, gpu::CommandListRetentionPolicy::BoundedUploadReuse);
+        if (!bounded || !gpu::BindCommandList(bounded, &failure))
+            return false;
+        for (vanguard::u64 offset = 0; offset < uploadDesc.size; offset += sizeof(payload))
+        {
+            if (!gpu::WriteBuffer(upload.GetRef(), payload, sizeof(payload), offset, &failure))
+            {
+                gpu::UnbindCommandList();
+                gpu::DiscardCommandList(bounded);
+                return false;
+            }
+        }
+        gpu::UnbindCommandList();
+
+        const gpu::CommandListRef submittedStale = bounded;
+        gpu::GpuFence completion{};
+        const gpu::CommandListRef submissions[]{bounded};
+        if (!gpu::CloseAndSubmitCommandLists("bounded command-list lease lifecycle", {submissions, 1}, gpu::CommandListSyncType::None, completion, &failure) || !completion.IsValid())
+            return false;
+
+        gpu::Failure staleFailure{};
+        if (gpu::BindCommandList(submittedStale, &staleFailure) || staleFailure.code != gpu::FailureCode::InvalidCommandList)
+            return false;
+
+        // This must reacquire the matching sticky bounded outer. Discard is deliberately
+        // immediate: if the prior submission is still in flight, Gate 3 must retire the
+        // outer against the carried prior completion fence rather than destroy it early or
+        // put the unexecuted recording back into the hot pool.
+        gpu::CommandListRef reused =
+            gpu::CreateCommandList(gpu::CommandListType::Default, BoundedRole, &failure, gpu::CommandListRetentionPolicy::BoundedUploadReuse);
+        if (!reused)
+            return false;
+        const gpu::CommandListRef discardedStale = reused;
+        gpu::DiscardCommandList(reused);
+        if (reused.IsValid())
+            return false;
+        staleFailure = {};
+        if (gpu::BindCommandList(discardedStale, &staleFailure) || staleFailure.code != gpu::FailureCode::InvalidCommandList)
+            return false;
+
+        if (!gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure) || !gpu::RetireResources(&failure))
+            return false;
+
+        gpu::CommandListRef clean = gpu::CreateCommandList(gpu::CommandListType::Default, 0x434d444c434c454eull, &failure);
+        if (!clean)
+            return false;
+        const gpu::CommandListRef cleanStale = clean;
+        gpu::DiscardCommandList(clean);
+        staleFailure = {};
+        return !clean.IsValid() && !gpu::BindCommandList(cleanStale, &staleFailure) && staleFailure.code == gpu::FailureCode::InvalidCommandList;
+    }
+
+    [[nodiscard]] bool TestManualTextureUploadTransition(gpu::Failure& failure) noexcept
+    {
+        // Streaming candidate textures declare keepInitialState with a shader-read entry state. With NVRHI
+        // automatic barriers disabled, a raw WriteTexture copy requires an explicit transition of the exact
+        // subresource to CopyDestination; the command list restores the initial state on close.
+        vanguard::u8 pixels[4u * 4u * 4u]{};
+        for (vanguard::u32 index = 0; index < sizeof(pixels); ++index)
+            pixels[index] = static_cast<vanguard::u8>(index);
+        const gpu::TextureSubresourceData upload{pixels, sizeof(pixels), 16, 0, 0, 0};
+        gpu::TextureDesc desc{};
+        desc.extent = {4, 4, 1};
+        desc.format = gpu::Format::R8G8B8A8UNorm;
+        desc.usage = gpu::TextureUsage::ShaderResource | gpu::TextureUsage::CopySource | gpu::TextureUsage::CopyDestination;
+        desc.initialState = gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
+        gpu::Texture texture(gpu::AdoptReference, gpu::CreateTexture(desc, {}, &failure));
+        if (!texture)
+            return false;
+
+        gpu::CommandListRef commandList = gpu::CreateCommandList(gpu::CommandListType::CopySync, 0x4d414e55504c4f41ull, &failure);
+        if (!commandList || !gpu::BindCommandList(commandList, &failure))
+        {
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        const gpu::ResourceState shaderRead = gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
+        const gpu::SubresourceRange range{0, 1, 0, 1};
+        if (!gpu::TransitionTexture(texture.GetRef(), shaderRead, gpu::ResourceState::CopyDestination, range, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        // Prove the transition was materialized in NVRHI's state tracker: repeating the same entry-state
+        // transition must now be rejected as a mismatch. A no-op transition would pass both calls.
+        gpu::Failure repeatFailure{};
+        if (gpu::TransitionTexture(texture.GetRef(), shaderRead, gpu::ResourceState::CopyDestination, range, &repeatFailure) ||
+            repeatFailure.code != gpu::FailureCode::ResourceStateMismatch || !gpu::WriteTexture(texture.GetRef(), upload, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        gpu::UnbindCommandList();
+        gpu::GpuFence completion{};
+        const gpu::CommandListRef submissions[]{commandList};
+        return gpu::CloseAndSubmitCommandLists("manual texture upload", {submissions, 1}, gpu::CommandListSyncType::None, completion, &failure) &&
+               gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure);
+    }
+
+    [[nodiscard]] bool TestLazyBarrierCommitFence(gpu::Failure& failure) noexcept
+    {
+        const auto failed = [&failure](const char* const stage) noexcept
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] lazy barrier fence failed at %s: code=%u message=%s\n", stage, static_cast<unsigned>(failure.code), failure.message);
+            return false;
+        };
+
+        gpu::BufferDesc bufferDesc{};
+        bufferDesc.size = 256;
+        bufferDesc.usage = gpu::BufferUsage::CopySource | gpu::BufferUsage::CopyDestination | gpu::BufferUsage::ShaderResource |
+                           gpu::BufferUsage::UnorderedAccess | gpu::BufferUsage::IndirectArguments;
+        bufferDesc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer buffer(gpu::AdoptReference, gpu::CreateBuffer(bufferDesc, {}, &failure));
+        if (!buffer)
+            return failed("buffer creation");
+
+        gpu::TextureDesc textureDesc{};
+        textureDesc.extent = {4, 4, 1};
+        textureDesc.mipCount = 2;
+        textureDesc.format = gpu::Format::R8G8B8A8UNorm;
+        textureDesc.usage = gpu::TextureUsage::CopySource | gpu::TextureUsage::CopyDestination | gpu::TextureUsage::ShaderResource | gpu::TextureUsage::UnorderedAccess;
+        textureDesc.initialState = gpu::ResourceState::Common;
+        gpu::Texture texture(gpu::AdoptReference, gpu::CreateTexture(textureDesc, {}, &failure));
+        gpu::QueryPool timestamps(gpu::AdoptReference, gpu::CreateQueryPool({gpu::QueryType::Timestamp, 1}, &failure));
+        if (!texture || !timestamps)
+            return failed("texture/query creation");
+
+        gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x4c415a5942415252ull, &failure);
+        if (!commands || !gpu::BindCommandList(commands, &failure))
+            return failed("command-list bind");
+
+        const gpu::ResourceState combinedRead = gpu::ResourceState::ShaderResourceCompute | gpu::ResourceState::IndirectArgument;
+        const gpu::SubresourceRange mipZero{0, 1, 0, 1};
+        const gpu::SubresourceRange mipOne{1, 1, 0, 1};
+        const bool recorded =
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::CopyDestination, gpu::ResourceState::CopySource, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::CopySource, gpu::ResourceState::Common, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::Common, combinedRead, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), combinedRead, gpu::ResourceState::Common, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::UnorderedAccess, &failure) &&
+            gpu::BarrierBufferUav(buffer.GetRef(), &failure) &&
+            gpu::BarrierBufferUav(buffer.GetRef(), &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::UnorderedAccess, gpu::ResourceState::Common, &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, mipZero, &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopySource, mipOne, &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::CopyDestination, gpu::ResourceState::CopySource, mipZero, &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::CopySource, gpu::ResourceState::Common, mipZero, &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::CopySource, gpu::ResourceState::Common, mipOne, &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::UnorderedAccess, {}, &failure) &&
+            gpu::BarrierTextureUav(texture.GetRef(), &failure) &&
+            gpu::BarrierTextureUav(texture.GetRef(), &failure) &&
+            gpu::TransitionTexture(texture.GetRef(), gpu::ResourceState::UnorderedAccess, gpu::ResourceState::Common, {}, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopySource, &failure) &&
+            gpu::IssueQuery(timestamps.GetRef(), 0, &failure) &&
+            gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::CopySource, gpu::ResourceState::Common, &failure);
+        if (!recorded)
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("ordered transition/query recording");
+        }
+
+        // Cross several 64-request fence batches and leave all buffers away from
+        // their automatic Common close state. This also exercises Vanguard's
+        // bounded pre-close restoration instead of NVRHI's unbounded tail batch.
+        gpu::Buffer boundedBuffers[320];
+        for (vanguard::u32 index = 0; index < 320; ++index)
+        {
+            boundedBuffers[index] = gpu::Buffer(gpu::AdoptReference, gpu::CreateBuffer(bufferDesc, {}, &failure));
+            if (!boundedBuffers[index] || !gpu::TransitionBuffer(boundedBuffers[index].GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopySource, &failure))
+            {
+                gpu::UnbindCommandList();
+                gpu::DiscardCommandList(commands);
+                return failed("bounded distinct-buffer batch");
+            }
+        }
+        if (!gpu::ResolveQueries(timestamps.GetRef(), 0, 1, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("query resolve boundary");
+        }
+        gpu::UnbindCommandList();
+
+        gpu::GpuFence completion{};
+        const gpu::CommandListRef submissions[]{commands};
+        if (!gpu::CloseAndSubmitCommandLists("lazy barrier commit fence", {submissions, 1}, gpu::CommandListSyncType::None, completion, &failure) ||
+            !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
+            return failed("submission");
+        if (!gpu::AcquireQueries(timestamps.GetRef(), 0, 1, &failure))
+            return failed("query acquire");
+        vanguard::u64 timestamp = 0;
+        const bool result = gpu::GetQueryResult(timestamps.GetRef(), 0, timestamp, &failure);
+        gpu::ReleaseQueries(timestamps.GetRef());
+        return result || failed("query result");
+    }
+
+    [[nodiscard]] bool TestBlockCompressedWholeMipCopy(gpu::Failure& failure) noexcept
+    {
+        // D3D12 requires explicit source boxes for BC formats to use block-aligned edges. A complete mip may
+        // instead be represented by a null source box. Keep the top level block-aligned so this proof does not
+        // depend on OPTIONS8 unaligned-top-level support while mip 1 intentionally has odd BC dimensions.
+        gpu::TextureDesc desc{};
+        desc.extent = {228, 148, 1};
+        desc.format = gpu::Format::BC7UNorm;
+        desc.mipCount = 2;
+        desc.usage = gpu::TextureUsage::ShaderResource | gpu::TextureUsage::CopySource | gpu::TextureUsage::CopyDestination;
+        desc.initialState = gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
+        gpu::Texture source(gpu::AdoptReference, gpu::CreateTexture(desc, {}, &failure));
+        gpu::Texture destination(gpu::AdoptReference, gpu::CreateTexture(desc, {}, &failure));
+        if (!source || !destination)
+            return false;
+
+        gpu::CommandListRef commandList = gpu::CreateCommandList(gpu::CommandListType::CopySync, 0x4243374d49504350ull, &failure);
+        if (!commandList || !gpu::BindCommandList(commandList, &failure))
+        {
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+
+        const gpu::ResourceState shaderRead = gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
+        const gpu::SubresourceRange mipOne{1, 1, 0, 1};
+        gpu::TextureCopyRegion region{};
+        region.source.mipLevel = 1;
+        region.destination.mipLevel = 1;
+        if (!gpu::TransitionTexture(source.GetRef(), shaderRead, gpu::ResourceState::CopySource, mipOne, &failure) ||
+            !gpu::TransitionTexture(destination.GetRef(), shaderRead, gpu::ResourceState::CopyDestination, mipOne, &failure) ||
+            !gpu::CopyTexture(destination.GetRef(), source.GetRef(), region, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+
+        gpu::UnbindCommandList();
+        gpu::GpuFence completion{};
+        const gpu::CommandListRef submissions[]{commandList};
+        return gpu::CloseAndSubmitCommandLists("BC7 whole odd mip copy", {submissions, 1}, gpu::CommandListSyncType::None, completion, &failure) &&
+               gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure);
+    }
+
+    [[nodiscard]] bool TestFlushRetiredResourcesWaitsSubmissionFence(gpu::Failure& failure) noexcept
+    {
+        // A resource used by submitted GPU work must be natively releasable by FlushRetiredResources without
+        // the caller first waiting the submission receipt: the flush owns waiting Vanguard's completion
+        // boundary (which NVRHI's own idle fence does not cover) before it drains retirement.
+        gpu::BufferDesc desc{};
+        desc.size = 256;
+        desc.usage = gpu::BufferUsage::CopyDestination;
+        desc.initialState = gpu::ResourceState::CopyDestination;
+        gpu::Buffer buffer(gpu::AdoptReference, gpu::CreateBuffer(desc, {}, &failure));
+        if (!buffer)
+            return false;
+
+        gpu::CommandListRef commandList = gpu::CreateCommandList(gpu::CommandListType::Default, 0x464c555348524554ull, &failure);
+        if (!commandList || !gpu::BindCommandList(commandList, &failure))
+        {
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        const vanguard::u32 payload[4]{1u, 2u, 3u, 4u};
+        if (!gpu::WriteBuffer(buffer.GetRef(), payload, sizeof(payload), 0, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commandList);
+            return false;
+        }
+        gpu::UnbindCommandList();
+        gpu::GpuFence completion{};
+        const gpu::CommandListRef submissions[]{commandList};
+        if (!gpu::CloseAndSubmitCommandLists("flush-retired-fence", {submissions, 1}, gpu::CommandListSyncType::None, completion, &failure) || !completion.IsValid())
+            return false;
+
+        gpu::NativeReleaseObservation observation = gpu::ObserveNativeRelease(gpu::ResourceRef(buffer.GetRef()), &failure);
+        if (!observation)
+            return false;
+        buffer.Reset();
+        if (gpu::IsNativeReleaseComplete(observation))
+        {
+            gpu::ReleaseNativeReleaseObservation(observation);
+            return false;
+        }
+        // Deliberately no WaitForGpuFence/WaitIdle here: the flush must be self-sufficient.
+        const bool flushed = gpu::FlushRetiredResources(&failure);
+        const bool released = gpu::IsNativeReleaseComplete(observation);
+        gpu::ReleaseNativeReleaseObservation(observation);
+        return flushed && released;
+    }
+
+    [[nodiscard]] bool TestDescriptorDomainReclaim(gpu::Failure& failure) noexcept
+    {
+        const gpu::Capabilities capabilities = gpu::GetCapabilities();
+        if (!capabilities.bindlessResources)
+            return true;
+
+        gpu::BufferDesc bufferDesc{};
+        bufferDesc.size = 256;
+        bufferDesc.structureStride = sizeof(vanguard::u32);
+        bufferDesc.usage = gpu::BufferUsage::Structured | gpu::BufferUsage::ShaderResource;
+        bufferDesc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer buffer(gpu::AdoptReference, gpu::CreateBuffer(bufferDesc, {}, &failure));
+        gpu::DescriptorDomain domain(
+            gpu::AdoptReference,
+            gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 1, 0, gpu::ShaderStageBit(gpu::ShaderStage::Compute)}, &failure));
+        if (!buffer || !domain)
+            return false;
+
+        const auto publish = [&](const gpu::DescriptorHandle descriptor) noexcept
+        {
+            return gpu::WriteDescriptor(domain, descriptor, buffer.GetRef(), gpu::BindingType::StructuredBufferShaderResource, {}, &failure);
+        };
+        const auto submitMarker = [&](const gpu::CommandListType type, const vanguard::u64 role, const char* const name, gpu::GpuFence& completion) noexcept
+        {
+            gpu::CommandListRef command = gpu::CreateCommandList(type, role, &failure);
+            if (!command)
+                return false;
+            if (!gpu::BindCommandList(command, &failure))
+            {
+                gpu::DiscardCommandList(command);
+                return false;
+            }
+            if (!gpu::SetGpuMarker(name, &failure))
+            {
+                gpu::UnbindCommandList();
+                gpu::DiscardCommandList(command);
+                return false;
+            }
+            gpu::UnbindCommandList();
+            return gpu::CloseAndSubmitCommandLists(name, {&command, 1}, gpu::CommandListSyncType::None, completion, &failure);
+        };
+
+        const gpu::DescriptorHandle first = gpu::AllocateDescriptor(domain, &failure);
+        if (!first || !publish(first) || !gpu::RetireDescriptor(domain, first, {}, &failure))
+            return false;
+        const gpu::DescriptorDomainStats immediateStats = gpu::GetDescriptorDomainStats(domain);
+        if (immediateStats.allocated != 0 || immediateStats.populated != 0 || immediateStats.pendingRetirement != 0 || immediateStats.free != 1 || immediateStats.completedRetirements != 1)
+            return false;
+
+        const gpu::DescriptorHandle second = gpu::AllocateDescriptor(domain, &failure);
+        if (!second || second.index != first.index || second.generation == first.generation)
+            return false;
+        if (publish(first) || failure.code != gpu::FailureCode::InvalidReference || gpu::RetireDescriptor(domain, first, {}, &failure) || failure.code != gpu::FailureCode::InvalidReference ||
+            !gpu::RetireDescriptor(domain, second, {}, &failure))
+            return false;
+
+        const gpu::DescriptorHandle delayed = gpu::AllocateDescriptor(domain, &failure);
+        if (!delayed || !publish(delayed))
+            return false;
+        gpu::GpuFence baselineFence{};
+        if (!submitMarker(gpu::CommandListType::Default, 0x4453435245434c30ull, "descriptor reclaim baseline", baselineFence) || baselineFence.queue != gpu::QueueType::Graphics)
+            return false;
+        gpu::DescriptorRetirement delayedRetirement;
+        delayedRetirement.Include({gpu::QueueType::Graphics, baselineFence.value + 1u});
+        if (!gpu::RetireDescriptor(domain, delayed, delayedRetirement, &failure))
+            return false;
+        const gpu::DescriptorDomainStats pendingStats = gpu::GetDescriptorDomainStats(domain);
+        if (pendingStats.allocated != 0 || pendingStats.populated != 0 || pendingStats.pendingRetirement != 1 || pendingStats.free != 0 || pendingStats.completedRetirements != 2)
+            return false;
+        if (gpu::AllocateDescriptor(domain, &failure) || failure.code != gpu::FailureCode::CapacityExceeded || gpu::GetDescriptorDomainStats(domain).allocationFailures != 1)
+            return false;
+
+        gpu::GpuFence releaseFence{};
+        if (!submitMarker(gpu::CommandListType::Default, 0x4453435245434c31ull, "descriptor reclaim release", releaseFence) || releaseFence.queue != gpu::QueueType::Graphics ||
+            releaseFence.value < delayedRetirement.graphicsFence || !gpu::WaitForGpuFence(releaseFence, 5'000'000'000ull, &failure))
+            return false;
+
+        const gpu::DescriptorHandle reclaimed = gpu::AllocateDescriptor(domain, &failure);
+        const gpu::DescriptorDomainStats reclaimedStats = gpu::GetDescriptorDomainStats(domain);
+        if (!reclaimed || reclaimed.index != delayed.index || reclaimed.generation == delayed.generation || reclaimedStats.allocated != 1 || reclaimedStats.pendingRetirement != 0 ||
+            reclaimedStats.completedRetirements != 3 || reclaimedStats.allocationFailures != 1)
+            return false;
+        if (publish(delayed) || failure.code != gpu::FailureCode::InvalidReference || gpu::RetireDescriptor(domain, delayed, {}, &failure) || failure.code != gpu::FailureCode::InvalidReference ||
+            !gpu::RetireDescriptor(domain, reclaimed, {}, &failure))
+            return false;
+        const gpu::DescriptorDomainStats finalStats = gpu::GetDescriptorDomainStats(domain);
+        if (finalStats.allocated != 0 || finalStats.populated != 0 || finalStats.pendingRetirement != 0 || finalStats.free != 1 || finalStats.completedRetirements != 4 ||
+            finalStats.staleHandleOperations < 4 || finalStats.allocationFailures != 1)
+            return false;
+
+        const gpu::CommandListType secondaryType = capabilities.asyncCompute ? gpu::CommandListType::Compute : (capabilities.copyQueue ? gpu::CommandListType::CopyAsync : gpu::CommandListType::None);
+        if (secondaryType != gpu::CommandListType::None)
+        {
+            const gpu::QueueType secondaryQueue = gpu::GetQueueType(secondaryType);
+            gpu::DescriptorDomain staggeredDomain(
+                gpu::AdoptReference,
+                gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 2, 0, gpu::ShaderStageBit(gpu::ShaderStage::Compute)}, &failure));
+            const gpu::DescriptorHandle middle = gpu::AllocateDescriptor(staggeredDomain, &failure);
+            const gpu::DescriptorHandle head = gpu::AllocateDescriptor(staggeredDomain, &failure);
+            if (!staggeredDomain || !middle || !head ||
+                !gpu::WriteDescriptor(staggeredDomain, middle, buffer.GetRef(), gpu::BindingType::StructuredBufferShaderResource, {}, &failure) ||
+                !gpu::WriteDescriptor(staggeredDomain, head, buffer.GetRef(), gpu::BindingType::StructuredBufferShaderResource, {}, &failure))
+                return false;
+
+            gpu::GpuFence graphicsBaseline{};
+            gpu::GpuFence secondaryBaseline{};
+            if (!submitMarker(gpu::CommandListType::Default, 0x445343524d494430ull, "descriptor staggered graphics baseline", graphicsBaseline) || graphicsBaseline.queue != gpu::QueueType::Graphics ||
+                !submitMarker(secondaryType, 0x4453435248444230ull, "descriptor staggered secondary baseline", secondaryBaseline) || secondaryBaseline.queue != secondaryQueue)
+                return false;
+
+            gpu::DescriptorRetirement middleRetirement;
+            middleRetirement.Include({gpu::QueueType::Graphics, graphicsBaseline.value + 1u});
+            gpu::DescriptorRetirement headRetirement;
+            headRetirement.Include({secondaryQueue, secondaryBaseline.value + 1u});
+            if (!gpu::RetireDescriptor(staggeredDomain, middle, middleRetirement, &failure) || !gpu::RetireDescriptor(staggeredDomain, head, headRetirement, &failure))
+                return false;
+            const gpu::DescriptorDomainStats staggeredPending = gpu::GetDescriptorDomainStats(staggeredDomain);
+            if (staggeredPending.allocated != 0 || staggeredPending.populated != 0 || staggeredPending.pendingRetirement != 2 || staggeredPending.free != 0 || staggeredPending.completedRetirements != 0)
+                return false;
+
+            gpu::GpuFence graphicsRelease{};
+            if (!submitMarker(gpu::CommandListType::Default, 0x445343524d494431ull, "descriptor staggered graphics release", graphicsRelease) ||
+                graphicsRelease.queue != gpu::QueueType::Graphics || graphicsRelease.value < middleRetirement.graphicsFence ||
+                !gpu::WaitForGpuFence(graphicsRelease, 5'000'000'000ull, &failure))
+                return false;
+            const gpu::DescriptorHandle middleReclaimed = gpu::AllocateDescriptor(staggeredDomain, &failure);
+            const gpu::DescriptorDomainStats middleReclaimedStats = gpu::GetDescriptorDomainStats(staggeredDomain);
+            if (!middleReclaimed || middleReclaimed.index != middle.index || middleReclaimed.generation == middle.generation || middleReclaimedStats.allocated != 1 ||
+                middleReclaimedStats.pendingRetirement != 1 || middleReclaimedStats.free != 0 || middleReclaimedStats.completedRetirements != 1)
+                return false;
+            const gpu::DescriptorDomainStats headStillPending = gpu::GetDescriptorDomainStats(staggeredDomain);
+            if (headStillPending.allocated != 1 || headStillPending.pendingRetirement != 1 || headStillPending.free != 0 || headStillPending.completedRetirements != 1)
+                return false;
+
+            gpu::GpuFence secondaryRelease{};
+            if (!submitMarker(secondaryType, 0x4453435248444231ull, "descriptor staggered secondary release", secondaryRelease) || secondaryRelease.queue != secondaryQueue ||
+                secondaryRelease.value < secondaryBaseline.value + 1u || !gpu::WaitForGpuFence(secondaryRelease, 5'000'000'000ull, &failure))
+                return false;
+            const gpu::DescriptorHandle headReclaimed = gpu::AllocateDescriptor(staggeredDomain, &failure);
+            const gpu::DescriptorDomainStats headReclaimedStats = gpu::GetDescriptorDomainStats(staggeredDomain);
+            if (!headReclaimed || headReclaimed.index != head.index || headReclaimed.generation == head.generation || headReclaimedStats.allocated != 2 ||
+                headReclaimedStats.pendingRetirement != 0 || headReclaimedStats.free != 0 || headReclaimedStats.completedRetirements != 2 ||
+                !gpu::RetireDescriptor(staggeredDomain, middleReclaimed, {}, &failure) || !gpu::RetireDescriptor(staggeredDomain, headReclaimed, {}, &failure))
+                return false;
+            const gpu::DescriptorDomainStats staggeredFinal = gpu::GetDescriptorDomainStats(staggeredDomain);
+            if (staggeredFinal.allocated != 0 || staggeredFinal.populated != 0 || staggeredFinal.pendingRetirement != 0 || staggeredFinal.free != 2 ||
+                staggeredFinal.completedRetirements != 4)
+                return false;
+        }
+
+        constexpr vanguard::u32 concurrentDescriptorCount = 64;
+        gpu::DescriptorDomain concurrentDomain(
+            gpu::AdoptReference,
+            gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, concurrentDescriptorCount, 0, gpu::ShaderStageBit(gpu::ShaderStage::Compute)}, &failure));
+        gpu::DescriptorHandle concurrentDescriptors[concurrentDescriptorCount]{};
+        vanguard::concurrency::Atomic<vanguard::u32> concurrentFailures{0};
+        vanguard::jobs::Builder builder;
+        vanguard::jobs::JobName name{"Vanguard.RHI.DescriptorDomain.RF1ConcurrentAllocation"};
+        for (vanguard::u32 index = 0; index < concurrentDescriptorCount; ++index)
+        {
+            vanguard::jobs::Task task = vanguard::jobs::Task::Create(
+                [&, index](const vanguard::jobs::JobContext&) noexcept
+                {
+                    concurrentDescriptors[index] = gpu::AllocateDescriptor(concurrentDomain);
+                    if (!concurrentDescriptors[index] ||
+                        !gpu::WriteDescriptor(concurrentDomain, concurrentDescriptors[index], buffer.GetRef(), gpu::BindingType::StructuredBufferShaderResource))
+                        static_cast<void>(concurrentFailures.Increment());
+                });
+            if (!builder.Dispatch(name, static_cast<vanguard::jobs::Task&&>(task), vanguard::jobs::Fence::None))
+                return false;
+        }
+        builder.DispatchFence();
+        vanguard::jobs::Counter counter = builder.ExtractCounter();
+        if (!counter.IsValid() || !counter.Wait() || concurrentFailures.GetValue() != 0)
+            return false;
+        for (vanguard::u32 index = 0; index < concurrentDescriptorCount; ++index)
+        {
+            for (vanguard::u32 previous = 0; previous < index; ++previous)
+                if (concurrentDescriptors[index].index == concurrentDescriptors[previous].index)
+                    return false;
+        }
+
+        concurrentFailures.SetValue(0);
+        vanguard::jobs::Builder retireBuilder;
+        vanguard::jobs::JobName retireName{"Vanguard.RHI.DescriptorDomain.RF1ConcurrentRetirement"};
+        for (vanguard::u32 index = 0; index < concurrentDescriptorCount; ++index)
+        {
+            vanguard::jobs::Task task = vanguard::jobs::Task::Create(
+                [&, index](const vanguard::jobs::JobContext&) noexcept
+                {
+                    if (!gpu::RetireDescriptor(concurrentDomain, concurrentDescriptors[index], {}))
+                        static_cast<void>(concurrentFailures.Increment());
+                });
+            if (!retireBuilder.Dispatch(retireName, static_cast<vanguard::jobs::Task&&>(task), vanguard::jobs::Fence::None))
+                return false;
+        }
+        retireBuilder.DispatchFence();
+        vanguard::jobs::Counter retireCounter = retireBuilder.ExtractCounter();
+        if (!retireCounter.IsValid() || !retireCounter.Wait() || concurrentFailures.GetValue() != 0)
+            return false;
+        const gpu::DescriptorDomainStats retiredStats = gpu::GetDescriptorDomainStats(concurrentDomain);
+        if (retiredStats.allocated != 0 || retiredStats.populated != 0 || retiredStats.pendingRetirement != 0 || retiredStats.free != concurrentDescriptorCount ||
+            retiredStats.peakAllocated != concurrentDescriptorCount || retiredStats.completedRetirements != concurrentDescriptorCount)
+            return false;
+
+        gpu::DescriptorHandle recycledDescriptors[concurrentDescriptorCount]{};
+        concurrentFailures.SetValue(0);
+        vanguard::jobs::Builder recycleBuilder;
+        vanguard::jobs::JobName recycleName{"Vanguard.RHI.DescriptorDomain.RF1ConcurrentRecycle"};
+        for (vanguard::u32 index = 0; index < concurrentDescriptorCount; ++index)
+        {
+            vanguard::jobs::Task task = vanguard::jobs::Task::Create(
+                [&, index](const vanguard::jobs::JobContext&) noexcept
+                {
+                    recycledDescriptors[index] = gpu::AllocateDescriptor(concurrentDomain);
+                    if (!recycledDescriptors[index] ||
+                        !gpu::WriteDescriptor(concurrentDomain, recycledDescriptors[index], buffer.GetRef(), gpu::BindingType::StructuredBufferShaderResource))
+                        static_cast<void>(concurrentFailures.Increment());
+                });
+            if (!recycleBuilder.Dispatch(recycleName, static_cast<vanguard::jobs::Task&&>(task), vanguard::jobs::Fence::None))
+                return false;
+        }
+        recycleBuilder.DispatchFence();
+        vanguard::jobs::Counter recycleCounter = recycleBuilder.ExtractCounter();
+        if (!recycleCounter.IsValid() || !recycleCounter.Wait() || concurrentFailures.GetValue() != 0)
+            return false;
+        for (vanguard::u32 index = 0; index < concurrentDescriptorCount; ++index)
+        {
+            bool advancedGeneration = false;
+            for (vanguard::u32 previous = 0; previous < concurrentDescriptorCount; ++previous)
+                if (recycledDescriptors[index].index == concurrentDescriptors[previous].index)
+                {
+                    advancedGeneration = recycledDescriptors[index].generation != concurrentDescriptors[previous].generation;
+                    break;
+                }
+            if (!advancedGeneration)
+                return false;
+            for (vanguard::u32 previous = 0; previous < index; ++previous)
+                if (recycledDescriptors[index].index == recycledDescriptors[previous].index)
+                    return false;
+            if (!gpu::RetireDescriptor(concurrentDomain, recycledDescriptors[index], {}, &failure))
+                return false;
+        }
+        const gpu::DescriptorDomainStats concurrentStats = gpu::GetDescriptorDomainStats(concurrentDomain);
+        return concurrentStats.allocated == 0 && concurrentStats.populated == 0 && concurrentStats.pendingRetirement == 0 && concurrentStats.free == concurrentDescriptorCount &&
+               concurrentStats.peakAllocated == concurrentDescriptorCount && concurrentStats.completedRetirements == concurrentDescriptorCount * 2u;
+    }
+
     [[nodiscard]] bool TestNativeResourcesAndSubmission(gpu::Failure& failure) noexcept
     {
         const vanguard::u32 sourceData[] = {0x10203040u, 0x50607080u, 0x90a0b0c0u, 0xd0e0f000u};
@@ -1414,7 +1990,16 @@ namespace
                     return false;
             }
             const gpu::DescriptorDomainStats concurrentStats = gpu::GetDescriptorDomainStats(concurrentDomain);
-            if (concurrentStats.peakAllocated != concurrentDescriptorCount || concurrentStats.completedRetirements != concurrentDescriptorCount || concurrentStats.free != concurrentDescriptorCount)
+            if (concurrentStats.allocated != 0 || concurrentStats.populated != 0 || concurrentStats.pendingRetirement != 0 || concurrentStats.peakAllocated != concurrentDescriptorCount ||
+                concurrentStats.completedRetirements != concurrentDescriptorCount || concurrentStats.free != concurrentDescriptorCount)
+                return false;
+
+            const gpu::DescriptorHandle immediateRecycle = gpu::AllocateDescriptor(concurrentDomain, &failure);
+            if (!immediateRecycle || immediateRecycle.generation == 1 || !gpu::RetireDescriptor(concurrentDomain, immediateRecycle, {}, &failure))
+                return false;
+            const gpu::DescriptorDomainStats immediateRecycleStats = gpu::GetDescriptorDomainStats(concurrentDomain);
+            if (immediateRecycleStats.allocated != 0 || immediateRecycleStats.pendingRetirement != 0 || immediateRecycleStats.free != concurrentDescriptorCount ||
+                immediateRecycleStats.completedRetirements != concurrentDescriptorCount + 1u)
                 return false;
         }
 
@@ -2127,7 +2712,11 @@ namespace
             return false;
 
         gpu::CommandListRef commandList = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5357415043484149ull, &failure);
-        if (!commandList || !gpu::BindCommandList(commandList, &failure) || !gpu::TransitionSwapChainPresent(backBuffer, &failure))
+        gpu::RenderTargetSetup renderTargets{};
+        renderTargets.colorTargets[0].texture = backBuffer.texture;
+        renderTargets.colorTargetCount = 1;
+        if (!commandList || !gpu::BindCommandList(commandList, &failure) || !gpu::SetupRenderTargets(renderTargets, &failure) ||
+            !gpu::TransitionSwapChainPresent(backBuffer, &failure))
         {
             if (gpu::GetBoundCommandList().IsValid())
                 gpu::UnbindCommandList();
@@ -2154,8 +2743,6 @@ namespace
         if (!gpu::Present(backBuffer, &failure))
             return false;
         if (gpu::Present(backBuffer, &failure) || failure.code != gpu::FailureCode::InvalidReference)
-            return false;
-        if (!gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
             return false;
         MSG message{};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
@@ -2312,8 +2899,83 @@ namespace
             return ScenePublicationFailure("retirement publication");
         gpu::ResidencyFenceSet sceneRetirementFences;
         if (!SubmitRetirementFences(0x4750555343505542ull, sceneRetirementFences) || !lifetime.SealRetirements(sceneRetirementFences, &lifetimeFailure) || !WaitRetirementFences(sceneRetirementFences) ||
-            lifetime.Collect(&lifetimeFailure) != 1 || !sceneManager.DestroyScene(scene, &sceneFailure) || !scenePublisher.Shutdown(&sceneGpuFailure) || !sceneManager.Shutdown(&sceneFailure))
+            lifetime.Collect(&lifetimeFailure) != 1 || !sceneManager.DestroyScene(scene, &sceneFailure))
             return ScenePublicationFailure("retirement collection and shutdown");
+
+        rendering::RenderSceneDesc detachSceneDesc;
+        detachSceneDesc.name = "GPU Scene tracked-count detach test";
+        detachSceneDesc.maximumProxies = 8;
+        detachSceneDesc.maximumPendingProxyMutations = 8;
+        rendering::RenderSceneHandle detachScene;
+        if (!sceneManager.CreateScene(detachSceneDesc, detachScene, &sceneFailure))
+            return ScenePublicationFailure("tracked-count scene creation");
+        rendering::MeshProxyDesc instanceDesc;
+        instanceDesc.proxy.scene = detachScene;
+        instanceDesc.proxy.debugName = "tracked-count instance";
+        instanceDesc.proxy.bounds.minimum[0] = instanceDesc.proxy.bounds.minimum[1] = instanceDesc.proxy.bounds.minimum[2] = -1.0f;
+        instanceDesc.proxy.bounds.maximum[0] = instanceDesc.proxy.bounds.maximum[1] = instanceDesc.proxy.bounds.maximum[2] = 1.0f;
+        instanceDesc.mesh = vanguard::resources::ResourceReference(vanguard::resources::ResourcePath::FromString("meshes/tracked_count.vmesh"), vanguard::meshes::MeshResourceType);
+        rendering::RenderProxyHandle instanceProxy;
+        rendering::LightProxyDesc trackedLightDesc;
+        trackedLightDesc.proxy.scene = detachScene;
+        trackedLightDesc.proxy.debugName = "tracked-count light";
+        trackedLightDesc.range = 5.0f;
+        rendering::RenderProxyHandle trackedLight;
+        rendering::DecalProxyDesc trackedDecalDesc;
+        trackedDecalDesc.proxy.scene = detachScene;
+        trackedDecalDesc.proxy.debugName = "tracked-count decal";
+        trackedDecalDesc.material = vanguard::resources::ResourceReference(vanguard::resources::ResourcePath::FromString("materials/tracked_count.vmat"),
+                                                                           vanguard::materials::MaterialResourceType);
+        rendering::RenderProxyHandle trackedDecal;
+        if (!sceneManager.CreateMeshProxy(instanceDesc, instanceProxy, &sceneFailure) ||
+            !sceneManager.CreateLightProxy(trackedLightDesc, trackedLight, &sceneFailure) ||
+            !sceneManager.CreateDecalProxy(trackedDecalDesc, trackedDecal, &sceneFailure))
+            return ScenePublicationFailure("tracked-count proxy admission");
+        const rendering::RenderSceneGpuStats trackedCountStats = scenePublisher.GetStats();
+        if (trackedCountStats.trackedInstances != 1 || trackedCountStats.trackedLights != 1 || trackedCountStats.trackedDecals != 1 || trackedCountStats.pendingChanges != 3)
+            return ScenePublicationFailure("tracked-count admission accounting");
+        if (!sceneManager.DestroyProxy(instanceProxy, &sceneFailure) || !sceneManager.DestroyProxy(trackedLight, &sceneFailure) || !sceneManager.DestroyProxy(trackedDecal, &sceneFailure))
+            return ScenePublicationFailure("tracked-count proxy retirement");
+        const rendering::RenderSceneGpuStats retiredCountStats = scenePublisher.GetStats();
+        if (retiredCountStats.trackedInstances != 0 || retiredCountStats.trackedLights != 0 || retiredCountStats.trackedDecals != 0 || retiredCountStats.pendingChanges != 0 ||
+            retiredCountStats.pendingRetirements != 3)
+            return ScenePublicationFailure("tracked-count retirement accounting");
+        if (!sceneManager.PrepareSceneUpdate(detachScene, 3, scenePrepare, &sceneFailure) || !sceneManager.ExecuteSceneUpdate(detachScene, sceneBuilder, sceneUpdate, &sceneFailure) ||
+            !scenePublisher.Prepare(detachScene, sceneUpdate.mutationEpoch, scenePublication, &sceneGpuFailure) || scenePublication.changeCount != 0 ||
+            scenePublication.retirements.Size() != 3 || !scenePublisher.BuildUploadRequests(scenePublication, sceneRequests, &sceneGpuFailure) || sceneRequests.Size() != 1 ||
+            !uploader.Begin({sceneRequests.TypedData(), sceneRequests.Size()}, {&sceneReservation, 1}, &uploadFailure))
+            return ScenePublicationFailure("tracked-count detach and shutdown");
+        const vanguard::u32 retirementWriteRangeCount = scenePublisher.GetWriteRangeCount(scenePublication);
+        for (vanguard::u32 rangeIndex = 0; rangeIndex < retirementWriteRangeCount; ++rangeIndex)
+            if (!scenePublisher.WriteRange(scenePublication, {&sceneReservation, 1}, rangeIndex, &sceneGpuFailure))
+                return ScenePublicationFailure("tracked-count retirement tombstone write");
+        if (!scenePublisher.FinishWrites(scenePublication, &sceneGpuFailure) || !uploader.Complete(sceneReservation, &uploadFailure) || !uploader.Submit(sceneUpload, &uploadFailure) ||
+            !scenePublisher.Complete(scenePublication, &sceneGpuFailure) || scenePublisher.GetStats().pendingRetirements != 0)
+            return ScenePublicationFailure("tracked-count detach and shutdown");
+        gpu::ResidencyFenceSet trackedCountRetirementFences;
+        if (!SubmitRetirementFences(0x4750555343545243ull, trackedCountRetirementFences))
+            return ScenePublicationFailure("tracked-count retirement fence submission");
+        if (!lifetime.SealRetirements(trackedCountRetirementFences, &lifetimeFailure))
+            return LifetimeFailure("tracked-count retirement sealing");
+        if (!WaitRetirementFences(trackedCountRetirementFences))
+            return ScenePublicationFailure("tracked-count retirement fence wait");
+        const vanguard::u32 trackedCountCollected = lifetime.Collect(&lifetimeFailure);
+        // Only the unpublished Instance receives a tombstone upload. That upload
+        // commits its initial publication before Complete moves it to Retiring, so
+        // it must pass through the fenced lifetime collector. The unpublished Light
+        // and Decal identities have no retirement upload and Complete cancels them
+        // directly from Allocated instead.
+        if (trackedCountCollected != 1)
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] tracked-count collected=%u pending=%u\n", trackedCountCollected, lifetime.GetStats().pendingRetirements);
+            return LifetimeFailure("tracked-count retirement collection");
+        }
+        if (!sceneManager.DestroyScene(detachScene, &sceneFailure))
+            return ScenePublicationFailure("tracked-count scene destruction");
+        if (!scenePublisher.Shutdown(&sceneGpuFailure))
+            return ScenePublicationFailure("tracked-count publisher shutdown");
+        if (!sceneManager.Shutdown(&sceneFailure))
+            return ScenePublicationFailure("tracked-count manager shutdown");
 
         rendering::GpuSceneAllocation uploadedInstances[2];
         if (!lifetime.Allocate<rendering::GpuInstance>(1, uploadedInstances[0], &lifetimeFailure) || !lifetime.Allocate<rendering::GpuInstance>(1, uploadedInstances[1], &lifetimeFailure))
@@ -2372,7 +3034,9 @@ namespace
         const gpu::ResourceState shaderRead = gpu::ResourceState::ShaderResourceGraphics | gpu::ResourceState::ShaderResourceCompute;
         if (!tables.GetPage<rendering::GpuInstance>(0, uploadedInstancePage) || !uploadReadback || !uploadReadbackCommands || !gpu::BindCommandList(uploadReadbackCommands, &failure) ||
             !gpu::TransitionBuffer(uploadedInstancePage.buffer, gpu::ResourceState::Unknown, gpu::ResourceState::CopySource, &failure) ||
-            !gpu::CopyBuffer(uploadReadback, 0, uploadedInstancePage.buffer, 0, sizeof(rendering::GpuInstance) * 2, &failure) ||
+            !gpu::CopyBuffer(uploadReadback, 0, uploadedInstancePage.buffer, static_cast<vanguard::u64>(uploadedInstances[0].first) * sizeof(rendering::GpuInstance), sizeof(rendering::GpuInstance), &failure) ||
+            !gpu::CopyBuffer(uploadReadback, sizeof(rendering::GpuInstance), uploadedInstancePage.buffer,
+                             static_cast<vanguard::u64>(uploadedInstances[1].first) * sizeof(rendering::GpuInstance), sizeof(rendering::GpuInstance), &failure) ||
             !gpu::TransitionBuffer(uploadedInstancePage.buffer, gpu::ResourceState::Unknown, shaderRead, &failure))
             return LifetimeFailure("sparse-upload readback recording");
         gpu::UnbindCommandList();
@@ -2382,8 +3046,8 @@ namespace
             !gpu::WaitForGpuFence(uploadReadbackCompletion, 5'000'000'000ull, &failure))
             return LifetimeFailure("sparse-upload readback submission");
         const auto* const uploadedData = static_cast<const rendering::GpuInstance*>(gpu::LockBuffer(uploadReadback, 0, sizeof(rendering::GpuInstance) * 2, &failure));
-        if (uploadedData == nullptr || uploadedData[uploadedInstances[0].first].boundsRadius != 11.0f || uploadedData[uploadedInstances[0].first].deformation != 0x11111111u ||
-            uploadedData[uploadedInstances[1].first].boundsRadius != 33.0f || uploadedData[uploadedInstances[1].first].deformation != 0x33333333u)
+        if (uploadedData == nullptr || uploadedData[0].boundsRadius != 11.0f || uploadedData[0].deformation != 0x11111111u ||
+            uploadedData[1].boundsRadius != 33.0f || uploadedData[1].deformation != 0x33333333u)
             return LifetimeFailure("sparse-upload readback verification");
         gpu::UnlockBuffer(uploadReadback);
         static_cast<void>(gpu::SafeRelease(uploadReadback));
@@ -2538,9 +3202,9 @@ namespace
         const rendering::GpuSceneTablesStats tableStats = tables.GetStats();
         const rendering::GpuSceneUploadStats uploadStats = uploader.GetStats();
         if (lifetimeStats.allocated != 0 || lifetimeStats.active != 0 || lifetimeStats.retiring != 0 || lifetimeStats.pendingRetirements != 0 || lifetimeStats.sealedRetirements != 0 ||
-            lifetimeStats.sealedEpochs != 0 || lifetimeStats.retirements != batchSize * 4 + 6 || lifetimeStats.reclaimed != batchSize * 4 + 6 || lifetimeStats.epochsSealed != 8 ||
-            lifetimeStats.epochCapacityStalls != 1 || lifetimeStats.epochFencePolls < 5 || uploadStats.batchesSubmitted != 4 || uploadStats.requestedUpdates != 6 || uploadStats.uniqueUpdates != 5 ||
-            uploadStats.copiesRecorded != 5 || uploadStats.bytesSuperseded != sizeof(rendering::GpuInstance) || tableStats.materializedPages < 4 || tableStats.allocatedBytes == 0)
+            lifetimeStats.sealedEpochs != 0 || lifetimeStats.retirements != batchSize * 4 + 7 || lifetimeStats.reclaimed != batchSize * 4 + 7 || lifetimeStats.epochsSealed != 9 ||
+            lifetimeStats.epochCapacityStalls != 1 || lifetimeStats.epochFencePolls < 5 || uploadStats.batchesSubmitted != 5 || uploadStats.requestedUpdates != 7 || uploadStats.uniqueUpdates != 6 ||
+            uploadStats.copiesRecorded != 6 || uploadStats.bytesSuperseded != sizeof(rendering::GpuInstance) || tableStats.materializedPages < 4 || tableStats.allocatedBytes == 0)
         {
             std::fprintf(stderr,
                          "[rhiNvrhiTests] lifetime stats: alloc=%u active=%u retiring=%u pending=%u sealed=%u epochs=%u retire=%llu reclaim=%llu "
@@ -2580,6 +3244,11 @@ namespace
 
     [[nodiscard]] bool TestGpuSceneRuntime(gpu::Failure& failure) noexcept
     {
+        const auto RuntimeFailure = [](const char* const stage) noexcept
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] GPU Scene runtime failed at %s\n", stage);
+            return false;
+        };
         const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) | gpu::ShaderStageBit(gpu::ShaderStage::Pixel) | gpu::ShaderStageBit(gpu::ShaderStage::Compute);
         gpu::DescriptorDomain descriptors(gpu::AdoptReference, gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 128, 0, visibility}, &failure));
         if (!descriptors)
@@ -2606,7 +3275,7 @@ namespace
         rendering::GpuSceneRuntimeFailure runtimeFailure;
         if (!runtime.Initialize(scenes, config, &runtimeFailure) || !runtime.IsInitialized() || !runtime.GetTables().IsInitialized() || !runtime.GetLifetime().IsInitialized() ||
             !runtime.GetUploader().IsInitialized() || !runtime.GetDefinitions().IsInitialized() || !runtime.GetScenePublisher().IsInitialized())
-            return false;
+            return RuntimeFailure("initialization");
 
         rendering::RenderCameraStorage cameras;
         rendering::RenderCameraFailure cameraFailure;
@@ -2640,19 +3309,32 @@ namespace
             return false;
 
         rendering::RenderCommandFrameTickResult tickResult;
-        if (!commands.FrameTick(scenes.GetFramePipelineScenes(), 1, tickResult, &commandFailure) || !commands.FlushPreviousFrameProcessing(&commandFailure) || commands.ConsumeExecutionFailure(commandFailure) ||
-            runtime.ConsumePublicationFailure(runtimeFailure) || runtime.GetLifetime().GetState(identity.allocation) != rendering::GpuSceneAllocationState::Active)
-            return false;
+        if (!commands.FrameTick(scenes.GetFramePipelineScenes(), 1, tickResult, &commandFailure) || !commands.FlushPreviousFrameProcessing(&commandFailure) ||
+            !runtime.ResolveContributions(&runtimeFailure) || commands.ConsumeExecutionFailure(commandFailure) || runtime.ConsumePublicationFailure(runtimeFailure) ||
+            runtime.GetLifetime().GetState(identity.allocation) != rendering::GpuSceneAllocationState::Active)
+            return RuntimeFailure("initial publication");
         const rendering::GpuSceneRuntimeStats firstPublication = runtime.GetStats();
         if (firstPublication.publicationTicks != 1 || firstPublication.submittedBatches != 1 || firstPublication.completedPublications != 1 || firstPublication.publishedObjects != 1)
-            return false;
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] runtime first stats: ticks=%llu batches=%llu completed=%llu objects=%llu deferred=%llu\n",
+                         static_cast<unsigned long long>(firstPublication.publicationTicks), static_cast<unsigned long long>(firstPublication.submittedBatches),
+                         static_cast<unsigned long long>(firstPublication.completedPublications), static_cast<unsigned long long>(firstPublication.publishedObjects),
+                         static_cast<unsigned long long>(firstPublication.deferredScenes));
+            return RuntimeFailure("initial publication stats");
+        }
 
         if (!commands.FrameTick(scenes.GetFramePipelineScenes(), 2, tickResult, &commandFailure) || !commands.FlushPreviousFrameProcessing(&commandFailure) || !runtime.ResolveContributions(&runtimeFailure) ||
             commands.ConsumeExecutionFailure(commandFailure) || runtime.ConsumePublicationFailure(runtimeFailure))
-            return false;
+            return RuntimeFailure("no-op publication");
         const rendering::GpuSceneRuntimeStats noOpPublication = runtime.GetStats();
         if (noOpPublication.publicationTicks != 2 || noOpPublication.submittedBatches != 1 || noOpPublication.completedPublications != 2 || noOpPublication.publishedObjects != 1)
-            return false;
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] runtime no-op stats: ticks=%llu batches=%llu completed=%llu objects=%llu deferred=%llu\n",
+                         static_cast<unsigned long long>(noOpPublication.publicationTicks), static_cast<unsigned long long>(noOpPublication.submittedBatches),
+                         static_cast<unsigned long long>(noOpPublication.completedPublications), static_cast<unsigned long long>(noOpPublication.publishedObjects),
+                         static_cast<unsigned long long>(noOpPublication.deferredScenes));
+            return RuntimeFailure("no-op publication stats");
+        }
 
         const auto submitRetirementFences = [&failure](const vanguard::u64 name, gpu::ResidencyFenceSet& submitted) noexcept
         {
@@ -2680,14 +3362,14 @@ namespace
         if (!scenes.DestroyProxy(light, &sceneFailure) || !commands.FrameTick(scenes.GetFramePipelineScenes(), 3, tickResult, &commandFailure) || !commands.FlushPreviousFrameProcessing(&commandFailure) ||
             commands.ConsumeExecutionFailure(commandFailure) || !runtime.ResolveContributions(&runtimeFailure) || runtime.ConsumePublicationFailure(runtimeFailure) ||
             runtime.GetLifetime().GetState(identity.allocation) != rendering::GpuSceneAllocationState::Retiring)
-            return false;
+            return RuntimeFailure("retirement publication");
         gpu::ResidencyFenceSet retirementFences;
         rendering::GpuSceneLifetimeFailure lifetimeFailure;
         if (!submitRetirementFences(0x47505552554e5449ull, retirementFences) || !runtime.GetLifetime().SealRetirements(retirementFences, &lifetimeFailure) || !waitRetirementFences(retirementFences) ||
             runtime.GetLifetime().Collect(&lifetimeFailure) != 1 || !commands.Shutdown(&commandFailure) || runtime.Shutdown({}, &runtimeFailure) ||
             runtimeFailure.code != rendering::GpuSceneRuntimeFailureCode::LiveScenesRemain || !scenes.DestroyScene(scene, &sceneFailure) || !runtime.Shutdown({}, &runtimeFailure) || runtime.IsInitialized() ||
             !cameras.Shutdown(&cameraFailure) || !scenes.Shutdown(&sceneFailure))
-            return false;
+            return RuntimeFailure("retirement collection and shutdown");
         return true;
     }
 
@@ -2888,6 +3570,12 @@ int main()
         static_cast<void>(vanguard::jobs::Shutdown());
         return 1;
     }
+    if (!TestCommandListRetentionPolicy())
+    {
+        std::printf("[rhiNvrhiTests] command-list retention policy test failed\n");
+        static_cast<void>(vanguard::jobs::Shutdown());
+        return 1;
+    }
 
     vanguard::rhi::d3d12::Backend backend;
     vanguard::rhi::Failure failure{};
@@ -2914,6 +3602,16 @@ int main()
         !capabilities.memoryBudgetQueries || !capabilities.explicitResidency || capabilities.rayTracing || capabilities.rayTracingPipeline || capabilities.meshShaders || capabilities.variableRateShading)
     {
         std::printf("[rhiNvrhiTests] invalid device capability contract\n");
+        static_cast<void>(vanguard::jobs::Shutdown());
+        return 1;
+    }
+    if (!TestCommandListLeaseLifecycle(failure) || !TestManualTextureUploadTransition(failure) || !TestLazyBarrierCommitFence(failure) || !TestBlockCompressedWholeMipCopy(failure) ||
+        !TestFlushRetiredResourcesWaitsSubmissionFence(failure) || !TestDescriptorDomainReclaim(failure))
+    {
+        std::printf("[rhiNvrhiTests] NVRHI state/lifetime regression test failed: %s\n", failure.message);
+        static_cast<void>(vanguard::rhi::WaitIdle());
+        static_cast<void>(vanguard::rhi::RetireResources());
+        static_cast<void>(vanguard::rhi::Shutdown());
         static_cast<void>(vanguard::jobs::Shutdown());
         return 1;
     }

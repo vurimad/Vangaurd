@@ -1,11 +1,13 @@
 #include <vanguard/platform/windows/windows_platform_host.hpp>
 
 #include <vanguard/concurrency/atomic.hpp>
+#include <vanguard/concurrency/thread.hpp>
 #include <vanguard/input/input.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/window/sdl/sdl_window_backend.hpp>
 
 #include <SDL3/SDL.h>
+#include <ShlObj.h>
 #include <Windows.h>
 
 #include <new>
@@ -16,6 +18,51 @@ namespace
 
     vanguard::concurrency::Atomic<bool> g_consoleExitRequested;
     vanguard::concurrency::Atomic<bool> g_platformHostActive;
+
+    struct FileDialogCallbackBridge final
+    {
+        vanguard::application::PlatformFileDialogCallback callback = nullptr;
+        void* userData = nullptr;
+    };
+
+    void DestroyFileDialogBridge(FileDialogCallbackBridge* const bridge) noexcept
+    {
+        if (bridge == nullptr)
+            return;
+        bridge->~FileDialogCallbackBridge();
+        vanguard::memory::MemoryBlock block{bridge, sizeof(FileDialogCallbackBridge), vanguard::memory::PoolId::Window};
+        vanguard::memory::Free(block);
+    }
+
+    void SDLCALL CompleteOpenFileDialog(void* const userData, const char* const* const fileList, int) noexcept
+    {
+        auto* const bridge = static_cast<FileDialogCallbackBridge*>(userData);
+        if (bridge == nullptr || bridge->callback == nullptr)
+        {
+            DestroyFileDialogBridge(bridge);
+            return;
+        }
+
+        vanguard::application::PlatformFileDialogResultView result;
+        if (fileList == nullptr)
+        {
+            result.outcome = vanguard::application::PlatformFileDialogOutcome::Error;
+            result.error = SDL_GetError();
+        }
+        else if (fileList[0] == nullptr)
+        {
+            result.outcome = vanguard::application::PlatformFileDialogOutcome::Cancelled;
+        }
+        else
+        {
+            result.outcome = vanguard::application::PlatformFileDialogOutcome::Selected;
+            result.paths = fileList;
+            while (result.pathCount != ~vanguard::u32{0} && fileList[result.pathCount] != nullptr)
+                ++result.pathCount;
+        }
+        bridge->callback(bridge->userData, result);
+        DestroyFileDialogBridge(bridge);
+    }
 
     class SdlInputBackend final : public vanguard::input::IInputBackend
     {
@@ -398,6 +445,11 @@ namespace vanguard::platform::windows
         return "Windows";
     }
 
+    const char* WindowsPlatformHost::GetExecutablePath() const noexcept
+    {
+        return m_executablePath[0] != '\0' ? m_executablePath : nullptr;
+    }
+
     application::PlatformStatus WindowsPlatformHost::Initialize(const application::PlatformStartupInfo& startup) noexcept
     {
         if (m_initialized)
@@ -405,14 +457,33 @@ namespace vanguard::platform::windows
         if (g_platformHostActive.CompareExchange(true, false))
             return application::PlatformStatus::Failure("another Windows platform host is already active");
 
+        wchar_t executableWide[1024]{};
+        constexpr DWORD executableCapacity = static_cast<DWORD>(sizeof(executableWide) / sizeof(executableWide[0]));
+        const DWORD executableLength = ::GetModuleFileNameW(nullptr, executableWide, executableCapacity);
+        if (executableLength == 0 || executableLength >= executableCapacity)
+        {
+            g_platformHostActive.SetValue(false);
+            return application::PlatformStatus::Failure("failed to resolve the Windows process image path");
+        }
+        const int executableUtf8Bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, executableWide,
+                                                               static_cast<int>(executableLength), m_executablePath,
+                                                               static_cast<int>(sizeof(m_executablePath) - 1u), nullptr, nullptr);
+        if (executableUtf8Bytes <= 0 || static_cast<size_t>(executableUtf8Bytes) >= sizeof(m_executablePath))
+        {
+            m_executablePath[0] = '\0';
+            g_platformHostActive.SetValue(false);
+            return application::PlatformStatus::Failure("failed to encode the Windows process image path as UTF-8");
+        }
+        m_executablePath[executableUtf8Bytes] = '\0';
+
         // This must happen before any product service creates an HWND. Failure is non-fatal when process metadata or
         // an embedding host has already selected the awareness mode.
         ConfigureDpiAwareness();
 
+        const bool editor = application::HasProfile(startup.profile, application::ApplicationProfile::Editor);
         // An editor activation click also operates the clicked tab/control, matching normal multi-window tool interaction.
-        if (application::HasProfile(startup.profile, application::ApplicationProfile::Editor))
+        if (editor)
             static_cast<void>(SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1"));
-
         g_consoleExitRequested.SetValue(false);
         if (::SetConsoleCtrlHandler(ConsoleControlHandler, TRUE) == FALSE)
         {
@@ -524,6 +595,97 @@ namespace vanguard::platform::windows
         return m_windowBackend;
     }
 
+    application::PlatformStatus WindowsPlatformHost::ShowOpenFileDialog(
+        const application::PlatformOpenFileDialogRequest& request,
+        const application::PlatformFileDialogCallback callback,
+        void* const userData) noexcept
+    {
+        if (!m_initialized)
+            return application::PlatformStatus::Failure("Windows platform host is not initialized");
+        if (!concurrency::IsMainThread())
+            return application::PlatformStatus::Failure("native open-file dialogs must be submitted from the main thread");
+        if (callback == nullptr)
+            return application::PlatformStatus::Failure("native open-file dialog requires a completion callback");
+
+        memory::MemoryBlock block = memory::Allocate(memory::PoolId::Window, sizeof(FileDialogCallbackBridge), alignof(FileDialogCallbackBridge));
+        if (!block)
+            return application::PlatformStatus::Failure("failed to allocate native open-file dialog callback bridge");
+        auto* const bridge = ::new (block.address) FileDialogCallbackBridge{callback, userData};
+
+        // Deliberately unparented in this first portable seam. SDL's Windows
+        // implementation stores the SDL_Window* in a detached dialog thread;
+        // keeping no parent pointer lets editor/window teardown remain safe if
+        // a dialog is still outstanding during process shutdown.
+        SDL_ShowOpenFileDialog(CompleteOpenFileDialog, bridge, nullptr, nullptr, 0, nullptr, request.allowMultiple);
+        return application::PlatformStatus::Success();
+    }
+
+    application::PlatformStatus WindowsPlatformHost::RevealFileLocation(const char* const utf8FilePath) noexcept
+    {
+        if (!m_initialized)
+            return application::PlatformStatus::Failure("Windows platform host is not initialized");
+        if (!concurrency::IsMainThread())
+            return application::PlatformStatus::Failure("revealing a file location requires the main thread");
+        if (utf8FilePath == nullptr || utf8FilePath[0] == '\0')
+            return application::PlatformStatus::Failure("revealing a file location requires a file path");
+
+        const int widePathCharacters =
+            ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8FilePath, -1, nullptr, 0);
+        if (widePathCharacters <= 1)
+            return application::PlatformStatus::Failure("file location path is not valid UTF-8");
+
+        memory::MemoryBlock block = memory::Allocate(memory::PoolId::Window,
+                                                     static_cast<usize>(widePathCharacters) * sizeof(wchar_t),
+                                                     alignof(wchar_t));
+        if (!block)
+            return application::PlatformStatus::Failure("failed to allocate file location path storage");
+        auto release = [&block]() noexcept
+        {
+            memory::Free(block);
+        };
+
+        auto* const widePath = static_cast<wchar_t*>(block.address);
+        if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8FilePath, -1,
+                                  widePath, widePathCharacters) != widePathCharacters)
+        {
+            release();
+            return application::PlatformStatus::Failure("failed to convert file location path to UTF-16");
+        }
+        const DWORD attributes = ::GetFileAttributesW(widePath);
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0u)
+        {
+            release();
+            return application::PlatformStatus::Failure("file location source is unavailable");
+        }
+
+        PIDLIST_ABSOLUTE item = ::ILCreateFromPathW(widePath);
+        if (item == nullptr)
+        {
+            release();
+            return application::PlatformStatus::Failure("failed to resolve the file location shell item");
+        }
+        PIDLIST_ABSOLUTE folder = ::ILCloneFull(item);
+        if (folder == nullptr || !::ILRemoveLastID(folder))
+        {
+            if (folder != nullptr)
+                ::ILFree(folder);
+            ::ILFree(item);
+            release();
+            return application::PlatformStatus::Failure("failed to resolve the containing folder");
+        }
+
+        PCUITEMID_CHILD child = ::ILFindLastID(item);
+        HRESULT result = ::SHOpenFolderAndSelectItems(folder, 1u, &child, 0u);
+        if (FAILED(result))
+            result = ::SHOpenFolderAndSelectItems(folder, 0u, nullptr, 0u);
+        ::ILFree(folder);
+        ::ILFree(item);
+        release();
+        return SUCCEEDED(result)
+                   ? application::PlatformStatus::Success()
+                   : application::PlatformStatus::Failure("Windows shell failed to reveal the file location");
+    }
+
     bool WindowsPlatformHost::AttachWindowEventSink(window::IWindowEventSink* const sink) noexcept
     {
         if (!m_initialized || sink == nullptr || m_windowEventSink != nullptr)
@@ -562,6 +724,7 @@ namespace vanguard::platform::windows
         static_cast<void>(::SetConsoleCtrlHandler(ConsoleControlHandler, FALSE));
         g_consoleExitRequested.SetValue(false);
         g_platformHostActive.SetValue(false);
+        m_executablePath[0] = '\0';
         m_initialized = false;
     }
 } // namespace vanguard::platform::windows

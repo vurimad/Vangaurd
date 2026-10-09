@@ -6,6 +6,7 @@
 #include <vanguard/jobs/jobs.hpp>
 
 #include <vanguard/system/assert.hpp>
+#include <vanguard/system/time.hpp>
 
 #include <numeric>
 
@@ -507,29 +508,6 @@ namespace vanguard::rendering
         }
     }
 
-    void RenderNodeGraph::CalculateNodeLevelInRenderFlowGroupRecursive(const RenderNodeDependencyType dependencyType, const ItemId nodeItemId,
-                                                                       containers::DynamicArray<u32>& levelNodeCounts)
-    {
-        VG_ASSERT(!m_isBuilt);
-        RenderNodeData& node = m_nodes[nodeItemId];
-        const u32 type = static_cast<u32>(dependencyType);
-        const RenderFlowGroup level = node.m_renderNodeContext.m_renderFlowGroups[type];
-        for (ItemId dependency = node.m_dependencies[static_cast<u32>(RelationType::Child)][type]; dependency != InvalidItemId;
-             dependency = m_dependencies[dependency].m_nextDependencies[static_cast<u32>(RelationType::Parent)])
-        {
-            const ItemId childNodeId = m_dependencies[dependency].m_nodes[static_cast<u32>(RelationType::Child)];
-            RenderFlowGroup& childLevel = m_nodes[childNodeId].m_renderNodeContext.m_renderFlowGroups[type];
-            if (childLevel <= level)
-            {
-                if (childLevel > 0)
-                    --levelNodeCounts[childLevel];
-                childLevel = level + 1;
-                ++levelNodeCounts[childLevel];
-                CalculateNodeLevelInRenderFlowGroupRecursive(dependencyType, childNodeId, levelNodeCounts);
-            }
-        }
-    }
-
     void RenderNodeGraph::BuildRenderFlowGroups()
     {
         if (m_isBuilt || m_nodes.GetNumItems() >= 0xffffu)
@@ -544,7 +522,9 @@ namespace vanguard::rendering
         readyNodes.Reserve(m_nodes.GetNumItems());
         for (u32 type = 0; type < RenderNodeDependencyTypeCount; ++type)
         {
-            // Validate both dependency domains before recursive level assignment can follow a cycle.
+            // One topological pass both proves acyclicity and computes longest
+            // dependency depth. The previous recursive relaxation could revisit
+            // descendant subgraphs whenever a later parent raised one node.
             readyNodes.Clear();
             for (u32 index = 0; index < levelNodeCounts.Size(); ++index)
                 levelNodeCounts[index] = 0;
@@ -558,13 +538,21 @@ namespace vanguard::rendering
                 if (levelNodeCounts[index] == 0)
                     readyNodes.PushBack(m_nodes.GetItemIdByUsageIndex(index));
             for (u32 index = 0; index < readyNodes.Size(); ++index)
-                for (ItemId dependencyId = m_nodes[readyNodes[index]].m_dependencies[static_cast<u32>(RelationType::Child)][type]; dependencyId != InvalidItemId;
+            {
+                const ItemId nodeId = readyNodes[index];
+                const RenderFlowGroup nodeLevel = m_nodes[nodeId].m_renderNodeContext.m_renderFlowGroups[type];
+                for (ItemId dependencyId = m_nodes[nodeId].m_dependencies[static_cast<u32>(RelationType::Child)][type]; dependencyId != InvalidItemId;
                      dependencyId = m_dependencies[dependencyId].m_nextDependencies[static_cast<u32>(RelationType::Parent)])
                 {
                     const ItemId child = m_dependencies[dependencyId].m_nodes[static_cast<u32>(RelationType::Child)];
+                    RenderFlowGroup& childLevel = m_nodes[child].m_renderNodeContext.m_renderFlowGroups[type];
+                    const RenderFlowGroup candidateLevel = nodeLevel + 1;
+                    if (childLevel < candidateLevel)
+                        childLevel = candidateLevel;
                     if (--levelNodeCounts[GetNodeIndex(child)] == 0)
                         readyNodes.PushBack(child);
                 }
+            }
             if (readyNodes.Size() != m_nodes.GetNumItems())
                 VG_FATAL("render-node graph contains a cycle in its CPU or GPU dependencies");
 
@@ -573,12 +561,10 @@ namespace vanguard::rendering
             for (u32 usageIndex = 0; usageIndex < m_nodes.GetNumItems(); ++usageIndex)
             {
                 const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(usageIndex);
-                RenderNodeData& node = m_nodes[nodeId];
-                if (node.m_dependencies[static_cast<u32>(RelationType::Parent)][type] == InvalidItemId)
-                {
-                    ++levelNodeCounts[0];
-                    CalculateNodeLevelInRenderFlowGroupRecursive(static_cast<RenderNodeDependencyType>(type), nodeId, levelNodeCounts);
-                }
+                const RenderFlowGroup level = m_nodes[nodeId].m_renderNodeContext.m_renderFlowGroups[type];
+                if (level >= levelNodeCounts.Size())
+                    VG_FATAL("render-node dependency depth exceeds the flow-group capacity");
+                ++levelNodeCounts[level];
             }
             for (u32 level = 1; level < m_nodes.GetNumItems() && levelNodeCounts[level] != 0; ++level)
                 levelNodeCounts[level] += levelNodeCounts[level - 1];
@@ -794,6 +780,8 @@ namespace vanguard::rendering
             }
             entry.executionFailure = {};
             entry.packet = {};
+            for (RenderNodeResourceRange& range : entry.resources.m_ranges)
+                range.execution = {};
             if (entry.node != RenderFlowNodeId{nodeId} || entry.executionContext == nullptr)
             {
                 if (failure != nullptr)
@@ -808,9 +796,74 @@ namespace vanguard::rendering
 
             const RenderNodeImpl* const impl = node.m_renderNodeParameters.m_impl;
             if (impl == nullptr || !impl->HasCommandList(impl->GetCommandListUsage()))
+            {
+                if (!entry.resources.m_uses.Empty() || !entry.resources.m_decisions.Empty())
+                {
+                    entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
+                    entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
+                    entry.executionFailure.node = entry.node;
+                    entry.executionFailure.message = "command-list-free render node published GPU resource bindings";
+                    if (failure != nullptr)
+                        *failure = entry.executionFailure;
+                    return false;
+                }
                 continue;
+            }
             if (!allocator.PacketFor(entry.node, entry.packet, &entry.executionFailure))
             {
+                if (failure != nullptr)
+                    *failure = entry.executionFailure;
+                return false;
+            }
+            if (entry.packet.GetUseCount() != entry.resources.m_uses.Size() || entry.packet.GetDecisionCount() != entry.resources.m_decisions.Size())
+            {
+                entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
+                entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
+                entry.executionFailure.node = entry.node;
+                entry.executionFailure.message = "render-node declarations do not match the compiled packet use/decision counts";
+                if (failure != nullptr)
+                    *failure = entry.executionFailure;
+                return false;
+            }
+
+            u32 nextUse = 0;
+            u32 nextDecision = 0;
+            for (u32 rangeIndex = 0; rangeIndex < entry.resources.m_ranges.Size(); ++rangeIndex)
+            {
+                RenderNodeResourceRange& range = entry.resources.m_ranges[rangeIndex];
+                if (range.firstUse != nextUse ||
+                    range.firstUse > entry.resources.m_uses.Size() || range.useCount > entry.resources.m_uses.Size() - range.firstUse ||
+                    range.firstDecision != nextDecision ||
+                    range.firstDecision > entry.resources.m_decisions.Size() || range.decisionCount > entry.resources.m_decisions.Size() - range.firstDecision ||
+                    range.lookupBucketOffset > entry.resources.m_lookupBuckets.Size() || range.lookupBucketCount > entry.resources.m_lookupBuckets.Size() - range.lookupBucketOffset ||
+                    range.lookupGroupOffset > entry.resources.m_lookupGroups.Size() || range.lookupGroupCount > entry.resources.m_lookupGroups.Size() - range.lookupGroupOffset ||
+                    (range.useCount == 0 && (range.lookupBucketCount != 0 || range.lookupGroupCount != 0)) ||
+                    (range.useCount != 0 && (range.lookupBucketCount == 0 || (range.lookupBucketCount & (range.lookupBucketCount - 1u)) != 0 || range.lookupGroupCount > range.useCount)))
+                {
+                    entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
+                    entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
+                    entry.executionFailure.node = entry.node;
+                    entry.executionFailure.message = "render-node child resource range is malformed";
+                    if (failure != nullptr)
+                        *failure = entry.executionFailure;
+                    return false;
+                }
+                nextUse += range.useCount;
+                nextDecision += range.decisionCount;
+
+                if (!entry.packet.ResolveExecutionRange(range.firstUse, range.useCount, range.execution, &entry.executionFailure))
+                {
+                    if (failure != nullptr)
+                        *failure = entry.executionFailure;
+                    return false;
+                }
+            }
+            if (nextUse != entry.resources.m_uses.Size() || nextDecision != entry.resources.m_decisions.Size())
+            {
+                entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
+                entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
+                entry.executionFailure.node = entry.node;
+                entry.executionFailure.message = "render-node execution ranges did not consume every declared resource use and decision";
                 if (failure != nullptr)
                     *failure = entry.executionFailure;
                 return false;
@@ -827,8 +880,25 @@ namespace vanguard::rendering
         m_dependencies.Reset();
     }
 
-    void RenderNodeGraph::AcquireExclusiveUpdateFlag() { m_updateFlag.Acquire(); }
+    void RenderNodeGraph::AcquireExclusiveUpdateFlag()
+    {
+        const u64 frequency = system::GetMonotonicFrequency();
+        const u64 beginTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
+        m_updateFlag.Acquire();
+        const u64 endTick = frequency != 0 ? system::GetMonotonicTicks() : beginTick;
+        const u64 elapsedNanoseconds = frequency != 0 && endTick >= beginTick
+            ? static_cast<u64>(1000000000.0 * static_cast<double>(endTick - beginTick) / static_cast<double>(frequency))
+            : 0;
+        static_cast<void>(m_updateAcquisitions.Increment());
+        m_lastUpdateWaitNanoseconds.SetValue(elapsedNanoseconds);
+        static_cast<void>(m_totalUpdateWaitNanoseconds.ExchangeAdd(elapsedNanoseconds));
+    }
     void RenderNodeGraph::ReleaseExclusiveUpdateFlag() { m_updateFlag.Release(); }
+
+    RenderNodeGraphExclusiveUpdateStats RenderNodeGraph::GetExclusiveUpdateStats() const noexcept
+    {
+        return {m_updateAcquisitions.GetValue(), m_lastUpdateWaitNanoseconds.GetValue(), m_totalUpdateWaitNanoseconds.GetValue()};
+    }
 
     // Scheduling and execution-side RenderNodeImpl processing remain separate from packet preparation.
 } // namespace vanguard::rendering

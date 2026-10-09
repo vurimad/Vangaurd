@@ -8,57 +8,6 @@ namespace
     using namespace vanguard;
     using namespace vanguard::assets;
 
-    struct OwnedBuildRequest
-    {
-        OwnedBuildRequest() noexcept
-            : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()), settings(memory::pools::Assets::GetInstance())
-        {
-        }
-
-        [[nodiscard]] bool CopyFrom(const BuildRequest& request) noexcept
-        {
-            sourceReference = request.source.identity;
-            outputReference = request.output;
-            target = request.target;
-            source.Resize(request.source.content.Count());
-            metadata.Resize(request.source.metadata.Count());
-            settings.Resize(request.settings.Count());
-            if (source.Size() != request.source.content.Count() || metadata.Size() != request.source.metadata.Count() ||
-                settings.Size() != request.settings.Count())
-            {
-                return false;
-            }
-            for (u32 index = 0; index < source.Size(); ++index)
-            {
-                source[index] = request.source.content[index];
-            }
-            for (u32 index = 0; index < metadata.Size(); ++index)
-            {
-                metadata[index] = request.source.metadata[index];
-            }
-            for (u32 index = 0; index < settings.Size(); ++index)
-            {
-                settings[index] = request.settings[index];
-            }
-            return true;
-        }
-
-        [[nodiscard]] BuildRequest View() const noexcept
-        {
-            return {{sourceReference, {source.TypedData(), source.Size()}, {metadata.TypedData(), metadata.Size()}},
-                    outputReference,
-                    target,
-                    {settings.TypedData(), settings.Size()}};
-        }
-
-        resources::ResourceReference sourceReference;
-        resources::ResourceReference outputReference;
-        TargetPlatform target = TargetPlatform::WindowsD3D12;
-        containers::DynamicArray<u8> source;
-        containers::DynamicArray<u8> metadata;
-        containers::DynamicArray<u8> settings;
-    };
-
     [[nodiscard]] bool Contains(const containers::DynamicArray<resources::ResourceReference>& values, const resources::ResourceReference value) noexcept
     {
         for (const resources::ResourceReference existing : values)
@@ -68,6 +17,15 @@ namespace
                 return true;
             }
         }
+        return false;
+    }
+
+    [[nodiscard]] bool Contains(const containers::ArraySpan<const resources::ResourceReference> values,
+                                const resources::ResourceReference value) noexcept
+    {
+        for (const resources::ResourceReference existing : values)
+            if (existing == value)
+                return true;
         return false;
     }
 
@@ -94,13 +52,18 @@ namespace vanguard::assets
     {
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
 
-        RecookOperation() noexcept : requests(memory::pools::Assets::GetInstance()) {}
+        RecookOperation() noexcept
+            : requests(memory::pools::Assets::GetInstance()), committedRecords(memory::pools::Assets::GetInstance())
+        {
+        }
 
         mutable concurrency::Mutex lock;
         containers::DynamicArray<GraphRequest> requests;
         concurrency::Atomic<u32> state{static_cast<u32>(RecookState::Building)};
         concurrency::Atomic<u32> failure{static_cast<u32>(RecookFailure::None)};
         RecookStats stats;
+        RecookPreCommitValidator validator;
+        containers::DynamicArray<DependencyRecord> committedRecords;
         bool cancelRequested = false;
     };
 
@@ -147,35 +110,12 @@ namespace vanguard::assets
         [[nodiscard]] bool ResolveOwnedRequest(const IncrementalRecooker::Impl& impl, const resources::ResourceReference output,
                                                OwnedBuildRequest& owned) noexcept
         {
-            BuildRequest request;
-            return impl.resolver(output, request, impl.resolverUserData) && request.IsValid() && request.output == output && owned.CopyFrom(request);
+            if (!impl.resolver(output, owned, impl.resolverUserData))
+                return false;
+            const BuildRequest request = owned.View();
+            return request.IsValid() && request.output == output;
         }
 
-        [[nodiscard]] bool MaterializeStoredGeneratedDependencies(DependencyIndex& index, BuildPlan& plan) noexcept
-        {
-            for (const BuildDependency& dependency : plan.GetDependencies())
-            {
-                if (dependency.role != DependencyRole::Generated || dependency.requirement == DependencyRequirement::Soft)
-                {
-                    continue;
-                }
-                DependencyRecord record;
-                const IndexResult found = index.Find(dependency.identity, record);
-                if (found == IndexResult::NotFound && dependency.requirement == DependencyRequirement::Optional)
-                {
-                    continue;
-                }
-                if (found == IndexResult::NotFound)
-                {
-                    continue;
-                }
-                if (found != IndexResult::Success || plan.SetGeneratedDependencyContent(dependency.identity, record.contentFingerprint) != Result::Success)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
     } // namespace
 
     RecookBatch::RecookBatch(IncrementalRecooker* const owner, RecookOperation* const operation) noexcept : m_owner(owner), m_operation(operation) {}
@@ -257,6 +197,18 @@ namespace vanguard::assets
         return m_operation->stats;
     }
 
+    bool RecookBatch::TakeCommittedRecords(containers::DynamicArray<DependencyRecord>& records) noexcept
+    {
+        if (m_operation == nullptr || !records.Empty())
+            return false;
+        concurrency::ScopedLock guard(m_operation->lock);
+        if (static_cast<RecookState>(m_operation->state.GetValue()) != RecookState::Succeeded ||
+            m_operation->committedRecords.Empty())
+            return false;
+        records.Swap(m_operation->committedRecords);
+        return !records.Empty();
+    }
+
     void RecookBatch::Reset() noexcept
     {
         if (m_owner != nullptr && m_operation != nullptr)
@@ -280,7 +232,8 @@ namespace vanguard::assets
             return true;
         }
         if (!buildSystem.IsInitialized() || !graph.IsInitialized() || !index.IsInitialized() || !graph.IsBoundTo(buildSystem, index) || resolver == nullptr ||
-            config.maximumChangesPerBatch == 0 || config.maximumAffectedOutputsPerBatch == 0 || config.maximumRootRequestsPerBatch == 0)
+            config.maximumChangesPerBatch == 0 || config.maximumAffectedOutputsPerBatch == 0 || config.maximumRootRequestsPerBatch == 0 ||
+            config.maximumValidationRecordsPerBatch == 0 || config.maximumValidationEvidenceBytes == 0)
         {
             return false;
         }
@@ -323,6 +276,32 @@ namespace vanguard::assets
 
     RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes, const BuildPriority priority) noexcept
     {
+        return RequestInternal(changes, {}, {}, true, priority, {});
+    }
+
+    RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes,
+                                             const containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                             const BuildPriority priority,
+                                             const RecookPreCommitValidator& validator) noexcept
+    {
+        return RequestInternal(changes, explicitOutputs, {}, false, priority, validator);
+    }
+
+    RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes,
+                                             const containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                             const containers::ArraySpan<const resources::ResourceReference> forcedOutputs,
+                                             const BuildPriority priority,
+                                             const RecookPreCommitValidator& validator) noexcept
+    {
+        return RequestInternal(changes, explicitOutputs, forcedOutputs, false, priority, validator);
+    }
+
+    RecookBatch IncrementalRecooker::RequestInternal(const containers::ArraySpan<const AssetChange> changes,
+                                                     const containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                                     const containers::ArraySpan<const resources::ResourceReference> forcedOutputs,
+                                                     const bool rejectUntrackedChanges, const BuildPriority priority,
+                                                     const RecookPreCommitValidator& validator) noexcept
+    {
         if (m_impl == nullptr)
         {
             return {};
@@ -343,14 +322,28 @@ namespace vanguard::assets
         m_impl->lock.Release();
 
         operation->stats.inputChanges = changes.Count();
+        operation->stats.explicitOutputs = explicitOutputs.Count();
+        operation->validator = validator;
         const auto fail = [&](const RecookFailure failure) noexcept
         {
             SetTerminal(*operation, RecookState::Failed, failure);
             return RecookBatch(this, operation);
         };
-        if (changes.Empty() || changes.Data() == nullptr)
+        if ((changes.Empty() && explicitOutputs.Empty()) ||
+            (!changes.Empty() && changes.Data() == nullptr) ||
+            (!explicitOutputs.Empty() && explicitOutputs.Data() == nullptr) ||
+            (!forcedOutputs.Empty() && forcedOutputs.Data() == nullptr))
         {
             return fail(RecookFailure::InvalidChange);
+        }
+        for (u32 index = 0; index < forcedOutputs.Count(); ++index)
+        {
+            const resources::ResourceReference output = forcedOutputs[index];
+            if (!output.IsValid() || !output.IsTyped() || !Contains(explicitOutputs, output))
+                return fail(RecookFailure::InvalidChange);
+            for (u32 previous = 0; previous < index; ++previous)
+                if (forcedOutputs[previous] == output)
+                    return fail(RecookFailure::InvalidChange);
         }
         if (changes.Count() > m_impl->config.maximumChangesPerBatch)
         {
@@ -362,6 +355,62 @@ namespace vanguard::assets
         containers::DynamicArray<resources::ResourceReference> direct(memory::pools::Assets::GetInstance());
         containers::DynamicArray<resources::ResourceReference> descendants(memory::pools::Assets::GetInstance());
 
+        const auto evaluateOutput = [&](const resources::ResourceReference output, const bool force,
+                                        bool& isDirty, bool& firstCook) noexcept -> RecookFailure
+        {
+            isDirty = false;
+            firstCook = false;
+            if (!output.IsValid() || !output.IsTyped())
+                return RecookFailure::InvalidChange;
+            if (Contains(evaluated, output))
+            {
+                isDirty = Contains(dirty, output);
+                if (force && !isDirty)
+                {
+                    if (!AddUnique(dirty, output, m_impl->config.maximumAffectedOutputsPerBatch))
+                        return RecookFailure::LimitExceeded;
+                    isDirty = true;
+                }
+                return RecookFailure::None;
+            }
+            if (!AddUnique(evaluated, output, m_impl->config.maximumAffectedOutputsPerBatch))
+                return RecookFailure::LimitExceeded;
+
+            OwnedBuildRequest owned;
+            if (!ResolveOwnedRequest(*m_impl, output, owned))
+                return RecookFailure::RequestResolutionFailed;
+            const BuildRequest request = owned.View();
+            BuildPlan plan;
+            if (m_impl->buildSystem->Prepare(request, plan) != Result::Success)
+                return RecookFailure::DependencyPreparationFailed;
+            const IndexResult materialized = m_impl->index->MaterializeGeneratedDependencyContent(plan);
+            if (materialized != IndexResult::Success && materialized != IndexResult::NotFound)
+                return RecookFailure::DependencyPreparationFailed;
+
+            const DirtyReason reason = m_impl->index->Evaluate(request, plan);
+            if (reason == DirtyReason::UpToDate)
+            {
+                if (!force)
+                    return RecookFailure::None;
+                isDirty = true;
+                return AddUnique(dirty, output, m_impl->config.maximumAffectedOutputsPerBatch)
+                           ? RecookFailure::None
+                           : RecookFailure::LimitExceeded;
+            }
+
+            isDirty = true;
+            firstCook = reason == DirtyReason::Missing;
+            if (!AddUnique(dirty, output, m_impl->config.maximumAffectedOutputsPerBatch))
+                return RecookFailure::LimitExceeded;
+            const IndexResult affectedResult = m_impl->index->CollectAffected(output, descendants);
+            if (affectedResult != IndexResult::Success && affectedResult != IndexResult::NotFound)
+                return affectedResult == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory : RecookFailure::IndexQueryFailed;
+            for (const resources::ResourceReference descendant : descendants)
+                if (!AddUnique(dirty, descendant, m_impl->config.maximumAffectedOutputsPerBatch))
+                    return RecookFailure::LimitExceeded;
+            return RecookFailure::None;
+        };
+
         for (const AssetChange& change : changes)
         {
             if (!change.identity.IsValid() || !change.identity.IsTyped())
@@ -371,7 +420,10 @@ namespace vanguard::assets
             const IndexResult directResult = m_impl->index->GetDirectDependants(change.identity, direct);
             if (directResult == IndexResult::NotFound)
             {
-                return fail(RecookFailure::UntrackedChange);
+                if (rejectUntrackedChanges || explicitOutputs.Empty())
+                    return fail(RecookFailure::UntrackedChange);
+                ++operation->stats.unchangedChanges;
+                continue;
             }
             if (directResult != IndexResult::Success)
             {
@@ -386,42 +438,33 @@ namespace vanguard::assets
                     changeIsDirty = changeIsDirty || Contains(dirty, output);
                     continue;
                 }
-                if (!AddUnique(evaluated, output, m_impl->config.maximumAffectedOutputsPerBatch))
+                bool outputDirty = false;
+                bool firstCook = false;
+                const RecookFailure evaluatedResult = evaluateOutput(output, false, outputDirty, firstCook);
+                if (evaluatedResult == RecookFailure::RequestResolutionFailed)
                 {
-                    return fail(RecookFailure::LimitExceeded);
-                }
-                OwnedBuildRequest owned;
-                if (!ResolveOwnedRequest(*m_impl, output, owned))
-                {
-                    return fail(RecookFailure::RequestResolutionFailed);
-                }
-                const BuildRequest request = owned.View();
-                BuildPlan plan;
-                if (m_impl->buildSystem->Prepare(request, plan) != Result::Success || !MaterializeStoredGeneratedDependencies(*m_impl->index, plan))
-                {
-                    return fail(RecookFailure::DependencyPreparationFailed);
-                }
-                if (m_impl->index->Evaluate(request, plan) == DirtyReason::UpToDate)
-                {
+                    // The committed producer may have been removed or become
+                    // unsupported. It is still valid invalidation evidence for
+                    // downstream committed outputs, but there is no current
+                    // request to fabricate for the removed node itself.
+                    DependencyRecord committed;
+                    const IndexResult committedResult = m_impl->index->Find(output, committed);
+                    if (committedResult != IndexResult::Success)
+                        return fail(committedResult == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                                                                                : RecookFailure::RequestResolutionFailed);
+                    const IndexResult affectedResult = m_impl->index->CollectAffected(output, descendants);
+                    if (affectedResult != IndexResult::Success && affectedResult != IndexResult::NotFound)
+                        return fail(affectedResult == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                                                                              : RecookFailure::IndexQueryFailed);
+                    for (const resources::ResourceReference descendant : descendants)
+                        if (!AddUnique(dirty, descendant, m_impl->config.maximumAffectedOutputsPerBatch))
+                            return fail(RecookFailure::LimitExceeded);
+                    changeIsDirty = changeIsDirty || !descendants.Empty();
                     continue;
                 }
-                changeIsDirty = true;
-                if (!AddUnique(dirty, output, m_impl->config.maximumAffectedOutputsPerBatch))
-                {
-                    return fail(RecookFailure::LimitExceeded);
-                }
-                const IndexResult affectedResult = m_impl->index->CollectAffected(output, descendants);
-                if (affectedResult != IndexResult::Success && affectedResult != IndexResult::NotFound)
-                {
-                    return fail(affectedResult == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory : RecookFailure::IndexQueryFailed);
-                }
-                for (const resources::ResourceReference descendant : descendants)
-                {
-                    if (!AddUnique(dirty, descendant, m_impl->config.maximumAffectedOutputsPerBatch))
-                    {
-                        return fail(RecookFailure::LimitExceeded);
-                    }
-                }
+                if (evaluatedResult != RecookFailure::None)
+                    return fail(evaluatedResult);
+                changeIsDirty = changeIsDirty || outputDirty;
             }
             if (changeIsDirty)
             {
@@ -433,9 +476,40 @@ namespace vanguard::assets
             }
         }
 
+        for (const resources::ResourceReference output : explicitOutputs)
+        {
+            bool outputDirty = false;
+            bool firstCook = false;
+            const RecookFailure evaluatedResult = evaluateOutput(output, Contains(forcedOutputs, output), outputDirty, firstCook);
+            if (evaluatedResult != RecookFailure::None)
+                return fail(evaluatedResult);
+            if (outputDirty)
+            {
+                ++operation->stats.dirtySeeds;
+                if (firstCook)
+                    ++operation->stats.firstCookOutputs;
+            }
+            else
+            {
+                ++operation->stats.unchangedOutputs;
+            }
+        }
+
         operation->stats.affectedOutputs = dirty.Size();
         if (dirty.Empty())
         {
+            if (operation->validator.validate != nullptr)
+            {
+                const RecookPreCommitValidationResult validated = operation->validator.validate({}, operation->validator.userData);
+                if (validated != RecookPreCommitValidationResult::Accept)
+                {
+                    SetTerminal(*operation, RecookState::Failed,
+                                validated == RecookPreCommitValidationResult::Reject
+                                    ? RecookFailure::PreCommitRejected
+                                    : RecookFailure::PreCommitValidationFailed);
+                    return RecookBatch(this, operation);
+                }
+            }
             SetTerminal(*operation, RecookState::Succeeded, RecookFailure::None);
             return RecookBatch(this, operation);
         }
@@ -443,6 +517,17 @@ namespace vanguard::assets
         containers::DynamicArray<resources::ResourceReference> roots(memory::pools::Assets::GetInstance());
         for (const resources::ResourceReference candidate : dirty)
         {
+            // A forced output represents exact current-record repair. It must be
+            // issued as a graph root even when the committed VADI topology says a
+            // dirty dependant exists: that dependant's current build request may
+            // have dropped the old Generated edge and therefore no longer reaches
+            // this repair output.
+            if (Contains(forcedOutputs, candidate))
+            {
+                if (!AddUnique(roots, candidate, m_impl->config.maximumRootRequestsPerBatch))
+                    return fail(RecookFailure::LimitExceeded);
+                continue;
+            }
             const IndexResult dependantResult = m_impl->index->GetDirectDependants(candidate, direct);
             if (dependantResult != IndexResult::Success && dependantResult != IndexResult::NotFound)
             {
@@ -575,6 +660,47 @@ namespace vanguard::assets
             static_cast<void>(m_impl->index->RollbackTransaction());
             SetTerminal(operation, RecookState::Failed, RecookFailure::BuildFailed);
         }
+        else if (operation.validator.validate != nullptr)
+        {
+            containers::DynamicArray<DependencyRecord> evidence(memory::pools::Assets::GetInstance());
+            const IndexResult captured = m_impl->index->CaptureTransactionRecords(
+                evidence, m_impl->config.maximumValidationRecordsPerBatch, m_impl->config.maximumValidationEvidenceBytes);
+            if (captured != IndexResult::Success)
+            {
+                static_cast<void>(m_impl->index->RollbackTransaction());
+                SetTerminal(operation, RecookState::Failed,
+                            captured == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                            : captured == IndexResult::LimitExceeded ? RecookFailure::LimitExceeded
+                                                                    : RecookFailure::PreCommitValidationFailed);
+            }
+            else
+            {
+                const RecookPreCommitValidationResult validated = operation.validator.validate(
+                    {evidence.TypedData(), evidence.Size()}, operation.validator.userData);
+                if (validated != RecookPreCommitValidationResult::Accept)
+                {
+                    static_cast<void>(m_impl->index->RollbackTransaction());
+                    SetTerminal(operation, RecookState::Failed,
+                                validated == RecookPreCommitValidationResult::Reject
+                                    ? RecookFailure::PreCommitRejected
+                                    : RecookFailure::PreCommitValidationFailed);
+                }
+                else if (m_impl->index->CommitTransaction() != IndexResult::Success)
+                {
+                    static_cast<void>(m_impl->index->RollbackTransaction());
+                    SetTerminal(operation, RecookState::Failed, RecookFailure::TransactionFailed);
+                }
+                else
+                {
+                    // The same deep-copied snapshot that was validated is now
+                    // authoritative committed-delivery evidence. Retain it on
+                    // the batch by O(1) swap so integration owners can move it
+                    // before releasing/resetting the completed operation.
+                    operation.committedRecords.Swap(evidence);
+                    SetTerminal(operation, RecookState::Succeeded, RecookFailure::None);
+                }
+            }
+        }
         else if (m_impl->index->CommitTransaction() != IndexResult::Success)
         {
             static_cast<void>(m_impl->index->RollbackTransaction());
@@ -614,6 +740,9 @@ namespace vanguard::assets
         {
             m_impl->stats.inputChanges += operation.stats.inputChanges;
             m_impl->stats.unchangedChanges += operation.stats.unchangedChanges;
+            m_impl->stats.explicitOutputs += operation.stats.explicitOutputs;
+            m_impl->stats.unchangedOutputs += operation.stats.unchangedOutputs;
+            m_impl->stats.firstCookOutputs += operation.stats.firstCookOutputs;
             m_impl->stats.dirtySeeds += operation.stats.dirtySeeds;
             m_impl->stats.affectedOutputs += operation.stats.affectedOutputs;
             m_impl->stats.rootRequests += operation.stats.rootRequests;

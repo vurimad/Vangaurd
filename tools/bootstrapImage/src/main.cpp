@@ -1,4 +1,5 @@
 #include <vanguard/assets/asset_index.hpp>
+#include <vanguard/assets/asset_metadata.hpp>
 #include <vanguard/assets/package_planner.hpp>
 #include <vanguard/assets/package_set_assembly.hpp>
 #include <vanguard/containers/containers.hpp>
@@ -19,15 +20,22 @@
 #include <vanguard/pipelines/renderer_catalog.hpp>
 #include <vanguard/prefabs/prefabs.hpp>
 #include <vanguard/rendering/render_phase.hpp>
+#include <vanguard/rendering/render_camera.hpp>
+#include <vanguard/rendering/renderer_draw_contract.hpp>
 #include <vanguard/rendering/renderer_feature_programs.hpp>
 #include <vanguard/serialization/serialization.hpp>
 #include <vanguard/shader_tools/shader_compiler.hpp>
 #include <vanguard/shader_tools/shader_asset_compiler.hpp>
 #include <vanguard/shaders/shaders.hpp>
+#include <vanguard/textures/textures.hpp>
 #include <vanguard/world/cells.hpp>
 #include <vanguard/world/worlds.hpp>
 
+#include <box.h>
+
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -40,6 +48,7 @@ namespace
     namespace entities = vanguard::entities;
     namespace filesystem = vanguard::filesystem;
     namespace gameInput = vanguard::game_input;
+    namespace math = ::math;
     namespace materialTools = vanguard::material_tools;
     namespace materials = vanguard::materials;
     namespace memory = vanguard::memory;
@@ -52,11 +61,14 @@ namespace
     namespace serialization = vanguard::serialization;
     namespace shaderTools = vanguard::shader_tools;
     namespace shaders = vanguard::shaders;
+    namespace textures = vanguard::textures;
     namespace world = vanguard::world;
 
     constexpr vanguard::u64 GameId = 0x56414e4755415244ull;
     constexpr vanguard::u64 WorldId = 0x444556574f524c44ull;
     constexpr vanguard::u64 CellId = 0x44455643454c4c01ull;
+    constexpr vanguard::u64 BootstrapEntityId = 1;
+    constexpr vanguard::u64 BootstrapCameraStableId = 102;
     constexpr resources::ResourceTypeId InputSourceType = serialization::MakeFourCC('I', 'N', 'S', 'R');
     constexpr resources::ResourceTypeId PrefabSourceType = serialization::MakeFourCC('P', 'F', 'S', 'R');
     constexpr resources::ResourceTypeId CellSourceType = serialization::MakeFourCC('C', 'E', 'S', 'R');
@@ -66,10 +78,18 @@ namespace
     constexpr resources::ResourceTypeId PipelineSourceType = serialization::MakeFourCC('P', 'L', 'S', 'R');
     constexpr resources::ResourceTypeId MaterialSourceType = serialization::MakeFourCC('M', 'A', 'S', 'R');
     constexpr resources::ResourceTypeId MeshSourceType = serialization::MakeFourCC('M', 'E', 'S', 'R');
+    constexpr resources::ResourceTypeId TextureSourceType = serialization::MakeFourCC('T', 'X', 'S', 'R');
     constexpr vanguard::u64 SurfaceDepthProgram = 0x4253544450544801ull;
     constexpr vanguard::u64 SurfaceOpaqueProgram = 0x4253544f50415101ull;
     constexpr vanguard::u64 SurfaceParameterBase = 200;
-    constexpr char SurfacePermutationName[] = "bootstrap-static-surface-v1";
+    constexpr vanguard::u64 SurfaceTextureSemantic = 300;
+    constexpr vanguard::u64 SurfaceSamplerSemantic = 301;
+    constexpr char SurfacePermutationName[] = "bootstrap-static-surface-v2";
+    constexpr assets::AssetId BootstrapProjectTextureAssetId{{
+        0x10, 0x47, 0x00, 0x01, 0x7a, 0x4d, 0x47, 0x21,
+        0x8b, 0x9c, 0x10, 0x47, 0x00, 0x00, 0x00, 0x01}};
+    constexpr char BootstrapProjectTextureOutputKey[] = "source";
+    constexpr vanguard::u8 BootstrapFallbackTexel[]{204u, 38u, 13u, 255u};
 
     [[nodiscard]] bool Fail(const char* const stage) noexcept
     {
@@ -100,6 +120,13 @@ namespace
             mesh.path = "meshes/bootstrap_quad.vmesh";
             material.resource = Reference("materials/bootstrap_surface.vmat", materials::MaterialResourceType);
             material.path = "materials/bootstrap_surface.vmat";
+            if (assets::GetAssetOutputPath(BootstrapProjectTextureAssetId, BootstrapProjectTextureOutputKey,
+                                           surfaceTexture.ownedPath))
+            {
+                surfaceTexture.path = surfaceTexture.ownedPath.AsChar();
+                surfaceTexture.resource = resources::ResourceReference(
+                    resources::ResourcePath::FromString(surfaceTexture.path), textures::TextureResourceType);
+            }
             depthShader.resource = Reference("materials/bootstrap_surface_depth.vshader", shaders::ShaderResourceType);
             depthShader.path = "materials/bootstrap_surface_depth.vshader";
             opaqueShader.resource = Reference("materials/bootstrap_surface_opaque.vshader", shaders::ShaderResourceType);
@@ -142,7 +169,7 @@ namespace
                 if (resource == featureShaders[index].resource) return &featureShaders[index];
                 if (resource == featurePipelines[index].resource) return &featurePipelines[index];
             }
-            for (StoredArtifact* const artifact : {&input, &prefab, &mesh, &material, &depthShader, &opaqueShader,
+            for (StoredArtifact* const artifact : {&input, &prefab, &mesh, &material, &surfaceTexture, &depthShader, &opaqueShader,
                                                     &depthPipeline, &opaquePipeline, &cell, &startupWorld})
                 if (artifact->resource == resource)
                     return artifact;
@@ -158,6 +185,7 @@ namespace
         StoredArtifact prefab;
         StoredArtifact mesh;
         StoredArtifact material;
+        StoredArtifact surfaceTexture;
         StoredArtifact depthShader;
         StoredArtifact opaqueShader;
         StoredArtifact depthPipeline;
@@ -205,6 +233,13 @@ namespace
         return shaders::HashInterfaceChildName(shaders::HashInterfaceName("StaticSurfaceParameters"), fieldName);
     }
 
+    [[nodiscard]] vanguard::u64 SurfaceResourceName(const vanguard::u64 semantic) noexcept
+    {
+        char fieldName[19]{};
+        const int length = std::snprintf(fieldName, sizeof(fieldName), "r_%016llx", static_cast<unsigned long long>(semantic));
+        return length == 18 ? shaders::HashInterfaceName(fieldName) : 0;
+    }
+
     [[nodiscard]] bool BuildSurfaceIr(materialTools::MaterialIrModule& module) noexcept
     {
         constexpr vanguard::u8 widths[]{4, 3, 1, 1, 3, 1};
@@ -222,6 +257,54 @@ namespace
             const materialTools::MaterialIrResult addedValue = builder.AddValue(value, parameter);
             if (addedValue != materialTools::MaterialIrResult::Success)
                 return false;
+            if (index == 0)
+            {
+                materialTools::MaterialIrValueId texture;
+                materialTools::MaterialIrValueId sampler;
+                materialTools::MaterialIrValueId uv;
+                materialTools::MaterialIrValueId sampledColor;
+
+                value.type = {};
+                value.type.kind = materialTools::MaterialIrTypeKind::Texture;
+                value.type.scalarType = shaders::ScalarType::F32;
+                value.type.rows = 4;
+                value.type.textureDimension = materialTools::MaterialIrTextureDimension::D2;
+                value.type.resourceAccess = materialTools::MaterialIrResourceAccess::Read;
+                value.semantic = SurfaceTextureSemantic;
+                value.resourceFlags = shaders::MaterialResourceFlags::Required;
+                if (builder.AddValue(value, texture) != materialTools::MaterialIrResult::Success)
+                    return false;
+
+                value.type = {};
+                value.type.kind = materialTools::MaterialIrTypeKind::Sampler;
+                value.type.samplerKind = materialTools::MaterialIrSamplerKind::Filtering;
+                value.semantic = SurfaceSamplerSemantic;
+                value.resourceFlags = shaders::MaterialResourceFlags::None;
+                if (builder.AddValue(value, sampler) != materialTools::MaterialIrResult::Success)
+                    return false;
+
+                value.kind = materialTools::MaterialIrValueKind::DomainInput;
+                value.type = FloatType(2);
+                value.semantic = 1;
+                if (builder.AddValue(value, uv) != materialTools::MaterialIrResult::Success)
+                    return false;
+
+                const materialTools::MaterialIrValueId sampleOperands[]{texture, sampler, uv};
+                value = {};
+                value.kind = materialTools::MaterialIrValueKind::Instruction;
+                value.opcode = materialTools::MaterialIrOpcode::TextureSample;
+                value.type = FloatType(4);
+                value.legalStages = fragment;
+                value.operands = sampleOperands;
+                if (builder.AddValue(value, sampledColor) != materialTools::MaterialIrResult::Success)
+                    return false;
+
+                const materialTools::MaterialIrValueId multiplyOperands[]{sampledColor, parameter};
+                value.opcode = materialTools::MaterialIrOpcode::Multiply;
+                value.operands = multiplyOperands;
+                if (builder.AddValue(value, parameter) != materialTools::MaterialIrResult::Success)
+                    return false;
+            }
             const materialTools::MaterialIrResult addedOutput = builder.AddOutput({100 + index, parameter, fragment});
             if (addedOutput != materialTools::MaterialIrResult::Success)
                 return false;
@@ -354,18 +437,21 @@ namespace
         description.vertexAttributes = attributes;
         description.graphics.depthStencil.depthTest = true;
         description.graphics.depthStencil.depthWrite = true;
-        description.graphics.depthStencil.depthCompare = pipelines::CompareOperation::LessEqual;
-        description.graphics.blend.attachmentCount = depth ? 0 : 3;
+        // BootstrapVertices wind toward their authored -Z surface normal. D3D12's
+        // render-target winding therefore needs clockwise front faces so the
+        // two-sided GBuffer path preserves that authored normal on this fixture.
+        description.graphics.rasterizer.frontFace = pipelines::FrontFace::Clockwise;
+        // CameraComponent inherits the renderer's reverse-depth projection default.
+        // Keep depth direction fixture-local and author the matching immutable PSO.
+        constexpr rendering::RenderCameraProjection cameraProjection;
+        description.graphics.depthStencil.depthCompare = cameraProjection.reverseDepth ? pipelines::CompareOperation::GreaterEqual
+                                                                                        : pipelines::CompareOperation::LessEqual;
+        const pipelines::AttachmentSignature attachments = depth ? rendering::MakeStandardDepthPrepassAttachments()
+                                                                  : rendering::MakeStandardOpaqueAttachments();
+        description.graphics.multisample.sampleCount = attachments.sampleCount;
+        description.graphics.blend.attachmentCount = attachments.colorCount;
         description.graphics.attachmentPolicy = pipelines::AttachmentPolicy::Exact;
-        description.graphics.exactAttachments.colorCount = depth ? 0 : 3;
-        if (!depth)
-        {
-            description.graphics.exactAttachments.colors[0] = {pipelines::Format::R8G8B8A8UNorm, shaders::NumericClass::FloatingPoint};
-            description.graphics.exactAttachments.colors[1] = {pipelines::Format::R16G16B16A16Float, shaders::NumericClass::FloatingPoint};
-            description.graphics.exactAttachments.colors[2] = {pipelines::Format::R16G16B16A16Float, shaders::NumericClass::FloatingPoint};
-        }
-        description.graphics.exactAttachments.depthStencilFormat = pipelines::Format::D32Float;
-        description.graphics.exactAttachments.depthStencilClass = pipelines::DepthStencilClass::Depth;
+        description.graphics.exactAttachments = attachments;
         filesystem::MemoryFileWriter writer(bytes);
         const pipelines::Result written = pipelines::WritePipeline(writer, description);
         return written == pipelines::Result::Success;
@@ -390,7 +476,7 @@ namespace
             return false;
         }
 
-        const std::array<vanguard::f32, 4> baseColor{{0.8f, 0.15f, 0.05f, 1.0f}};
+        const std::array<vanguard::f32, 4> baseColor{{1.0f, 1.0f, 1.0f, 1.0f}};
         const std::array<vanguard::f32, 3> normal{{0.0f, 0.0f, 1.0f}};
         const vanguard::f32 roughness = 0.6f;
         const vanguard::f32 metallic = 0.0f;
@@ -406,17 +492,48 @@ namespace
         const materials::TechniqueBuildRecord techniques[]{
             {rendering::standardRenderPhases::DepthPrepass.value, content.depthPipeline.resource, &depthPipeline},
             {rendering::standardRenderPhases::Opaque.value, content.opaquePipeline.resource, &opaquePipeline}};
+        const materials::ResourceValueBuildRecord resourceValues[]{
+            {SurfaceResourceName(SurfaceTextureSemantic), 0, content.surfaceTexture.resource, resources::DependencyKind::Required},
+            {SurfaceResourceName(SurfaceSamplerSemantic), 0, {}, resources::DependencyKind::Soft}};
+        const materials::ResourceTypeCompatibility resourceTypes[]{
+            {materials::ResourceParameterKind::Texture, textures::TextureResourceType},
+            {materials::ResourceParameterKind::Sampler, materials::StandardSamplerResourceType}};
         materials::BuildDescription description;
         description.name = content.material.resource.GetPath().Id();
         description.shader = content.opaqueShader.resource;
         description.shaderReflection = &shader;
         description.techniques = techniques;
         description.constants = constants;
+        description.resources = resourceValues;
+        description.resourceTypeCompatibility = resourceTypes;
         filesystem::MemoryFileWriter writer(bytes);
         const materials::Result written = materials::WriteMaterial(writer, description);
         if (written != materials::Result::Success)
             std::fprintf(stderr, "bootstrapImage: material write failed: %s\n", materials::ToString(written));
         return written == materials::Result::Success;
+    }
+
+    [[nodiscard]] bool BuildSurfaceTexture(containers::DynamicArray<vanguard::u8>& bytes) noexcept
+    {
+        const textures::SubresourceBuildRecord subresource{
+            0, 0, 0, BootstrapFallbackTexel, sizeof(BootstrapFallbackTexel),
+            static_cast<vanguard::u32>(sizeof(BootstrapFallbackTexel)),
+            static_cast<vanguard::u32>(sizeof(BootstrapFallbackTexel))};
+        textures::BuildDescription description;
+        description.dimension = textures::TextureDimension::Texture2D;
+        description.format = textures::PixelFormat::R8G8B8A8UNorm;
+        description.colorSpace = textures::ColorSpace::Linear;
+        description.flags = textures::TextureFlags::DirectGpuUpload;
+        description.width = 1;
+        description.height = 1;
+        description.depth = 1;
+        description.arrayLayers = 1;
+        description.mipCount = 1;
+        description.mipTailFirstLevel = 0;
+        description.sourceFingerprint = crypto::Sha256(BootstrapFallbackTexel, sizeof(BootstrapFallbackTexel));
+        description.subresources = {&subresource, 1};
+        filesystem::MemoryFileWriter writer(bytes);
+        return textures::WriteTexture(writer, description) == textures::Result::Success;
     }
 
     struct BootstrapVertex final
@@ -428,20 +545,67 @@ namespace
     };
     static_assert(sizeof(BootstrapVertex) == 48);
 
+    inline constexpr std::array<BootstrapVertex, 4> BootstrapVertices{{
+        {{-1.5f, -1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+        {{-1.5f,  1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        {{ 1.5f,  1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        {{ 1.5f, -1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}}}};
+    inline constexpr std::array<vanguard::u16, 6> BootstrapIndices{{0, 1, 2, 0, 2, 3}};
+
+    [[nodiscard]] meshes::Bounds CalculateBootstrapMeshBounds() noexcept
+    {
+        math::Box box(math::Box::RESET_STATE);
+        for (const BootstrapVertex& vertex : BootstrapVertices)
+            box.AddPoint(math::Vector3(vertex.position[0], vertex.position[1], vertex.position[2]));
+        const math::Vector4 center = box.CalcCenter();
+        vanguard::f32 radiusSquared = 0.0f;
+        for (const BootstrapVertex& vertex : BootstrapVertices)
+        {
+            const vanguard::f32 dx = vertex.position[0] - center.X;
+            const vanguard::f32 dy = vertex.position[1] - center.Y;
+            const vanguard::f32 dz = vertex.position[2] - center.Z;
+            radiusSquared = std::max(radiusSquared, dx * dx + dy * dy + dz * dz);
+        }
+        meshes::Bounds bounds;
+        bounds.minimum[0] = box.Min.X;
+        bounds.minimum[1] = box.Min.Y;
+        bounds.minimum[2] = box.Min.Z;
+        bounds.maximum[0] = box.Max.X;
+        bounds.maximum[1] = box.Max.Y;
+        bounds.maximum[2] = box.Max.Z;
+        bounds.sphereCenter[0] = center.X;
+        bounds.sphereCenter[1] = center.Y;
+        bounds.sphereCenter[2] = center.Z;
+        bounds.sphereRadius = std::sqrt(radiusSquared);
+        return bounds;
+    }
+
+    [[nodiscard]] world::Bounds CalculatePlacementBounds(const meshes::Bounds& localBounds, const world::PlacementTransform& placement) noexcept
+    {
+        const math::Box local(math::Vector3(localBounds.minimum[0], localBounds.minimum[1], localBounds.minimum[2]),
+                              math::Vector3(localBounds.maximum[0], localBounds.maximum[1], localBounds.maximum[2]));
+        math::Matrix transform = math::Quaternion(placement.rotation).ToMatrix();
+        transform.SetScale33(math::Vector4(placement.scale[0], placement.scale[1], placement.scale[2], 1.0f));
+        transform.SetTranslation(placement.translation[0], placement.translation[1], placement.translation[2]);
+        const math::Box transformed = transform.TransformBox(local);
+        world::Bounds bounds;
+        bounds.minimum[0] = transformed.Min.X;
+        bounds.minimum[1] = transformed.Min.Y;
+        bounds.minimum[2] = transformed.Min.Z;
+        bounds.maximum[0] = transformed.Max.X;
+        bounds.maximum[1] = transformed.Max.Y;
+        bounds.maximum[2] = transformed.Max.Z;
+        return bounds;
+    }
+
     [[nodiscard]] bool BuildSurfaceMesh(const BootstrapContent& content, containers::DynamicArray<vanguard::u8>& bytes) noexcept
     {
-        const std::array<BootstrapVertex, 4> vertices{{
-            {{-1.5f, -1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-            {{-1.5f,  1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-            {{ 1.5f,  1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
-            {{ 1.5f, -1.0f, 5.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}}}};
-        const std::array<vanguard::u16, 6> indices{{0, 1, 2, 0, 2, 3}};
         const meshes::BufferBuildRecord buffers[]{
-            {1, meshes::BufferKind::Vertex, sizeof(BootstrapVertex), sizeof(vertices)},
-            {2, meshes::BufferKind::Index, sizeof(vanguard::u16), sizeof(indices)}};
+            {1, meshes::BufferKind::Vertex, sizeof(BootstrapVertex), sizeof(BootstrapVertices)},
+            {2, meshes::BufferKind::Index, sizeof(vanguard::u16), sizeof(BootstrapIndices)}};
         const meshes::PageBuildRecord pages[]{
-            {1, 0, vertices.data(), sizeof(vertices), 4, meshes::PageFlags::RequiredForLowestLod | meshes::PageFlags::DirectGpuUpload},
-            {2, 0, indices.data(), sizeof(indices), 4, meshes::PageFlags::RequiredForLowestLod | meshes::PageFlags::DirectGpuUpload}};
+            {1, 0, BootstrapVertices.data(), sizeof(BootstrapVertices), 4, meshes::PageFlags::RequiredForLowestLod | meshes::PageFlags::DirectGpuUpload},
+            {2, 0, BootstrapIndices.data(), sizeof(BootstrapIndices), 4, meshes::PageFlags::RequiredForLowestLod | meshes::PageFlags::DirectGpuUpload}};
         const meshes::VertexLayoutBuildRecord layout{1};
         const meshes::VertexStreamBuildRecord streams[]{
             {1, meshes::VertexSemantic::Position, 0, meshes::VertexFormat::R32G32B32Float, 0, 1, 0, sizeof(BootstrapVertex)},
@@ -450,19 +614,12 @@ namespace
             {1, meshes::VertexSemantic::TexCoord, 0, meshes::VertexFormat::R32G32Float, 0, 1, 40, sizeof(BootstrapVertex)}};
         const meshes::MaterialSlotBuildRecord materialSlot{1, content.material.resource.GetPath().Id(), content.material.resource};
         const meshes::LodBuildRecord lod{0, 1.0f};
-        meshes::Bounds bounds;
-        bounds.minimum[0] = -1.5f;
-        bounds.minimum[1] = -1.0f;
-        bounds.minimum[2] = 4.9f;
-        bounds.maximum[0] = 1.5f;
-        bounds.maximum[1] = 1.0f;
-        bounds.maximum[2] = 5.1f;
-        bounds.sphereRadius = 1.9f;
+        const meshes::Bounds bounds = CalculateBootstrapMeshBounds();
         const meshes::SubmeshBuildRecord submesh{content.mesh.resource.GetPath().Id(), content.mesh.resource.GetPath().Id(), 0, 1, 1, 2,
                                                   meshes::IndexFormat::UInt16, meshes::PrimitiveTopology::TriangleList,
                                                   meshes::SubmeshFlags::CastsShadow | meshes::SubmeshFlags::TwoSided,
-                                                  0, static_cast<vanguard::u32>(vertices.size()), 0,
-                                                  static_cast<vanguard::u32>(indices.size()), bounds};
+                                                  0, static_cast<vanguard::u32>(BootstrapVertices.size()), 0,
+                                                  static_cast<vanguard::u32>(BootstrapIndices.size()), bounds};
         meshes::BuildDescription description;
         description.kind = meshes::MeshKind::Static;
         description.name = content.mesh.resource.GetPath().Id();
@@ -483,7 +640,7 @@ namespace
     [[nodiscard]] bool BuildRenderablePrefab(const BootstrapContent& content, const crypto::Digest256& fingerprint,
                                              containers::DynamicArray<vanguard::u8>& bytes) noexcept
     {
-        const prefabs::EntityBuildRecord entity{1, prefabs::InvalidStableId, 0x626f6f7473747261ull, prefabs::EntityFlags::Root};
+        const prefabs::EntityBuildRecord entity{BootstrapEntityId, prefabs::InvalidStableId, 0x626f6f7473747261ull, prefabs::EntityFlags::Root};
         entities::StaticMeshComponentData mesh;
         mesh.mesh = content.mesh.resource;
         entities::CameraComponentData camera;
@@ -495,17 +652,16 @@ namespace
         light.blue = 0.9f;
         light.intensity = 3.1415926536f;
         const prefabs::ComponentBuildRecord components[]{
-            {101, 1, &entities::GetStaticMeshComponentSchema(), &mesh, prefabs::ComponentFlags::None},
-            {102, 1, &entities::GetCameraComponentSchema(), &camera, prefabs::ComponentFlags::None},
-            {103, 1, &entities::GetLightComponentSchema(), &light, prefabs::ComponentFlags::None}};
+            {101, BootstrapEntityId, &entities::GetStaticMeshComponentSchema(), &mesh, prefabs::ComponentFlags::None},
+            {BootstrapCameraStableId, BootstrapEntityId, &entities::GetCameraComponentSchema(), &camera, prefabs::ComponentFlags::None},
+            {103, BootstrapEntityId, &entities::GetLightComponentSchema(), &light, prefabs::ComponentFlags::None}};
         prefabs::CookDescription description;
         description.name = 0x626f6f7473747261ull;
         description.entities = {&entity, 1};
         description.components = components;
         description.sourceFingerprint = fingerprint;
         filesystem::MemoryFileWriter writer(bytes);
-        const prefabs::Result cooked = prefabs::CookPrefab(description, writer);
-        return cooked == prefabs::Result::Success;
+        return prefabs::CookPrefab(description, writer) == prefabs::Result::Success;
     }
 
     [[nodiscard]] bool BuildFeaturePipeline(const BootstrapContent& content, const vanguard::u32 index,
@@ -579,12 +735,12 @@ namespace
         if (request.output == content.mesh.resource)
             return add(content.material);
         if (request.output == content.material.resource)
-            return add(content.opaqueShader) && add(content.depthPipeline) && add(content.opaquePipeline);
+            return add(content.opaqueShader) && add(content.depthPipeline) && add(content.opaquePipeline) && add(content.surfaceTexture);
         if (request.output == content.depthPipeline.resource)
             return add(content.depthShader);
         if (request.output == content.opaquePipeline.resource)
             return add(content.opaqueShader);
-        return request.output == content.input.resource;
+        return request.output == content.input.resource || request.output == content.surfaceTexture.resource;
     }
 
     void SetBounds(world::Bounds& bounds, const vanguard::f32 extent) noexcept
@@ -633,6 +789,10 @@ namespace
             const gameInput::MappingBuildDescription description;
             cooked = gameInput::CookMapping(description, output) == gameInput::MappingResult::Success;
         }
+        else if (context.request.output == content.surfaceTexture.resource)
+        {
+            cooked = BuildSurfaceTexture(bytes);
+        }
         else if (context.request.output == content.depthPipeline.resource)
         {
             cooked = BuildSurfacePipeline(content.depthShader, content.depthPipeline, true, bytes);
@@ -656,10 +816,10 @@ namespace
         else if (context.request.output == content.cell.resource)
         {
             world::PlacementBuildRecord placement;
-            placement.entityId = 1;
+            placement.entityId = BootstrapEntityId;
             placement.name = 0x626f6f7473747261ull;
             placement.prefab = content.prefab.resource;
-            SetBounds(placement.bounds, 1.0f);
+            placement.bounds = CalculatePlacementBounds(CalculateBootstrapMeshBounds(), placement.transform);
             placement.streamingDistance = 1000.0f;
             placement.visibilityDistance = 1000.0f;
             placement.flags = world::PlacementFlags::Persistent;
@@ -690,6 +850,7 @@ namespace
             description.worldId = WorldId;
             SetBounds(description.bounds, 100.0);
             description.cells = {&cell, 1};
+            description.startupCamera = {CellId, BootstrapEntityId, BootstrapCameraStableId};
             description.sourceFingerprint = crypto::Sha256(context.request.source.content.Data(), context.request.source.content.Count());
             cooked = world::CookWorld(description, output) == world::Result::Success;
         }
@@ -702,9 +863,9 @@ namespace
     }
 
     [[nodiscard]] assets::CompilerDescriptor Compiler(const char* const name, const resources::ResourceTypeId sourceType,
-                                                      const resources::ResourceTypeId outputType, BootstrapContent& content) noexcept
+                                                      const resources::ResourceTypeId outputType, BootstrapContent& content, const vanguard::u32 version = 6) noexcept
     {
-        return {assets::HashCompilerName(name), name, 3, sourceType, outputType, &DiscoverDependencies, &CompileResource, &content};
+        return {assets::HashCompilerName(name), name, version, sourceType, outputType, &DiscoverDependencies, &CompileResource, &content};
     }
 
     [[nodiscard]] bool StoreBuildOutput(BootstrapContent& content, const assets::BuildOutput& output) noexcept
@@ -725,7 +886,7 @@ namespace
                                      const StoredArtifact* const* const generatedDependencies = nullptr,
                                      const vanguard::u32 generatedDependencyCount = 0) noexcept
     {
-        constexpr char SourceContent[] = "Vanguard deterministic development bootstrap recipe 3";
+        constexpr char SourceContent[] = "Vanguard deterministic development bootstrap recipe 6";
         const assets::BuildRequest request{
             {BootstrapContent::Reference(sourcePath, sourceType), {reinterpret_cast<const vanguard::u8*>(SourceContent), sizeof(SourceContent) - 1u}, {}},
             artifact.resource,
@@ -804,13 +965,14 @@ namespace
     bool BuildShaderResource(assets::BuildSystem& builds, assets::DependencyIndex& index, BootstrapContent& content,
         const char* sourceName, containers::ArraySpan<const vanguard::u8> source,
         containers::ArraySpan<const shaderTools::EntryPoint> entries, StoredArtifact& artifact, vanguard::u64 program,
-        crypto::Digest256 permutation = {}) noexcept
+        crypto::Digest256 permutation = {}, const shaderTools::Define* const defines = nullptr, const vanguard::u32 defineCount = 0) noexcept
     {
         shaderTools::ShaderBuildDescription description;
         description.sourceName = sourceName;
         description.program = program;
         description.permutation = permutation.IsEmpty() ? crypto::Sha256(artifact.path, std::strlen(artifact.path)) : permutation;
         description.entryPoints = entries;
+        description.defines = {defines, defineCount};
         containers::DynamicArray<vanguard::u8> settings(memory::pools::Tools::GetInstance());
         const auto encoded = shaderTools::EncodeShaderBuildSettings(description, settings);
         if (encoded != shaderTools::BuildSettingsResult::Success)
@@ -878,6 +1040,108 @@ namespace
         return true;
     }
 
+    [[nodiscard]] bool ValidateBootstrapFixtureArtifacts(const BootstrapContent& content) noexcept
+    {
+        filesystem::MemoryFileReader textureReader(content.surfaceTexture.bytes, 0);
+        textures::TextureFile texture;
+        if (texture.Open(textureReader) != textures::Result::Success ||
+            texture.GetDimension() != textures::TextureDimension::Texture2D ||
+            texture.Format() != textures::PixelFormat::R8G8B8A8UNorm ||
+            texture.GetSpace() != textures::ColorSpace::Linear || texture.GetWidth() != 1u ||
+            texture.GetHeight() != 1u || texture.GetDepth() != 1u || texture.GetArrayLayers() != 1u ||
+            texture.GetMipCount() != 1u || texture.GetSubresources().Size() != 1u)
+            return false;
+        vanguard::u8 fallbackTexel[sizeof(BootstrapFallbackTexel)]{};
+        if (texture.ReadSubresource(textureReader, 0, fallbackTexel, sizeof(fallbackTexel)) != textures::Result::Success ||
+            std::memcmp(fallbackTexel, BootstrapFallbackTexel, sizeof(BootstrapFallbackTexel)) != 0)
+            return false;
+
+        filesystem::MemoryFileReader materialReader(content.material.bytes, 0);
+        materials::MaterialFile material;
+        if (material.Open(materialReader) != materials::Result::Success)
+            return false;
+        const auto materialResources = material.GetResourceParameters();
+        if (materialResources.Size() != 2u ||
+            materialResources[0].name != SurfaceResourceName(SurfaceTextureSemantic) ||
+            materialResources[0].kind != materials::ResourceParameterKind::Texture ||
+            materialResources[0].expectedAssetType != textures::TextureResourceType ||
+            materialResources[0].resource != content.surfaceTexture.resource ||
+            materialResources[0].dependency != resources::DependencyKind::Required ||
+            materialResources[1].name != SurfaceResourceName(SurfaceSamplerSemantic) ||
+            materialResources[1].kind != materials::ResourceParameterKind::Sampler ||
+            materialResources[1].expectedAssetType != materials::StandardSamplerResourceType ||
+            materialResources[1].resource.IsValid() ||
+            materialResources[1].dependency != resources::DependencyKind::Soft)
+            return false;
+
+        const auto validateSurfacePipeline = [](const StoredArtifact& artifact, const pipelines::AttachmentSignature& expected) noexcept
+        {
+            filesystem::MemoryFileReader pipelineReader(artifact.bytes, 0);
+            pipelines::PipelineFile pipeline;
+            const pipelines::Result opened = pipeline.Open(pipelineReader);
+            if (opened != pipelines::Result::Success || pipeline.GetKind() != pipelines::PipelineKind::Graphics ||
+                pipeline.GetGraphics().attachmentPolicy != pipelines::AttachmentPolicy::Exact || pipeline.GetGraphics().rasterizer.frontFace != pipelines::FrontFace::Clockwise ||
+                pipeline.GetGraphics().depthStencil.depthCompare != pipelines::CompareOperation::GreaterEqual)
+            {
+                std::fprintf(stderr, "bootstrapImage: surface pipeline validation failed path=%s open=%u kind=%u attachments=%u frontFace=%u depthCompare=%u\n",
+                             artifact.path, static_cast<vanguard::u32>(opened), static_cast<vanguard::u32>(pipeline.GetKind()),
+                             static_cast<vanguard::u32>(pipeline.GetGraphics().attachmentPolicy), static_cast<vanguard::u32>(pipeline.GetGraphics().rasterizer.frontFace),
+                             static_cast<vanguard::u32>(pipeline.GetGraphics().depthStencil.depthCompare));
+                return false;
+            }
+            crypto::Digest256 concreteKey;
+            const pipelines::Result concrete = pipelines::CalculateConcretePipelineKey(pipeline, &expected, concreteKey);
+            if (concrete != pipelines::Result::Success)
+                std::fprintf(stderr, "bootstrapImage: surface pipeline concrete-key validation failed path=%s result=%u\n", artifact.path,
+                             static_cast<vanguard::u32>(concrete));
+            return concrete == pipelines::Result::Success;
+        };
+        if (!validateSurfacePipeline(content.depthPipeline, rendering::MakeStandardDepthPrepassAttachments()) ||
+            !validateSurfacePipeline(content.opaquePipeline, rendering::MakeStandardOpaqueAttachments()))
+            return false;
+
+        filesystem::MemoryFileReader meshReader(content.mesh.bytes, 0);
+        meshes::MeshFile mesh;
+        if (mesh.Open(meshReader) != meshes::Result::Success)
+            return false;
+        const meshes::Bounds& meshBounds = mesh.GetMeshBounds();
+        const vanguard::f32 expectedRadius = std::sqrt(3.25f);
+        if (meshBounds.minimum[0] != -1.5f || meshBounds.minimum[1] != -1.0f || meshBounds.minimum[2] != 5.0f ||
+            meshBounds.maximum[0] != 1.5f || meshBounds.maximum[1] != 1.0f || meshBounds.maximum[2] != 5.0f ||
+            meshBounds.sphereCenter[0] != 0.0f || meshBounds.sphereCenter[1] != 0.0f || meshBounds.sphereCenter[2] != 5.0f ||
+            std::fabs(meshBounds.sphereRadius - expectedRadius) > 0.000001f)
+            return false;
+
+        filesystem::MemoryFileReader cellReader(content.cell.bytes, 0);
+        world::CellFile cell;
+        if (cell.Open(cellReader) != world::Result::Success)
+            return false;
+        const world::PlacementRecord* const placement = cell.FindPlacement(BootstrapEntityId);
+        if (placement == nullptr || placement->bounds.minimum[0] != -1.5f || placement->bounds.minimum[1] != -1.0f ||
+            placement->bounds.minimum[2] != 5.0f || placement->bounds.maximum[0] != 1.5f || placement->bounds.maximum[1] != 1.0f ||
+            placement->bounds.maximum[2] != 5.0f)
+            return false;
+
+        filesystem::MemoryFileReader worldReader(content.startupWorld.bytes, 0);
+        world::WorldFile startupWorld;
+        const world::Result worldOpen = startupWorld.Open(worldReader);
+        if (worldOpen != world::Result::Success || !startupWorld.HasStartupCamera())
+        {
+            std::fprintf(stderr, "bootstrapImage: startup world camera validation open=%u hasCamera=%u bytes=%u\n",
+                         static_cast<vanguard::u32>(worldOpen), static_cast<vanguard::u32>(startupWorld.HasStartupCamera()),
+                         content.startupWorld.bytes.Size());
+            return false;
+        }
+        const world::WorldCameraLocator& startupCamera = startupWorld.GetStartupCamera();
+        const bool cameraMatches = startupCamera.cellId == CellId && startupCamera.entityId == BootstrapEntityId &&
+                                   startupCamera.componentStableId == BootstrapCameraStableId;
+        if (!cameraMatches)
+            std::fprintf(stderr, "bootstrapImage: startup world camera mismatch cell=%llu entity=%llu component=%llu\n",
+                         static_cast<unsigned long long>(startupCamera.cellId), static_cast<unsigned long long>(startupCamera.entityId),
+                         static_cast<unsigned long long>(startupCamera.componentStableId));
+        return cameraMatches;
+    }
+
     [[nodiscard]] bool ValidateImage(filesystem::Manager& files, const filesystem::AbsolutePath& path, const BootstrapContent& content) noexcept
     {
         auto file = files.CreateFileReader(path, filesystem::FOF_Buffered);
@@ -897,7 +1161,7 @@ namespace
             packageSet->startupWorldType != content.startupWorld.resource.ExpectedType() ||
             packageSet->defaultInput != content.input.resource.GetPath().Id() || packageSet->defaultInputType != content.input.resource.ExpectedType())
             return false;
-        for (const StoredArtifact* const artifact : {&content.input, &content.prefab, &content.mesh, &content.material, &content.depthShader,
+        for (const StoredArtifact* const artifact : {&content.input, &content.prefab, &content.mesh, &content.material, &content.surfaceTexture, &content.depthShader,
                                                      &content.opaqueShader, &content.depthPipeline, &content.opaquePipeline, &content.cell,
                                                      &content.startupWorld})
         {
@@ -932,6 +1196,12 @@ namespace
             if (!shaderValid || !pipelineValid)
                 return false;
         }
+        if (!validateBytes(content.depthPipeline) || !validateBytes(content.opaquePipeline) || !validateBytes(content.surfaceTexture) ||
+            !validateBytes(content.mesh) || !validateBytes(content.cell))
+            return false;
+        if (!ValidateBootstrapFixtureArtifacts(content))
+            return false;
+
         const bool catalogValid = validateBytes(content.catalog);
         if (!catalogValid)
             return false;
@@ -941,7 +1211,7 @@ namespace
         std::fprintf(stdout, "bootstrapImage: catalog=%s entries=%u resources=%u\n", pipelines::ToString(openedCatalog),
             catalog.Entries().Size(), reader.GetResources().Count());
         return openedCatalog == pipelines::Result::Success && catalog.Entries().Size() == FeatureCount &&
-            reader.GetResources().Count() == 11 + 2 * FeatureCount;
+            reader.GetResources().Count() == 12 + 2 * FeatureCount;
     }
 
     [[nodiscard]] bool BuildBootstrapImage(const char* const runtimeRootArgument, const char* const shaderDirectoryArgument) noexcept
@@ -981,11 +1251,13 @@ namespace
         assets::DependencyIndex index;
         assets::DependencyIndexConfig indexConfig;
         indexConfig.root = cacheDirectory.AsChar();
-        indexConfig.settingsFingerprint = crypto::Sha256("bootstrapImage.settings.3", 25);
+        constexpr char BootstrapSettings[] = "bootstrapImage.settings.6";
+        indexConfig.settingsFingerprint = crypto::Sha256(BootstrapSettings, sizeof(BootstrapSettings) - 1u);
 
         const assets::CompilerDescriptor compilers[]{Compiler("bootstrap.input", InputSourceType, gameInput::MappingResourceType, content),
                                                      Compiler("renderer.catalog", CatalogSourceType, pipelines::RendererCatalogResourceType, content),
-                                                     Compiler("bootstrap.pipeline", PipelineSourceType, pipelines::PipelineResourceType, content),
+                                                     Compiler("bootstrap.pipeline", PipelineSourceType, pipelines::PipelineResourceType, content, 7),
+                                                     Compiler("bootstrap.texture", TextureSourceType, textures::TextureResourceType, content),
                                                      Compiler("bootstrap.material", MaterialSourceType, materials::MaterialResourceType, content),
                                                      Compiler("bootstrap.mesh", MeshSourceType, meshes::MeshResourceType, content),
                                                      Compiler("bootstrap.prefab", PrefabSourceType, prefabs::PrefabResourceType, content),
@@ -1000,6 +1272,12 @@ namespace
             succeeded = assets::IsSuccess(initialized);
             if (!succeeded)
                 std::fprintf(stderr, "bootstrapImage: dependency-index initialization failed: %s\n", assets::ToString(initialized));
+        }
+        if (succeeded)
+        {
+            succeeded = index.BindPersistentProtectionDomain(builds);
+            if (!succeeded)
+                std::fprintf(stderr, "bootstrapImage: dependency-index protection-domain binding failed\n");
         }
         for (const assets::CompilerDescriptor& compiler : compilers)
         {
@@ -1049,11 +1327,18 @@ namespace
                                              content.opaquePipeline, opaquePipelineDependencies, 1);
             succeeded = built;
         }
-        const StoredArtifact* const materialDependencies[]{&content.opaqueShader, &content.depthPipeline, &content.opaquePipeline};
+        if (succeeded)
+        {
+            const bool built = BuildResource(builds, index, content, "source/textures/bootstrap_project_fallback.bootstrap", TextureSourceType,
+                                             content.surfaceTexture);
+            succeeded = built;
+        }
+        const StoredArtifact* const materialDependencies[]{&content.opaqueShader, &content.depthPipeline, &content.opaquePipeline,
+                                                           &content.surfaceTexture};
         if (succeeded)
         {
             const bool built = BuildResource(builds, index, content, "source/materials/bootstrap_surface.bootstrap", MaterialSourceType,
-                                             content.material, materialDependencies, 3);
+                                             content.material, materialDependencies, 4);
             succeeded = built;
         }
         const StoredArtifact* const meshDependencies[]{&content.material};
@@ -1084,6 +1369,14 @@ namespace
                                              worldDependencies, 1);
             succeeded = built;
         }
+        if (succeeded)
+        {
+            succeeded = ValidateBootstrapFixtureArtifacts(content);
+            if (succeeded)
+                std::fprintf(stdout, "bootstrapImage: fixture artifacts validated\n");
+            else
+                std::fprintf(stderr, "bootstrapImage: fixture artifact validation failed\n");
+        }
         for (vanguard::u32 featureIndex = 0; succeeded && featureIndex < FeatureCount; ++featureIndex)
         {
             const auto& feature = rendering::RendererFeaturePrograms[featureIndex];
@@ -1095,9 +1388,11 @@ namespace
             const containers::ArraySpan<const shaderTools::EntryPoint> entries = feature.compute != nullptr
                 ? containers::ArraySpan<const shaderTools::EntryPoint>(compute, 1)
                 : containers::ArraySpan<const shaderTools::EntryPoint>(graphics, 2);
+            const shaderTools::Define featureDefine{feature.define, nullptr};
             if (succeeded)
                 succeeded = BuildShaderResource(builds, index, content, feature.source, source, entries, content.featureShaders[featureIndex],
-                    content.featureShaders[featureIndex].resource.GetPath().Id());
+                    content.featureShaders[featureIndex].resource.GetPath().Id(), {}, feature.define != nullptr ? &featureDefine : nullptr,
+                    feature.define != nullptr ? 1u : 0u);
             const StoredArtifact* dependencies[]{&content.featureShaders[featureIndex]};
             if (succeeded)
                 succeeded = BuildResource(builds, index, content, content.featurePipelines[featureIndex].path, PipelineSourceType,

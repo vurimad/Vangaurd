@@ -74,6 +74,8 @@ namespace vanguard::rendering
         u64 mutationEpoch = 0;
         u64 serial = 0;
         u32 changeCount = 0;
+        /// Dirty object uploads plus mutation-driven retirement tombstones.
+        u32 uploadRequestCount = 0;
         containers::ArraySpan<const RenderSceneGpuRetirement> retirements;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
@@ -211,11 +213,19 @@ namespace vanguard::rendering
                                       RenderSceneGpuFailure* failure = nullptr) noexcept;
         /// Verifies that every non-empty range was written. Call after the Jobs dependency joining range writers.
         [[nodiscard]] bool FinishWrites(const RenderSceneGpuPublication& publication, RenderSceneGpuFailure* failure = nullptr) noexcept;
-        /// Closes a staged publication and forwards removals to GPU-safe cancellation or retirement.
+        /// Main-thread. Closes a staged publication and forwards removals to GPU-safe cancellation or retirement.
         [[nodiscard]] bool Complete(const RenderSceneGpuPublication& publication, RenderSceneGpuFailure* failure = nullptr) noexcept;
         /// Discards a publication before staging and preserves its sealed dirty indices for retry.
         [[nodiscard]] bool Cancel(const RenderSceneGpuPublication& publication, RenderSceneGpuFailure* failure = nullptr) noexcept;
+        /// Defers an unstaged publication because shared upload storage is temporarily busy. Parallel dirty slices
+        /// are rebased into the serial queue so later scene mutations may continue to coalesce before retry.
+        [[nodiscard]] bool Defer(const RenderSceneGpuPublication& publication, RenderSceneGpuFailure* failure = nullptr) noexcept;
 
+        /// Reports whether one scene still owns dirty, retirement, or non-serial publication state without scanning unrelated scenes.
+        [[nodiscard]] bool HasPendingPublicationWork(RenderSceneHandle scene, bool& pending, RenderSceneGpuFailure* failure = nullptr) const noexcept;
+        /// O(1) scene-local publication/accounting snapshot. This does not inspect
+        /// proxy payloads or GPU memory and is safe at the serialized frame boundary.
+        [[nodiscard]] bool GetSceneStats(RenderSceneHandle scene, RenderSceneGpuStats& stats) const noexcept;
         [[nodiscard]] RenderSceneGpuStats GetStats() const noexcept;
 
     private:

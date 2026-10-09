@@ -27,7 +27,8 @@ namespace vanguard::entities
         InvalidHandle,
         InvalidState,
         InitializationFailure,
-        AttachmentFailure
+        AttachmentFailure,
+        Busy
     };
 
     struct ComponentDirectoryFailure

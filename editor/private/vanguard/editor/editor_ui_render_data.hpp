@@ -4,6 +4,7 @@
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/editor/editor_ui.hpp>
 #include <vanguard/memory/pool.hpp>
+#include <vanguard/rendering/render_flow_resource_allocator.hpp>
 
 namespace vanguard::editor::detail
 {
@@ -43,6 +44,7 @@ namespace vanguard::editor::detail
         rhi::Texture texture;
         rhi::SamplerState sampler;
         EditorTextureColorSpace colorSpace = EditorTextureColorSpace::DisplaySrgb;
+        EditorTextureRenderOutputPublication publication;
     };
 
     struct EditorUiRenderData
@@ -85,6 +87,14 @@ namespace vanguard::editor::detail
         containers::DynamicArray<EditorUiTextureUpload> uploads;
         containers::DynamicArray<u8> pixels;
     };
+
+    /// Resolves one retained draw texture into the exact RenderFlow import contract used by the UI renderer.
+    /// A render-output publication is queried here, late in retained frame processing; no producer state is
+    /// captured during UI authoring.
+    [[nodiscard]] bool ResolveEditorTexturePublicationImport(const EditorTextureRenderOutputPublication& publication,
+                                                             rendering::RetainedTextureImportDesc& import) noexcept;
+    [[nodiscard]] bool ResolveEditorUiTextureImport(const EditorUiRenderTexture& texture,
+                                                    rendering::RetainedTextureImportDesc& import) noexcept;
 
     [[nodiscard]] EditorUiRenderData* AllocateEditorUiRenderData() noexcept;
     void RetainEditorUiRenderData(void* data) noexcept;

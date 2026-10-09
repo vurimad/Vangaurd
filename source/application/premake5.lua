@@ -10,6 +10,7 @@ project "application"
     disablewarnings { "4127" }
     targetdir(output_root)
     objdir(object_root)
+    useVanguardProfiling()
     files { "include/**.hpp", "src/**.cpp", "README.md", "UPSTREAM.md" }
     includedirs {
         "include", "../system/include", "../memory/include", "../diagnostics/include", "../containers/include",

@@ -68,20 +68,22 @@ lifecycle ownership in all configurations.
 
 ## Renderer composition and cameras
 
-RenderingRuntimeConfig::meshDrawPhases supplies explicit phase keys and attachment
-signatures, copied during world initialization. Source storage must survive that
-initialization. Keys must be valid and unique; count is bounded by
-MaximumRenderPhases. A bound renderer registry validates membership. Selected
-meshes must satisfy 9B's complete and compatible phase-coverage contract.
+Mesh draw phase/attachment compatibility is renderer-generation state owned once by
+the topology-enabled `MeshResidencyManager`. World runtimes and components do not
+copy or forward attachment-context tables. `StaticMeshComponent` requests the shared
+drawable closure from residency after topology is ready; residency resolves the
+selected renderer policy internally. Selected meshes must still satisfy 9B's complete
+and compatible phase-coverage contract.
 
 ManagedGameWorldService binds the engine MeshResidencyManager, RenderCommandSystem
-and RenderPhaseRegistry. Standalone composition calls BindMeshResidency and
-BindCommands before initialization. Components never invent attachment formats.
-An empty context list supports worlds without mesh/camera components but cannot
-prepare one of those components.
+and the renderer-generation default camera `RenderPhaseSet`. Standalone composition
+calls BindMeshResidency and BindCommands before initialization. The runtime stores the
+small phase set by value and retains no phase-registry pointer or renderer-policy
+span. Components never invent attachment formats. Disabled rendering supplies an
+empty default camera phase set and an uninitialized mesh-residency capability.
 
 CameraComponent provides a perspective, on-demand camera in existing storage.
-Its phase set is resolved once from configured phases at attachment. Existing
+Its render state consumes the runtime's already-resolved default phase set. Existing
 viewport owners select its GetCamera() handle; component creation does not choose
 an active viewport camera. Projection/masks are saved; placed transforms supply
 pose. Enable changes camera state; detach unregisters the camera.

@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
@@ -353,7 +354,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "materialResourceTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(vanguard::io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("material_resource_tests");
     const filesystem::AbsolutePath directory = root.AddDirPath("vanguard_material_resource_conformance");
     Check(filesystem::Initialize({root, root, directory}), "filesystem initialization");
     filesystem::Manager& files = filesystem::GetManager();

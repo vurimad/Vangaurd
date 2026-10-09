@@ -38,8 +38,8 @@ namespace
 
 		while ( index < str.Length() )
 		{
-			if ( index + 2 < str.Length() &&
-				str[ index + 1 ] == '.' && str[ index + 2 ] == '.' )
+				if ( index + 2 < str.Length() && str[ index + 1 ] == '.' && str[ index + 2 ] == '.' &&
+					( index + 3 == str.Length() || str[ index + 3 ] == separator ) )
 			{
 				// Resolve .. relative directory, /x/../ -> /
 				str.Erase( prevIndex, index + 3 );
@@ -53,8 +53,8 @@ namespace
 					}
 				}
 			}
-			else if ( index + 1 < str.Length() &&
-				str[ index + 1 ] == '.' )
+				else if ( index + 1 < str.Length() && str[ index + 1 ] == '.' &&
+					( index + 2 == str.Length() || str[ index + 2 ] == separator ) )
 			{
 				// Resolve . current directory, /./ -> /
 				str.Erase( index, index + 2 );

@@ -18,6 +18,7 @@ namespace vanguard::filesystem
 namespace vanguard::engine
 {
     struct RenderingServiceConfig;
+    struct WindowServiceConfig;
     inline constexpr application::ModuleId EngineModuleId = 0x656e67696e650001ull;
     inline constexpr application::ServiceId IoServiceId = 0x696f000000000001ull;
     inline constexpr application::ServiceId FilesystemServiceId = 0x66696c6573797301ull;
@@ -59,7 +60,7 @@ namespace vanguard::engine
     [[nodiscard]] bool RegisterJobsService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterFramePipelineService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterReflectionService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;
-    [[nodiscard]] bool RegisterWindowService(application::EngineHost& host, application::IPlatformHost* platform,
+    [[nodiscard]] bool RegisterWindowService(application::EngineHost& host, const WindowServiceConfig& config,
                                              application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterInputService(application::EngineHost& host, input::IInputBackend* backend, application::HostFailure* failure = nullptr) noexcept;
     [[nodiscard]] bool RegisterGameInputService(application::EngineHost& host, application::HostFailure* failure = nullptr) noexcept;

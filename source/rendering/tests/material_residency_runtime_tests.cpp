@@ -1,5 +1,9 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/rendering/material_residency_runtime.hpp>
 #include <vanguard/rendering/material_scene_binding.hpp>
+#include <vanguard/rendering/mesh_draw_layout.hpp>
+#include <vanguard/rendering/render_phase.hpp>
+#include <vanguard/rendering/render_scene_gpu_pending_state.hpp>
 
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/materials/materials.hpp>
@@ -36,15 +40,26 @@ namespace vanguard::rendering::tests
 
         struct RuntimeFixture
         {
-            RuntimeFixture() noexcept : shaderBytes(memory::pools::Rendering::GetInstance()), pipelineBytes(memory::pools::Rendering::GetInstance()), materialBytes(memory::pools::Rendering::GetInstance()) {}
+            RuntimeFixture() noexcept
+                : shaderBytes(memory::pools::Rendering::GetInstance()), pipelineBytes(memory::pools::Rendering::GetInstance()), materialBytes(memory::pools::Rendering::GetInstance()),
+                  malformedStaticShaderBytes(memory::pools::Rendering::GetInstance()), malformedStaticPipelineBytes(memory::pools::Rendering::GetInstance()),
+                  malformedStaticMaterialBytes(memory::pools::Rendering::GetInstance())
+            {
+            }
 
             resources::ResourceReference shaderReference{resources::ResourcePath::FromString("runtime/material_residency.vshader"), shader::ShaderResourceType};
             resources::ResourceReference pipelineReference{resources::ResourcePath::FromString("runtime/material_residency.vppl"), pipeline::PipelineResourceType};
             resources::ResourceReference materialReference{resources::ResourcePath::FromString("runtime/material_residency.vmat"), material::MaterialResourceType};
             resources::ResourceReference secondMaterialReference{resources::ResourcePath::FromString("runtime/material_residency_second.vmat"), material::MaterialResourceType};
+            resources::ResourceReference malformedStaticShaderReference{resources::ResourcePath::FromString("runtime/material_residency_static_bad.vshader"), shader::ShaderResourceType};
+            resources::ResourceReference malformedStaticPipelineReference{resources::ResourcePath::FromString("runtime/material_residency_static_bad.vppl"), pipeline::PipelineResourceType};
+            resources::ResourceReference malformedStaticMaterialReference{resources::ResourcePath::FromString("runtime/material_residency_static_bad.vmat"), material::MaterialResourceType};
             ByteArray shaderBytes;
             ByteArray pipelineBytes;
             ByteArray materialBytes;
+            ByteArray malformedStaticShaderBytes;
+            ByteArray malformedStaticPipelineBytes;
+            ByteArray malformedStaticMaterialBytes;
         };
 
         [[nodiscard]] bool Compile(const char* const source, const char* const target, CompiledShader& output) noexcept
@@ -118,14 +133,92 @@ namespace vanguard::rendering::tests
             if (pipelineFile.Open(pipelineReader) != pipeline::Result::Success)
                 return false;
 
-            const material::TechniqueBuildRecord technique{0x3c010003, output.pipelineReference, &pipelineFile};
+            const material::TechniqueBuildRecord techniques[]{{0x3c010003, output.pipelineReference, &pipelineFile},
+                                                               {standardRenderPhases::Opaque.value, output.pipelineReference, &pipelineFile}};
             material::BuildDescription materialDescription;
             materialDescription.name = 0x3c010004;
             materialDescription.shader = output.shaderReference;
             materialDescription.shaderReflection = &shaderFile;
-            materialDescription.techniques = {&technique, 1};
+            materialDescription.techniques = techniques;
             filesystem::MemoryFileWriter materialWriter(output.materialBytes);
-            return material::WriteMaterial(materialWriter, materialDescription) == material::Result::Success;
+            if (material::WriteMaterial(materialWriter, materialDescription) != material::Result::Success)
+                return false;
+
+            CompiledShader staticVertex;
+            CompiledShader staticPixel;
+            if (!Compile("struct VSInput { float3 p : POSITION; uint2 draw0 : VG_DRAW0; uint2 draw1 : VG_DRAW1; }; cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; float4 main(VSInput input) : SV_Position { float offset = float((input.draw0.x ^ input.draw1.x) & 1u) * 0.000001; return float4(input.p * drawScale.xyz + float3(offset, 0.0, 0.0), 1.0); }",
+                         "vs_5_0", staticVertex) ||
+                !Compile("cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; float4 main() : SV_Target0 { return float4(1.0, 0.0, 1.0, worldCellSize); }", "ps_5_0",
+                         staticPixel))
+                return false;
+            const shader::StageBuildRecord staticStages[]{{shader::ShaderStage::Vertex, shader::NativeFormat::Dxil, 0x1101, staticVertex.bytecode->GetBufferPointer(), staticVertex.bytecode->GetBufferSize(), "main"},
+                                                         {shader::ShaderStage::Fragment, shader::NativeFormat::Dxil, 0x1102, staticPixel.bytecode->GetBufferPointer(), staticPixel.bytecode->GetBufferSize(), "main"}};
+            constexpr u64 staticDrawContext = 0x3c010010ull;
+            const shader::StageMask staticDrawStages = shader::StageBit(shader::ShaderStage::Vertex) | shader::StageBit(shader::ShaderStage::Fragment);
+            const shader::DescriptorBinding staticDrawBinding{staticDrawContext, 0, 0, 1, shader::BindingKind::ConstantBuffer, shader::BindingAccess::Read, staticDrawStages};
+            // Deliberately malformed reflected size. RequestTechnique must reject this
+            // before native shader/PSO admission when the selected VPPL is static-surface.
+            const shader::ConstantBuffer malformedDrawBuffer{staticDrawContext, 0, 0, 16, 0, 0};
+            const shader::VertexInput staticInputs[]{{shader::HashInterfaceName("POSITION"), 0, 0, shader::NumericClass::FloatingPoint, 3, 32},
+                                                     {shader::HashInterfaceName("VG_DRAW"), 0, 1, shader::NumericClass::UnsignedInteger, 2, 32},
+                                                     {shader::HashInterfaceName("VG_DRAW"), 1, 2, shader::NumericClass::UnsignedInteger, 2, 32}};
+            shader::BuildDescription staticShaderDescription;
+            staticShaderDescription.kind = shader::ProgramKind::Graphics;
+            staticShaderDescription.program = 0x3c010011;
+            staticShaderDescription.permutation = crypto::Sha256("static residency malformed", 26);
+            staticShaderDescription.compilerFingerprint = crypto::Sha256("d3dcompiler static proof", 24);
+            staticShaderDescription.pipelineInterface.stages = staticDrawStages;
+            staticShaderDescription.pipelineInterface.primitiveClass = shader::PrimitiveClass::Triangle;
+            staticShaderDescription.pipelineInterface.renderTargetCount = 1;
+            staticShaderDescription.stages = staticStages;
+            staticShaderDescription.bindings = {&staticDrawBinding, 1};
+            staticShaderDescription.constantBuffers = {&malformedDrawBuffer, 1};
+            staticShaderDescription.vertexInputs = staticInputs;
+            staticShaderDescription.fragmentOutputs = {&fragmentOutput, 1};
+            staticShaderDescription.materialContract = &contract;
+            filesystem::MemoryFileWriter staticShaderWriter(output.malformedStaticShaderBytes);
+            if (shader::WriteShader(staticShaderWriter, staticShaderDescription) != shader::Result::Success)
+                return false;
+            filesystem::MemoryFileReader staticShaderReader(output.malformedStaticShaderBytes, 0);
+            shader::ShaderFile staticShaderFile;
+            if (staticShaderFile.Open(staticShaderReader) != shader::Result::Success || staticShaderFile.GetMaterialContract() == nullptr)
+                return false;
+
+            const pipeline::ShaderReference staticPipelineShader{output.malformedStaticShaderReference.GetPath().Id(),
+                                                                 staticShaderFile.GetPermutation(),
+                                                                 staticShaderFile.BindingLayoutFingerprint(),
+                                                                 staticShaderFile.GetPipelineInterfaceFingerprint(),
+                                                                 staticShaderFile.GetMaterialContract()->domainFingerprint,
+                                                                 staticShaderFile.GetMaterialContract()->layoutFingerprint};
+            const pipeline::VertexStream staticStreams[]{{0, 12, pipeline::InputRate::PerVertex, 1},
+                                                         {MeshDrawInstanceBinding, sizeof(MeshDrawInstance), pipeline::InputRate::PerInstance, 1}};
+            const pipeline::VertexAttribute staticAttributes[]{{shader::HashInterfaceName("POSITION"), 0, 0, 0, 0, shader::NumericClass::FloatingPoint, 3, 32, pipeline::Format::R32G32B32Float, "POSITION"},
+                                                               {shader::HashInterfaceName("VG_DRAW"), 0, 1, MeshDrawInstanceBinding, 0, shader::NumericClass::UnsignedInteger, 2, 32, pipeline::Format::R32G32UInt, "VG_DRAW"},
+                                                               {shader::HashInterfaceName("VG_DRAW"), 1, 2, MeshDrawInstanceBinding, 8, shader::NumericClass::UnsignedInteger, 2, 32, pipeline::Format::R32G32UInt, "VG_DRAW"}};
+            pipeline::BuildDescription staticPipelineDescription;
+            staticPipelineDescription.kind = pipeline::PipelineKind::Graphics;
+            staticPipelineDescription.name = 0x3c010012;
+            staticPipelineDescription.shaders = {&staticPipelineShader, 1};
+            staticPipelineDescription.vertexStreams = staticStreams;
+            staticPipelineDescription.vertexAttributes = staticAttributes;
+            staticPipelineDescription.graphics.blend.attachmentCount = 1;
+            staticPipelineDescription.graphics.attachmentPolicy = pipeline::AttachmentPolicy::Deferred;
+            filesystem::MemoryFileWriter staticPipelineWriter(output.malformedStaticPipelineBytes);
+            if (pipeline::WritePipeline(staticPipelineWriter, staticPipelineDescription) != pipeline::Result::Success)
+                return false;
+            filesystem::MemoryFileReader staticPipelineReader(output.malformedStaticPipelineBytes, 0);
+            pipeline::PipelineFile staticPipelineFile;
+            if (staticPipelineFile.Open(staticPipelineReader) != pipeline::Result::Success || !IsStaticSurfaceDrawPipeline(staticPipelineFile))
+                return false;
+
+            const material::TechniqueBuildRecord staticTechnique{standardRenderPhases::Opaque.value, output.malformedStaticPipelineReference, &staticPipelineFile};
+            material::BuildDescription staticMaterialDescription;
+            staticMaterialDescription.name = 0x3c010013;
+            staticMaterialDescription.shader = output.malformedStaticShaderReference;
+            staticMaterialDescription.shaderReflection = &staticShaderFile;
+            staticMaterialDescription.techniques = {&staticTechnique, 1};
+            filesystem::MemoryFileWriter staticMaterialWriter(output.malformedStaticMaterialBytes);
+            return material::WriteMaterial(staticMaterialWriter, staticMaterialDescription) == material::Result::Success;
         }
 
         [[nodiscard]] bool Save(const filesystem::AbsolutePath& path, const ByteArray& bytes) noexcept
@@ -164,12 +257,112 @@ namespace vanguard::rendering::tests
             RenderCommandFrameTickResult frame;
             RenderCommandFailure commandFailure;
             GpuSceneRuntimeFailure runtimeFailure;
-            if (!residency.Update(&residencyFailure) || !residency.Update(&residencyFailure) || !bindings.Update(&bindingFailure) ||
-                !commands.FrameTick(scenes.GetFramePipelineScenes(), tick++, frame, &commandFailure) || !commands.FlushPreviousFrameProcessing(&commandFailure) ||
-                commands.ConsumeExecutionFailure(commandFailure) || !runtime.ResolveContributions(&runtimeFailure) || runtime.ConsumePublicationFailure(runtimeFailure) || !residency.Update(&residencyFailure) ||
-                !bindings.Update(&bindingFailure))
+            if (!residency.Update(&residencyFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: residency update A code=%u message=%s\n", static_cast<u32>(residencyFailure.code), residencyFailure.message != nullptr ? residencyFailure.message : "");
                 return false;
+            }
+            if (!residency.Update(&residencyFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: residency update B code=%u message=%s\n", static_cast<u32>(residencyFailure.code), residencyFailure.message != nullptr ? residencyFailure.message : "");
+                return false;
+            }
+            if (!bindings.Update(&bindingFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: binding pre-frame code=%u message=%s\n", static_cast<u32>(bindingFailure.code), bindingFailure.message != nullptr ? bindingFailure.message : "");
+                return false;
+            }
+            if (!commands.FrameTick(scenes.GetFramePipelineScenes(), tick++, frame, &commandFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: frame tick code=%u message=%s\n", static_cast<u32>(commandFailure.code), commandFailure.message != nullptr ? commandFailure.message : "");
+                return false;
+            }
+            if (!commands.FlushPreviousFrameProcessing(&commandFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: frame flush code=%u message=%s\n", static_cast<u32>(commandFailure.code), commandFailure.message != nullptr ? commandFailure.message : "");
+                return false;
+            }
+            if (commands.ConsumeExecutionFailure(commandFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: command execution code=%u message=%s\n", static_cast<u32>(commandFailure.code), commandFailure.message != nullptr ? commandFailure.message : "");
+                return false;
+            }
+            if (!runtime.ResolveContributions(&runtimeFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: runtime resolve code=%u message=%s sceneCode=%u sceneMessage=%s\n", static_cast<u32>(runtimeFailure.code),
+                             runtimeFailure.message != nullptr ? runtimeFailure.message : "", static_cast<u32>(runtimeFailure.scenePublicationFailure.code),
+                             runtimeFailure.scenePublicationFailure.message != nullptr ? runtimeFailure.scenePublicationFailure.message : "");
+                return false;
+            }
+            if (runtime.ConsumePublicationFailure(runtimeFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: publication code=%u message=%s sceneCode=%u sceneMessage=%s\n", static_cast<u32>(runtimeFailure.code),
+                             runtimeFailure.message != nullptr ? runtimeFailure.message : "", static_cast<u32>(runtimeFailure.scenePublicationFailure.code),
+                             runtimeFailure.scenePublicationFailure.message != nullptr ? runtimeFailure.scenePublicationFailure.message : "");
+                return false;
+            }
+            if (!residency.Update(&residencyFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: residency post-frame code=%u message=%s\n", static_cast<u32>(residencyFailure.code), residencyFailure.message != nullptr ? residencyFailure.message : "");
+                return false;
+            }
+            if (!bindings.Update(&bindingFailure))
+            {
+                std::fprintf(stderr, "[material3C2] advance failed: binding post-frame code=%u message=%s\n", static_cast<u32>(bindingFailure.code), bindingFailure.message != nullptr ? bindingFailure.message : "");
+                return false;
+            }
             return true;
+        }
+
+        [[nodiscard]] bool RunStaticSurfaceReflectionAdmissionProof(const resources::ResourceHandle& material, MaterialMaterializer& materializer, GpuSceneRuntime& runtime,
+                                                                    RenderCommandSystem& commands, RenderSceneManager& scenes, const u64 frameTick) noexcept
+        {
+            PipelineCache pipelineCache;
+            MaterialResidencyRuntime residency;
+            MaterialResidencyRuntimeFailure residencyFailure;
+            MaterialResidencyRuntimeConfig residencyConfig;
+            residencyConfig.maximumResidencies = 1;
+            residencyConfig.maximumDemands = 1;
+            residencyConfig.maximumTechniqueRequests = 1;
+            residencyConfig.maximumNativePrograms = 1;
+            rhi::BindingLayout drawLayout(rhi::AdoptReference, rhi::RequestBindingLayout(GetStaticSurfaceDrawBindingLayout()));
+            if (!drawLayout)
+                return false;
+            const rhi::BindingLayoutRef drawLayoutRef = drawLayout.GetRef();
+            const PipelineInterfaceResources interfaces{{&drawLayoutRef, 1}, {}};
+            if (!pipelineCache.Initialize() || !residency.Initialize(materializer, pipelineCache, interfaces, residencyConfig, &residencyFailure))
+                return false;
+
+            MaterialDemandHandle demand;
+            if (!residency.RequestMaterial(material, demand, &residencyFailure) || !residency.Update(&residencyFailure) || !residency.Update(&residencyFailure))
+                return false;
+            RenderCommandFrameTickResult tick;
+            RenderCommandFailure commandFailure;
+            GpuSceneRuntimeFailure runtimeFailure;
+            if (!commands.FrameTick(scenes.GetFramePipelineScenes(), frameTick, tick, &commandFailure) || !commands.FlushPreviousFrameProcessing(&commandFailure) ||
+                commands.ConsumeExecutionFailure(commandFailure) || !runtime.ResolveContributions(&runtimeFailure) || runtime.ConsumePublicationFailure(runtimeFailure) ||
+                !residency.Update(&residencyFailure))
+                return false;
+            MaterialResidencyInfo residencyInfo;
+            if (!residency.GetInfo(demand.GetResidency(), residencyInfo, &residencyFailure) || residencyInfo.state != MaterialResidencyState::Resident)
+                return false;
+
+            pipeline::AttachmentSignature attachments;
+            attachments.colorCount = 1;
+            attachments.colors[0].format = pipeline::Format::R8G8B8A8UNorm;
+            attachments.colors[0].numericClass = shader::NumericClass::FloatingPoint;
+            MaterialTechniqueRequest rejected;
+            const MaterialTechniqueDesc staticSurfaceTechnique{demand.GetResidency(), standardRenderPhases::Opaque.value, &attachments, pipeline_cache::Priority::Critical};
+            if (residency.RequestTechnique(staticSurfaceTechnique, rejected, &residencyFailure) || residencyFailure.code != MaterialResidencyRuntimeFailureCode::InvalidMaterial || rejected.IsValid())
+                return false;
+
+            demand.Reset();
+            rhi::ResidencyFenceSet retirementFences;
+            rhi::Failure rhiFailure;
+            if (!SubmitRetirementFences(retirementFences, rhiFailure) || !residency.SealRetirements(retirementFences, &residencyFailure) || !residency.Shutdown(&residencyFailure))
+                return false;
+            pipelineCache.WaitIdle();
+            return pipelineCache.Shutdown();
         }
 
         [[nodiscard]] bool RunSceneBindingProof(const resources::ResourceHandle& firstMaterial, const resources::ResourceHandle& secondMaterial, MaterialMaterializer& materializer, GpuSceneRuntime& runtime,
@@ -221,7 +414,7 @@ namespace vanguard::rendering::tests
                 return false;
             reporter.stage = 3;
 
-            u64 tick = 6;
+            u64 tick = 7;
             MaterialSceneBindingInfo info;
             for (u32 attempt = 0; attempt < 4; ++attempt)
                 if (!AdvanceSceneBinding(residency, bindings, runtime, commands, scenes, tick))
@@ -297,13 +490,28 @@ namespace vanguard::rendering::tests
                 return false;
             reporter.stage = 7;
 
-            for (u32 attempt = 0; attempt < 3 && info.activeResidency == firstResidency; ++attempt)
+            for (u32 attempt = 0; attempt < 8 && info.activeResidency == firstResidency; ++attempt)
             {
                 if (!AdvanceSceneBinding(residency, bindings, runtime, commands, scenes, tick) || !bindings.GetInfo(decal, info, &bindingFailure))
                     return false;
+                if (info.activeResidency == firstResidency)
+                {
+                    const rhi::GpuFence publicationFence = runtime.GetPublicationFence();
+                    rhi::Failure waitFailure;
+                    if (publicationFence.IsValid() && !rhi::WaitForGpuFence(publicationFence, 5'000'000'000ull, &waitFailure))
+                        return false;
+                }
             }
             if (info.activeResidency == firstResidency || info.candidateResidency.IsValid() || !info.activeMaterial.IsValid() || bindings.GetStats().replacements != 1)
+            {
+                bool stillPending = false;
+                const bool pendingQuery = runtime.GetScenePublisher().HasPendingPublicationWork(scene, stillPending, &gpuSceneFailure);
+                std::fprintf(stderr, "[material3C2] replacement acceptance: old=%u candidate=%u material=%u replacements=%llu pendingQuery=%u pending=%u segmentBusy=%llu\n",
+                             info.activeResidency == firstResidency, info.candidateResidency.IsValid(), info.activeMaterial.IsValid(),
+                             static_cast<unsigned long long>(bindings.GetStats().replacements), pendingQuery, stillPending,
+                             static_cast<unsigned long long>(runtime.GetUploader().GetStats().segmentBusyEvents));
                 return false;
+            }
             const MaterialResidencyHandle secondResidency = info.activeResidency;
             const GpuMaterialHandle secondGpuMaterial = info.activeMaterial;
             reporter.stage = 8;
@@ -314,10 +522,44 @@ namespace vanguard::rendering::tests
                 !runtime.GetScenePublisher().BindDecalMaterial(decal, info.activeMaterial, currentReceipt, &gpuSceneFailure) ||
                 runtime.GetScenePublisher().PollBinding(staleReceipt) != RenderSceneGpuBindingStatus::Stale || runtime.GetScenePublisher().PollBinding(currentReceipt) != RenderSceneGpuBindingStatus::Pending)
                 return false;
-            reporter.stage = 9;
-            if (!AdvanceSceneBinding(residency, bindings, runtime, commands, scenes, tick) || runtime.GetScenePublisher().PollBinding(currentReceipt) != RenderSceneGpuBindingStatus::Accepted)
+            bool scenePublicationPending = false;
+            if (!runtime.GetScenePublisher().HasPendingPublicationWork(scene, scenePublicationPending, &gpuSceneFailure) || !scenePublicationPending)
                 return false;
+            reporter.stage = 9;
+            bool advancedCurrentPublication = true;
+            bool queriedPendingPublication = true;
+            RenderSceneGpuBindingStatus currentPublicationStatus = RenderSceneGpuBindingStatus::Pending;
+            for (u32 attempt = 0; attempt < 8 && currentPublicationStatus == RenderSceneGpuBindingStatus::Pending; ++attempt)
+            {
+                advancedCurrentPublication = AdvanceSceneBinding(residency, bindings, runtime, commands, scenes, tick);
+                currentPublicationStatus = runtime.GetScenePublisher().PollBinding(currentReceipt);
+                queriedPendingPublication = runtime.GetScenePublisher().HasPendingPublicationWork(scene, scenePublicationPending, &gpuSceneFailure);
+                if (!advancedCurrentPublication || !queriedPendingPublication)
+                    break;
+                if (currentPublicationStatus == RenderSceneGpuBindingStatus::Pending)
+                {
+                    const rhi::GpuFence publicationFence = runtime.GetPublicationFence();
+                    rhi::Failure waitFailure;
+                    if (publicationFence.IsValid() && !rhi::WaitForGpuFence(publicationFence, 5'000'000'000ull, &waitFailure))
+                    {
+                        advancedCurrentPublication = false;
+                        break;
+                    }
+                }
+            }
+            if (!advancedCurrentPublication || currentPublicationStatus != RenderSceneGpuBindingStatus::Accepted || !queriedPendingPublication || scenePublicationPending)
+            {
+                std::fprintf(stderr, "[material3C2] current publication: advance=%u status=%u query=%u pending=%u gpuSceneFailure=%u\n",
+                             advancedCurrentPublication, static_cast<u32>(currentPublicationStatus), queriedPendingPublication, scenePublicationPending,
+                             static_cast<u32>(gpuSceneFailure.code));
+                return false;
+            }
             reporter.stage = 10;
+
+            if (!detail::HasPendingRenderSceneGpuPublicationWork(detail::RenderSceneGpuMutationPhase::Sealed, 0, 0) ||
+                detail::HasPendingRenderSceneGpuPublicationWork(detail::RenderSceneGpuMutationPhase::Serial, 0, 0))
+                return false;
+
             if (!runtime.GetScenePublisher().BindDecalMaterial(decal, info.activeMaterial, staleReceipt, &gpuSceneFailure) ||
                 runtime.GetScenePublisher().PollBinding(currentReceipt) != RenderSceneGpuBindingStatus::Stale || runtime.GetScenePublisher().PollBinding(staleReceipt) != RenderSceneGpuBindingStatus::Pending)
                 return false;
@@ -421,7 +663,7 @@ namespace vanguard::rendering::tests
         RuntimeFixture fixture;
         if (!BuildFixture(fixture))
             return false;
-        const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+        const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("material_residency_runtime_tests");
         const filesystem::AbsolutePath directory = root.AddDirPath("vanguard_material_residency_runtime");
         filesystem::Manager& files = filesystem::GetManager();
         static_cast<void>(files.DeletePath(directory));
@@ -430,7 +672,12 @@ namespace vanguard::rendering::tests
         const filesystem::AbsolutePath shaderPath = directory.AddFilePath("material_residency.vshader");
         const filesystem::AbsolutePath pipelinePath = directory.AddFilePath("material_residency.vppl");
         const filesystem::AbsolutePath materialPath = directory.AddFilePath("material_residency.vmat");
-        if (!Save(shaderPath, fixture.shaderBytes) || !Save(pipelinePath, fixture.pipelineBytes) || !Save(materialPath, fixture.materialBytes))
+        const filesystem::AbsolutePath malformedStaticShaderPath = directory.AddFilePath("material_residency_static_bad.vshader");
+        const filesystem::AbsolutePath malformedStaticPipelinePath = directory.AddFilePath("material_residency_static_bad.vppl");
+        const filesystem::AbsolutePath malformedStaticMaterialPath = directory.AddFilePath("material_residency_static_bad.vmat");
+        if (!Save(shaderPath, fixture.shaderBytes) || !Save(pipelinePath, fixture.pipelineBytes) || !Save(materialPath, fixture.materialBytes) ||
+            !Save(malformedStaticShaderPath, fixture.malformedStaticShaderBytes) || !Save(malformedStaticPipelinePath, fixture.malformedStaticPipelineBytes) ||
+            !Save(malformedStaticMaterialPath, fixture.malformedStaticMaterialBytes))
             return false;
 
         resources::ResourceRegistry registry;
@@ -446,19 +693,32 @@ namespace vanguard::rendering::tests
             return false;
         const streaming::DependencyDescriptor pipelineDependency{fixture.shaderReference, resources::DependencyKind::Required};
         const streaming::DependencyDescriptor materialDependencies[]{{fixture.shaderReference, resources::DependencyKind::Required}, {fixture.pipelineReference, resources::DependencyKind::Required}};
+        const streaming::DependencyDescriptor malformedStaticPipelineDependency{fixture.malformedStaticShaderReference, resources::DependencyKind::Required};
+        const streaming::DependencyDescriptor malformedStaticMaterialDependencies[]{{fixture.malformedStaticShaderReference, resources::DependencyKind::Required},
+                                                                                      {fixture.malformedStaticPipelineReference, resources::DependencyKind::Required}};
         if (!streamer.RegisterLoose({fixture.shaderReference, shaderPath, {}, serialization::Crc64(fixture.shaderBytes.Data(), fixture.shaderBytes.Size()), 0}) ||
             !streamer.RegisterLoose({fixture.pipelineReference, pipelinePath, {&pipelineDependency, 1}, serialization::Crc64(fixture.pipelineBytes.Data(), fixture.pipelineBytes.Size()), 0}) ||
             !streamer.RegisterLoose({fixture.materialReference, materialPath, materialDependencies, serialization::Crc64(fixture.materialBytes.Data(), fixture.materialBytes.Size()), 0}) ||
-            !streamer.RegisterLoose({fixture.secondMaterialReference, materialPath, materialDependencies, serialization::Crc64(fixture.materialBytes.Data(), fixture.materialBytes.Size()), 0}))
+            !streamer.RegisterLoose({fixture.secondMaterialReference, materialPath, materialDependencies, serialization::Crc64(fixture.materialBytes.Data(), fixture.materialBytes.Size()), 0}) ||
+            !streamer.RegisterLoose({fixture.malformedStaticShaderReference, malformedStaticShaderPath, {},
+                                     serialization::Crc64(fixture.malformedStaticShaderBytes.Data(), fixture.malformedStaticShaderBytes.Size()), 0}) ||
+            !streamer.RegisterLoose({fixture.malformedStaticPipelineReference, malformedStaticPipelinePath, {&malformedStaticPipelineDependency, 1},
+                                     serialization::Crc64(fixture.malformedStaticPipelineBytes.Data(), fixture.malformedStaticPipelineBytes.Size()), 0}) ||
+            !streamer.RegisterLoose({fixture.malformedStaticMaterialReference, malformedStaticMaterialPath, malformedStaticMaterialDependencies,
+                                     serialization::Crc64(fixture.malformedStaticMaterialBytes.Data(), fixture.malformedStaticMaterialBytes.Size()), 0}))
             return false;
         resources::PipelineRequest materialLoad = streamer.Request(fixture.materialReference);
         resources::PipelineRequest secondMaterialLoad = streamer.Request(fixture.secondMaterialReference);
-        if (!materialLoad.TryWait(10'000) || !materialLoad.HasLoaded() || !secondMaterialLoad.TryWait(10'000) || !secondMaterialLoad.HasLoaded())
+        resources::PipelineRequest malformedStaticMaterialLoad = streamer.Request(fixture.malformedStaticMaterialReference);
+        if (!materialLoad.TryWait(10'000) || !materialLoad.HasLoaded() || !secondMaterialLoad.TryWait(10'000) || !secondMaterialLoad.HasLoaded() ||
+            !malformedStaticMaterialLoad.TryWait(10'000) || !malformedStaticMaterialLoad.HasLoaded())
             return false;
         resources::ResourceHandle materialHandle = materialLoad.Acquire();
         resources::ResourceHandle secondMaterialHandle = secondMaterialLoad.Acquire();
+        resources::ResourceHandle malformedStaticMaterialHandle = malformedStaticMaterialLoad.Acquire();
         materialLoad.Reset();
         secondMaterialLoad.Reset();
+        malformedStaticMaterialLoad.Reset();
 
         PipelineCache pipelineCache;
         MaterialResidencyRuntime residency;
@@ -500,6 +760,13 @@ namespace vanguard::rendering::tests
             return false;
         MaterialResidencyInfo residencyInfo;
         if (!residency.GetInfo(firstDemand.GetResidency(), residencyInfo, &residencyFailure) || residencyInfo.state != MaterialResidencyState::Resident || !residencyInfo.material.IsValid())
+            return false;
+
+        MaterialTechniqueRequest nonStaticOpaque;
+        const MaterialTechniqueDesc nonStaticOpaqueTechnique{firstDemand.GetResidency(), standardRenderPhases::Opaque.value, nullptr, pipeline_cache::Priority::Normal};
+        if (residency.RequestTechnique(nonStaticOpaqueTechnique, nonStaticOpaque, &residencyFailure) || residencyFailure.code != MaterialResidencyRuntimeFailureCode::PipelineFailure ||
+            nonStaticOpaque.IsValid() ||
+            !residency.GetInfo(firstDemand.GetResidency(), residencyInfo, &residencyFailure) || residencyInfo.state != MaterialResidencyState::Resident)
             return false;
 
         MaterialTechniqueRequest missingAttachments;
@@ -590,6 +857,9 @@ namespace vanguard::rendering::tests
         if (!pipelineCache.Shutdown())
             return false;
 
+        if (!RunStaticSurfaceReflectionAdmissionProof(malformedStaticMaterialHandle, materializer, runtime, commands, scenes, 6))
+            return false;
+
         if (!RunSceneBindingProof(materialHandle, secondMaterialHandle, materializer, runtime, commands, scenes, mesh))
             return false;
 
@@ -609,7 +879,10 @@ namespace vanguard::rendering::tests
 
         materialHandle.Reset();
         secondMaterialHandle.Reset();
-        if (!streamer.UnregisterLoose(fixture.secondMaterialReference.GetPath()) || !streamer.UnregisterLoose(fixture.materialReference.GetPath()) ||
+        malformedStaticMaterialHandle.Reset();
+        if (!streamer.UnregisterLoose(fixture.malformedStaticMaterialReference.GetPath()) || !streamer.UnregisterLoose(fixture.malformedStaticPipelineReference.GetPath()) ||
+            !streamer.UnregisterLoose(fixture.malformedStaticShaderReference.GetPath()) || !streamer.UnregisterLoose(fixture.secondMaterialReference.GetPath()) ||
+            !streamer.UnregisterLoose(fixture.materialReference.GetPath()) ||
             !streamer.UnregisterLoose(fixture.pipelineReference.GetPath()) || !streamer.UnregisterLoose(fixture.shaderReference.GetPath()) || !streamer.UnregisterDecoder(material::MaterialResourceType) ||
             !streamer.UnregisterDecoder(pipeline::PipelineResourceType) || !streamer.UnregisterDecoder(shader::ShaderResourceType) || !streamer.Shutdown() || !resourcePipeline.Shutdown() ||
             !registry.Shutdown())
@@ -617,6 +890,9 @@ namespace vanguard::rendering::tests
         static_cast<void>(files.DeleteFile(shaderPath));
         static_cast<void>(files.DeleteFile(pipelinePath));
         static_cast<void>(files.DeleteFile(materialPath));
+        static_cast<void>(files.DeleteFile(malformedStaticShaderPath));
+        static_cast<void>(files.DeleteFile(malformedStaticPipelinePath));
+        static_cast<void>(files.DeleteFile(malformedStaticMaterialPath));
         static_cast<void>(files.DeletePath(directory));
         std::puts("[material3C2] material residency, scene binding, and atomic replacement proof passed");
         return true;

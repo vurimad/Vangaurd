@@ -1,7 +1,9 @@
 #include <vanguard/rendering/viewport.hpp>
+#include <vanguard/rendering/texture_output_receipt_state.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
 
 #include <vanguard/concurrency/atomic.hpp>
+#include <vanguard/concurrency/synchronization.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/pool.hpp>
 
@@ -76,6 +78,11 @@ namespace vanguard::rendering
                    static_cast<u32>(setup.features.debugView) <= static_cast<u32>(RenderDebugView::HitProxies);
         }
 
+        [[nodiscard]] constexpr bool ValidOutputColorEncoding(const RenderOutputColorEncoding encoding) noexcept
+        {
+            return encoding == RenderOutputColorEncoding::SceneLinear || encoding == RenderOutputColorEncoding::DisplaySrgb;
+        }
+
     } // namespace
 
     struct ViewportManager::Impl
@@ -87,6 +94,8 @@ namespace vanguard::rendering
             RenderViewport viewport;
             u32 generation = 0;
             concurrency::Atomic<bool> outputAcquired{false};
+            mutable concurrency::SpinLock outputReceiptLock{false};
+            RenderOutputReceipt outputReceipt;
         };
 
         struct EngineSlot
@@ -165,12 +174,17 @@ namespace vanguard::rendering
 
     RenderFrameOutputTransaction::RenderFrameOutputTransaction(RenderFrameOutputTransaction&& other) noexcept
         : m_viewport(other.m_viewport), m_acquisition(other.m_acquisition), m_resourceImportIndex(other.m_resourceImportIndex),
-          m_resourceImportGeneration(other.m_resourceImportGeneration), m_presentNodeReached(other.m_presentNodeReached)
+          m_resourceImportGeneration(other.m_resourceImportGeneration), m_resourceExportIndex(other.m_resourceExportIndex),
+          m_resourceExportGeneration(other.m_resourceExportGeneration), m_producerSerial(other.m_producerSerial),
+          m_presentNodeReached(other.m_presentNodeReached)
     {
         other.m_viewport = nullptr;
         other.m_acquisition = {};
         other.m_resourceImportIndex = ~u32{0};
         other.m_resourceImportGeneration = 0;
+        other.m_resourceExportIndex = ~u32{0};
+        other.m_resourceExportGeneration = 0;
+        other.m_producerSerial = 0;
         other.m_presentNodeReached = false;
     }
 
@@ -183,11 +197,17 @@ namespace vanguard::rendering
         m_acquisition = other.m_acquisition;
         m_resourceImportIndex = other.m_resourceImportIndex;
         m_resourceImportGeneration = other.m_resourceImportGeneration;
+        m_resourceExportIndex = other.m_resourceExportIndex;
+        m_resourceExportGeneration = other.m_resourceExportGeneration;
+        m_producerSerial = other.m_producerSerial;
         m_presentNodeReached = other.m_presentNodeReached;
         other.m_viewport = nullptr;
         other.m_acquisition = {};
         other.m_resourceImportIndex = ~u32{0};
         other.m_resourceImportGeneration = 0;
+        other.m_resourceExportIndex = ~u32{0};
+        other.m_resourceExportGeneration = 0;
+        other.m_producerSerial = 0;
         other.m_presentNodeReached = false;
         return *this;
     }
@@ -204,7 +224,20 @@ namespace vanguard::rendering
         m_acquisition = {};
         m_resourceImportIndex = ~u32{0};
         m_resourceImportGeneration = 0;
+        m_resourceExportIndex = ~u32{0};
+        m_resourceExportGeneration = 0;
+        m_producerSerial = 0;
         m_presentNodeReached = false;
+    }
+
+    bool RenderFrameOutputTransaction::CompleteTextureOutput(const rhi::ResourceState terminalState, const rhi::QueueType terminalQueue,
+                                                             const RenderOutputPublicationReadinessKind readiness, const rhi::GpuFence readyFence,
+                                                             ViewportFailure* const failure) noexcept
+    {
+        return m_viewport != nullptr && m_viewport->m_manager != nullptr && m_producerSerial != 0
+                   ? m_viewport->m_manager->CompleteProducedTextureOutput(m_acquisition, m_producerSerial, terminalState, terminalQueue, readiness,
+                                                                         readyFence, failure)
+                   : Fail(failure, ViewportFailureCode::InvalidState, "texture output transaction has no accepted producer epoch");
     }
 
     RenderViewportOutputKind RenderFrameOutputTransaction::GetKind() const noexcept
@@ -279,6 +312,10 @@ namespace vanguard::rendering
                 static_cast<void>(rhi::SafeRelease(slot.viewport.m_swapChain));
             if (slot.viewport.m_outputTexture.IsValid())
                 static_cast<void>(rhi::SafeRelease(slot.viewport.m_outputTexture));
+            {
+                concurrency::ScopedLock<concurrency::SpinLock> guard(slot.outputReceiptLock);
+                slot.outputReceipt = {};
+            }
             slot.viewport.Reset();
         }
         m_impl->initialized = false;
@@ -306,7 +343,9 @@ namespace vanguard::rendering
                                      desc.outputExtent.IsValid() &&
                                      (desc.outputKind != RenderViewportOutputKind::Presentation || desc.presentation.IsValid()) &&
                                      (desc.outputKind != RenderViewportOutputKind::Texture || desc.outputTexture.IsValid()) &&
-                                     (desc.outputKind == RenderViewportOutputKind::Texture || !desc.outputTexture.IsValid());
+                                     (desc.outputKind == RenderViewportOutputKind::Texture || !desc.outputTexture.IsValid()) &&
+                                     (desc.outputKind != RenderViewportOutputKind::Texture || desc.textureOutput.IsSupported()) &&
+                                     ValidOutputColorEncoding(desc.outputColorEncoding);
         if (!descriptorValid)
         {
             m_impl->Reject();
@@ -317,6 +356,25 @@ namespace vanguard::rendering
         {
             m_impl->Reject();
             return Fail(failure, ViewportFailureCode::InvalidDescriptor, "texture output must be a live RHI texture reference");
+        }
+        rhi::TextureDesc textureDesc;
+        if (desc.outputKind == RenderViewportOutputKind::Texture)
+        {
+            rhi::Failure rhiFailure;
+            if (!rhi::GetTextureDesc(desc.outputTexture, textureDesc, &rhiFailure))
+            {
+                m_impl->Reject();
+                return Fail(failure, ViewportFailureCode::InvalidDescriptor,
+                            "texture output descriptor is unavailable", {}, {}, &rhiFailure);
+            }
+            const bool renderTargetCapable =
+                (static_cast<u32>(textureDesc.usage) & static_cast<u32>(rhi::TextureUsage::RenderTarget)) != 0;
+            if (textureDesc.initialState != desc.textureOutput.restingState || !renderTargetCapable)
+            {
+                m_impl->Reject();
+                return Fail(failure, ViewportFailureCode::InvalidDescriptor,
+                            "texture output must be render-target capable and created in its declared resting resource state", {}, {}, &rhiFailure);
+            }
         }
 
         for (u32 index = 0; index < MaximumRenderViewports; ++index)
@@ -335,11 +393,18 @@ namespace vanguard::rendering
             slot.viewport.m_requestedOutputExtent = desc.outputExtent;
             slot.viewport.m_presentation = desc.presentation;
             slot.viewport.m_outputTexture = desc.outputTexture;
+            slot.viewport.m_textureOutput = desc.textureOutput;
+            slot.viewport.m_outputColorEncoding = desc.outputColorEncoding;
+            slot.viewport.m_outputRevision = desc.outputKind == RenderViewportOutputKind::Texture ? 1u : 0u;
             slot.viewport.m_visible = desc.outputKind != RenderViewportOutputKind::Presentation;
             CopyNameUnchecked(slot.viewport.m_name, validatedName);
             if (desc.outputTexture.IsValid())
                 rhi::AddRef(desc.outputTexture);
             slot.outputAcquired.SetValue(false);
+            {
+                concurrency::ScopedLock<concurrency::SpinLock> guard(slot.outputReceiptLock);
+                slot.outputReceipt = {};
+            }
             slot.viewport.m_active = true;
             viewport = slot.viewport.m_handle;
             ++m_impl->stats.renderViewports;
@@ -385,6 +450,10 @@ namespace vanguard::rendering
             static_cast<void>(rhi::SafeRelease(slot->viewport.m_swapChain));
         if (slot->viewport.m_outputTexture.IsValid())
             static_cast<void>(rhi::SafeRelease(slot->viewport.m_outputTexture));
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
+            slot->outputReceipt = {};
+        }
         slot->viewport.Reset();
         --m_impl->stats.renderViewports;
         return true;
@@ -553,6 +622,22 @@ namespace vanguard::rendering
         return acknowledgement.pixelExtentRevision != 0 || acknowledgement.surfaceRevision != 0;
     }
 
+    bool ViewportManager::QueryOutputReceipt(const RenderViewportHandle viewport, const u64 outputRevision, const u64 producerSerial,
+                                             RenderOutputReceipt& receipt) const noexcept
+    {
+        receipt = {};
+        if (!IsInitialized() || outputRevision == 0 || producerSerial == 0)
+            return false;
+        const Impl::RenderSlot* const slot = m_impl->Find(viewport);
+        if (slot == nullptr || slot->viewport.m_outputKind != RenderViewportOutputKind::Texture || slot->viewport.m_outputRevision != outputRevision)
+            return false;
+        concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
+        if (!detail::MatchesTextureOutputReceiptEpoch(slot->outputReceipt, viewport, outputRevision, producerSerial))
+            return false;
+        receipt = slot->outputReceipt;
+        return true;
+    }
+
     bool ViewportManager::RequestRenderExtent(const RenderViewportHandle viewport, const ViewportExtent extent, ViewportFailure* const failure) noexcept
     {
         ClearFailure(failure);
@@ -590,6 +675,9 @@ namespace vanguard::rendering
             return Fail(failure, ViewportFailureCode::OutputUnavailable, "render viewport output is not ready for acquisition", viewport);
         if (slot->viewport.m_outputKind == RenderViewportOutputKind::Texture && slot->viewport.m_outputTexture.IsValid())
         {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
+            if (slot->outputAcquired.GetValue())
+                return Fail(failure, ViewportFailureCode::Busy, "render viewport output is already acquired", viewport);
             acquisition = {viewport, slot->viewport.m_outputTexture, {}, slot->viewport.m_outputRevision};
             slot->outputAcquired.SetValue(true);
             return true;
@@ -615,6 +703,17 @@ namespace vanguard::rendering
         Impl::RenderSlot* const slot = m_impl->Find(acquisition.viewport);
         if (slot == nullptr)
             return Fail(failure, ViewportFailureCode::InvalidHandle, "stale or foreign render-output acquisition", acquisition.viewport);
+        if (slot->viewport.m_outputKind == RenderViewportOutputKind::Texture)
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
+            if (!slot->outputAcquired.GetValue() || !acquisition.IsValid() || acquisition.outputRevision != slot->viewport.m_outputRevision ||
+                acquisition.backBuffer.IsValid() || acquisition.texture != slot->viewport.m_outputTexture)
+                return Fail(failure, ViewportFailureCode::InvalidHandle, "stale or foreign texture-output acquisition", acquisition.viewport);
+            static_cast<void>(detail::FailPendingTextureOutputReceipt(slot->outputReceipt, acquisition.viewport, acquisition.outputRevision));
+            slot->outputAcquired.SetValue(false);
+            acquisition = {};
+            return true;
+        }
         if (!slot->outputAcquired.GetValue() || !acquisition.IsValid() || acquisition.outputRevision != slot->viewport.m_outputRevision)
             return Fail(failure, ViewportFailureCode::InvalidHandle, "stale or foreign render-output acquisition", acquisition.viewport);
         if (acquisition.backBuffer.IsValid())
@@ -636,9 +735,40 @@ namespace vanguard::rendering
         Impl::RenderSlot* const slot = m_impl->Find(acquisition.viewport);
         if (slot == nullptr)
             return Fail(failure, ViewportFailureCode::InvalidHandle, "stale or foreign texture-output acquisition", acquisition.viewport);
+        concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
         if (!slot->outputAcquired.GetValue() || !acquisition.IsValid() || acquisition.outputRevision != slot->viewport.m_outputRevision ||
             slot->viewport.m_outputKind != RenderViewportOutputKind::Texture || acquisition.backBuffer.IsValid() || acquisition.texture != slot->viewport.m_outputTexture)
             return Fail(failure, ViewportFailureCode::InvalidHandle, "stale or foreign texture-output acquisition", acquisition.viewport);
+        // Generic completion has no terminal export receipt. Accepted producer epochs
+        // must fail closed rather than leaving a stale Pending receipt reusable.
+        static_cast<void>(detail::FailPendingTextureOutputReceipt(slot->outputReceipt, acquisition.viewport, acquisition.outputRevision));
+        slot->outputAcquired.SetValue(false);
+        acquisition = {};
+        return true;
+    }
+
+    bool ViewportManager::CompleteProducedTextureOutput(RenderOutputAcquisition& acquisition, const u64 producerSerial,
+                                                        const rhi::ResourceState terminalState, const rhi::QueueType terminalQueue,
+                                                        const RenderOutputPublicationReadinessKind readiness, const rhi::GpuFence readyFence,
+                                                        ViewportFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (!IsInitialized())
+            return Fail(failure, ViewportFailureCode::NotInitialized, "viewport manager is not initialized");
+        Impl::RenderSlot* const slot = m_impl->Find(acquisition.viewport);
+        if (slot == nullptr)
+            return Fail(failure, ViewportFailureCode::InvalidHandle, "stale or foreign produced texture-output acquisition", acquisition.viewport);
+        concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
+        const RenderTextureOutputContract& contract = slot->viewport.m_textureOutput;
+        if (!slot->outputAcquired.GetValue() || !acquisition.IsValid() || acquisition.outputRevision != slot->viewport.m_outputRevision ||
+            slot->viewport.m_outputKind != RenderViewportOutputKind::Texture || acquisition.backBuffer.IsValid() || acquisition.texture != slot->viewport.m_outputTexture ||
+            producerSerial == 0 || !detail::MatchesPendingTextureOutputReceiptEpoch(slot->outputReceipt, acquisition.viewport, acquisition.outputRevision,
+                                                                                   producerSerial))
+            return Fail(failure, ViewportFailureCode::InvalidHandle, "produced texture output does not match its pending receipt epoch", acquisition.viewport);
+        if (!detail::MatchesTextureOutputPublication(contract, terminalState, terminalQueue, readiness, readyFence))
+            return Fail(failure, ViewportFailureCode::InvalidState, "produced texture output terminal export does not match its viewport contract", acquisition.viewport);
+
+        detail::PublishReadyTextureOutputReceipt(slot->outputReceipt, terminalState, terminalQueue, readiness, readyFence);
         slot->outputAcquired.SetValue(false);
         acquisition = {};
         return true;
@@ -656,8 +786,18 @@ namespace vanguard::rendering
         {
             if (acquisition.IsValid() && acquisition.outputRevision == slot->viewport.m_outputRevision)
             {
-                slot->viewport.m_state = RenderViewportState::Failed;
-                slot->outputAcquired.SetValue(false);
+                if (slot->viewport.m_outputKind == RenderViewportOutputKind::Texture)
+                {
+                    concurrency::ScopedLock<concurrency::SpinLock> guard(slot->outputReceiptLock);
+                    static_cast<void>(detail::FailPendingTextureOutputReceipt(slot->outputReceipt, acquisition.viewport, acquisition.outputRevision));
+                    slot->viewport.m_state = RenderViewportState::Failed;
+                    slot->outputAcquired.SetValue(false);
+                }
+                else
+                {
+                    slot->viewport.m_state = RenderViewportState::Failed;
+                    slot->outputAcquired.SetValue(false);
+                }
             }
         }
         acquisition = {};
@@ -886,6 +1026,8 @@ namespace vanguard::rendering
         if (!frame.m_payload.IsValid())
             return Fail(failure, ViewportFailureCode::InvalidDescriptor, "render frame payload is invalid", engine->viewport.m_output, viewport);
         RenderFrameOutputTransaction outputTransaction;
+        RenderOutputReceipt previousReceipt;
+        bool textureReceiptPrearmed = false;
         if (frame.GetOutputKind() == RenderViewportOutputKind::Texture ||
             (frame.GetOutputKind() == RenderViewportOutputKind::Presentation && frame.ShouldPresent()))
         {
@@ -894,12 +1036,33 @@ namespace vanguard::rendering
                 return false;
             outputTransaction.m_viewport = frame.GetViewport();
             outputTransaction.m_acquisition = acquisition;
+            if (frame.GetOutputKind() == RenderViewportOutputKind::Texture)
+            {
+                concurrency::ScopedLock<concurrency::SpinLock> guard(output->outputReceiptLock);
+                previousReceipt = output->outputReceipt;
+                detail::PrearmTextureOutputReceipt(output->outputReceipt, acquisition.viewport, acquisition.outputRevision, frame.m_serial,
+                                                   output->viewport.m_textureOutput);
+                outputTransaction.m_producerSerial = frame.m_serial;
+                textureReceiptPrearmed = true;
+            }
         }
         RenderCommandFailure commandFailure;
         if (!m_impl->commands->RenderFrame(frame, outputTransaction, submission, &commandFailure))
+        {
+            if (textureReceiptPrearmed)
+            {
+                concurrency::ScopedLock<concurrency::SpinLock> guard(output->outputReceiptLock);
+                if (!detail::RestorePendingTextureOutputReceipt(output->outputReceipt, outputTransaction.m_acquisition.viewport,
+                                                                outputTransaction.m_acquisition.outputRevision, outputTransaction.m_producerSerial,
+                                                                previousReceipt))
+                    return Fail(failure, ViewportFailureCode::InvalidState, "texture output receipt rollback lost its exact pending producer epoch",
+                                engine->viewport.m_output, viewport);
+                outputTransaction.m_producerSerial = 0;
+            }
             return Fail(failure, ViewportFailureCode::SubmissionFailure,
                         commandFailure.message != nullptr ? commandFailure.message : "render command frame submission failed", frame.GetViewport()->GetHandle(),
                         frame.GetEngineViewport());
+        }
         ++output->viewport.m_renderedFrames;
         engine->viewport.m_buildingFrameSerial = 0;
         ++engine->viewport.m_submittedFrames;
@@ -1019,6 +1182,8 @@ namespace vanguard::rendering
         m_presentation = {};
         m_swapChain = {};
         m_outputTexture = {};
+        m_textureOutput = {};
+        m_outputColorEncoding = RenderOutputColorEncoding::SceneLinear;
         m_requestedOutputExtent = {};
         m_requiredPixelExtentRevision = 0;
         m_appliedPixelExtentRevision = 0;
@@ -1070,6 +1235,12 @@ namespace vanguard::rendering
     {
         acknowledgement = {};
         return m_manager != nullptr && m_manager->GetPresentationAcknowledgement(m_handle, acknowledgement);
+    }
+
+    bool RenderViewport::QueryOutputReceipt(const u64 outputRevision, const u64 producerSerial, RenderOutputReceipt& receipt) const noexcept
+    {
+        receipt = {};
+        return m_manager != nullptr && m_manager->QueryOutputReceipt(m_handle, outputRevision, producerSerial, receipt);
     }
 
     bool RenderViewport::AbandonOutput(RenderOutputAcquisition& acquisition, ViewportFailure* const failure) noexcept

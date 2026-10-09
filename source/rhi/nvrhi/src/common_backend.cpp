@@ -16,6 +16,15 @@ namespace vanguard::rhi::backend
 
     namespace
     {
+        concurrency::Atomic<u64> g_writeBufferTrackTicks;
+        concurrency::Atomic<u64> g_writeBufferCommitTicks;
+        concurrency::Atomic<u64> g_writeBufferNativeTicks;
+        concurrency::Atomic<u64> g_writeBufferFirstNativeTicks;
+        concurrency::Atomic<u64> g_writeBufferRepeatNativeTicks;
+        concurrency::Atomic<u32> g_writeBufferFirstNativeCalls;
+        concurrency::Atomic<u32> g_writeBufferRepeatNativeCalls;
+        concurrency::Atomic<u32> g_writeBufferTimingCalls;
+
         template <typename Enum> [[nodiscard]] constexpr bool HasFlag(const Enum value, const Enum flag) noexcept
         {
             return (static_cast<u32>(value) & static_cast<u32>(flag)) != 0;
@@ -786,6 +795,7 @@ namespace vanguard::rhi::backend
             FenceSet retirement;
             u32 generation = 1;
             u32 nextFree = InvalidReferenceIndex;
+            u32 nextRetiring = InvalidReferenceIndex;
             DescriptorSlotState state = DescriptorSlotState::Free;
         };
         struct DescriptorDomainPayload
@@ -799,6 +809,7 @@ namespace vanguard::rhi::backend
             DescriptorDomainDesc desc;
             DescriptorDomainStats stats;
             u32 freeHead = InvalidReferenceIndex;
+            u32 retiringHead = InvalidReferenceIndex;
             u32 gpuBaseIndex = 0;
         };
 
@@ -817,33 +828,60 @@ namespace vanguard::rhi::backend
                    (fences.copy == 0 || common.IsGpuFenceComplete({QueueType::Copy, fences.copy}));
         }
 
+        void CompleteDescriptorRetirement(CommonBackend& common, DescriptorDomainPayload& domain, const u32 index) noexcept
+        {
+            DescriptorSlot& slot = domain.slots[index];
+            VG_ASSERT(slot.state == DescriptorSlotState::Retiring);
+            VG_ASSERT(domain.stats.pendingRetirement != 0);
+
+            if (domain.desc.kind == DescriptorDomainKind::Resources)
+                static_cast<void>(common.GetDevice()->writeDescriptorTable(domain.nativeTable, nvrhi::BindingSetItem::None(index)));
+            if (slot.resource.IsValid())
+                static_cast<void>(common.Release(slot.resource));
+            slot.resource = {};
+            slot.retirement = {};
+            slot.nextRetiring = InvalidReferenceIndex;
+            --domain.stats.pendingRetirement;
+            ++domain.stats.completedRetirements;
+            if (slot.generation == 0xffffffffu)
+            {
+                slot.state = DescriptorSlotState::Exhausted;
+                slot.nextFree = InvalidReferenceIndex;
+                ++domain.stats.exhaustedSlots;
+                return;
+            }
+            ++slot.generation;
+            slot.state = DescriptorSlotState::Free;
+            slot.nextFree = domain.freeHead;
+            domain.freeHead = index;
+        }
+
         void ReclaimDescriptorSlots(CommonBackend& common, DescriptorDomainPayload& domain) noexcept
         {
-            for (u32 index = 0; index < domain.slots.Size(); ++index)
+            u32 previous = InvalidReferenceIndex;
+            u32 index = domain.retiringHead;
+            while (index != InvalidReferenceIndex)
             {
                 DescriptorSlot& slot = domain.slots[index];
-                if (slot.state != DescriptorSlotState::Retiring || !DescriptorRetirementComplete(common, slot.retirement))
-                    continue;
-
-                if (domain.desc.kind == DescriptorDomainKind::Resources)
-                    static_cast<void>(common.GetDevice()->writeDescriptorTable(domain.nativeTable, nvrhi::BindingSetItem::None(index)));
-                if (slot.resource.IsValid())
-                    static_cast<void>(common.Release(slot.resource));
-                slot.resource = {};
-                slot.retirement = {};
-                --domain.stats.pendingRetirement;
-                ++domain.stats.completedRetirements;
-                if (slot.generation == 0xffffffffu)
+                const u32 next = slot.nextRetiring;
+                if (slot.state != DescriptorSlotState::Retiring)
                 {
-                    slot.state = DescriptorSlotState::Exhausted;
-                    slot.nextFree = InvalidReferenceIndex;
-                    ++domain.stats.exhaustedSlots;
+                    VG_FATAL("descriptor retirement list contains a non-retiring slot");
+                }
+                if (!DescriptorRetirementComplete(common, slot.retirement))
+                {
+                    previous = index;
+                    index = next;
                     continue;
                 }
-                ++slot.generation;
-                slot.state = DescriptorSlotState::Free;
-                slot.nextFree = domain.freeHead;
-                domain.freeHead = index;
+
+                if (previous == InvalidReferenceIndex)
+                    domain.retiringHead = next;
+                else
+                    domain.slots[previous].nextRetiring = next;
+                slot.nextRetiring = InvalidReferenceIndex;
+                CompleteDescriptorRetirement(common, domain, index);
+                index = next;
             }
             domain.stats.free = domain.desc.capacity - domain.stats.allocated - domain.stats.pendingRetirement - domain.stats.exhaustedSlots;
         }
@@ -863,6 +901,34 @@ namespace vanguard::rhi::backend
         }
         struct CommandListPayload
         {
+            static constexpr u32 MaximumPendingExplicitBarrierRequests = 64u;
+            static constexpr u32 PendingBufferBarrierTableCapacity = MaximumPendingExplicitBarrierRequests * 2u;
+
+            struct PendingBufferBarrierSlot
+            {
+                u64 key = 0;
+                u32 epoch = 0;
+            };
+
+            struct PendingTextureBarrierRequest
+            {
+                ResourceRef resource;
+                SubresourceRange range;
+            };
+
+            void ResetPendingBarrierTracking() noexcept
+            {
+                pendingBufferBarrierCount = 0;
+                pendingTextureBarrierCount = 0;
+                pendingTextureBarrierCellCount = 0;
+                ++pendingBufferBarrierEpoch;
+                if (pendingBufferBarrierEpoch != 0)
+                    return;
+                for (PendingBufferBarrierSlot& slot : pendingBufferBarrierTable)
+                    slot.epoch = 0;
+                pendingBufferBarrierEpoch = 1;
+            }
+
             struct SubmissionCallback
             {
                 CommandSubmissionCallback callback = nullptr;
@@ -870,11 +936,86 @@ namespace vanguard::rhi::backend
                 u64 value = 0;
             };
 
-            explicit CommandListPayload(nvrhi::CommandListHandle&& commandList, const CommandListType commandListType, const u64 commandListRole) noexcept
-                : native(static_cast<nvrhi::CommandListHandle&&>(commandList)), resources(memory::pools::Rendering::GetInstance()),
-                  residencyResources(memory::pools::Rendering::GetInstance()), submissionCallbacks(memory::pools::Rendering::GetInstance()),
-                  role(commandListRole), type(commandListType)
+            CommandListPayload() noexcept
+                : resources(memory::pools::Rendering::GetInstance()), residencyResources(memory::pools::Rendering::GetInstance()),
+                  submissionCallbacks(memory::pools::Rendering::GetInstance())
             {
+            }
+
+            void BeginRecording(nvrhi::CommandListHandle&& commandList, const CommandListType commandListType, const u64 commandListRole,
+                                const CommandListRetentionPolicy commandListRetentionPolicy, const CommandListReuseClass commandListReuseClass,
+                                const u64 commandListReuseRole, const GpuFence priorCompletion) noexcept
+            {
+                VG_ASSERT_MSG(!native && resources.Size() == 0 && residencyResources.Size() == 0 && submissionCallbacks.Size() == 0,
+                              "command-list arena slot was reused before its prior recording was drained");
+                VG_ASSERT_MSG(commandListType > CommandListType::None && commandListType <= CommandListType::Compute,
+                              "command-list arena received an invalid native queue type");
+                VG_ASSERT_MSG(commandListRetentionPolicy == CommandListRetentionPolicy::Default ||
+                                  commandListRetentionPolicy == CommandListRetentionPolicy::BoundedUploadReuse,
+                              "command-list arena received an invalid retention policy");
+                VG_ASSERT_MSG(commandListReuseClass == CommandListReuseClass::Clean
+                                  ? commandListReuseRole == 0
+                                  : (commandListRetentionPolicy == CommandListRetentionPolicy::BoundedUploadReuse && commandListRole != 0 &&
+                                     commandListReuseRole == commandListRole),
+                              "command-list native reuse provenance is incompatible with the new recording lease");
+                native = static_cast<nvrhi::CommandListHandle&&>(commandList);
+                framebuffer = nullptr;
+                pipeline = {};
+                viewport = {};
+                scissors = {};
+                for (VertexBufferBinding& binding : vertexBuffers)
+                    binding = {};
+                indexBuffer = {};
+                indirectArguments = {};
+                indirectCount = {};
+                for (u8& byte : pushConstants)
+                    byte = 0;
+                blendFactor = {1.0f, 1.0f, 1.0f, 1.0f};
+                vertexBufferCount = 0;
+                pushConstantSize = 0;
+                markerDepth = 0;
+                stencilReference = 0;
+                role = commandListRole;
+                type = commandListType;
+                retentionPolicy = commandListRetentionPolicy;
+                reuseClass = commandListReuseClass;
+                reuseRole = commandListReuseRole;
+                renderTargetsSet = false;
+                viewportSet = false;
+                scissorsSet = false;
+                indexBufferSet = false;
+                for (bool& bound : vertexBufferSet)
+                    bound = false;
+                open = true;
+                entryStatesSeeded = false;
+                ResetPendingBarrierTracking();
+                for (u64& wait : incomingWaits)
+                    wait = 0;
+                recycleNative = false;
+                usedPersistentWorkingSet = false;
+                nativeLastCompletion = priorCompletion;
+                for (char& character : debugName)
+                    character = '\0';
+            }
+
+            void ResetAfterRetirement() noexcept
+            {
+                native = nullptr;
+                resources.Clear();
+                residencyResources.Clear();
+                submissionCallbacks.Clear();
+                framebuffer = nullptr;
+                pipeline = {};
+                type = CommandListType::None;
+                role = 0;
+                reuseRole = 0;
+                retentionPolicy = CommandListRetentionPolicy::Default;
+                reuseClass = CommandListReuseClass::Clean;
+                open = false;
+                ResetPendingBarrierTracking();
+                recycleNative = false;
+                usedPersistentWorkingSet = false;
+                nativeLastCompletion = {};
             }
             nvrhi::CommandListHandle native;
             containers::DynamicArray<ResourceRef> resources;
@@ -895,7 +1036,10 @@ namespace vanguard::rhi::backend
             u32 markerDepth = 0;
             u8 stencilReference = 0;
             u64 role = 0;
+            u64 reuseRole = 0;
             CommandListType type = CommandListType::None;
+            CommandListRetentionPolicy retentionPolicy = CommandListRetentionPolicy::Default;
+            CommandListReuseClass reuseClass = CommandListReuseClass::Clean;
             bool renderTargetsSet = false;
             bool viewportSet = false;
             bool scissorsSet = false;
@@ -903,10 +1047,114 @@ namespace vanguard::rhi::backend
             bool vertexBufferSet[MaximumVertexBindings]{};
             bool open = true;
             bool entryStatesSeeded = false;
+            PendingBufferBarrierSlot pendingBufferBarrierTable[PendingBufferBarrierTableCapacity]{};
+            PendingTextureBarrierRequest pendingTextureBarriers[MaximumPendingExplicitBarrierRequests]{};
+            u32 pendingBufferBarrierCount = 0;
+            u32 pendingTextureBarrierCount = 0;
+            u32 pendingTextureBarrierCellCount = 0;
+            u32 pendingBufferBarrierEpoch = 1;
             u64 incomingWaits[3]{};
-            bool recycleAfterCompletion = false;
+            bool recycleNative = false;
+            // NVRHI's upload/scratch managers retain native high-water until the
+            // outer command list is destroyed. Current Vanguard recording only
+            // reaches the upload manager; future scratch-backed operations must
+            // mark this same bit before issuing native work.
+            bool usedPersistentWorkingSet = false;
+            GpuFence nativeLastCompletion{};
             char debugName[96]{};
         };
+
+        void CommitPendingBarriers(CommandListPayload& command) noexcept
+        {
+            command.native->commitBarriers();
+            command.ResetPendingBarrierTracking();
+        }
+
+        [[nodiscard]] bool SubresourceRangesOverlap(const SubresourceRange& left, const SubresourceRange& right) noexcept
+        {
+            const u32 leftMipEnd = static_cast<u32>(left.firstMip) + left.mipCount;
+            const u32 rightMipEnd = static_cast<u32>(right.firstMip) + right.mipCount;
+            const u32 leftSliceEnd = static_cast<u32>(left.firstSlice) + left.sliceCount;
+            const u32 rightSliceEnd = static_cast<u32>(right.firstSlice) + right.sliceCount;
+            return left.firstMip < rightMipEnd && right.firstMip < leftMipEnd &&
+                   left.firstSlice < rightSliceEnd && right.firstSlice < leftSliceEnd;
+        }
+
+        void PrepareExplicitBufferBarrier(CommandListPayload& command, const ResourceRef resource) noexcept
+        {
+            const u64 key = resource.value;
+            const u64 mixed = (key ^ (key >> 33u)) * 0xff51afd7ed558ccdu;
+            const u32 firstSlot = static_cast<u32>((mixed ^ (mixed >> 33u)) & (CommandListPayload::PendingBufferBarrierTableCapacity - 1u));
+            for (;;)
+            {
+                if (command.pendingBufferBarrierCount == CommandListPayload::MaximumPendingExplicitBarrierRequests)
+                    CommitPendingBarriers(command);
+
+                u32 slotIndex = firstSlot;
+                bool retryAfterCommit = false;
+                for (u32 probe = 0; probe < CommandListPayload::PendingBufferBarrierTableCapacity; ++probe)
+                {
+                    CommandListPayload::PendingBufferBarrierSlot& slot = command.pendingBufferBarrierTable[slotIndex];
+                    if (slot.epoch != command.pendingBufferBarrierEpoch)
+                    {
+                        slot.key = key;
+                        slot.epoch = command.pendingBufferBarrierEpoch;
+                        ++command.pendingBufferBarrierCount;
+                        return;
+                    }
+                    if (slot.key == key)
+                    {
+                        CommitPendingBarriers(command);
+                        retryAfterCommit = true;
+                        break;
+                    }
+                    slotIndex = (slotIndex + 1u) & (CommandListPayload::PendingBufferBarrierTableCapacity - 1u);
+                }
+                if (!retryAfterCommit)
+                    CommitPendingBarriers(command);
+            }
+        }
+
+        void PrepareExplicitTextureBarrier(CommandListPayload& command, const ResourceRef resource, const SubresourceRange& range) noexcept
+        {
+            const u64 requestedCells64 = static_cast<u64>(range.mipCount) * range.sliceCount;
+            const u32 requestedCells = requestedCells64 > CommandListPayload::MaximumPendingExplicitBarrierRequests
+                                           ? CommandListPayload::MaximumPendingExplicitBarrierRequests
+                                           : static_cast<u32>(requestedCells64);
+            bool mustCommit = command.pendingTextureBarrierCount == CommandListPayload::MaximumPendingExplicitBarrierRequests ||
+                              (command.pendingTextureBarrierCellCount != 0 &&
+                               requestedCells > CommandListPayload::MaximumPendingExplicitBarrierRequests - command.pendingTextureBarrierCellCount);
+            for (u32 index = 0; !mustCommit && index < command.pendingTextureBarrierCount; ++index)
+            {
+                const CommandListPayload::PendingTextureBarrierRequest& pending = command.pendingTextureBarriers[index];
+                mustCommit = pending.resource == resource && SubresourceRangesOverlap(pending.range, range);
+            }
+            if (mustCommit)
+                CommitPendingBarriers(command);
+            command.pendingTextureBarriers[command.pendingTextureBarrierCount++] = {resource, range};
+            command.pendingTextureBarrierCellCount += requestedCells;
+        }
+
+        struct RetiredNativeCommandListContext
+        {
+            nvrhi::CommandListHandle native;
+        };
+
+        void MarkCommandListPersistentWorkingSetUse(CommandListPayload& command) noexcept
+        {
+            command.usedPersistentWorkingSet = true;
+            if (command.retentionPolicy != CommandListRetentionPolicy::BoundedUploadReuse)
+                return;
+            VG_ASSERT_MSG(command.role != 0, "bounded command-list working-set use requires a stable nonzero role");
+            if (command.reuseClass == CommandListReuseClass::Clean)
+            {
+                command.reuseClass = CommandListReuseClass::BoundedWorkingSet;
+                command.reuseRole = command.role;
+                return;
+            }
+            VG_ASSERT_MSG(command.reuseRole == command.role,
+                          "bounded command-list context changed role after retaining native working-set state");
+        }
 
         void DestroyPipeline(void* const context, ResourceRef, void* const address) noexcept
         {
@@ -1099,7 +1347,7 @@ namespace vanguard::rhi::backend
                 state.indirectParams = arguments->native;
                 state.indirectCountBuffer = count != nullptr ? count->native : nullptr;
             }
-            command.native->commitBarriers();
+            CommitPendingBarriers(command);
             command.native->setGraphicsState(state);
             if (command.pushConstantSize != 0)
                 command.native->setPushConstants(command.pushConstants, command.pushConstantSize);
@@ -1126,13 +1374,377 @@ namespace vanguard::rhi::backend
                     return BackendStatus::Failure(FailureCode::InvalidReference, 0, "the indirect buffer became invalid");
                 state.indirectParams = arguments->native;
             }
-            command.native->commitBarriers();
+            CommitPendingBarriers(command);
             command.native->setComputeState(state);
             if (command.pushConstantSize != 0)
                 command.native->setPushConstants(command.pushConstants, command.pushConstantSize);
             return BackendStatus::Success();
         }
     } // namespace
+
+    namespace
+    {
+        enum class CommandListArenaSlotState : u32
+        {
+            Free = 0,
+            Acquiring,
+            Live,
+            Retiring
+        };
+
+        [[nodiscard]] constexpr u64 PackCommandListArenaIdentity(const u32 generation, const CommandListArenaSlotState state) noexcept
+        {
+            return (static_cast<u64>(generation) << 32u) | static_cast<u32>(state);
+        }
+
+        [[nodiscard]] constexpr u32 CommandListArenaGeneration(const u64 identity) noexcept
+        {
+            return static_cast<u32>(identity >> 32u);
+        }
+
+        [[nodiscard]] constexpr CommandListArenaSlotState CommandListArenaSlotStateOf(const u64 identity) noexcept
+        {
+            return static_cast<CommandListArenaSlotState>(static_cast<u32>(identity));
+        }
+
+        [[nodiscard]] constexpr u32 NextCommandListArenaGeneration(const u32 generation) noexcept
+        {
+            const u32 next = generation + 1u;
+            return next != 0 ? next : 1u;
+        }
+
+        constexpr u32 CommandListArenaCapacity = ResourceLifetimeConfig{}.commandListCapacity;
+        // RED's DX12 backend retires command-list contexts after 30 maintenance
+        // flushes of inactivity. Use the same proven starting window here; Gate 4
+        // profiling can tune it without changing correctness.
+        constexpr u64 CommandListColdMaintenanceEpochs = 30u;
+        // Outer destruction can be materially more expensive than pool removal.
+        // Bound cold destruction work per maintenance pass so aging never recreates
+        // the old multi-context ReclaimReady spike on an ordinary frame.
+        constexpr u32 MaximumColdCommandListRetirementsPerMaintenance = 4u;
+        constexpr u32 MaximumCommandListMaintenanceCandidateChecks = 32u;
+        constexpr u32 MaximumCommandListPressureVictimChecks = 64u;
+        constexpr u32 CommandListPoolHashBucketCountInternal = 4096u;
+
+        [[nodiscard]] constexpr u32 CommandListPoolBucket(const CommandListType type, const u64 role) noexcept
+        {
+            u64 value = role ^ (static_cast<u64>(type) * 0x9e3779b97f4a7c15ull);
+            value ^= value >> 33u;
+            value *= 0xff51afd7ed558ccdull;
+            value ^= value >> 33u;
+            return static_cast<u32>(value) & (CommandListPoolHashBucketCountInternal - 1u);
+        }
+        static_assert((CommandListPoolHashBucketCountInternal & (CommandListPoolHashBucketCountInternal - 1u)) == 0u,
+                      "command-list pool hash bucket count must be a power of two");
+    }
+
+    struct CommonBackend::CommandListArenaSlot
+    {
+        concurrency::Atomic<u64> identity{PackCommandListArenaIdentity(1u, CommandListArenaSlotState::Free)};
+        CommandListPayload* payload = nullptr;
+        ResourceRef retirementResource{};
+        u32 index = InvalidReferenceIndex;
+    };
+
+    struct CommonBackend::CommandListArenaState
+    {
+        CommandListArenaState() noexcept
+        {
+            freeCount = CommandListArenaCapacity;
+            for (u32 index = 0; index < CommandListArenaCapacity; ++index)
+            {
+                slots[index].index = index;
+                freeIndices[index] = CommandListArenaCapacity - index - 1u;
+            }
+        }
+
+        concurrency::SpinLock lock;
+        CommandListArenaSlot slots[CommandListArenaCapacity];
+        u32 freeIndices[CommandListArenaCapacity]{};
+        u32 freeCount = 0;
+    };
+
+    bool CommonBackend::InitializeCommandListArena() noexcept
+    {
+        if (m_commandListArena != nullptr)
+            return false;
+        memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(CommandListArenaState), alignof(CommandListArenaState));
+        if (!block)
+            return false;
+        m_commandListArena = new (block.address) CommandListArenaState();
+        return true;
+    }
+
+    void CommonBackend::ShutdownCommandListArena() noexcept
+    {
+        if (m_commandListArena == nullptr)
+            return;
+        for (CommandListArenaSlot& slot : m_commandListArena->slots)
+        {
+            if (slot.payload == nullptr)
+                continue;
+            VG_ASSERT_MSG(!slot.payload->native && slot.payload->resources.Size() == 0 && slot.payload->submissionCallbacks.Size() == 0,
+                          "command-list arena shutdown encountered an undrained recording payload");
+            DestroyPayload<CommandListPayload>(nullptr, {}, slot.payload);
+            slot.payload = nullptr;
+        }
+        m_commandListArena->~CommandListArenaState();
+        memory::MemoryBlock block{m_commandListArena, sizeof(CommandListArenaState), memory::PoolId::Rendering};
+        memory::Free(block);
+        m_commandListArena = nullptr;
+    }
+
+    CommonBackend::CommandListArenaSlot* CommonBackend::GetCommandListSlot(const CommandListRef commandList) noexcept
+    {
+        if (m_commandListArena == nullptr || !commandList.IsValid() || commandList.index >= CommandListArenaCapacity)
+            return nullptr;
+        CommandListArenaSlot& slot = m_commandListArena->slots[commandList.index];
+        const u64 identity = slot.identity.GetValue();
+        return CommandListArenaGeneration(identity) == commandList.generation && CommandListArenaSlotStateOf(identity) == CommandListArenaSlotState::Live ? &slot : nullptr;
+    }
+
+    const CommonBackend::CommandListArenaSlot* CommonBackend::GetCommandListSlot(const CommandListRef commandList) const noexcept
+    {
+        return const_cast<CommonBackend*>(this)->GetCommandListSlot(commandList);
+    }
+
+    void* CommonBackend::GetCommandListPayload(const CommandListRef commandList) noexcept
+    {
+        CommandListArenaSlot* const slot = GetCommandListSlot(commandList);
+        return slot != nullptr ? slot->payload : nullptr;
+    }
+
+    const void* CommonBackend::GetCommandListPayload(const CommandListRef commandList) const noexcept
+    {
+        return const_cast<CommonBackend*>(this)->GetCommandListPayload(commandList);
+    }
+
+    CommandListRef CommonBackend::AcquireCommandListLease(nvrhi::CommandListHandle&& native, const CommandListType type, const u64 role,
+                                                          const CommandListRetentionPolicy retentionPolicy, const CommandListReuseClass reuseClass,
+                                                          const u64 reuseRole, const GpuFence priorCompletion) noexcept
+    {
+        if (m_commandListArena == nullptr || !native)
+            return {};
+
+        CommandListArenaSlot* slot = nullptr;
+        {
+            concurrency::ScopedLock guard(m_commandListArena->lock);
+            if (m_commandListArena->freeCount == 0)
+                return {};
+            const u32 index = m_commandListArena->freeIndices[--m_commandListArena->freeCount];
+            slot = &m_commandListArena->slots[index];
+            const u64 identity = slot->identity.GetValue();
+            VG_ASSERT_MSG(CommandListArenaSlotStateOf(identity) == CommandListArenaSlotState::Free,
+                          "command-list arena free list contained a non-free slot");
+            slot->identity.SetValue(PackCommandListArenaIdentity(CommandListArenaGeneration(identity), CommandListArenaSlotState::Acquiring));
+        }
+
+        if (slot->payload == nullptr)
+            slot->payload = AllocatePayload<CommandListPayload>();
+        if (slot->payload == nullptr)
+        {
+            concurrency::ScopedLock guard(m_commandListArena->lock);
+            const u64 identity = slot->identity.GetValue();
+            slot->identity.SetValue(PackCommandListArenaIdentity(CommandListArenaGeneration(identity), CommandListArenaSlotState::Free));
+            m_commandListArena->freeIndices[m_commandListArena->freeCount++] = slot->index;
+            return {};
+        }
+
+        slot->payload->BeginRecording(static_cast<nvrhi::CommandListHandle&&>(native), type, role, retentionPolicy, reuseClass, reuseRole, priorCompletion);
+        slot->retirementResource = {};
+
+        const u64 identity = slot->identity.GetValue();
+        const u32 generation = CommandListArenaGeneration(identity);
+        slot->identity.SetValue(PackCommandListArenaIdentity(generation, CommandListArenaSlotState::Live));
+        return {slot->index, generation};
+    }
+
+    void CommonBackend::RetireCommandListLease(const CommandListRef commandList, const GpuFence completion, const bool allowImmediateReuse,
+                                               const bool submittedWithoutCompletion) noexcept
+    {
+        CommandListArenaSlot* const slot = GetCommandListSlot(commandList);
+        if (slot == nullptr || slot->payload == nullptr)
+            return;
+        CommandListPayload& payload = *slot->payload;
+        const bool recycleNative = allowImmediateReuse && ShouldRecycleCommandList(true, payload.usedPersistentWorkingSet, payload.retentionPolicy);
+
+        const u64 liveIdentity = PackCommandListArenaIdentity(commandList.generation, CommandListArenaSlotState::Live);
+        const u64 retiringIdentity = PackCommandListArenaIdentity(commandList.generation, CommandListArenaSlotState::Retiring);
+        const u64 observed = slot->identity.CompareExchange(retiringIdentity, liveIdentity);
+        VG_ASSERT_MSG(observed == liveIdentity, "command-list lease retirement raced with another terminal operation");
+        if (observed != liveIdentity)
+            return;
+        payload.recycleNative = recycleNative;
+        if (completion.IsValid())
+            payload.nativeLastCompletion = completion;
+
+        // NVRHI has already detached a successfully executed recording from the
+        // outer ICommandList. Clean/bounded contexts can therefore re-enter the
+        // Vanguard recording pool immediately once the external completion fence
+        // has been published. Fence-less submissions are quarantined because the
+        // just-executed native work has no safe destruction fence; ordinary discard
+        // must still respect any prior submission fence carried by a reused outer.
+        if (submittedWithoutCompletion)
+        {
+            // Native execution already happened, but Vanguard failed to publish a
+            // completion fence for this queue. The current submission may still be
+            // using outer-owned scratch/high-water state, so no prior fence can make
+            // destruction safe. Keep the retired arena slot as a quarantine owner
+            // until device-loss/after-idle shutdown provides a true teardown boundary.
+            payload.recycleNative = false;
+            return;
+        }
+        if (payload.recycleNative || !payload.nativeLastCompletion.IsValid() || IsGpuFenceComplete(payload.nativeLastCompletion))
+        {
+            CompleteCommandListRetirement(slot);
+            return;
+        }
+
+        // A successfully submitted context that is not eligible for immediate
+        // reuse (currently an unbounded/default upload user, or a context being
+        // quarantined after an overall submission failure) is still destroyed at
+        // a fence-safe boundary. This is the exceptional path; healthy reusable
+        // lists never enter ResourceLifetimeManager anymore.
+        const GpuFence retirementFence = payload.nativeLastCompletion;
+        slot->retirementResource = m_lifetime.Create(
+            ResourceKind::CommandList, slot,
+            [](void* context, ResourceRef, void* address) noexcept
+            {
+                auto& common = *static_cast<CommonBackend*>(context);
+                common.CompleteCommandListRetirement(static_cast<CommandListArenaSlot*>(address));
+            },
+            this);
+        if (!slot->retirementResource)
+        {
+            // Capacity/OOM here is exceptional. Preserve the selected fence-safe
+            // destruction boundary synchronously instead of either leaking the
+            // arena slot or returning a contaminated context to healthy reuse.
+            WaitForGpuFenceCompletionNoAllocation(retirementFence);
+            CompleteCommandListRetirement(slot);
+            return;
+        }
+        if (!m_lifetime.RecordUse(slot->retirementResource, retirementFence.queue, retirementFence.value))
+        {
+            // If lifetime fence publication itself fails, wait the already
+            // published external fence without allocating another wait primitive.
+            WaitForGpuFenceCompletionNoAllocation(retirementFence);
+        }
+        static_cast<void>(m_lifetime.Release(slot->retirementResource));
+    }
+
+    bool CommonBackend::HasLiveCommandListLeases() const noexcept
+    {
+        if (m_commandListArena == nullptr)
+            return false;
+        for (const CommandListArenaSlot& slot : m_commandListArena->slots)
+        {
+            const CommandListArenaSlotState state = CommandListArenaSlotStateOf(slot.identity.GetValue());
+            if (state == CommandListArenaSlotState::Live || state == CommandListArenaSlotState::Acquiring)
+                return true;
+        }
+        return false;
+    }
+
+    bool CommonBackend::IsCommandListArenaDrained() const noexcept
+    {
+        if (m_commandListArena == nullptr)
+            return true;
+        for (const CommandListArenaSlot& slot : m_commandListArena->slots)
+            if (CommandListArenaSlotStateOf(slot.identity.GetValue()) != CommandListArenaSlotState::Free)
+                return false;
+        return true;
+    }
+
+    void CommonBackend::ForceDrainCommandListArena() noexcept
+    {
+        if (m_commandListArena == nullptr)
+            return;
+        for (CommandListArenaSlot& slot : m_commandListArena->slots)
+        {
+            const CommandListArenaSlotState state = CommandListArenaSlotStateOf(slot.identity.GetValue());
+            if (state == CommandListArenaSlotState::Free)
+                continue;
+            if (state == CommandListArenaSlotState::Retiring)
+            {
+                // A retirement with no RLM token is a fence-less submitted context
+                // intentionally quarantined until this after-idle/device-loss
+                // teardown boundary. Token-backed retirements remain owned by RLM
+                // and complete during the force lifetime shutdown below.
+                if (slot.payload != nullptr && !slot.retirementResource)
+                {
+                    slot.payload->recycleNative = false;
+                    CompleteCommandListRetirement(&slot);
+                }
+                continue;
+            }
+            VG_ASSERT_MSG(state == CommandListArenaSlotState::Live,
+                          "forced command-list arena drain encountered an acquiring lease during backend shutdown");
+            if (state != CommandListArenaSlotState::Live || slot.payload == nullptr)
+                continue;
+            slot.payload->recycleNative = false;
+            CompleteCommandListRetirement(&slot);
+        }
+    }
+
+    void CommonBackend::CompleteCommandListRetirement(CommandListArenaSlot* const slot) noexcept
+    {
+        if (slot == nullptr || m_commandListArena == nullptr || slot->payload == nullptr)
+            return;
+        // Normal terminal paths publish Live -> Retiring before teardown. Forced
+        // shutdown can instead reach a still-live recording lease directly. In
+        // that path, invalidate the public lease before touching callbacks,
+        // resources or native state so no stale handle observes teardown in
+        // progress.
+        u64 identity = slot->identity.GetValue();
+        for (;;)
+        {
+            const CommandListArenaSlotState state = CommandListArenaSlotStateOf(identity);
+            if (state == CommandListArenaSlotState::Retiring)
+                break;
+            VG_ASSERT_MSG(state == CommandListArenaSlotState::Live,
+                          "command-list retirement completed for a slot that was neither live nor retiring");
+            if (state != CommandListArenaSlotState::Live)
+                return;
+            const u64 retiring = PackCommandListArenaIdentity(CommandListArenaGeneration(identity), CommandListArenaSlotState::Retiring);
+            const u64 observed = slot->identity.CompareExchange(retiring, identity);
+            if (observed == identity)
+            {
+                identity = retiring;
+                break;
+            }
+            identity = observed;
+        }
+
+        CommandListPayload& command = *slot->payload;
+        nvrhi::CommandListHandle native = static_cast<nvrhi::CommandListHandle&&>(command.native);
+        const bool recycle = ShouldRecycleCommandList(command.recycleNative, command.usedPersistentWorkingSet, command.retentionPolicy);
+        const CommandListType type = command.type;
+        const CommandListReuseClass reuseClass = command.reuseClass;
+        const u64 reuseRole = command.reuseRole;
+        const GpuFence completion = command.nativeLastCompletion;
+        for (const CommandListPayload::SubmissionCallback& notification : command.submissionCallbacks)
+            notification.callback(notification.context, {}, notification.value);
+        for (const ResourceRef used : command.resources)
+            static_cast<void>(Release(used));
+        command.ResetAfterRetirement();
+        slot->retirementResource = {};
+
+        if (recycle)
+            RecycleNativeCommandList(static_cast<nvrhi::CommandListHandle&&>(native), type, reuseClass, reuseRole, completion);
+        else
+            native = nullptr;
+
+        {
+            concurrency::ScopedLock guard(m_commandListArena->lock);
+            identity = slot->identity.GetValue();
+            VG_ASSERT_MSG(CommandListArenaSlotStateOf(identity) == CommandListArenaSlotState::Retiring,
+                          "command-list retirement completed for a slot that was not retiring");
+            const u32 generation = NextCommandListArenaGeneration(CommandListArenaGeneration(identity));
+            slot->identity.SetValue(PackCommandListArenaIdentity(generation, CommandListArenaSlotState::Free));
+            VG_ASSERT_MSG(m_commandListArena->freeCount < CommandListArenaCapacity, "command-list arena free list overflow");
+            m_commandListArena->freeIndices[m_commandListArena->freeCount++] = slot->index;
+        }
+    }
 
     CommonBackend::CommonBackend() noexcept
         : m_bindingLayouts(memory::pools::Rendering::GetInstance()), m_vertexLayouts(memory::pools::Rendering::GetInstance()),
@@ -1153,31 +1765,124 @@ namespace vanguard::rhi::backend
         ForceShutdownAfterGpuIdle();
     }
 
-    nvrhi::CommandListHandle CommonBackend::AcquireNativeCommandList(const CommandListType type, const u64 role) noexcept
+    u32 CommonBackend::AllocateRecycledCommandListSlotLocked() noexcept
     {
+        if (m_commandListPoolFreeHead == InvalidReferenceIndex)
+            return InvalidReferenceIndex;
+        const u32 index = m_commandListPoolFreeHead;
+        RecycledCommandList& entry = m_recycledCommandLists[index];
+        m_commandListPoolFreeHead = entry.nextFree;
+        entry.nextFree = InvalidReferenceIndex;
+        return index;
+    }
+
+    void CommonBackend::ReleaseRecycledCommandListSlotLocked(const u32 index) noexcept
+    {
+        VG_ASSERT(index < MaximumRetainedCommandListContexts);
+        RecycledCommandList& entry = m_recycledCommandLists[index];
+        VG_ASSERT_MSG(!entry.native, "recycled command-list slot released while still owning a native context");
+        entry = {};
+        entry.nextFree = m_commandListPoolFreeHead;
+        m_commandListPoolFreeHead = index;
+    }
+
+    void CommonBackend::LinkRecycledCommandListLocked(const u32 index) noexcept
+    {
+        RecycledCommandList& entry = m_recycledCommandLists[index];
+        VG_ASSERT(entry.native && entry.type != CommandListType::None);
+        u32* classHead = nullptr;
+        if (entry.reuseClass == CommandListReuseClass::Clean)
+        {
+            entry.role = 0;
+            classHead = &m_cleanCommandListHeads[static_cast<u32>(entry.type)];
+        }
+        else
+        {
+            VG_ASSERT_MSG(entry.role != 0, "bounded command-list context is missing its stable reuse role");
+            classHead = &m_boundedCommandListBuckets[CommandListPoolBucket(entry.type, entry.role)];
+        }
+        entry.previousClass = InvalidReferenceIndex;
+        entry.nextClass = *classHead;
+        if (entry.nextClass != InvalidReferenceIndex)
+            m_recycledCommandLists[entry.nextClass].previousClass = index;
+        *classHead = index;
+
+        entry.previousAge = m_commandListPoolNewest;
+        entry.nextAge = InvalidReferenceIndex;
+        if (m_commandListPoolNewest != InvalidReferenceIndex)
+            m_recycledCommandLists[m_commandListPoolNewest].nextAge = index;
+        else
+            m_commandListPoolOldest = index;
+        m_commandListPoolNewest = index;
+        ++m_recycledCommandListCount;
+    }
+
+    void CommonBackend::UnlinkRecycledCommandListLocked(const u32 index) noexcept
+    {
+        RecycledCommandList& entry = m_recycledCommandLists[index];
+        u32* classHead = entry.reuseClass == CommandListReuseClass::Clean
+                             ? &m_cleanCommandListHeads[static_cast<u32>(entry.type)]
+                             : &m_boundedCommandListBuckets[CommandListPoolBucket(entry.type, entry.role)];
+        if (entry.previousClass != InvalidReferenceIndex)
+            m_recycledCommandLists[entry.previousClass].nextClass = entry.nextClass;
+        else
+            *classHead = entry.nextClass;
+        if (entry.nextClass != InvalidReferenceIndex)
+            m_recycledCommandLists[entry.nextClass].previousClass = entry.previousClass;
+
+        if (entry.previousAge != InvalidReferenceIndex)
+            m_recycledCommandLists[entry.previousAge].nextAge = entry.nextAge;
+        else
+            m_commandListPoolOldest = entry.nextAge;
+        if (entry.nextAge != InvalidReferenceIndex)
+            m_recycledCommandLists[entry.nextAge].previousAge = entry.previousAge;
+        else
+            m_commandListPoolNewest = entry.previousAge;
+
+        entry.previousClass = InvalidReferenceIndex;
+        entry.nextClass = InvalidReferenceIndex;
+        entry.previousAge = InvalidReferenceIndex;
+        entry.nextAge = InvalidReferenceIndex;
+        VG_ASSERT_MSG(m_recycledCommandListCount != 0, "recycled command-list pool count underflow");
+        if (m_recycledCommandListCount != 0)
+            --m_recycledCommandListCount;
+    }
+
+    nvrhi::CommandListHandle CommonBackend::AcquireNativeCommandList(const CommandListType type, const u64 role,
+                                                                     const CommandListRetentionPolicy retentionPolicy,
+                                                                     CommandListReuseClass& reuseClass, u64& reuseRole,
+                                                                     GpuFence& priorCompletion) noexcept
+    {
+        reuseClass = CommandListReuseClass::Clean;
+        reuseRole = 0;
+        priorCompletion = {};
         {
             concurrency::ScopedLock poolGuard(m_commandListPoolLock);
             u32 selected = InvalidReferenceIndex;
-            u64 newestStamp = 0;
-            for (u32 index = 0; index < m_recycledCommandListCount; ++index)
+            if (retentionPolicy == CommandListRetentionPolicy::BoundedUploadReuse)
             {
-                const RecycledCommandList& entry = m_recycledCommandLists[index];
-                if (entry.type != type || entry.role != role)
-                    continue;
-                if (selected == InvalidReferenceIndex || entry.stamp > newestStamp)
+                for (u32 index = m_boundedCommandListBuckets[CommandListPoolBucket(type, role)]; index != InvalidReferenceIndex;
+                     index = m_recycledCommandLists[index].nextClass)
                 {
-                    selected = index;
-                    newestStamp = entry.stamp;
+                    const RecycledCommandList& entry = m_recycledCommandLists[index];
+                    if (entry.reuseClass == CommandListReuseClass::BoundedWorkingSet && entry.type == type && entry.role == role)
+                    {
+                        selected = index;
+                        break;
+                    }
                 }
             }
+            if (selected == InvalidReferenceIndex)
+                selected = m_cleanCommandListHeads[static_cast<u32>(type)];
             if (selected != InvalidReferenceIndex)
             {
                 RecycledCommandList& entry = m_recycledCommandLists[selected];
                 nvrhi::CommandListHandle native = static_cast<nvrhi::CommandListHandle&&>(entry.native);
-                --m_recycledCommandListCount;
-                if (selected != m_recycledCommandListCount)
-                    entry = static_cast<RecycledCommandList&&>(m_recycledCommandLists[m_recycledCommandListCount]);
-                m_recycledCommandLists[m_recycledCommandListCount] = {};
+                reuseClass = entry.reuseClass;
+                reuseRole = entry.role;
+                priorCompletion = entry.completion;
+                UnlinkRecycledCommandListLocked(selected);
+                ReleaseRecycledCommandListSlotLocked(selected);
                 return native;
             }
         }
@@ -1188,55 +1893,173 @@ namespace vanguard::rhi::backend
         return m_device->createCommandList(parameters);
     }
 
-    void CommonBackend::RecycleNativeCommandList(nvrhi::CommandListHandle&& native, const CommandListType type, const u64 role) noexcept
+    void CommonBackend::RetireNativeCommandListContext(nvrhi::CommandListHandle&& native, const GpuFence completion) noexcept
     {
-        if (!native || type == CommandListType::None)
+        if (!native)
             return;
-        nvrhi::CommandListHandle evicted;
+        if (!completion.IsValid() || IsGpuFenceComplete(completion))
+        {
+            native = nullptr;
+            return;
+        }
+
+        RetiredNativeCommandListContext* const payload = AllocatePayload<RetiredNativeCommandListContext>();
+        if (payload == nullptr)
+        {
+            WaitForGpuFenceCompletionNoAllocation(completion);
+            native = nullptr;
+            return;
+        }
+        payload->native = static_cast<nvrhi::CommandListHandle&&>(native);
+        const ResourceRef retirement = m_lifetime.Create(ResourceKind::CommandList, payload, &DestroyPayload<RetiredNativeCommandListContext>, nullptr);
+        if (!retirement)
+        {
+            WaitForGpuFenceCompletionNoAllocation(completion);
+            DestroyPayload<RetiredNativeCommandListContext>(nullptr, {}, payload);
+            return;
+        }
+        if (!m_lifetime.RecordUse(retirement, completion.queue, completion.value))
+            WaitForGpuFenceCompletionNoAllocation(completion);
+        static_cast<void>(m_lifetime.Release(retirement));
+    }
+
+    void CommonBackend::WaitForGpuFenceCompletionNoAllocation(const GpuFence completion) const noexcept
+    {
+        if (!completion.IsValid())
+            return;
+        while (!m_fenceComplete(m_fenceContext, completion.queue, completion.value))
+            concurrency::YieldCurrentThread();
+    }
+
+    void CommonBackend::RecycleNativeCommandList(nvrhi::CommandListHandle&& native, const CommandListType type,
+                                                 const CommandListReuseClass reuseClass, const u64 reuseRole,
+                                                 const GpuFence completion) noexcept
+    {
+        if (!native || type <= CommandListType::None || type > CommandListType::Compute || !completion.IsValid() ||
+            (reuseClass == CommandListReuseClass::BoundedWorkingSet && reuseRole == 0))
+        {
+            RetireNativeCommandListContext(static_cast<nvrhi::CommandListHandle&&>(native), completion);
+            return;
+        }
+
+        bool retireIncoming = false;
+        nvrhi::CommandListHandle retiredVictim;
         {
             concurrency::ScopedLock poolGuard(m_commandListPoolLock);
-            u32 matchingRoleCount = 0;
-            u32 oldestMatching = InvalidReferenceIndex;
-            u32 oldestOverall = InvalidReferenceIndex;
-            for (u32 index = 0; index < m_recycledCommandListCount; ++index)
-            {
-                const RecycledCommandList& entry = m_recycledCommandLists[index];
-                if (oldestOverall == InvalidReferenceIndex || entry.stamp < m_recycledCommandLists[oldestOverall].stamp)
-                    oldestOverall = index;
-                if (entry.type != type || entry.role != role)
-                    continue;
-                ++matchingRoleCount;
-                if (oldestMatching == InvalidReferenceIndex || entry.stamp < m_recycledCommandLists[oldestMatching].stamp)
-                    oldestMatching = index;
-            }
+            // No historical peak counter is needed. Acquire removes one context
+            // from its exact class and healthy retirement puts it back; the pool
+            // can grow only when simultaneous recording demand exhausted that
+            // class and forced creation of another outer. Cold aging then decays
+            // transient peaks, while this fixed arena-sized storage is the hard cap.
+            u32 destination = AllocateRecycledCommandListSlotLocked();
 
-            u32 destination = InvalidReferenceIndex;
-            if (matchingRoleCount >= MaximumRecycledCommandListsPerRole)
-                destination = oldestMatching;
-            else if (m_recycledCommandListCount < MaximumRecycledCommandLists)
-                destination = m_recycledCommandListCount++;
-            else
-                destination = oldestOverall;
-
-            VG_ASSERT_MSG(destination != InvalidReferenceIndex, "command-list recycling could not select a bounded pool destination");
             if (destination == InvalidReferenceIndex)
-                return;
-            RecycledCommandList& entry = m_recycledCommandLists[destination];
-            evicted = static_cast<nvrhi::CommandListHandle&&>(entry.native);
-            entry.native = static_cast<nvrhi::CommandListHandle&&>(native);
-            entry.role = role;
-            entry.stamp = ++m_commandListRecycleStamp;
-            entry.type = type;
+            {
+                // Pool-full pressure is rare: ordinary reacquire/recycle frees and
+                // refills the same slot. Search only a bounded oldest-first window
+                // for a fence-complete victim so pressure never becomes a 4096-entry
+                // hot-lock scan. If no safe victim is visible, quarantine the
+                // incoming context against its own completion fence instead.
+                u32 candidate = m_commandListPoolOldest;
+                for (u32 checked = 0; candidate != InvalidReferenceIndex && checked < MaximumCommandListPressureVictimChecks; ++checked)
+                {
+                    RecycledCommandList& entry = m_recycledCommandLists[candidate];
+                    const u32 next = entry.nextAge;
+                    VG_ASSERT_MSG(entry.completion.IsValid(), "pooled command-list context is missing its published completion fence");
+                    if (entry.completion.IsValid() && IsGpuFenceComplete(entry.completion))
+                    {
+                        retiredVictim = static_cast<nvrhi::CommandListHandle&&>(entry.native);
+                        UnlinkRecycledCommandListLocked(candidate);
+                        ReleaseRecycledCommandListSlotLocked(candidate);
+                        destination = AllocateRecycledCommandListSlotLocked();
+                        break;
+                    }
+                    candidate = next;
+                }
+                if (destination == InvalidReferenceIndex)
+                    retireIncoming = true;
+            }
+            if (destination != InvalidReferenceIndex)
+            {
+                RecycledCommandList& entry = m_recycledCommandLists[destination];
+                entry.native = static_cast<nvrhi::CommandListHandle&&>(native);
+                entry.completion = completion;
+                entry.role = reuseClass == CommandListReuseClass::BoundedWorkingSet ? reuseRole : 0;
+                entry.lastUsedMaintenanceEpoch = m_commandListMaintenanceEpoch;
+                entry.type = type;
+                entry.reuseClass = reuseClass;
+                LinkRecycledCommandListLocked(destination);
+            }
         }
+
+        retiredVictim = nullptr;
+        if (retireIncoming)
+            RetireNativeCommandListContext(static_cast<nvrhi::CommandListHandle&&>(native), completion);
+    }
+
+    void CommonBackend::MaintainRecycledCommandLists() noexcept
+    {
+        nvrhi::CommandListHandle retired[MaximumColdCommandListRetirementsPerMaintenance]{};
+        u32 retiredCount = 0;
+        {
+            concurrency::ScopedLock poolGuard(m_commandListPoolLock);
+            ++m_commandListMaintenanceEpoch;
+            u32 candidate = m_commandListPoolOldest;
+            u32 checked = 0;
+            while (retiredCount < MaximumColdCommandListRetirementsPerMaintenance && candidate != InvalidReferenceIndex &&
+                   checked < MaximumCommandListMaintenanceCandidateChecks)
+            {
+                ++checked;
+                RecycledCommandList& entry = m_recycledCommandLists[candidate];
+                const u32 next = entry.nextAge;
+                if (m_commandListMaintenanceEpoch - entry.lastUsedMaintenanceEpoch < CommandListColdMaintenanceEpochs)
+                    break;
+                VG_ASSERT_MSG(entry.completion.IsValid(), "pooled command-list context is missing its published completion fence");
+                if (entry.completion.IsValid() && IsGpuFenceComplete(entry.completion))
+                {
+                    retired[retiredCount++] = static_cast<nvrhi::CommandListHandle&&>(entry.native);
+                    UnlinkRecycledCommandListLocked(candidate);
+                    ReleaseRecycledCommandListSlotLocked(candidate);
+                }
+                candidate = next;
+            }
+        }
+        for (u32 index = 0; index < retiredCount; ++index)
+            retired[index] = nullptr;
     }
 
     void CommonBackend::ClearRecycledCommandLists() noexcept
     {
         concurrency::ScopedLock poolGuard(m_commandListPoolLock);
-        for (u32 index = 0; index < m_recycledCommandListCount; ++index)
+        static_assert(CommandListPoolHashBucketCount == CommandListPoolHashBucketCountInternal);
+        for (u32& head : m_cleanCommandListHeads)
+            head = InvalidReferenceIndex;
+        for (u32& head : m_boundedCommandListBuckets)
+            head = InvalidReferenceIndex;
+        m_commandListPoolFreeHead = MaximumRetainedCommandListContexts != 0 ? 0u : InvalidReferenceIndex;
+        m_commandListPoolOldest = InvalidReferenceIndex;
+        m_commandListPoolNewest = InvalidReferenceIndex;
+        for (u32 index = 0; index < MaximumRetainedCommandListContexts; ++index)
+        {
             m_recycledCommandLists[index] = {};
+            m_recycledCommandLists[index].nextFree = index + 1u < MaximumRetainedCommandListContexts ? index + 1u : InvalidReferenceIndex;
+        }
         m_recycledCommandListCount = 0;
-        m_commandListRecycleStamp = 0;
+        m_commandListMaintenanceEpoch = 0;
+    }
+
+    void CommonBackend::DrainUnsignaledCommandListRetirementsAfterGpuIdle() noexcept
+    {
+        if (m_commandListArena == nullptr)
+            return;
+        for (CommandListArenaSlot& slot : m_commandListArena->slots)
+        {
+            if (CommandListArenaSlotStateOf(slot.identity.GetValue()) != CommandListArenaSlotState::Retiring || slot.payload == nullptr ||
+                slot.retirementResource)
+                continue;
+            slot.payload->recycleNative = false;
+            CompleteCommandListRetirement(&slot);
+        }
     }
 
     bool CommonBackend::Initialize(nvrhi::DeviceHandle&& device, const FenceCompleteCallback fenceComplete, const SignalFenceCallback signalFence,
@@ -1252,8 +2075,14 @@ namespace vanguard::rhi::backend
             return false;
         ClearRecycledCommandLists();
         m_device = static_cast<nvrhi::DeviceHandle&&>(device);
+        if (!InitializeCommandListArena())
+        {
+            m_device = nullptr;
+            return false;
+        }
         if (!m_lifetime.Initialize({}, fenceComplete, fenceContext, releaseResidency, fenceContext))
         {
+            ShutdownCommandListArena();
             m_device = nullptr;
             return false;
         }
@@ -1306,8 +2135,13 @@ namespace vanguard::rhi::backend
         }
         RetireResources();
         m_lifetime.WaitForReclamation();
+        DrainUnsignaledCommandListRetirementsAfterGpuIdle();
+        if (HasLiveCommandListLeases())
+            return false;
         if (!m_lifetime.ShutdownAfterGpuIdle())
             return false;
+        VG_ASSERT_MSG(IsCommandListArenaDrained(), "command-list retirement remained pending after lifetime shutdown at GPU idle");
+        ShutdownCommandListArena();
         ClearRecycledCommandLists();
         m_device = nullptr;
         m_fenceComplete = nullptr;
@@ -1335,7 +2169,16 @@ namespace vanguard::rhi::backend
         for (u32& bucket : m_vertexLayoutBuckets)
             bucket = InvalidReferenceIndex;
         m_descriptorDomains.Clear();
+        // Live recording leases may own callbacks whose contexts are RLM-backed
+        // resources (for example a swap-chain presentation acknowledgement).
+        // Drain them while those payloads are still alive. Fence-less retiring
+        // leases are also released here because this is the after-idle/device-loss
+        // teardown boundary; token-backed retirements remain owned by RLM and are
+        // completed by the force lifetime shutdown immediately afterward.
+        ForceDrainCommandListArena();
         m_lifetime.ForceShutdownAfterGpuIdle();
+        VG_ASSERT_MSG(IsCommandListArenaDrained(), "command-list arena was not drained by forced lifetime shutdown");
+        ShutdownCommandListArena();
         ClearRecycledCommandLists();
         m_device = nullptr;
         m_fenceComplete = nullptr;
@@ -1397,7 +2240,23 @@ namespace vanguard::rhi::backend
         if (lockMs + gpuMs >= 100.0)
             VG_LOG_WARNING(diagnostics::Category::Rendering, "GPU idle stall: lock=%.2f ms gpu=%.2f ms mainThread=%u", lockMs, gpuMs, u32(concurrency::IsMainThread()));
 #endif
-        return result;
+        if (!result)
+            return false;
+        // NVRHI's waitForIdle covers only its own internal queue fence, which is signaled before
+        // Vanguard's lifetime fence on the same native queue. Resource last-use is recorded against
+        // the later Vanguard fence, so an idle that ignored it could report success while
+        // ResourceLifetimeManager still treats retired resources as GPU-in-use. Wait for the latest
+        // successfully signaled Vanguard value on every queue so "idle" matches the reclamation
+        // boundary. Values that were never successfully signaled are deliberately excluded.
+        for (u32 queue = 0; queue < 3; ++queue)
+        {
+            const u64 value = m_signaledFences[queue];
+            if (value == 0)
+                continue;
+            if (!m_waitFence(m_fenceContext, static_cast<QueueType>(queue), value, ~u64{0}))
+                return false;
+        }
+        return true;
     }
 
     void CommonBackend::RetireResources() noexcept
@@ -1432,6 +2291,7 @@ namespace vanguard::rhi::backend
             concurrency::ScopedLock submissionGuard(m_submissionLock);
             m_device->runGarbageCollection();
         }
+        MaintainRecycledCommandLists();
         m_lifetime.SealRetirementEpoch({m_submittedFences[0].GetValue(), m_submittedFences[1].GetValue(), m_submittedFences[2].GetValue()});
         m_lifetime.CollectGarbage();
     }
@@ -1790,7 +2650,8 @@ namespace vanguard::rhi::backend
         if (domain == nullptr)
             return {};
         concurrency::ScopedLock domainGuard(domain->lock);
-        ReclaimDescriptorSlots(*this, *domain);
+        if (domain->freeHead == InvalidReferenceIndex)
+            ReclaimDescriptorSlots(*this, *domain);
         if (domain->freeHead == InvalidReferenceIndex)
         {
             ++domain->stats.allocationFailures;
@@ -1991,7 +2852,15 @@ namespace vanguard::rhi::backend
         ++domain->stats.pendingRetirement;
         slot.retirement = fences;
         slot.state = DescriptorSlotState::Retiring;
-        ReclaimDescriptorSlots(*this, *domain);
+        if (DescriptorRetirementComplete(*this, fences))
+        {
+            CompleteDescriptorRetirement(*this, *domain, descriptorSlot);
+            domain->stats.free = domain->desc.capacity - domain->stats.allocated - domain->stats.pendingRetirement - domain->stats.exhaustedSlots;
+            return BackendStatus::Success();
+        }
+        slot.nextRetiring = domain->retiringHead;
+        domain->retiringHead = descriptorSlot;
+        domain->stats.free = domain->desc.capacity - domain->stats.allocated - domain->stats.pendingRetirement - domain->stats.exhaustedSlots;
         return BackendStatus::Success();
     }
 
@@ -2654,41 +3523,82 @@ namespace vanguard::rhi::backend
     }
     BackendStatus CommonBackend::ValidateNativeReleaseObservation(const ResourceRef resource) const noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return BackendStatus::Failure(FailureCode::Unsupported, 0,
+                                          "native release observation is not defined for reusable command-list recording leases");
         if (!m_lifetime.IsValid(resource))
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "native release can only be observed for a live resource generation");
         return BackendStatus::Success();
     }
     bool CommonBackend::IsNativeReleaseComplete(const ResourceRef resource) const noexcept
     {
-        return resource.IsValid() && m_lifetime.IsNativeReleaseComplete(resource);
+        if (!resource.IsValid() || resource.GetKind() == ResourceKind::CommandList)
+            return false;
+        return m_lifetime.IsNativeReleaseComplete(resource);
     }
     bool CommonBackend::IsResourceReferenceValid(const ResourceRef resource) const noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return GetCommandListSlot(CommandListRef{resource.Index(), resource.GetGeneration()}) != nullptr;
         return m_lifetime.IsValid(resource);
     }
     void* CommonBackend::GetResourcePayload(const ResourceRef resource) noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return GetCommandListPayload(CommandListRef{resource.Index(), resource.GetGeneration()});
         return m_lifetime.GetPayload(resource);
     }
     const void* CommonBackend::GetResourcePayload(const ResourceRef resource) const noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return GetCommandListPayload(CommandListRef{resource.Index(), resource.GetGeneration()});
         return m_lifetime.GetPayload(resource);
     }
     i32 CommonBackend::GetResourceReferenceCount(const ResourceRef resource) const noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return GetCommandListSlot(CommandListRef{resource.Index(), resource.GetGeneration()}) != nullptr ? 1 : -1;
         return m_lifetime.GetRefCount(resource);
     }
     void CommonBackend::AddRef(const ResourceRef resource) noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return;
         static_cast<void>(m_lifetime.AddRef(resource));
     }
     bool CommonBackend::TryAddRef(const ResourceRef resource) noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return false;
         return m_lifetime.AddRef(resource);
     }
     i32 CommonBackend::Release(const ResourceRef resource) noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+            return -1;
         return m_lifetime.Release(resource);
+    }
+    BackendStatus CommonBackend::ReleaseNativeTextureHandleAfterGpuUse(const TextureRef texture) noexcept
+    {
+        const ResourceRef resource(texture);
+        auto* const payload = static_cast<TexturePayload*>(m_lifetime.GetPayload(resource));
+        if (payload == nullptr || !payload->native)
+            return BackendStatus::Failure(FailureCode::InvalidReference, 0, "native texture handle release requires a live texture");
+        if (m_lifetime.GetRefCount(resource) != 1)
+            return BackendStatus::Failure(FailureCode::Busy, 0, "native texture handle release requires sole ownership");
+
+        const FenceSet lastUse = m_lifetime.GetLastUse(resource);
+        const GpuFence fences[]{{QueueType::Graphics, lastUse.graphics}, {QueueType::Compute, lastUse.compute}, {QueueType::Copy, lastUse.copy}};
+        for (const GpuFence fence : fences)
+        {
+            if (!fence.IsValid())
+                continue;
+            const BackendStatus wait = WaitForGpuFence(fence, ~u64{0});
+            if (!wait)
+                return wait;
+        }
+        payload->native = nullptr;
+        return BackendStatus::Success();
     }
     ResourceLifetimeStats CommonBackend::GetResourceLifetimeStats() const noexcept
     {
@@ -2701,71 +3611,104 @@ namespace vanguard::rhi::backend
         RetireResources();
         m_lifetime.WaitForReclamation();
     }
-    CommandListRef CommonBackend::CreateCommandList(const CommandListType type, const u64 role) noexcept
+    CommandListRef CommonBackend::CreateCommandList(const CommandListType type, const u64 role,
+                                                    const CommandListRetentionPolicy retentionPolicy) noexcept
     {
-        nvrhi::CommandListHandle native = AcquireNativeCommandList(type, role);
+        if (type <= CommandListType::None || type > CommandListType::Compute ||
+            (retentionPolicy != CommandListRetentionPolicy::Default && retentionPolicy != CommandListRetentionPolicy::BoundedUploadReuse) ||
+            (retentionPolicy == CommandListRetentionPolicy::BoundedUploadReuse && role == 0))
+            return {};
+        CommandListReuseClass reuseClass = CommandListReuseClass::Clean;
+        u64 reuseRole = 0;
+        GpuFence priorCompletion{};
+        nvrhi::CommandListHandle native = AcquireNativeCommandList(type, role, retentionPolicy, reuseClass, reuseRole, priorCompletion);
         if (!native)
             return {};
-        native->open();
-        native->setEnableAutomaticBarriers(false);
-        CommandListPayload* const payload = AllocatePayload<CommandListPayload>(static_cast<nvrhi::CommandListHandle&&>(native), type, role);
-        if (payload == nullptr)
+        const CommandListRef commandList =
+            AcquireCommandListLease(static_cast<nvrhi::CommandListHandle&&>(native), type, role, retentionPolicy, reuseClass, reuseRole, priorCompletion);
+        if (!commandList.IsValid())
+        {
+            // If arena/payload admission failed before BeginRecording consumed the
+            // handle, preserve the prior fence carried by a pooled outer context.
+            RetireNativeCommandListContext(static_cast<nvrhi::CommandListHandle&&>(native), priorCompletion);
             return {};
-        const ResourceRef resource = m_lifetime.Create(
-            ResourceKind::CommandList, payload,
-            [](void* context, ResourceRef, void* address) noexcept
-            {
-                auto& common = *static_cast<CommonBackend*>(context);
-                auto* const command = static_cast<CommandListPayload*>(address);
-                nvrhi::CommandListHandle native = static_cast<nvrhi::CommandListHandle&&>(command->native);
-                const bool recycle = command->recycleAfterCompletion;
-                const CommandListType type = command->type;
-                const u64 role = command->role;
-                for (const CommandListPayload::SubmissionCallback& notification : command->submissionCallbacks)
-                    notification.callback(notification.context, {}, notification.value);
-                for (const ResourceRef used : command->resources)
-                    static_cast<void>(common.Release(used));
-                DestroyPayload<CommandListPayload>(nullptr, {}, command);
-                if (recycle)
-                    common.RecycleNativeCommandList(static_cast<nvrhi::CommandListHandle&&>(native), type, role);
-            },
-            this);
-        if (!resource)
-            DestroyPayload<CommandListPayload>(nullptr, {}, payload);
-        return CastResourceRef<CommandListRef>(resource);
+        }
+        auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
+        if (payload == nullptr || !payload->native)
+        {
+            RetireCommandListLease(commandList);
+            return {};
+        }
+        payload->native->open();
+        payload->native->setEnableAutomaticBarriers(false);
+        return commandList;
     }
     CommandListType CommonBackend::GetCommandListType(const CommandListRef commandList) const noexcept
     {
-        const auto* const payload = static_cast<const CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        const auto* const payload = static_cast<const CommandListPayload*>(GetCommandListPayload(commandList));
         return payload != nullptr && payload->open ? payload->type : CommandListType::None;
     }
     void CommonBackend::DiscardCommandList(const CommandListRef commandList) noexcept
     {
-        const ResourceRef resource(commandList);
-        auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(resource));
+        auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (payload == nullptr)
             return;
         if (payload->open)
         {
+            payload->ResetPendingBarrierTracking();
             payload->native->close();
             payload->open = false;
         }
         for (const CommandListPayload::SubmissionCallback& notification : payload->submissionCallbacks)
             notification.callback(notification.context, {}, notification.value);
         payload->submissionCallbacks.Clear();
+        // The framebuffer owns NVRHI texture references independently of the
+        // Vanguard resource holds below. A discarded list has no GPU work that
+        // needs it alive, so release it before the texture references become
+        // externally unretained.
+        payload->framebuffer = nullptr;
         for (const ResourceRef used : payload->resources)
             static_cast<void>(m_lifetime.Release(used));
         payload->resources.Clear();
-        static_cast<void>(m_lifetime.Release(resource));
+        RetireCommandListLease(commandList);
     }
     BackendStatus CommonBackend::CloseCommandList(const CommandListRef commandList) noexcept
     {
-        auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (payload == nullptr || !payload->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "cannot close a stale or already closed command list");
         if (payload->markerDepth != 0)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "cannot close a command list with unterminated GPU events");
-        payload->native->commitBarriers();
+        CommitPendingBarriers(*payload);
+
+        // NVRHI restores every keepInitialState buffer from CommandList::close().
+        // Its buffer tracker linearly searches the current pending barrier vector
+        // for every transition, which makes a large close-time restoration batch
+        // quadratic. Restore only buffers that NVRHI actually tracked, through
+        // Vanguard's bounded explicit-buffer fence, before entering native close.
+        // The native close pass then observes every tracked buffer already in its
+        // initial state (and performs only linear validation/UAV ordering work).
+        bool restoredInitialBufferState = false;
+        for (const ResourceRef resource : payload->resources)
+        {
+            if (resource.GetKind() != ResourceKind::Buffer)
+                continue;
+            const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(resource));
+            if (buffer == nullptr || !buffer->desc.keepInitialState || buffer->desc.memoryType != MemoryType::DeviceLocal)
+                continue;
+            const nvrhi::ResourceStates tracked = payload->native->getBufferState(buffer->native);
+            if (tracked == nvrhi::ResourceStates::Unknown)
+                continue;
+            const nvrhi::ResourceStates initial = ToNativeState(buffer->desc.initialState);
+            if (tracked == initial)
+                continue;
+            PrepareExplicitBufferBarrier(*payload, resource);
+            payload->native->setBufferState(buffer->native, initial);
+            restoredInitialBufferState = true;
+        }
+        if (restoredInitialBufferState)
+            CommitPendingBarriers(*payload);
+
         payload->native->close();
         payload->open = false;
         return BackendStatus::Success();
@@ -2777,20 +3720,17 @@ namespace vanguard::rhi::backend
         receipt = {};
         nvrhi::ICommandList* nativeLists[3][MaximumCommandListsPerSubmission]{};
         CommandListPayload* payloads[MaximumCommandListsPerSubmission]{};
-        ResourceRef references[MaximumCommandListsPerSubmission]{};
         u32 queueCounts[3]{};
         u64 incomingWaits[3][3]{};
 
         for (u32 index = 0; index < commandLists.Size(); ++index)
         {
-            const ResourceRef resource(commandLists[index]);
-            auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(resource));
+            auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(commandLists[index]));
             if (payload == nullptr || payload->open)
                 return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "submission contains a stale or open command list");
             const u32 queue = QueueIndex(GetQueueType(payload->type));
             nativeLists[queue][queueCounts[queue]++] = payload->native;
             payloads[index] = payload;
-            references[index] = resource;
             for (u32 producer = 0; producer < 3; ++producer)
             {
                 const u64 value = payload->incomingWaits[producer];
@@ -2875,7 +3815,7 @@ namespace vanguard::rhi::backend
 
         GpuFence queueFences[3]{};
         receipt.workSubmitted = true;
-        const auto finalizeSubmittedPayloads = [&]() noexcept
+        const auto finalizeSubmittedPayloads = [&](const bool healthySubmission) noexcept
         {
             for (u32 index = 0; index < commandLists.Size(); ++index)
             {
@@ -2891,6 +3831,12 @@ namespace vanguard::rhi::backend
                 for (const CommandListPayload::SubmissionCallback& notification : payload.submissionCallbacks)
                     notification.callback(notification.context, fence, notification.value);
                 payload.submissionCallbacks.Clear();
+                // Submitted NVRHI command-list instances retain any framebuffer
+                // they actually use until their native queue fence completes.
+                // The Vanguard payload must not keep a second, fence-independent
+                // framebuffer reference after submission because swap-chain
+                // resize is allowed as soon as the tracked texture use completes.
+                payload.framebuffer = nullptr;
                 for (const ResourceRef resource : payload.resources)
                 {
                     if (fence.IsValid())
@@ -2899,8 +3845,7 @@ namespace vanguard::rhi::backend
                 }
                 payload.resources.Clear();
                 payload.residencyResources.Clear();
-                payload.recycleAfterCompletion = fence.IsValid() && m_lifetime.RecordUse(references[index], queue, fence.value);
-                static_cast<void>(m_lifetime.Release(references[index]));
+                RetireCommandListLease(commandLists[index], fence, healthySubmission && fence.IsValid(), !healthySubmission && !fence.IsValid());
             }
         };
         for (u32 queueIndex = 0; queueIndex < 3; ++queueIndex)
@@ -2920,7 +3865,7 @@ namespace vanguard::rhi::backend
                 // Native execution already happened. Release the closed list
                 // payloads and publish truthful submitted-without-completion
                 // evidence; device-loss recovery owns the fence-less work.
-                finalizeSubmittedPayloads();
+                finalizeSubmittedPayloads(false);
                 return BackendStatus::Failure(FailureCode::DeviceLost, 0, "failed to signal a submission fence");
             }
             queueFences[queueIndex] = {queue, value};
@@ -2928,7 +3873,7 @@ namespace vanguard::rhi::backend
             receipt.residency.Include(queueFences[queueIndex]);
         }
 
-        finalizeSubmittedPayloads();
+        finalizeSubmittedPayloads(true);
 
         if (sync == CommandListSyncType::ForkAsyncCompute)
             receipt.completion = queueFences[QueueIndex(QueueType::Compute)];
@@ -2974,7 +3919,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetPipeline(const CommandListRef commandList, const PipelineRef pipeline) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const nativePipeline = static_cast<const PipelinePayload*>(m_lifetime.GetPayload(ResourceRef(pipeline)));
         if (command == nullptr || !command->open || nativePipeline == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid command list or pipeline");
@@ -2991,7 +3936,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetupRenderTargets(const CommandListRef commandList, const RenderTargetSetup& setup) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "render targets require an open graphics command list");
         nvrhi::FramebufferDesc nativeDesc;
@@ -3040,7 +3985,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetViewport(const CommandListRef commandList, const ViewportDesc& viewport) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "viewport requires an open graphics command list");
         command->viewport = viewport;
@@ -3050,7 +3995,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetScissors(const CommandListRef commandList, const Rect& rect) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "scissors require an open graphics command list");
         command->scissors = rect;
@@ -3061,7 +4006,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::BindVertexBuffers(const CommandListRef commandList, const u32 startIndex,
                                                    const containers::ArraySpan<const VertexBufferBinding> bindings) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "vertex buffers require an open graphics command list");
         for (u32 index = 0; index < bindings.Size(); ++index)
@@ -3083,7 +4028,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::BindIndexBuffer(const CommandListRef commandList, const IndexBufferBinding& binding) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(binding.buffer)));
         const u64 alignment = binding.format == IndexFormat::UInt32 ? 4u : 2u;
         if (command == nullptr || !command->open || command->type != CommandListType::Default || buffer == nullptr ||
@@ -3099,7 +4044,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::BindIndirectArguments(const CommandListRef commandList, const BufferRef arguments, const BufferRef count) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const argumentBuffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(arguments)));
         const auto* const countBuffer = count ? static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(count))) : nullptr;
         if (command == nullptr || !command->open || argumentBuffer == nullptr || !HasFlag(argumentBuffer->desc.usage, BufferUsage::IndirectArguments) ||
@@ -3114,7 +4059,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetPushConstants(const CommandListRef commandList, const void* const data, const u32 size) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || data == nullptr || size > sizeof(command->pushConstants))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid push-constant recording request");
         const u8* const source = static_cast<const u8*>(data);
@@ -3127,7 +4072,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::ClearColorTarget(const CommandListRef commandList, const TextureRef target, const ColorValue& value,
                                                   const SubresourceRange& requested, const Rect* const rectangle) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(target)));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "color clears require an open graphics command list");
@@ -3143,14 +4088,16 @@ namespace vanguard::rhi::backend
         const nvrhi::TextureSubresourceSet nativeRange(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
         if (rectangle == nullptr)
         {
+            CommitPendingBarriers(*command);
             for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
                 command->native->clearTextureFloat(texture->native, nvrhi::TextureSubresourceSet(mip, 1, range.firstSlice, range.sliceCount),
                                                    nvrhi::Color(value.red, value.green, value.blue, value.alpha));
         }
         else
         {
+            CommitPendingBarriers(*command);
             command->native->setTextureState(texture->native, nativeRange, nvrhi::ResourceStates::RenderTarget);
-            command->native->commitBarriers();
+            CommitPendingBarriers(*command);
             if (!m_rectColorClear(m_fenceContext, command->native, texture->native, value, range, *rectangle))
                 return BackendStatus::Failure(FailureCode::BackendFailure, 0, "native rectangular color clear failed");
         }
@@ -3161,7 +4108,7 @@ namespace vanguard::rhi::backend
                                                          const bool clearStencil, const u8 stencil, const SubresourceRange& requested,
                                                          const Rect* const rectangle) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(target)));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "depth-stencil clears require an open graphics command list");
@@ -3180,14 +4127,16 @@ namespace vanguard::rhi::backend
         const nvrhi::TextureSubresourceSet nativeRange(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
         if (rectangle == nullptr)
         {
+            CommitPendingBarriers(*command);
             for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
                 command->native->clearDepthStencilTexture(texture->native, nvrhi::TextureSubresourceSet(mip, 1, range.firstSlice, range.sliceCount), clearDepth,
                                                           depth, clearStencil, stencil);
         }
         else
         {
+            CommitPendingBarriers(*command);
             command->native->setTextureState(texture->native, nativeRange, nvrhi::ResourceStates::DepthWrite);
-            command->native->commitBarriers();
+            CommitPendingBarriers(*command);
             if (!m_rectDepthStencilClear(m_fenceContext, command->native, texture->native, clearDepth, depth, clearStencil, stencil, range, *rectangle))
                 return BackendStatus::Failure(FailureCode::BackendFailure, 0, "native rectangular depth-stencil clear failed");
         }
@@ -3197,7 +4146,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::ClearTextureUav(const CommandListRef commandList, const TextureRef textureRef, const ColorValue& value,
                                                  const SubresourceRange& requested) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV clears require an open graphics or compute command list");
@@ -3211,6 +4160,7 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture UAV clear range");
         if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV clear target");
+        CommitPendingBarriers(*command);
         for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
             command->native->clearTextureFloat(texture->native, nvrhi::TextureSubresourceSet(mip, 1, 0, texture->desc.arraySize),
                                                nvrhi::Color(value.red, value.green, value.blue, value.alpha));
@@ -3220,7 +4170,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::ClearTextureUav(const CommandListRef commandList, const TextureRef textureRef, const u32 value,
                                                  const SubresourceRange& requested) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV clears require an open graphics or compute command list");
@@ -3233,6 +4183,7 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture UAV clear range");
         if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV clear target");
+        CommitPendingBarriers(*command);
         for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
             command->native->clearTextureUInt(texture->native, nvrhi::TextureSubresourceSet(mip, 1, 0, texture->desc.arraySize), value);
         return BackendStatus::Success();
@@ -3240,7 +4191,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::ClearBufferUav(const CommandListRef commandList, const BufferRef bufferRef, const u32 value) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(bufferRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer UAV clears require an open graphics or compute command list");
@@ -3248,13 +4199,14 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "buffer does not support unordered access");
         if (!TrackCommandResource(*this, *command, ResourceRef(bufferRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer UAV clear target");
+        CommitPendingBarriers(*command);
         command->native->clearBufferUInt(buffer->native, value);
         return BackendStatus::Success();
     }
 
     BackendStatus CommonBackend::DiscardTexture(const CommandListRef commandList, const TextureRef textureRef, const SubresourceRange& requested) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture discard requires an open graphics or compute command list");
@@ -3274,9 +4226,10 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture has no discard-compatible usage on this queue");
         if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a discarded texture");
+        CommitPendingBarriers(*command);
         command->native->setTextureState(texture->native, nvrhi::TextureSubresourceSet(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount),
                                          discardState);
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         return m_discardTexture(m_fenceContext, command->native, texture->native, range)
                    ? BackendStatus::Success()
                    : BackendStatus::Failure(FailureCode::BackendFailure, 0, "native texture discard failed");
@@ -3284,7 +4237,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetStencilRefValue(const CommandListRef commandList, const u8 value) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "stencil reference requires an open graphics command list");
         command->stencilReference = value;
@@ -3293,7 +4246,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SetBlendFactor(const CommandListRef commandList, const ColorValue& value) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "blend factor requires an open graphics command list");
         command->blendFactor = value;
@@ -3302,7 +4255,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::BeginGpuEvent(const CommandListRef commandList, const char* const name) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "GPU event requires an open command list");
         if (name == nullptr || name[0] == '\0')
@@ -3314,7 +4267,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::EndGpuEvent(const CommandListRef commandList) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "GPU event requires an open command list");
         if (command->markerDepth == 0)
@@ -3332,7 +4285,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::DrawPrimitive(const CommandListRef commandList, const DrawArguments& arguments) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "draw requires an open graphics command list");
         const BackendStatus status = SetupForGraphics(*this, *command);
@@ -3349,7 +4302,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::DrawIndexedPrimitive(const CommandListRef commandList, const DrawIndexedArguments& arguments) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->type != CommandListType::Default || !command->indexBufferSet)
             return BackendStatus::Failure(FailureCode::MissingBinding, 0, "indexed draw requires an index buffer");
         const BackendStatus status = SetupForGraphics(*this, *command);
@@ -3369,7 +4322,7 @@ namespace vanguard::rhi::backend
     {
         if (argumentsOffset > 0xffffffffu || (argumentsOffset & 3u) != 0 || commandCount == 0)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid native indirect draw arguments");
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const arguments =
             command != nullptr ? static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(command->indirectArguments))) : nullptr;
         const u64 bytes = static_cast<u64>(sizeof(IndirectDrawArguments)) * commandCount;
@@ -3386,7 +4339,7 @@ namespace vanguard::rhi::backend
     {
         if (argumentsOffset > 0xffffffffu || (argumentsOffset & 3u) != 0 || commandCount == 0)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid native indexed indirect draw arguments");
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const arguments =
             command != nullptr ? static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(command->indirectArguments))) : nullptr;
         const u64 bytes = static_cast<u64>(sizeof(IndirectDrawIndexedArguments)) * commandCount;
@@ -3406,7 +4359,7 @@ namespace vanguard::rhi::backend
         if (argumentsOffset > 0xffffffffu || countOffset > 0xffffffffu || (argumentsOffset & 3u) != 0 || (countOffset & 3u) != 0 ||
             maximumCommandCount == 0)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid native counted indirect draw arguments");
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const arguments =
             command != nullptr ? static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(command->indirectArguments))) : nullptr;
         const auto* const count = command != nullptr ? static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(command->indirectCount))) : nullptr;
@@ -3423,7 +4376,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::DispatchCompute(const CommandListRef commandList, const u32 groupCountX, const u32 groupCountY, const u32 groupCountZ) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "dispatch requires an open graphics or compute command list");
         const BackendStatus status = SetupForCompute(*this, *command);
@@ -3437,7 +4390,7 @@ namespace vanguard::rhi::backend
     {
         if (argumentsOffset > 0xffffffffu || (argumentsOffset & 3u) != 0)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid native indirect dispatch arguments");
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const arguments =
             command != nullptr ? static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(command->indirectArguments))) : nullptr;
         if (command == nullptr || arguments == nullptr || argumentsOffset + sizeof(IndirectDispatchArguments) < argumentsOffset ||
@@ -3453,7 +4406,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::WriteBuffer(const CommandListRef commandList, const BufferRef buffer, const void* const data, const u64 size,
                                              const u64 destinationOffset) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const resource = static_cast<BufferPayload*>(m_lifetime.GetPayload(ResourceRef(buffer)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer upload requires an open command list");
@@ -3461,16 +4414,60 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "buffer upload references a stale buffer");
         if (destinationOffset > resource->desc.size || size > resource->desc.size - destinationOffset)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "buffer upload exceeds the destination buffer");
+        const u64 trackBegin = system::GetMonotonicTicks();
         if (!TrackCommandResource(*this, *command, ResourceRef(buffer)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer upload destination");
-        command->native->commitBarriers();
+        const u64 trackEnd = system::GetMonotonicTicks();
+        const bool firstUploadOnCommandList = !command->usedPersistentWorkingSet;
+        MarkCommandListPersistentWorkingSetUse(*command);
+        CommitPendingBarriers(*command);
+        const u64 commitEnd = system::GetMonotonicTicks();
         command->native->writeBuffer(resource->native, data, static_cast<usize>(size), destinationOffset);
+        const u64 nativeEnd = system::GetMonotonicTicks();
+        static_cast<void>(g_writeBufferTrackTicks.ExchangeAdd(trackEnd - trackBegin));
+        static_cast<void>(g_writeBufferCommitTicks.ExchangeAdd(commitEnd - trackEnd));
+        static_cast<void>(g_writeBufferNativeTicks.ExchangeAdd(nativeEnd - commitEnd));
+        if (firstUploadOnCommandList)
+        {
+            static_cast<void>(g_writeBufferFirstNativeTicks.ExchangeAdd(nativeEnd - commitEnd));
+            static_cast<void>(g_writeBufferFirstNativeCalls.Increment());
+        }
+        else
+        {
+            static_cast<void>(g_writeBufferRepeatNativeTicks.ExchangeAdd(nativeEnd - commitEnd));
+            static_cast<void>(g_writeBufferRepeatNativeCalls.Increment());
+        }
+        const u32 calls = g_writeBufferTimingCalls.Increment();
+        if (calls >= 1200u)
+        {
+            const u32 observedCalls = g_writeBufferTimingCalls.Exchange(0u);
+            const u64 trackTicks = g_writeBufferTrackTicks.Exchange(0u);
+            const u64 commitTicks = g_writeBufferCommitTicks.Exchange(0u);
+            const u64 nativeTicks = g_writeBufferNativeTicks.Exchange(0u);
+            const u64 firstNativeTicks = g_writeBufferFirstNativeTicks.Exchange(0u);
+            const u64 repeatNativeTicks = g_writeBufferRepeatNativeTicks.Exchange(0u);
+            const u32 firstNativeCalls = g_writeBufferFirstNativeCalls.Exchange(0u);
+            const u32 repeatNativeCalls = g_writeBufferRepeatNativeCalls.Exchange(0u);
+            const u64 frequency = system::GetMonotonicFrequency();
+            if (observedCalls != 0 && frequency != 0)
+            {
+                const double tickToMicroseconds = 1000000.0 / static_cast<double>(frequency) / static_cast<double>(observedCalls);
+                VG_LOG_INFO(diagnostics::Category::Rendering,
+                            "RHI WriteBuffer CPU: calls=%u trackUs=%.3f commitUs=%.3f nativeUs=%.3f totalUs=%.3f firstNativeUs=%.3f repeatNativeUs=%.3f firstCalls=%u repeatCalls=%u",
+                            observedCalls, static_cast<double>(trackTicks) * tickToMicroseconds,
+                            static_cast<double>(commitTicks) * tickToMicroseconds, static_cast<double>(nativeTicks) * tickToMicroseconds,
+                            static_cast<double>(trackTicks + commitTicks + nativeTicks) * tickToMicroseconds,
+                            firstNativeCalls != 0 ? static_cast<double>(firstNativeTicks) * 1000000.0 / static_cast<double>(frequency) / static_cast<double>(firstNativeCalls) : 0.0,
+                            repeatNativeCalls != 0 ? static_cast<double>(repeatNativeTicks) * 1000000.0 / static_cast<double>(frequency) / static_cast<double>(repeatNativeCalls) : 0.0,
+                            firstNativeCalls, repeatNativeCalls);
+            }
+        }
         return BackendStatus::Success();
     }
 
     BackendStatus CommonBackend::WriteTexture(const CommandListRef commandList, const TextureRef texture, const TextureSubresourceData& data) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const resource = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(texture)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture upload requires an open command list");
@@ -3480,7 +4477,8 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "texture upload selects an invalid subresource");
         if (!TrackCommandResource(*this, *command, ResourceRef(texture)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture upload destination");
-        command->native->commitBarriers();
+        MarkCommandListPersistentWorkingSetUse(*command);
+        CommitPendingBarriers(*command);
         command->native->writeTexture(resource->native, data.arraySlice, data.mipLevel, data.data, static_cast<usize>(data.rowPitch),
                                       static_cast<usize>(data.depthPitch));
         return BackendStatus::Success();
@@ -3489,7 +4487,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::CopyBuffer(const CommandListRef commandList, const BufferRef destination, const u64 destinationOffset, const BufferRef source,
                                             const u64 sourceOffset, const u64 size) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const destinationPayload = static_cast<BufferPayload*>(m_lifetime.GetPayload(ResourceRef(destination)));
         auto* const sourcePayload = static_cast<BufferPayload*>(m_lifetime.GetPayload(ResourceRef(source)));
         if (command == nullptr || !command->open)
@@ -3503,7 +4501,7 @@ namespace vanguard::rhi::backend
         for (const ResourceRef reference : references)
             if (!TrackCommandResource(*this, *command, reference))
                 return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer copy resource");
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         command->native->copyBuffer(destinationPayload->native, destinationOffset, sourcePayload->native, sourceOffset, size);
         return BackendStatus::Success();
     }
@@ -3511,7 +4509,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::CopyTexture(const CommandListRef commandList, const TextureRef destination, const TextureRef source,
                                              const TextureCopyRegion& requested) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const destinationPayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(destination)));
         auto* const sourcePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(source)));
         if (command == nullptr || !command->open)
@@ -3585,7 +4583,7 @@ namespace vanguard::rhi::backend
             .setSize(region.extent.width, region.extent.height, region.extent.depth)
             .setMipLevel(region.destination.mipLevel)
             .setArraySlice(region.destination.arraySlice);
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         command->native->copyTexture(destinationPayload->native, destinationSlice, sourcePayload->native, sourceSlice);
         return BackendStatus::Success();
     }
@@ -3593,7 +4591,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::ResolveTexture(const CommandListRef commandList, const TextureRef destination, const TextureRef source,
                                                 const TextureResolveRegion& region) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const destinationPayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(destination)));
         auto* const sourcePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(source)));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
@@ -3625,7 +4623,7 @@ namespace vanguard::rhi::backend
 
         const nvrhi::TextureSubresourceSet sourceSubresource(region.source.mipLevel, 1, region.source.arraySlice, 1);
         const nvrhi::TextureSubresourceSet destinationSubresource(region.destination.mipLevel, 1, region.destination.arraySlice, 1);
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         command->native->resolveTexture(destinationPayload->native, destinationSubresource, sourcePayload->native, sourceSubresource);
         return BackendStatus::Success();
     }
@@ -3634,7 +4632,7 @@ namespace vanguard::rhi::backend
                                                         TextureReadbackRef& readback) noexcept
     {
         readback = {};
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const sourcePayload = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(source)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture readback requires an open command list");
@@ -3716,7 +4714,7 @@ namespace vanguard::rhi::backend
             .setArraySlice(region.source.arraySlice);
         nvrhi::TextureSlice destinationSlice;
         destinationSlice.setOrigin(0, 0, 0).setSize(region.extent.width, region.extent.height, 1).setMipLevel(0).setArraySlice(0);
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         command->native->copyTexture(payload->native, destinationSlice, sourcePayload->native, sourceSlice);
         return BackendStatus::Success();
     }
@@ -3807,7 +4805,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::AddCommandListWait(const CommandListRef commandList, const GpuFence fence) noexcept
     {
-        auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (payload == nullptr || !payload->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "incoming queue wait requires an open command list");
         if (!fence.IsValid() || (fence.queue != QueueType::Graphics && fence.queue != QueueType::Compute && fence.queue != QueueType::Copy))
@@ -3820,7 +4818,7 @@ namespace vanguard::rhi::backend
 
     BackendStatus CommonBackend::SeedCommandListStates(const CommandListRef commandList, const containers::ArraySpan<const CommandListEntryState> entries) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || command->entryStatesSeeded || command->resources.Size() != 0)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "entry-state seeding requires an unseeded command list with no recorded resources");
 
@@ -3851,8 +4849,6 @@ namespace vanguard::rhi::backend
                 const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(reference));
                 if (buffer == nullptr)
                     return BackendStatus::Failure(FailureCode::InvalidReference, 0, "entry state references a stale buffer");
-                if (buffer->desc.memoryType != MemoryType::DeviceLocal)
-                    return BackendStatus::Failure(FailureCode::Unsupported, 0, "entry-state seeding does not override upload/readback heap states");
                 initialState = buffer->desc.initialState;
                 keepInitialState = buffer->desc.keepInitialState;
                 if (buffer->native->getDesc().keepInitialState != keepInitialState)
@@ -3895,7 +4891,10 @@ namespace vanguard::rhi::backend
             else
             {
                 const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(entry.resource));
-                command->native->beginTrackingBufferState(buffer->native, ToNativeState(entry.state));
+                // Upload/readback heaps have a fixed native state. Their immutable descriptor state was validated above,
+                // so retain them in this scope without attempting to override NVRHI's fixed-heap tracking.
+                if (buffer->desc.memoryType == MemoryType::DeviceLocal)
+                    command->native->beginTrackingBufferState(buffer->native, ToNativeState(entry.state));
             }
         }
         return BackendStatus::Success();
@@ -3904,7 +4903,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::TransitionTexture(const CommandListRef commandList, const TextureRef texture, const ResourceState before,
                                                    const ResourceState after, const SubresourceRange& range) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const resource = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(texture)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture transition requires an open command list");
@@ -3927,6 +4926,7 @@ namespace vanguard::rhi::backend
         }
         if (!TrackCommandResource(*this, *command, ResourceRef(texture)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture transition resource");
+        PrepareExplicitTextureBarrier(*command, ResourceRef(texture), resolved);
         const nvrhi::TextureSubresourceSet subresources(resolved.firstMip, resolved.mipCount, resolved.firstSlice, resolved.sliceCount);
         command->native->setTextureState(resource->native, subresources, ToNativeState(after));
         return BackendStatus::Success();
@@ -3934,7 +4934,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::TransitionBuffer(const CommandListRef commandList, const BufferRef buffer, const ResourceState before,
                                                   const ResourceState after) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         auto* const resource = static_cast<BufferPayload*>(m_lifetime.GetPayload(ResourceRef(buffer)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer transition requires an open command list");
@@ -3950,12 +4950,13 @@ namespace vanguard::rhi::backend
         }
         if (!TrackCommandResource(*this, *command, ResourceRef(buffer)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer transition resource");
+        PrepareExplicitBufferBarrier(*command, ResourceRef(buffer));
         command->native->setBufferState(resource->native, ToNativeState(after));
         return BackendStatus::Success();
     }
     BackendStatus CommonBackend::BarrierTextureUav(const CommandListRef commandList, const TextureRef texture) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const resource = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(texture)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV barrier requires an open command list");
@@ -3963,12 +4964,16 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture does not support unordered access");
         if (!TrackCommandResource(*this, *command, ResourceRef(texture)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV barrier resource");
+        SubresourceRange wholeResource;
+        if (!ResolveSubresources(resource->desc, {}, wholeResource))
+            return BackendStatus::Failure(FailureCode::BackendFailure, 0, "failed to resolve whole-resource texture UAV barrier range");
+        PrepareExplicitTextureBarrier(*command, ResourceRef(texture), wholeResource);
         command->native->setTextureState(resource->native, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
         return BackendStatus::Success();
     }
     BackendStatus CommonBackend::BarrierBufferUav(const CommandListRef commandList, const BufferRef buffer) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         const auto* const resource = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(buffer)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer UAV barrier requires an open command list");
@@ -3976,13 +4981,14 @@ namespace vanguard::rhi::backend
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "buffer does not support unordered access");
         if (!TrackCommandResource(*this, *command, ResourceRef(buffer)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer UAV barrier resource");
+        PrepareExplicitBufferBarrier(*command, ResourceRef(buffer));
         command->native->setBufferState(resource->native, nvrhi::ResourceStates::UnorderedAccess);
         return BackendStatus::Success();
     }
     BackendStatus CommonBackend::ActivateAliasedResource(const CommandListRef commandList, const ResourceRef destination,
                                                          const containers::ArraySpan<const ResourceRef> predecessors) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "alias activation requires an open graphics or compute command list");
         if ((destination.GetKind() != ResourceKind::Texture && destination.GetKind() != ResourceKind::Buffer) || predecessors.Size() == 0)
@@ -4076,7 +5082,7 @@ namespace vanguard::rhi::backend
         for (const ResourceRef predecessor : predecessors)
             if (!TrackCommandResource(*this, *command, predecessor))
                 return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain alias predecessor");
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         if (!m_aliasingBarrier(m_fenceContext, command->native, destinationNative))
             return BackendStatus::Failure(FailureCode::BackendFailure, 0, "native alias activation barrier failed");
         if (!requiresExplicitDiscard)
@@ -4086,10 +5092,10 @@ namespace vanguard::rhi::backend
     }
     BackendStatus CommonBackend::FlushPendingBarriers(const CommandListRef commandList) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "barrier flush requires an open command list");
-        command->native->commitBarriers();
+        CommitPendingBarriers(*command);
         return BackendStatus::Success();
     }
     BackendStatus CommonBackend::MakeStateSafeToRetire(const CommandListRef commandList, const TextureRef texture) noexcept
@@ -4102,7 +5108,7 @@ namespace vanguard::rhi::backend
     }
     bool CommonBackend::RetainCommandResource(const CommandListRef commandList, const ResourceRef resource) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         return command != nullptr && command->open && resource.IsValid() && TrackCommandResource(*this, *command, resource);
     }
     bool CommonBackend::RegisterCommandSubmissionCallback(const CommandListRef commandList, const CommandSubmissionCallback callback, void* const context,
@@ -4110,7 +5116,7 @@ namespace vanguard::rhi::backend
     {
         if (added != nullptr)
             *added = false;
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         if (command == nullptr || !command->open || callback == nullptr)
             return false;
         for (const CommandListPayload::SubmissionCallback& existing : command->submissionCallbacks)
@@ -4126,7 +5132,7 @@ namespace vanguard::rhi::backend
 
     nvrhi::ICommandList* CommonBackend::GetNativeCommandList(const CommandListRef commandList) noexcept
     {
-        auto* const command = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(commandList)));
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
         return command != nullptr && command->open ? command->native.Get() : nullptr;
     }
 
@@ -4155,11 +5161,21 @@ namespace vanguard::rhi::backend
 
     FenceSet CommonBackend::GetResourceLastUse(const ResourceRef resource) const noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+        {
+            const CommandListArenaSlot* const slot = GetCommandListSlot(CommandListRef{resource.Index(), resource.GetGeneration()});
+            return slot != nullptr && slot->retirementResource ? m_lifetime.GetLastUse(slot->retirementResource) : FenceSet{};
+        }
         return m_lifetime.GetLastUse(resource);
     }
 
     nvrhi::Object CommonBackend::GetNativeObject(const ResourceRef resource, const nvrhi::ObjectType objectType) noexcept
     {
+        if (resource.GetKind() == ResourceKind::CommandList)
+        {
+            auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(CommandListRef{resource.Index(), resource.GetGeneration()}));
+            return command != nullptr && command->native ? command->native->getNativeObject(objectType) : nullptr;
+        }
         void* const address = m_lifetime.GetPayload(resource);
         if (address == nullptr)
             return nullptr;
@@ -4184,8 +5200,6 @@ namespace vanguard::rhi::backend
                 return pipeline->compute->getNativeObject(objectType);
             return pipeline->rayTracing->getNativeObject(objectType);
         }
-        case ResourceKind::CommandList:
-            return static_cast<CommandListPayload*>(address)->native->getNativeObject(objectType);
         default:
             return nullptr;
         }
@@ -4240,7 +5254,7 @@ namespace vanguard::rhi::backend
     }
     void CommonBackend::SetResourceDebugName(const CommandListRef resource, const char* const name) noexcept
     {
-        auto* const payload = static_cast<CommandListPayload*>(m_lifetime.GetPayload(ResourceRef(resource)));
+        auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(resource));
         if (payload != nullptr)
             CopyDebugName(payload->debugName, sizeof(payload->debugName), name);
     }

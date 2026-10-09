@@ -853,7 +853,8 @@ namespace vanguard::material_tools
             const MaterialIrValue& value = module.GetValues()[resource.value];
             mt::MaterialIrType elementType = value.type;
             elementType.arrayCount = 1;
-            if (!writer.Text("    [VanguardMaterialResource(") || !writer.U32(resource.firstSlot) || !writer.Text(", 0)] ") ||
+            const u32 required = shaders::HasFlag(value.resourceFlags, shaders::MaterialResourceFlags::Required) ? 1u : 0u;
+            if (!writer.Text("    [VanguardMaterialResource(") || !writer.U32(resource.firstSlot) || !writer.Text(", ") || !writer.U32(required) || !writer.Text(")] ") ||
                 !WriteResourceElementType(writer, module, elementType) || !writer.Text(" ") || !WriteResourceFieldName(writer, value.semantic) ||
                 (value.type.arrayCount > 1 && (!writer.Text("[") || !writer.U32(value.type.arrayCount) || !writer.Text("]"))) ||
                 !writer.Text(";\n"))

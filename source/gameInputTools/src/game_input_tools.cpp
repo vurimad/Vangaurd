@@ -617,6 +617,14 @@ namespace
     {
         return true;
     }
+    bool ScanReferences(const assets::BuildRequest& request, assets::AssetReferenceCollector&, void*) noexcept
+    {
+        if (!request.settings.Empty())
+            return false;
+        Document document;
+        git::SourceDiagnostic diagnostic;
+        return Parse(request.source.content, document, diagnostic) == git::SourceResult::Success;
+    }
     bool Compile(const assets::CompileContext& context, assets::ArtifactWriter& artifacts, void*) noexcept
     {
         if (context.IsCancellationRequested() || !context.request.settings.Empty())
@@ -715,14 +723,16 @@ namespace vanguard::game_input_tools
 
     assets::CompilerDescriptor MakeMappingCompilerDescriptor() noexcept
     {
-        return {MappingCompilerId,
-                "vanguard.input_mapping.compiler",
-                MappingCompilerVersion,
-                SourceMappingResourceType,
-                game_input::MappingResourceType,
-                Discover,
-                Compile,
-                nullptr};
+        return {MappingCompilerId, "vanguard.input_mapping.compiler", MappingCompilerVersion, SourceMappingResourceType,
+                game_input::MappingResourceType, Discover, Compile, nullptr};
+    }
+    assets::SourceImporterDescriptor MakeMappingImporterDescriptor() noexcept
+    {
+        return assets::MakeDirectSourceImporterDescriptor(MakeMappingCompilerDescriptor(), [](const containers::StringView path, void*) noexcept
+        {
+            const containers::StringView extension = filesystem::paths::GetExtension(path);
+            return extension.Length() == 8u && extension.StartsWithIgnoreCase("inputmap");
+        }, ScanReferences, nullptr, assets::RelocateSourceUnchanged);
     }
     assets::Result RegisterMappingCompiler(assets::BuildSystem& buildSystem) noexcept
     {

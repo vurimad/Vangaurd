@@ -19,13 +19,6 @@ namespace vanguard::rendering
                    shader.GetMaterialLayoutFingerprint() == reference.materialLayout;
         }
 
-        [[nodiscard]] rhi::Format ConvertFormat(const pipelines::Format format) noexcept
-        {
-            static_assert(static_cast<u16>(pipelines::Format::R8UNorm) == static_cast<u16>(rhi::Format::R8UNorm));
-            static_assert(static_cast<u16>(pipelines::Format::BC7UNormSrgb) == static_cast<u16>(rhi::Format::BC7UNormSrgb));
-            return format < pipelines::Format::Count ? static_cast<rhi::Format>(format) : rhi::Format::Unknown;
-        }
-
         [[nodiscard]] RenderPipelineResult PopulateShaders(const RenderPipelineRequest& request, rhi::GraphicsPipelineDesc& output, rhi::ComputePipelineDesc& compute) noexcept
         {
             for (const pipelines::ShaderReference& reference : request.pipeline->GetShaders())
@@ -149,7 +142,7 @@ namespace vanguard::rendering
             {
                 if (attribute.location > 0xffu || attribute.streamBinding > 0xffu || attribute.byteOffset > 0xffffu)
                     return false;
-                attributes.PushBack({static_cast<u8>(attribute.location), static_cast<u8>(attribute.streamBinding), static_cast<u16>(attribute.byteOffset), ConvertFormat(attribute.format),
+                attributes.PushBack({static_cast<u8>(attribute.location), static_cast<u8>(attribute.streamBinding), static_cast<u16>(attribute.byteOffset), ToRhiFormat(attribute.format),
                                      attribute.semanticName, attribute.semanticIndex});
             }
             if (!bindings.Empty())
@@ -202,10 +195,10 @@ namespace vanguard::rendering
             if (attachments == nullptr)
                 return false;
             output.attachments.colorCount = attachments->colorCount;
-            output.attachments.depthStencilFormat = ConvertFormat(attachments->depthStencilFormat);
+            output.attachments.depthStencilFormat = ToRhiFormat(attachments->depthStencilFormat);
             output.attachments.sampleCount = attachments->sampleCount;
             for (u32 index = 0; index < attachments->colorCount; ++index)
-                output.attachments.colorFormats[index] = ConvertFormat(attachments->colors[index].format);
+                output.attachments.colorFormats[index] = ToRhiFormat(attachments->colors[index].format);
             return true;
         }
     } // namespace

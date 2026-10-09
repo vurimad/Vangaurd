@@ -59,6 +59,7 @@ project "concurrency"
     fatalwarnings "All"
     targetdir(output_root)
     objdir(object_root)
+    useVanguardProfiling()
 
     files {
         "include/**.hpp",

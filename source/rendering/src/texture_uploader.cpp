@@ -14,6 +14,12 @@ namespace vanguard::rendering
     {
         inline constexpr u64 TextureUploadCommandListRole = 0x545855504c4f4144ull; // TXUPLOAD
 
+        [[nodiscard]] constexpr u32 NextSession(const u32 session) noexcept
+        {
+            const u32 next = session + 1u;
+            return next != 0 ? next : 1u;
+        }
+
         template <typename T, typename... Args> [[nodiscard]] T* AllocateObject(Args&&... args) noexcept
         {
             memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(T), alignof(T));
@@ -147,9 +153,9 @@ namespace vanguard::rendering
             u32 generation = 1;
         };
 
-        explicit Impl(const TextureUploaderConfig& uploaderConfig) noexcept
+        explicit Impl(const TextureUploaderConfig& uploaderConfig, const u32 uploaderSession) noexcept
             : slots(memory::pools::Rendering::GetInstance()), recycledSlots(memory::pools::Rendering::GetInstance()), touchedSlots(memory::pools::Rendering::GetInstance()),
-              pendingCompletionSlots(memory::pools::Rendering::GetInstance()), requestSlots(memory::pools::Rendering::GetInstance()), config(uploaderConfig)
+              pendingCompletionSlots(memory::pools::Rendering::GetInstance()), requestSlots(memory::pools::Rendering::GetInstance()), config(uploaderConfig), session(uploaderSession)
         {
             slots.Reserve(config.maximumRequests);
             recycledSlots.Reserve(config.maximumRequests);
@@ -160,12 +166,12 @@ namespace vanguard::rendering
 
         [[nodiscard]] UploadEntry* Find(const TextureUploadRequestId id) const noexcept
         {
-            return id.IsValid() && id.index < slots.Size() && slots[id.index].generation == id.generation ? slots[id.index].entry : nullptr;
+            return id.IsValid() && id.session == session && id.index < slots.Size() && slots[id.index].generation == id.generation ? slots[id.index].entry : nullptr;
         }
 
         [[nodiscard]] TextureUploadRequestId Id(const u32 index) const noexcept
         {
-            return {index, slots[index].generation};
+            return {index, slots[index].generation, session};
         }
 
         [[nodiscard]] u32 ReadyCapacity() const noexcept
@@ -321,6 +327,7 @@ namespace vanguard::rendering
         containers::HashMap<UploadRequestKey, u32> requestSlots;
         TextureUploaderConfig config;
         TextureUploaderStats stats;
+        u32 session = 0;
         u64 pendingCandidateBytes = 0;
         u64 pendingCandidateGpuBytes = 0;
         u32 nextScanSlot = 0;
@@ -380,9 +387,11 @@ namespace vanguard::rendering
             config.maximumBytesPerBatch == 0 || config.maximumCopyBytesPerBatch == 0 || config.maximumCandidateGpuBytesPerBatch == 0 || config.maximumPendingCandidateGpuBytes == 0 ||
             config.maximumPendingCandidateBytes == 0 || config.maximumAcquisitionWindowBytes == 0)
             return Fail(failure, TextureUploadFailureCode::InvalidConfiguration, "texture uploader configuration is invalid");
-        m_impl = AllocateObject<Impl>(config);
+        const u32 session = NextSession(m_session);
+        m_impl = AllocateObject<Impl>(config, session);
         if (m_impl == nullptr)
             return Fail(failure, TextureUploadFailureCode::CapacityExceeded, "texture uploader storage allocation failed");
+        m_session = session;
         return true;
     }
 
@@ -434,6 +443,32 @@ namespace vanguard::rendering
         if (object == nullptr || !object->IsOpen())
             return Fail(failure, TextureUploadFailureCode::InvalidArgument, "texture mip-tail request references a closed texture resource");
         return RequestInternal(resource, nullptr, residency, object->GetMetadata().GetMipTailFirstLevel(), request, priority, failure);
+    }
+
+    bool TextureUploader::RequestGenerationReplacement(const resources::ResourceHandle& resource,
+                                                       const GpuTextureResidencyHandle residency,
+                                                       const u32 targetFirstResidentMip,
+                                                       TextureUploadRequestId& request,
+                                                       const io::AsyncPriority priority,
+                                                       TextureUploadFailure* const failure) noexcept
+    {
+        return RequestInternal(resource, nullptr, residency, targetFirstResidentMip, request, priority, failure);
+    }
+
+    bool TextureUploader::RequestGenerationReplacement(const resources::ResourceHandle& resource,
+                                                       const GpuTextureResidencyHandle residency,
+                                                       TextureUploadRequestId& request,
+                                                       const io::AsyncPriority priority,
+                                                       TextureUploadFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        request = {};
+        if (!resource.IsValid() || resource.GetType() != textures::TextureResourceType)
+            return Fail(failure, TextureUploadFailureCode::InvalidArgument, "texture generation replacement requires a live texture resource");
+        auto* const object = static_cast<textures::TextureResourceObject*>(resource.Get());
+        if (object == nullptr || !object->IsOpen())
+            return Fail(failure, TextureUploadFailureCode::InvalidArgument, "texture generation replacement references a closed texture resource");
+        return RequestGenerationReplacement(resource, residency, object->GetMetadata().GetMipTailFirstLevel(), request, priority, failure);
     }
 
     bool TextureUploader::RequestMipTransition(const resources::ResourceHandle& resource, TextureResidencyManager& residencyManager, const GpuTextureResidencyHandle residency, const u32 targetFirstResidentMip,
@@ -693,6 +728,10 @@ namespace vanguard::rendering
         u64 copyByteCount = 0;
         u64 candidateByteCount = 0;
         const bool copiesAreSafe = FencesComplete(prerequisiteFences);
+        // Candidate textures declare keepInitialState with a shader-read entry state. NVRHI automatic
+        // barriers are disabled for Vanguard command lists, so both the source upload and the shared
+        // mip copy must explicitly transition the exact subresource before a copy touches it.
+        const rhi::ResourceState shaderRead = rhi::ResourceState::ShaderResourceGraphics | rhi::ResourceState::ShaderResourceCompute;
 
         const auto Touch = [&](const u32 slot, UploadEntry& entry) noexcept
         {
@@ -878,8 +917,10 @@ namespace vanguard::rendering
                         wroteWindow = false;
                         break;
                     }
+                    const rhi::SubresourceRange uploadRange{mapped.upload.mipLevel, 1, mapped.upload.arraySlice, 1};
                     rhi::Failure rhiFailure;
-                    if (!rhi::WriteTexture(entry->candidateTexture.GetRef(), mapped.upload, &rhiFailure) || !entry->plan.MarkUploaded(mapped, &candidateFailure))
+                    if (!rhi::TransitionTexture(entry->candidateTexture.GetRef(), shaderRead, rhi::ResourceState::CopyDestination, uploadRange, &rhiFailure) ||
+                        !rhi::WriteTexture(entry->candidateTexture.GetRef(), mapped.upload, &rhiFailure) || !entry->plan.MarkUploaded(mapped, &candidateFailure))
                     {
                         TextureUploadFailure requestFailure;
                         requestFailure.code = rhiFailure.code != rhi::FailureCode::None ? TextureUploadFailureCode::RhiFailure : TextureUploadFailureCode::CandidateFailure;
@@ -958,7 +999,6 @@ namespace vanguard::rendering
                         break;
                     if (!EnsureCommandList())
                         return false;
-                    const rhi::ResourceState shaderRead = rhi::ResourceState::ShaderResourceGraphics | rhi::ResourceState::ShaderResourceCompute;
                     const rhi::SubresourceRange sourceRange{mapped.copy.source.mipLevel, 1, mapped.copy.source.arraySlice, 1};
                     const rhi::SubresourceRange destinationRange{mapped.copy.destination.mipLevel, 1, mapped.copy.destination.arraySlice, 1};
                     rhi::Failure rhiFailure;
@@ -1087,15 +1127,30 @@ namespace vanguard::rendering
 
         while (installed < maximumInstallations && m_impl->readyHead.IsValid())
         {
-            const TextureUploadRequestId request = m_impl->readyHead;
-            UploadEntry* const entry = m_impl->Find(request);
-            if (entry == nullptr || entry->state != TextureUploadState::ReadyToInstall)
+            TextureUploadRequestId request = m_impl->readyHead;
+            UploadEntry* entry = nullptr;
+            u32 inspected = 0;
+            while (request.IsValid() && inspected < m_impl->readyCount)
+            {
+                entry = m_impl->Find(request);
+                if (entry == nullptr || entry->state != TextureUploadState::ReadyToInstall)
+                {
+                    assert(false && "the ready texture FIFO must contain a live ready request");
+                    return Fail(failure, TextureUploadFailureCode::InvalidArgument, "ready texture FIFO contains an invalid request", request);
+                }
+                if (entry->residencyManager == &residencyManager)
+                    break;
+                request = entry->readyNext;
+                entry = nullptr;
+                ++inspected;
+            }
+            if (entry == nullptr)
+                break;
+            if (entry->state != TextureUploadState::ReadyToInstall)
             {
                 assert(false && "the ready texture FIFO must contain a live ready request");
                 return Fail(failure, TextureUploadFailureCode::InvalidArgument, "ready texture FIFO contains an invalid request", request);
             }
-            if (entry->residencyManager != nullptr && entry->residencyManager != &residencyManager)
-                return Fail(failure, TextureUploadFailureCode::InvalidArgument, "completed texture candidate belongs to a different residency manager", request);
 
             resources::ResourceHandle source = entry->submitted.resource.Lock();
             auto* const texture = source.IsValid() && source.GetType() == textures::TextureResourceType ? static_cast<textures::TextureResourceObject*>(source.Get()) : nullptr;
@@ -1122,13 +1177,18 @@ namespace vanguard::rendering
             installation.transition = entry->transitionToken;
             if (!residencyManager.Install(entry->submitted.residency, installation, ticket, &residencyFailure))
             {
+                TextureUploadFailure installFailure;
+                installFailure.code = TextureUploadFailureCode::ResidencyFailure;
+                installFailure.request = request;
+                installFailure.message = "completed texture candidate could not enter residency installation";
+                installFailure.residencyFailure = residencyFailure;
+                const bool transient = residencyFailure.code == TextureResidencyFailureCode::Busy ||
+                                       residencyFailure.code == TextureResidencyFailureCode::CapacityExceeded ||
+                                       residencyFailure.code == TextureResidencyFailureCode::PendingRetirementCapacityExceeded;
+                if (!transient)
+                    m_impl->SetFailed(request.index, installFailure);
                 if (failure != nullptr)
-                {
-                    failure->code = TextureUploadFailureCode::ResidencyFailure;
-                    failure->request = request;
-                    failure->message = "completed texture candidate could not enter residency installation";
-                    failure->residencyFailure = residencyFailure;
-                }
+                    *failure = installFailure;
                 return false;
             }
 

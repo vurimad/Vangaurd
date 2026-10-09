@@ -353,6 +353,28 @@ namespace
             g_currentFrameNumber.SetValue(m_stats.frames);
             m_state = engine::FramePipelineState::Compiled;
             m_stats.state = m_state;
+            if ((m_stats.frames & 0xffu) == 0u)
+            {
+                VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                            "FRAME_PIPELINE_PROFILE frame=%llu total_us=%.3f phases_us=%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",
+                            static_cast<unsigned long long>(m_stats.frames), static_cast<double>(m_stats.lastExecutionSeconds) * 1'000'000.0,
+                            static_cast<double>(m_stats.lastPhaseSeconds[0]) * 1'000'000.0, static_cast<double>(m_stats.lastPhaseSeconds[1]) * 1'000'000.0,
+                            static_cast<double>(m_stats.lastPhaseSeconds[2]) * 1'000'000.0, static_cast<double>(m_stats.lastPhaseSeconds[3]) * 1'000'000.0,
+                            static_cast<double>(m_stats.lastPhaseSeconds[4]) * 1'000'000.0, static_cast<double>(m_stats.lastPhaseSeconds[5]) * 1'000'000.0,
+                            static_cast<double>(m_stats.lastPhaseSeconds[6]) * 1'000'000.0, static_cast<double>(m_stats.lastPhaseSeconds[7]) * 1'000'000.0,
+                            static_cast<double>(m_stats.lastPhaseSeconds[8]) * 1'000'000.0, static_cast<double>(m_stats.lastPhaseSeconds[9]) * 1'000'000.0,
+                            static_cast<double>(m_stats.lastPhaseSeconds[10]) * 1'000'000.0, static_cast<double>(m_stats.lastPhaseSeconds[11]) * 1'000'000.0);
+                for (const ParticipantRecord& participant : m_participants)
+                {
+                    if (participant.stats.lastFrameInvocations == 0)
+                        continue;
+                    VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                                "FRAME_PARTICIPANT_PROFILE frame=%llu phase=%u name=%s invocations=%u total_us=%.3f",
+                                static_cast<unsigned long long>(m_stats.frames), static_cast<vanguard::u32>(participant.descriptor.phase),
+                                participant.descriptor.name, participant.stats.lastFrameInvocations,
+                                static_cast<double>(participant.stats.lastFrameSeconds) * 1'000'000.0);
+                }
+            }
             PaceFrame(frameStartTick);
             return true;
         }

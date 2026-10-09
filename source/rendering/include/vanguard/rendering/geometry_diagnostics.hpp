@@ -35,6 +35,7 @@ namespace vanguard::rendering
         u32 firstShell = 0;
         u32 plannedShells = 0;
         u32 pipelineBinds = 0; // Recorded CPU binds, not GPU-visible shells.
+        u32 directionalLights = 0;
         u32 visibleCapacity = 0;
         u32 workCapacity = 0;
         u32 instanceCapacity = 0;
@@ -48,6 +49,7 @@ namespace vanguard::rendering
         EngineViewportHandle viewport;
         RenderSceneHandle scene;
         u32 viewCount = 0;
+        u32 outputRegions = 0;
         bool frameFailed = false;
         bool gpuAvailable = false;
         GeometryViewDiagnostics views[MaximumRenderViewsPerFamily]{};

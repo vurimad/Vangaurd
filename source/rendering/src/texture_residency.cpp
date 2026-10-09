@@ -61,7 +61,16 @@ namespace vanguard::rendering
                 left.compute = right.compute;
             if (left.copy < right.copy)
                 left.copy = right.copy;
+            left.neverSubmittedQueues |= right.neverSubmittedQueues;
             return left;
+        }
+
+        [[nodiscard]] bool CutoverComplete(const rhi::ResidencyFenceSet& fences) noexcept
+        {
+            return HasCompleteCutover(fences) &&
+                   (fences.graphics == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Graphics, fences.graphics})) &&
+                   (fences.compute == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Compute, fences.compute})) &&
+                   (fences.copy == 0 || rhi::IsGpuFenceComplete({rhi::QueueType::Copy, fences.copy}));
         }
     } // namespace
 
@@ -124,7 +133,10 @@ namespace vanguard::rendering
         struct Retirement
         {
             Installation installation;
+            TextureGenerationRetirement generation;
             rhi::ResidencyFenceSet floor;
+            rhi::NativeReleaseObservation nativeRelease;
+            bool sealed = false;
         };
 
         explicit Impl(const TextureResidencyConfig& value) noexcept
@@ -240,6 +252,7 @@ namespace vanguard::rendering
         u32 pendingQueueCount = 0;
         u32 nextBatchSerial = 1;
         u32 nextTransitionSerial = 1;
+        u64 nextGenerationRetirementId = 1;
         u32 frozenBatchSerial = 0;
         bool frozenBatchWritten = false;
 
@@ -313,6 +326,11 @@ namespace vanguard::rendering
 
     void TextureResidencyManager::AbandonDevice() noexcept
     {
+        if (m_impl != nullptr)
+        {
+            for (Impl::Retirement& retirement : m_impl->pendingRetirements)
+                rhi::ReleaseNativeReleaseObservation(retirement.nativeRelease);
+        }
         DeleteObject(m_impl);
         m_impl = nullptr;
         m_lifetime = nullptr;
@@ -642,6 +660,18 @@ namespace vanguard::rendering
             {
                 Impl::Retirement retirement;
                 retirement.installation = std::move(slot.current);
+                const TextureGenerationRetirement retiredGeneration{retirement.installation.source.GetPath(), retirement.installation.source.GetGeneration(),
+                                                                     m_impl->nextGenerationRetirementId};
+                const resources::ResourcePath replacementPath = slot.pending.source.GetPath();
+                const u32 replacementGeneration = slot.pending.source.GetGeneration();
+                if (retiredGeneration.IsValid() &&
+                    (retiredGeneration.resourcePath != replacementPath || retiredGeneration.resourceGeneration != replacementGeneration))
+                {
+                    retirement.generation = retiredGeneration;
+                    ++m_impl->nextGenerationRetirementId;
+                    if (m_impl->nextGenerationRetirementId == 0)
+                        ++m_impl->nextGenerationRetirementId;
+                }
                 retirement.floor.Include(retirement.installation.activation);
                 retirement.floor.Include(sharedCompletion);
                 m_impl->pendingRetirements.PushBack(std::move(retirement));
@@ -793,6 +823,15 @@ namespace vanguard::rendering
         {
             Impl::Retirement retirement;
             retirement.installation = std::move(slot->current);
+            const TextureGenerationRetirement retiredGeneration{retirement.installation.source.GetPath(), retirement.installation.source.GetGeneration(),
+                                                                 m_impl->nextGenerationRetirementId};
+            if (retiredGeneration.IsValid())
+            {
+                retirement.generation = retiredGeneration;
+                ++m_impl->nextGenerationRetirementId;
+                if (m_impl->nextGenerationRetirementId == 0)
+                    ++m_impl->nextGenerationRetirementId;
+            }
             retirement.floor.Include(retirement.installation.activation);
             m_impl->pendingRetirements.PushBack(std::move(retirement));
             --m_impl->stats.bindlessReady;
@@ -833,13 +872,29 @@ namespace vanguard::rendering
 
         for (Impl::Retirement& pending : m_impl->pendingRetirements)
         {
+            if (pending.sealed)
+                continue;
             Impl::Installation& installation = pending.installation;
             if (!installation.descriptor.IsValid())
                 continue;
-            const rhi::DescriptorRetirement retirement = ToDescriptorRetirement(MergeCutover(pending.floor, safeAfter));
+            pending.floor = MergeCutover(pending.floor, safeAfter);
             rhi::Failure rhiFailure;
+            pending.nativeRelease = rhi::ObserveNativeRelease(rhi::ResourceRef(installation.texture.GetRef()), &rhiFailure);
+            if (!pending.nativeRelease.IsValid())
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = TextureResidencyFailureCode::NativeReleaseFailure;
+                    failure->message = "texture native-release observation creation failed";
+                    failure->rhiFailure = rhiFailure;
+                }
+                ++m_impl->stats.rejectedOperations;
+                return false;
+            }
+            const rhi::DescriptorRetirement retirement = ToDescriptorRetirement(pending.floor);
             if (!rhi::RetireDescriptor(m_resourceDescriptors.GetRef(), installation.descriptor, retirement, &rhiFailure))
             {
+                rhi::ReleaseNativeReleaseObservation(pending.nativeRelease);
                 if (failure != nullptr)
                 {
                     failure->code = TextureResidencyFailureCode::DescriptorFailure;
@@ -851,8 +906,11 @@ namespace vanguard::rendering
             }
             installation.descriptor = {};
             installation.texture.Reset();
+            // The immutable retirement evidence already owns the exact source path/generation.
+            // Do not keep the ResourceRegistry weak handle alive while waiting for downstream acknowledgement.
+            installation.source.Reset();
+            pending.sealed = true;
         }
-        m_impl->pendingRetirements.Clear();
         for (const u32 slotIndex : m_impl->retiringSlots)
         {
             Impl::Slot& slot = m_impl->slots[slotIndex];
@@ -896,7 +954,80 @@ namespace vanguard::rendering
             ++m_impl->stats.reclaimed;
             ++collected;
         }
+
+        // Installations without a resource source have no neutral generation
+        // evidence to hand off. Release their completed backend-scoped observations
+        // here so existing manager-only users do not need a synthetic drain.
+        for (u32 index = 0; index < m_impl->pendingRetirements.Size();)
+        {
+            Impl::Retirement& retirement = m_impl->pendingRetirements[index];
+            if (retirement.generation.IsValid() || !retirement.sealed || !CutoverComplete(retirement.floor) ||
+                !rhi::IsNativeReleaseComplete(retirement.nativeRelease))
+            {
+                ++index;
+                continue;
+            }
+            rhi::ReleaseNativeReleaseObservation(retirement.nativeRelease);
+            static_cast<void>(m_impl->pendingRetirements.RemoveAt(index));
+        }
         return collected;
+    }
+
+    u32 TextureResidencyManager::PeekCompletedGenerationRetirements(const containers::ArraySpan<TextureGenerationRetirement> output,
+                                                                    TextureResidencyFailure* const failure) const noexcept
+    {
+        ClearFailure(failure);
+        if (!IsInitialized())
+        {
+            static_cast<void>(Fail(failure, TextureResidencyFailureCode::NotInitialized, "texture residency manager is not initialized"));
+            return 0;
+        }
+        if (!concurrency::IsMainThread())
+        {
+            static_cast<void>(Fail(failure, TextureResidencyFailureCode::WrongThread, "texture generation-retirement peek must run on the main thread"));
+            return 0;
+        }
+        if (output.Size() != 0 && output.Data() == nullptr)
+        {
+            static_cast<void>(Fail(failure, TextureResidencyFailureCode::InvalidArgument, "texture generation-retirement peek output span is invalid"));
+            return 0;
+        }
+
+        u32 visible = 0;
+        for (u32 index = 0; index < m_impl->pendingRetirements.Size() && visible < output.Size(); ++index)
+        {
+            const Impl::Retirement& retirement = m_impl->pendingRetirements[index];
+            if (!retirement.sealed || !CutoverComplete(retirement.floor) || !rhi::IsNativeReleaseComplete(retirement.nativeRelease))
+                continue;
+            if (retirement.generation.IsValid())
+                output[visible++] = retirement.generation;
+        }
+        return visible;
+    }
+
+    bool TextureResidencyManager::AcknowledgeGenerationRetirement(const u64 retirementId, TextureResidencyFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (!IsInitialized())
+            return Fail(failure, TextureResidencyFailureCode::NotInitialized, "texture residency manager is not initialized");
+        if (!concurrency::IsMainThread())
+            return Fail(failure, TextureResidencyFailureCode::WrongThread, "texture generation-retirement acknowledgement must run on the main thread");
+        if (retirementId == 0)
+            return Fail(failure, TextureResidencyFailureCode::InvalidArgument, "texture generation-retirement acknowledgement id is invalid");
+
+        for (u32 index = 0; index < m_impl->pendingRetirements.Size(); ++index)
+        {
+            Impl::Retirement& retirement = m_impl->pendingRetirements[index];
+            if (retirement.generation.retirementId != retirementId)
+                continue;
+            if (!retirement.generation.IsValid() || !retirement.sealed || !CutoverComplete(retirement.floor) ||
+                !rhi::IsNativeReleaseComplete(retirement.nativeRelease))
+                return Fail(failure, TextureResidencyFailureCode::Busy, "texture generation retirement is not complete yet");
+            rhi::ReleaseNativeReleaseObservation(retirement.nativeRelease);
+            static_cast<void>(m_impl->pendingRetirements.RemoveAt(index));
+            return true;
+        }
+        return Fail(failure, TextureResidencyFailureCode::InvalidArgument, "texture generation-retirement acknowledgement is stale");
     }
 
     bool TextureResidencyManager::GetInfo(const GpuTextureResidencyHandle handle, TextureResidencyInfo& info, TextureResidencyFailure* const failure) const noexcept
@@ -927,7 +1058,13 @@ namespace vanguard::rendering
         TextureResidencyStats stats = m_impl->stats;
         stats.pendingInstallations = m_impl->pendingInstallationCount;
         stats.frozenInstallations = m_impl->frozenSlots.Size();
-        stats.pendingDescriptorRetirements = m_impl->pendingRetirements.Size();
+        for (const Impl::Retirement& retirement : m_impl->pendingRetirements)
+        {
+            if (retirement.installation.descriptor.IsValid())
+                ++stats.pendingDescriptorRetirements;
+            if (retirement.generation.IsValid())
+                ++stats.pendingGenerationRetirements;
+        }
         return stats;
     }
 } // namespace vanguard::rendering

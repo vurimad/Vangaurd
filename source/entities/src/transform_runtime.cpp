@@ -378,12 +378,23 @@ namespace vanguard::entities
                 static_cast<void>(RemovePlaceholder(record, false, false));
                 return false;
             }
-            if (!world->QueueSetComponent(record.entity, ownerType, TransformOwner{record.ownerGeneration}))
+            const ecs::Entity runtimeEntity = world->Resolve(record.entity);
+            if (!runtimeEntity)
             {
                 static_cast<void>(RemovePlaceholder(record, false, false));
                 return false;
             }
-            ownerDirty = true;
+            const bool ownerPresent = ecs_has_id(world->GetNative(), runtimeEntity.value, ownerType.id);
+            const TransformOwner owner{record.ownerGeneration};
+            ecs_set_id(world->GetNative(), runtimeEntity.value, ownerType.id, sizeof(owner), &owner);
+            if (!ecs_has_id(world->GetNative(), runtimeEntity.value, ownerType.id) ||
+                !world->CaptureNativeComponentChange(record.entity, ownerType.id,
+                                                     ownerPresent ? ecs::CommittedChangeKind::ComponentSet
+                                                                  : ecs::CommittedChangeKind::ComponentAdded))
+            {
+                static_cast<void>(RemovePlaceholder(record, false, false));
+                return false;
+            }
             return true;
         }
 
@@ -457,9 +468,14 @@ namespace vanguard::entities
             }
             if (updateOwnerComponent)
             {
-                if (!world->QueueRemoveComponent(record.entity, ownerType))
-                    return false;
-                ownerDirty = true;
+                const ecs::Entity runtimeEntity = world->Resolve(record.entity);
+                if (runtimeEntity && ecs_has_id(world->GetNative(), runtimeEntity.value, ownerType.id))
+                {
+                    ecs_remove_id(world->GetNative(), runtimeEntity.value, ownerType.id);
+                    if (ecs_has_id(world->GetNative(), runtimeEntity.value, ownerType.id) ||
+                        !world->CaptureNativeComponentChange(record.entity, ownerType.id, ecs::CommittedChangeKind::ComponentRemoved))
+                        return false;
+                }
             }
             return true;
         }
@@ -502,7 +518,6 @@ namespace vanguard::entities
         u64 nextOwnerGeneration = 1;
         u64 synchronizedChanges = 0;
         u64 lostChanges = 0;
-        bool ownerDirty = false;
     };
 
     TransformRuntime::TransformRuntime(const TransformRuntimeConfig& config) noexcept
@@ -604,7 +619,6 @@ namespace vanguard::entities
                         "TransformRuntime lost committed ECS changes and requires reconstruction");
         }
 
-        m_impl->ownerDirty = false;
         for (const ecs::CommittedChange& change : m_impl->captured)
         {
             if (change.kind == ecs::CommittedChangeKind::EntityDestroyed)
@@ -649,8 +663,6 @@ namespace vanguard::entities
             }
         }
 
-        if (m_impl->ownerDirty && !m_impl->world->FlushComponentActions())
-            return Fail(failure, TransformRuntimeFailureCode::InvalidState, "failed to flush transform-owner component changes");
         return true;
     }
 

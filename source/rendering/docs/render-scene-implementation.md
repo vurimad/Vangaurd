@@ -59,7 +59,7 @@ Paths below are relative to the reference source root.
 | Concrete proxy base | `renderer/src/renderProxy.h`, `renderer/src/renderProxy.cpp` | Renderer-side proxy state, scene attachment, spatial keys, frame tracking, and base relink behavior. |
 | Concrete scene | `renderer/src/renderScene.h`, `renderer/src/renderScene.cpp` | Scene storage, proxy insertion/removal, layers, spatial membership, relink buffering, job dispatch, and frame publication. |
 | Render command path | `renderData/include/renderCommandHandler.h`, `renderer/src/renderCommandInterface.h/.cpp`, `renderer/src/renderCommandHandler.h/.cpp` | Cross-thread mutation entry points, command ownership, frame tick ordering, add/remove execution, and synchronization. |
-| World bridge | `world/include/runtimeSystemRendering.h`, targeted ranges of `world/src/runtimeSystemRendering.cpp` | Scene creation/ownership, proxy registration, world lifecycle, delayed destruction, and producer integration. |
+| World integration | `world/include/runtimeSystemRendering.h`, targeted ranges of `world/src/runtimeSystemRendering.cpp` | Scene creation/ownership, proxy registration, world lifecycle, delayed destruction, and producer integration. |
 
 ### Tier 2: mandatory integration boundaries
 
@@ -106,7 +106,7 @@ They may be revisited after the core scene, proxy, and collection boundary are s
 | 06 | Scene construction plus proxy insertion/removal | Reviewed |
 | 07 | Relink ingestion, double buffering, coalescing, and redJobs execution | Reviewed |
 | 08 | Command queue ownership and frame-tick ordering | Reviewed |
-| 09 | World runtime bridge, registration, and delayed destruction | Reviewed |
+| 09 | World runtime integration, registration, and delayed destruction | Reviewed |
 | 10 | Visibility scene and acceleration-structure publication | Reviewed |
 | 11 | Query-only objects and collection boundary | Reviewed |
 | 12 | Render-frame integration ranges | Reviewed |
@@ -992,7 +992,7 @@ extensions.
 
 - What exact command-lane and builder fences establish collection visibility after scene updates?
 - Can general or per-proxy commands submitted during relink jobs observe partially updated proxy state before publication?
-- How does the world runtime bridge order registration, visibility changes, relinks, and delayed destruction for the same
+- How does the world runtime integration order registration, visibility changes, relinks, and delayed destruction for the same
   producer handle?
 - Which representative proxy types perform non-local work during relink and therefore require a serialized extension phase?
 - Does the secondary visibility scene consume proxy transforms directly, or is it updated through a separate publication
@@ -1176,7 +1176,7 @@ asynchronous reduced frame path that drains ordinary commands before backend res
 
 #### Questions carried forward
 
-- How does the world runtime bridge assign ordering between proxy creation, registration, visibility, relink, and delayed
+- How does the world runtime integration assign ordering between proxy creation, registration, visibility, relink, and delayed
   destruction before these operations enter renderer ingress?
 - Which late camera/view updates must be accepted between scene publication and collection, and which belong to the next
   frame?
@@ -1184,7 +1184,7 @@ asynchronous reduced frame path that drains ordinary commands before backend res
 - Which renderer-wide operations truly require a global dependency rather than per-scene or per-resource ordering?
 - How should editor transactions request completion/undo evidence without turning the runtime mutation path synchronous?
 
-### Chunk 09: world runtime bridge, registration, and delayed destruction
+### Chunk 09: world runtime integration, registration, and delayed destruction
 
 Reviewed files and targeted call sites:
 
@@ -1267,7 +1267,7 @@ cleanup so node detachment releases or transfers renderer proxies before runtime
 explicit shutdown-order workarounds and TODOs around inter-system dependencies, demonstrating that this ordering is required
 but not encoded as a dependency graph.
 
-RED therefore provides the right high-level separation—world nodes own producer handles and a bridge owns scene admission—
+RED therefore provides the right high-level separation—world nodes own producer handles and a runtime integration layer owns scene admission—
 but not an atomic world-to-render transaction. Parallel node callbacks can independently create and register proxies, and
 the fixed attachment budget may make a streamed group partially visible across frames.
 
@@ -1306,8 +1306,8 @@ that no producer can call it later. Correctness consequently depends on world/no
 
 Vanguard must encode this order rather than trust it:
 
-1. close the bridge to new Flecs and streaming mutations;
-2. wait for or cancel producer jobs that can emit bridge changes;
+1. close world integration to new Flecs and streaming mutations;
+2. wait for or cancel producer jobs that can emit integration changes;
 3. collapse pending creation, attachment, relink, visibility, and removal operations by stable identity;
 4. force visual retirements to their detach stage during shutdown;
 5. commit all remaining detach operations and wait for the published-scene reader epoch;
@@ -1315,17 +1315,17 @@ Vanguard must encode this order rather than trust it:
 7. verify that the proxy registry, pending admission queue, and retained retirement queue are empty;
 8. release or return the scene according to an explicit ownership mode.
 
-No proxy destructor may call an owner through a raw pointer. Explicit bridge records and generation-checked handles make
+No proxy destructor may call an owner through a raw pointer. Explicit integration records and generation-checked handles make
 unregistration an ordinary state transition; RAII handles may request release, but their destruction is not the sole source
 of lifecycle correctness.
 
-#### Vanguard world bridge contract
+#### Vanguard world-to-render integration contract
 
-`WorldRenderBridge` will be a per-world-session adapter above Render Scene and below Flecs-facing game-world services. It
+A per-world-session integration layer sits above Render Scene and below Flecs-facing game-world services. It
 consumes committed materialization changes, not Flecs mutation callbacks directly. This prevents renderer work from running
 inside table moves, component constructors/destructors, or partially committed activation groups.
 
-The bridge owns a registry keyed by stable entity identity plus render-contributor identity. One entity may produce zero,
+The integration layer owns a registry keyed by stable entity identity plus render-contributor identity. One entity may produce zero,
 one, or many proxies; submeshes, lights, decals, and future feature contributors are not forced into a one-entity/one-proxy
 model. Each record carries a scene generation, proxy generation, lifecycle state, visibility channels, latest transform and
 bounds revision, resource-readiness state, and optional retirement policy.
@@ -1344,11 +1344,11 @@ Absent
     -> Absent with a new generation
 ```
 
-Removal dominates pending creation, admission, visibility, and relink in the same bridge epoch. Re-creation after removal
+Removal dominates pending creation, admission, visibility, and relink in the same publication epoch. Re-creation after removal
 uses a new generation. Operations carrying a stale world, scene, entity, contributor, or proxy generation are rejected and
 reported rather than applied to a newly reused slot.
 
-Streaming activation groups are submitted as bridge transactions. Resource preparation and proxy construction may run in
+Streaming activation groups are submitted as integration transactions. Resource preparation and proxy construction may run in
 parallel, but a group becomes render-published only after its required members pass preflight. Admission budgeting may defer
 the complete group or explicitly split it according to authored streaming policy; an arbitrary count limit must not expose a
 half-materialized group. Deactivation makes the group logically absent immediately, then schedules batched scene detachment
@@ -1361,12 +1361,12 @@ the resulting scene-version token.
 
 Scene ownership is explicit:
 
-- `Owned`: the bridge creates and ultimately destroys the scene;
+- `Owned`: the world integration creates and ultimately destroys the scene;
 - `Borrowed`: an editor/preview owner supplies a scene lease and remains its teardown authority;
-- `Shared`: a retained scene may outlive one bridge, with an explicit detach and handoff protocol.
+- `Shared`: a retained scene may outlive one world-integration instance, with an explicit detach and handoff protocol.
 
-A world switch creates a new bridge/scene generation and retires the old generation independently. Multiple editor views
-may read one published scene concurrently; editor windows and viewports never own the bridge or scene.
+A world switch creates a new world/session generation and retires the old generation independently. Multiple editor views
+may read one published scene concurrently; editor windows and viewports never own the world integration or scene.
 
 #### Invariants to preserve
 
@@ -1379,14 +1379,14 @@ may read one published scene concurrently; editor windows and viewports never ow
 - Streaming activation-group publication is transactional according to explicit group policy.
 - Scene attachment work is bounded and observable, with completion evidence and starvation prevention.
 - Logical removal takes effect before visual/GPU retirement, and reclamation waits for both scene and RHI lifetime domains.
-- Shutdown closes producers and proves every queue and registry empty before releasing bridge or scene ownership.
+- Shutdown closes producers and proves every queue and registry empty before releasing world-integration or scene ownership.
 
 #### Questions carried forward
 
 - Does the visibility scene publish immutable acceleration state, use reader/writer epochs, or rely on the global render
   command fence while collection traverses live storage?
 - Which proxy roles need physical residency while logically invisible beyond the demonstrated shadow case?
-- What query-only spatial objects require bridge ownership without becoming render proxies?
+- What query-only spatial objects require world-integration ownership without becoming render proxies?
 - Which collection inputs are scene-versioned and which are legitimately view-local late data?
 
 ### Chunk 10: visibility scene and acceleration-structure publication
@@ -2101,12 +2101,12 @@ RenderSceneManager
 RenderScene
     owns proxy storage, payload pools, bounded mutation accounting, spatial state, and scene-update epochs
 
-WorldRenderBridge
+world integration
     optional per-world adapter attached above GameWorld/Flecs
     converts committed world/entity/component changes into typed RenderScene operations
 ```
 
-The service should not depend on Flecs. The bridge may know about the game-world/materialization layer, because that is exactly
+The service should not depend on Flecs. World integration may know about the game-world/materialization layer, because that is exactly
 the adapter boundary. Preview scenes, editor inspection scenes, and thumbnail scenes must be able to exist with no Flecs world at
 all. Conversely, `GameWorldService` must not learn about concrete mesh/light/decal proxy storage.
 
@@ -2138,7 +2138,7 @@ Simulation / WorldStreaming
     GameWorld and CellStreamingSystem commit entity/resource lifecycle changes
 
 PostSimulation
-    WorldRenderBridge captures committed component/entity changes and queues RenderScene mutations
+    world integration captures committed component/entity changes and queues RenderScene mutations
 
 Render
     RenderSceneFramePrepare drains mutation ingress under budget
@@ -2149,7 +2149,7 @@ EndFrame
     RenderSceneEndFrame publishes feedback, retires completed CPU state, and reports stats
 ```
 
-The exact participant IDs can be chosen during implementation, but the dependency direction is non-negotiable: world and bridge
+The exact participant IDs can be chosen during implementation, but the dependency direction is non-negotiable: world integration
 mutation production before scene publication; scene publication before collection; collection completion before any later batcher
 or render graph consumes output pages.
 
@@ -2167,7 +2167,7 @@ The cross-check did not find a blocking dependency for a CPU RenderScene. It did
 - The existing frame pipeline is main-thread participant based. RenderScene may use main-thread participants to schedule work,
   but actual culling/collection fan-out should happen through `jobs::Builder` with `Priority::RenderPath`.
 - The materializer is serialized by the game-world synchronization owner. RenderScene must not call materializer operations; it
-  consumes the already-committed results through the bridge.
+  consumes the already-committed results through world integration.
 
 #### Implementation green light
 
@@ -2183,7 +2183,7 @@ is CPU-only:
 6. add tests for handle generation, mutation coalescing, read-lease retirement, resource-handle retention, and job-token
    completion.
 
-The world bridge remains the producer layer above this CPU core. World systems produce renderer mutation intent, RenderScene
+World integration remains the producer layer above this CPU core. World systems produce renderer mutation intent, RenderScene
 publishes immutable scene state, and later render-path jobs produce compact GPU Scene candidates without importing batching or
 graph-execution policy into RenderScene.
 
@@ -2242,7 +2242,7 @@ GPU Scene change emission. RED-specific raw proxy pointers and global renderer a
 | Existing area | Decision | Required change |
 | --- | --- | --- |
 | Scene/service ownership and generational scene handles | Keep | Register through runtime/editor composition only after the revised frame participants exist. |
-| Generational proxy lifecycle and change-driven world bridge | Keep and adapt | Add private GPU identity and dirty-category state; preserve exact ECS change capture and coalescing. |
+| Generational proxy lifecycle and change-driven world integration | Keep and adapt | Add private GPU identity and dirty-category state; preserve exact ECS change capture and coalescing. |
 | Prepare/commit publication boundary and read leases | Removed | Stable renderer-owned proxies now advance through an ordered update job chain. Complete versions, read leases, retirement lists, synchronous commit wrappers, and broad proxy snapshots no longer exist. |
 | Typed mesh/light/decal CPU pools | Keep and adapt | They remain authoritative CPU state. Mesh payloads resolve to shared renderable definitions; light/decal payloads produce sparse persistent table updates. Do not duplicate strong resource handles into every published version. |
 | Spatial write index and dirty-cell repair | Keep | It is the CPU broad phase and must remain change-driven. Add stable GPU identities to published spatial membership. |
@@ -2306,7 +2306,7 @@ Render Graph work. The command-chain and engine ownership shells now exist, but 
 5. **Command-chain and service ownership shell — implemented:** `RenderCommandSystem` owns one CPU rendering tail. Its
    `FrameTick` appends unique live-scene updates and its `RenderFrame` appends retained viewport frames to that same chain;
    `FlushPreviousFrameProcessing` waits only this CPU chain. `RenderingService` owns the command system and viewport manager,
-   and runtime/editor composition registers both Render Scene and Rendering services. No bridge is hard-coded into the generic
+   and runtime/editor composition registers both Render Scene and Rendering services. No world integration is hard-coded into the generic
    service. The private frame dispatcher constructs a renderer continuation context inside the retained frame job, matching
    the RED command-handler boundary without adding another tail. The service destination currently fails closed because no
    Render Graph executor is installed. Automatic frame-participant ingress ordering, camera/frame publication, and the graph
@@ -2318,7 +2318,7 @@ The command shell deliberately preserves the same ownership split as RED while l
 
 1. The future engine Render-phase driver owns the normal-frame CPU boundary. It first calls
    `FlushPreviousFrameProcessing`, then asks registered producers to finish mutation ingress and gather the live scenes for
-   the tick. `WorldRenderBridge` is one producer, not a hard-coded `RenderingService` dependency.
+   the tick. World integration is one producer, not a hard-coded `RenderingService` dependency.
 2. `RenderCommandSystem::FrameTick` performs main-thread scene preparation, appends scene-update jobs, and finally enters
    `RenderingService::FrameTick(RenderFrameTickContext&)`. GPU Scene publication, fence-based retirement, renderer-global
    streaming decisions, and other tick-wide work extend this same chain through `RenderFrameTickContext::Jobs()`. If later
@@ -2615,13 +2615,13 @@ Done when:
 - parallel evaluation has no shared output cursor or serial probe reduction;
 - an empty view set deterministically publishes `Unknown` without losing the last real evaluation age.
 
-### Phase 8: world bridge integration
+### Phase 8: world-to-render integration
 
 Goal: connect committed world/entity changes to RenderScene without making RenderScene depend on Flecs.
 
 Status: implemented at the explicit world/render boundary. The ECS world publishes a bounded sequence-numbered journal for
 successful entity and component commits, with independent subscriber cursors, overrun reporting, command-batch identity, and a
-minimal native-observer capture entry point. `WorldRenderBridge` lives in the entities integration module so dependency flow is
+minimal native-observer capture entry point. World integration lives above RenderScene so dependency flow is
 `entities -> rendering`; RenderScene has no Flecs dependency. Project-defined contributor/state descriptors translate mesh,
 light, decal, transform/bounds, visibility, layer, and user-data changes after world commit. Changes coalesce by stable entity
 and component, all translations complete before scene mutation begins, transaction capacity is preflighted against the exact
@@ -2637,10 +2637,10 @@ scene versions.
 
 Add:
 
-- `WorldRenderBridge` as a per-world/session adapter;
+- a per-world/session world-to-render integration layer;
 - component-to-proxy registration descriptors for renderable mesh, light, decal, and transform components;
 - changed-component capture streams for transform, bounds, visibility, payload, and destruction changes;
-- bridge generation tied to world/session switches;
+- session generation tied to world/session switches;
 - activation-group transactional proxy admission;
 - proxy release synchronized with cell/entity release;
 - resource/request readiness propagation back to the streaming executor where appropriate;
@@ -2648,16 +2648,16 @@ Add:
 - debug-only/full-rebuild validation that can compare the dirty stream against world state without being part of the frame hot
   path.
 
-This phase must preserve the existing materialization rule: world changes are committed first, then the bridge observes/captures
+This phase must preserve the existing materialization rule: world changes are committed first, then world integration observes/captures
 them, then RenderScene publishes renderer-visible changes. Partial activation groups must not become partially visible.
 
-The bridge is change-driven. It must not query every Flecs table every frame and then decide whether each entity needs a relink.
+World integration is change-driven. It must not query every Flecs table every frame and then decide whether each entity needs a relink.
 For a transform update, the expected path is:
 
 ```text
 Transform component written
     -> component/store revision or observer marks entity/proxy dirty
-    -> WorldRenderBridge captures only dirty transform identities for the current bridge epoch
+    -> world integration captures only dirty transform identities for the current publication epoch
     -> latest transform/bounds per proxy coalesces into one relink packet
     -> RenderSceneCommit applies only changed proxies and repairs only affected spatial pages
 ```
@@ -2677,7 +2677,7 @@ Vanguard should therefore use two layers:
 Primary runtime path
     Vanguard ECS committed-component-action journal
         -> exact stable entity IDs touched by Add/Set/Remove/Enable/Disable
-        -> bridge maps those IDs to render proxy handles
+        -> world integration maps those IDs to render proxy handles
         -> coalesced relink/payload/visibility packets
 
 Secondary table gate / validation path
@@ -2688,14 +2688,14 @@ Secondary table gate / validation path
 
 The existing Vanguard ECS wrapper already queues component actions before `FlushComponentActions`, which is the right place to
 publish an exact committed-change journal. The current wrapper reports only aggregate counts, so Phase 8 must add a retained
-change-journal or subscriber boundary for systems like `WorldRenderBridge`.
+change-journal or subscriber boundary for world-integration consumers.
 
 Flecs `OnSet`, `OnAdd`, and `OnRemove` observers may also be used as exact entity-level dirty markers, especially for native
 Flecs systems that intentionally bypass Vanguard's queued component API. Observer callbacks must remain tiny: copy the stable
-entity ID, component ID, event kind, and revision into a bridge-owned dirty stream, then return. They must not create render
+entity ID, component ID, event kind, and revision into an integration-owned dirty stream, then return. They must not create render
 proxies, relink spatial state, wait on jobs, allocate heavyweight payloads, or call back into RenderScene mutation commit while
 Flecs is applying changes. An `OnSet` event means the component was set, not that its value is byte-different from the previous
-value, so same-value writes may still produce dirty entries and should be coalesced by the bridge epoch.
+value, so same-value writes may still produce dirty entries and should be coalesced by the publication epoch.
 
 Recommended runtime priority:
 
@@ -2710,14 +2710,14 @@ Done when:
 
 - loading a streamed cell can materialize entities and queue matching render proxies;
 - transform changes on N entities enqueue O(N changed) relinks, not O(total renderable entities) checks;
-- repeated transform writes to one entity in one bridge epoch produce one final relink packet;
+- repeated transform writes to one entity in one publication epoch produce one final relink packet;
 - a changed Flecs table does not force relinking every entity in that table unless the engine is explicitly rebuilding or
   validating;
-- `FlushComponentActions` or an equivalent committed-change boundary can expose exact changed stable entity IDs to the bridge;
+- `FlushComponentActions` or an equivalent committed-change boundary can expose exact changed stable entity IDs to world integration;
 - Flecs observers, when enabled, only append dirty identities and never perform RenderScene work inside the observer callback;
 - releasing a cell removes proxies through the scene lifecycle and acknowledges downstream release only after safe detachment;
-- world switch/session generation invalidates stale queued bridge work;
-- preview scenes still work without a world bridge.
+- world switch/session generation invalidates stale queued integration work;
+- preview scenes still work without runtime world integration.
 
 ### Phase 9: frame-pipeline wiring
 
@@ -2728,7 +2728,7 @@ typed CPU collector. Use the revised continuation phases in the reevaluation sec
 
 Add:
 
-- frame participants for bridge capture, scene prepare/commit, collection scheduling, and end-frame retirement;
+- frame participants for world-change capture, scene prepare/commit, collection scheduling, and end-frame retirement;
 - participant dependencies against existing `GameWorldFrameParticipantId`, streaming observer work, presentation readiness where
   needed, and future renderer participants;
 - profile filtering for runtime, editor, preview, tool, and headless modes;
@@ -2833,7 +2833,7 @@ RenderSceneCollect
 RenderSceneEndFrame
     publishes visibility feedback and retires retained proxy/update work after dependent tokens complete
 
-WorldRenderBridge
+world integration
     consumes committed Flecs/world transactions, owns proxy lifecycle records,
     budgets admission, and publishes scene mutation epochs
 ```
@@ -2890,7 +2890,7 @@ runtime world. No viewport owns a Render Scene.
 | Proxy destruction never calls a raw owner pointer | Accepted | RED unregisters through a raw `IRenderProxySystemInterface*`, which becomes unsafe if teardown ordering leaves a handle alive. |
 | Dissolve is optional visual retirement, not lifetime proof | Accepted | RED retains handles for twice a global dissolve duration, which does not prove scene-reader or GPU completion. |
 | Scene ownership mode is explicit | Accepted | RED stores internally created and externally supplied scenes in the same pointer and relies on lifecycle context for teardown authority. |
-| World/scene switches advance bridge generations | Accepted | Queued admission, relink, and retirement operations must not target a replacement world or reused proxy slot. |
+| World/scene switches advance session generations | Accepted | Queued admission, relink, and retirement operations must not target a replacement world or reused proxy slot. |
 | Main proxy spatial index is distinct from view-query coordination | Accepted | RED directly owns the live `visGrid` in Render Scene while `vis::Scene` owns ephemeral queries and per-view frame data. |
 | Collection reads stable live state after a per-scene update dependency | Accepted | Mirror RED's retained proxies, double-buffered relinks, command-owned structural operations, and Jobs ordering; do not copy the scene to manufacture reader versions. |
 | Spatial state remains live rather than copy-on-write | Accepted | Runtime/editor collections consume the same completed scene epoch. Overlap is expressed through the scheduler; mutation waits behind dependent collection instead of cloning the VisGrid. |
@@ -2919,12 +2919,12 @@ runtime world. No viewport owns a Render Scene.
 | RenderSceneEndFrame publishes feedback and retires CPU scene state only after collection completion | Accepted | RED finalizes visibility queries and query-only bitsets at render-frame boundaries, but Vanguard must include lease and GPU-retirement awareness. |
 | RenderScene is an engine service with explicit frame-pipeline hooks | Accepted | Vanguard already owns service registration and global frame phases; RenderScene should plug into that loop instead of presentation or application-state code. |
 | RenderScene uses Jobs RenderPath counters and no private scheduler | Accepted | The existing Jobs API exposes `Priority::RenderPath`, `Builder`, `Counter`, dependencies, parallel dispatch, and explicit fence closure. |
-| RenderScene core has no Flecs dependency | Accepted | GameWorldService and CellStreamingSystem already own Flecs/materialization; RenderScene consumes mutations through a bridge so preview and thumbnail scenes can exist without a game world. |
+| RenderScene core has no Flecs dependency | Accepted | GameWorldService and CellStreamingSystem already own Flecs/materialization; RenderScene consumes mutations through world-facing integration so preview and thumbnail scenes can exist without a game world. |
 | RenderScene payloads retain resource references and handles | Accepted | Vanguard resources already provide logical identity, generation-checked handles, async request coalescing, cancellation, and failure traces. |
 | Renderer proxy readiness is distinct from resource byte availability | Accepted | WorldStreamingExecutor separates `ResourceAvailable`, downstream `SetReady`, and `CompleteRelease`; renderer residency needs the same boundary. |
 | RenderScene hot storage uses rendering pools | Accepted | Vanguard already exposes canonical memory pools and object-to-pool macros; hot scene storage should not allocate through generic standard-library mechanisms. |
 | Presentation never kicks scene rendering by ownership | Accepted | Presentation owns windows, attachments, viewports, swap chains, HDR/display policy, acquire, resize, and present; scene publication and collection are render-phase work. |
 | First RenderScene implementation is CPU-only | Accepted | RHI, cameras, batching, and render graph are not required to validate scene handles, mutation publication, read leases, spatial membership, and typed collector pages. |
-| WorldRenderBridge is dirty-stream driven, not table-scan driven | Accepted | Transform, bounds, visibility, payload, and destruction changes must arrive through changed-component streams/revisions; full world scans are reserved for cold build, recovery, and validation. |
+| World integration is dirty-stream driven, not table-scan driven | Accepted | Transform, bounds, visibility, payload, and destruction changes must arrive through changed-component streams/revisions; full world scans are reserved for cold build, recovery, and validation. |
 | Flecs query change detection is a table gate, not the primary relink stream | Accepted | Flecs `EcsQueryDetectChanges`/`ecs_iter_changed` can skip untouched matched tables, but per-entity relinks need Vanguard's exact committed component-action journal. |
 | Forced LOD and dissolve excluded from the base interface | Provisional | Present in RED but appears policy-specific; representative proxies and collectors will decide. |

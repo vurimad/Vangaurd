@@ -1,6 +1,7 @@
 #include "build.h"
 
 #include <vanguard/diagnostics/diagnostics_backend.hpp>
+#include <vanguard/diagnostics/sink_registry.hpp>
 
 #include "log.h"
 #include "logMessage.h"
@@ -36,12 +37,6 @@ namespace
     public:
         void SinkLogLine(const char* const formattedMessage, const red::LoggerLine& message) override
         {
-            const SinkCallback callback = m_callback.load(std::memory_order_acquire);
-            if (callback == nullptr)
-            {
-                return;
-            }
-
             MessageView view = {formattedMessage,
                                 message.buffer,
                                 message.prefix,
@@ -51,26 +46,25 @@ namespace
                                 message.netPeerId,
                                 static_cast<Level>(message.level),
                                 static_cast<Category>(message.category)};
-
-            callback(view, m_userData.load(std::memory_order_acquire));
+            m_registry->Dispatch(view);
         }
 
         void Flush() override {}
 
-        void SetCallback(const SinkCallback callback, void* const userData) noexcept
+        explicit VanguardSink(vanguard::diagnostics::detail::SinkRegistryCore& registry) noexcept
+            : m_registry(&registry)
         {
-            m_userData.store(userData, std::memory_order_release);
-            m_callback.store(callback, std::memory_order_release);
         }
 
     private:
-        std::atomic<SinkCallback> m_callback = nullptr;
-        std::atomic<void*> m_userData = nullptr;
+        vanguard::diagnostics::detail::SinkRegistryCore* m_registry = nullptr;
     };
 
+    std::atomic<vanguard::u64> g_sinkRegistrationGeneration{0};
+    vanguard::diagnostics::detail::SinkRegistryCore g_sinkRegistry({&g_sinkRegistrationGeneration});
     bool g_initialized = false;
     bool g_fileSinkRegistered = false;
-    VanguardSink g_vanguardSink;
+    VanguardSink g_vanguardSink(g_sinkRegistry);
     red::LoggerFileSink g_fileSink;
 } // namespace
 
@@ -93,12 +87,14 @@ namespace vanguard::diagnostics::backend
     {
         if (!g_initialized)
         {
+            g_sinkRegistry.ClearRegisteredAfterAggregateFence();
             return;
         }
 
         CloseFileSink();
         red::LogFlush(red::LoggerFlushMode_Sync);
         red::UnregisterFilteredLoggerSink(&g_vanguardSink);
+        g_sinkRegistry.ClearRegisteredAfterAggregateFence();
         red::UninitializeLogger();
         g_initialized = false;
     }
@@ -200,7 +196,23 @@ namespace vanguard::diagnostics::backend
 
     void SetSinkCallback(const SinkCallback callback, void* const userData) noexcept
     {
-        g_vanguardSink.SetCallback(callback, userData);
+        g_sinkRegistry.SetLegacyCallback(callback, userData);
+    }
+
+    SinkRegistrationResult RegisterSinkCallback(const SinkCallback callback, void* const userData,
+                                                SinkRegistrationToken& token) noexcept
+    {
+        return g_sinkRegistry.Register(callback, userData, token);
+    }
+
+    SinkRegistrationResult UnregisterSinkCallback(const SinkRegistrationToken token) noexcept
+    {
+        return g_sinkRegistry.Unregister(token);
+    }
+
+    bool IsSinkCallbackRegistered(const SinkRegistrationToken token) noexcept
+    {
+        return g_sinkRegistry.IsRegistered(token);
     }
 
     bool OpenFileSink(const char* const path, const FileMode mode) noexcept

@@ -64,7 +64,7 @@ namespace vanguard::material_tools
         {
         }
 
-        static bool Resolve(const assets::BuildDependency& dependency, assets::BuildRequest& request, void* userData) noexcept
+        static bool Resolve(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request, void* userData) noexcept
         {
             Impl& implementation = *static_cast<Impl*>(userData);
             const MaterialPreviewBuildSet* const build = implementation.submitting;
@@ -72,15 +72,13 @@ namespace vanguard::material_tools
             {
                 if (build->program.output == dependency.identity)
                 {
-                    request = build->program;
-                    return true;
+                    return request.CopyFrom(build->program);
                 }
                 for (const assets::BuildRequest& pipeline : build->pipelines)
                 {
                     if (pipeline.output == dependency.identity)
                     {
-                        request = pipeline;
-                        return true;
+                        return request.CopyFrom(pipeline);
                     }
                 }
             }

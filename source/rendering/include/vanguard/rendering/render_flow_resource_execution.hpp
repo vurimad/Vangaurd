@@ -138,6 +138,29 @@ namespace vanguard::rendering
 
     class ExecutionPacketCursor;
 
+    struct CompiledExecutionActionSegment
+    {
+        u32 offset = 0;
+        u32 count = 0;
+
+        [[nodiscard]] bool Empty() const noexcept { return count == 0; }
+    };
+
+    // Immutable packet-local execution image for one renderer child range.
+    // Step spans preserve the exact Resolve timeline; action segments contain
+    // only steps that carry real semantic work (transition/UAV/clear/alias).
+    struct CompiledExecutionRange
+    {
+        u32 beginStepOffset = 0;
+        u32 beginStepCount = 0;
+        u32 endStepOffset = 0;
+        u32 endStepCount = 0;
+        CompiledExecutionActionSegment beginActions;
+        CompiledExecutionActionSegment endActions;
+    };
+    class ResolvedTextureUse;
+    class ResolvedBufferUse;
+
     class ExecutionGenerationRef final
     {
     public:
@@ -180,10 +203,29 @@ namespace vanguard::rendering
         [[nodiscard]] CommandScopeId GetCommandScope() const noexcept;
         [[nodiscard]] rhi::QueueType GetQueue() const noexcept;
         [[nodiscard]] u32 GetStepCount() const noexcept;
+        [[nodiscard]] u32 GetUseCount() const noexcept;
         [[nodiscard]] u32 GetDecisionCount() const noexcept;
+        [[nodiscard]] CompiledExecutionActionSegment GetExitActionSegment() const noexcept;
+        // Publish the immutable step/action spans for a contiguous dense use
+        // range. No packet runtime state is advanced and no actions execute.
+        [[nodiscard]] bool ResolveExecutionRange(u32 firstUseOrdinal, u32 useCount, CompiledExecutionRange& range,
+                                                 RenderFlowResourceFailure* failure = nullptr) const noexcept;
+        // Publish an immutable renderer-facing use binding from the already
+        // physicalized packet. These calls do not advance execution or execute
+        // actions; the matching BeginRange/EndRange pair owns rangeEpoch.
+        [[nodiscard]] bool ResolveTextureUseBinding(ResourceUseId use, u32 rangeEpoch, ResolvedTextureUse& resolved,
+                                                    RenderFlowResourceFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] bool ResolveBufferUseBinding(ResourceUseId use, u32 rangeEpoch, ResolvedBufferUse& resolved,
+                                                   RenderFlowResourceFailure* failure = nullptr) const noexcept;
         [[nodiscard]] bool OpenCursor(CommandScopeId activeScope, rhi::QueueType activeQueue, ExecutionPacketCursor& cursor, RenderFlowResourceFailure* failure = nullptr) const noexcept;
+        // Renderer/compiled-range path. Declared range cardinality is fixed at
+        // cursor open so FinalizePacket can prove even zero-use child epochs ran.
+        [[nodiscard]] bool OpenCompiledCursor(CommandScopeId activeScope, rhi::QueueType activeQueue, u32 expectedRangeCount,
+                                              ExecutionPacketCursor& cursor, RenderFlowResourceFailure* failure = nullptr) const noexcept;
 
     private:
+        [[nodiscard]] bool OpenCursorInternal(CommandScopeId activeScope, rhi::QueueType activeQueue, u32 expectedRangeCount, bool compiledRanges,
+                                              ExecutionPacketCursor& cursor, RenderFlowResourceFailure* failure) const noexcept;
         ExecutionGenerationRef m_generation;
         u32 m_packetIndex = InvalidRenderFlowResourceIndex;
         friend class RenderFlowResourceAllocator;
@@ -192,7 +234,8 @@ namespace vanguard::rendering
     // A resolved use retains only a packet-local liveness witness so stale
     // IsValid checks remain memory-safe. It owns neither the execution
     // generation nor an independent physical allocation and is usable only
-    // between its matching Begin/End on the packet execution thread.
+    // while its legacy use or compiled child range is active on the packet
+    // execution thread.
     class ResolvedTextureUse final
     {
     public:
@@ -224,9 +267,13 @@ namespace vanguard::rendering
         TextureUseDesc m_desc;
         rhi::TextureViewDesc m_viewDesc;
         u32 m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
+        ExecutionGenerationId m_generation;
+        u32 m_packetIndex = InvalidRenderFlowResourceIndex;
+        u32 m_rangeEpoch = 0;
         bool m_hasExplicitView = false;
         rhi::DescriptorHandle m_shaderResource;
         rhi::DescriptorHandle m_unorderedAccess;
+        friend class CompiledExecutionPacketView;
         friend class ExecutionPacketCursor;
     };
 
@@ -261,9 +308,13 @@ namespace vanguard::rendering
         BufferUseDesc m_desc;
         rhi::BufferViewDesc m_viewDesc;
         u32 m_runtimeUseSlot = InvalidRenderFlowResourceIndex;
+        ExecutionGenerationId m_generation;
+        u32 m_packetIndex = InvalidRenderFlowResourceIndex;
+        u32 m_rangeEpoch = 0;
         bool m_hasExplicitView = false;
         rhi::DescriptorHandle m_shaderResource;
         rhi::DescriptorHandle m_unorderedAccess;
+        friend class CompiledExecutionPacketView;
         friend class ExecutionPacketCursor;
     };
 
@@ -284,7 +335,14 @@ namespace vanguard::rendering
         [[nodiscard]] bool IsValid() const noexcept;
         [[nodiscard]] bool BeginTextureUse(ResourceUseId use, ResolvedTextureUse& resolved, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool BeginBufferUse(ResourceUseId use, ResolvedBufferUse& resolved, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginTextureUse(ResourceUseId use, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BeginBufferUse(ResourceUseId use, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool EndUse(ResourceUseId use, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Render-node fast path. These calls advance a whole prevalidated child
+        // range at once and execute only its sparse semantic action-tape entries;
+        // they never replay the range's logical uses one by one.
+        [[nodiscard]] bool BeginRange(const CompiledExecutionRange& range, u32 rangeEpoch, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool EndRange(const CompiledExecutionRange& range, u32 rangeEpoch, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool CapturedDecision(DecisionId decision, bool& value, RenderFlowResourceFailure* failure = nullptr) const noexcept;
         [[nodiscard]] bool FinalizePacket(RenderFlowResourceFailure* failure = nullptr) noexcept;
         void CancelRemaining() noexcept;

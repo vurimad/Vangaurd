@@ -42,6 +42,18 @@ namespace job
 {
 	struct RunContext;
 
+	struct DependencyContinuationStats
+	{
+		Uint32 pendingRecruitmentControls{ 0 };
+		Uint64 recruitmentControlsAdmitted{ 0 };
+		Uint64 recruitmentControlsPopped{ 0 };
+		Uint64 recruitmentControlsDroppedBound{ 0 };
+		Uint64 recruitmentControlsDroppedQueueFull{ 0 };
+		Uint64 recruitmentControlsAbandoned{ 0 };
+		Uint64 relaysInlined{ 0 };
+		Uint64 relaysQueuedFallback{ 0 };
+	};
+
 	// Init/shutdown the job system
 	REDJOBS2_API void Initialize( const InitParam& setup );
 	REDJOBS2_API void Shutdown();
@@ -56,6 +68,7 @@ namespace job
 
 	// Concurrent diagnostic snapshot. Values can change immediately after return.
 	REDJOBS2_API Uint32 GetApproximateQueueDepth( Priority priority );
+	REDJOBS2_API DependencyContinuationStats GetDependencyContinuationStats();
 
 	REDJOBS2_API void DumpToLog();
 

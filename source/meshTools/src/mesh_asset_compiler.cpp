@@ -364,6 +364,71 @@ namespace vanguard::mesh_tools
             return ResolveAndImport(request, settings, implementation.config, mesh, report) && DiscoverImportedDependencies(request, mesh, implementation.config, dependencies);
         }
 
+        [[nodiscard]] bool ScanReferences(const assets::BuildRequest& request, assets::AssetReferenceCollector& references, void*) noexcept
+        {
+            ParsedSettings settings;
+            if (!ParseSettings(request.settings, settings) || request.source.identity.GetPath() != resources::ResourcePath::FromString(settings.sourceName))
+                return false;
+            if (settings.import.defaultMaterial.IsValid() &&
+                references.Add({settings.import.defaultMaterial, resources::DependencyKind::Required}) != assets::Result::Success)
+                return false;
+            if (settings.import.skeleton.IsValid() &&
+                references.Add({settings.import.skeleton, resources::DependencyKind::Required}) != assets::Result::Success)
+                return false;
+            return true;
+        }
+
+        [[nodiscard]] bool WriteMutation(const assets::SourceRecord& source, const assets::SourceDataView& data,
+                                         ParsedSettings& settings, const char* const sourceName,
+                                         containers::DynamicArray<u8>& rewrittenSource,
+                                         assets::AssetMetadata& rewrittenMetadata) noexcept
+        {
+            if (!assets::RelocateSourceUnchanged(source, data, containers::StringView(sourceName), rewrittenSource, rewrittenMetadata, nullptr))
+                return false;
+            const MeshBuildDescription description{sourceName, settings.formatHint, settings.import, settings.cook};
+            return EncodeMeshBuildSettings(description, rewrittenMetadata.settings) == MeshBuildSettingsResult::Success;
+        }
+
+        [[nodiscard]] bool RewriteReferences(const assets::SourceRecord& source, const assets::SourceDataView& data,
+                                             const containers::ArraySpan<const assets::AssetReferenceReplacement> replacements,
+                                             containers::DynamicArray<u8>& rewrittenSource,
+                                             assets::AssetMetadata& rewrittenMetadata, void*) noexcept
+        {
+            ParsedSettings settings;
+            if (!ParseSettings(source.metadata.settings, settings))
+                return false;
+            bool changed = false;
+            for (const assets::AssetReferenceReplacement& replacement : replacements)
+            {
+                if (settings.import.defaultMaterial == replacement.previous)
+                {
+                    settings.import.defaultMaterial = replacement.replacement;
+                    changed = true;
+                }
+                if (settings.import.skeleton == replacement.previous)
+                {
+                    settings.import.skeleton = replacement.replacement;
+                    changed = true;
+                }
+            }
+            return changed && WriteMutation(source, data, settings, settings.sourceName, rewrittenSource, rewrittenMetadata);
+        }
+
+        [[nodiscard]] bool RelocateSource(const assets::SourceRecord& source, const assets::SourceDataView& data,
+                                          const containers::StringView newSourceIdentity,
+                                          containers::DynamicArray<u8>& relocatedSource,
+                                          assets::AssetMetadata& relocatedMetadata, void*) noexcept
+        {
+            if (newSourceIdentity.Empty() || newSourceIdentity.Length() >= MaximumPathBytes)
+                return false;
+            char sourceName[MaximumPathBytes]{};
+            for (u32 index = 0; index < newSourceIdentity.Length(); ++index)
+                sourceName[index] = newSourceIdentity[index];
+            ParsedSettings settings;
+            return ParseSettings(source.metadata.settings, settings) &&
+                   WriteMutation(source, data, settings, sourceName, relocatedSource, relocatedMetadata);
+        }
+
         [[nodiscard]] bool CompileAsset(const assets::CompileContext& context, assets::ArtifactWriter& artifacts, void* userData) noexcept
         {
             MeshAssetCompiler::Impl& implementation = *static_cast<MeshAssetCompiler::Impl*>(userData);
@@ -457,8 +522,13 @@ namespace vanguard::mesh_tools
     {
         if (m_impl == nullptr)
             return {};
-        assets::CompilerDescriptor descriptor{m_impl->compilerId, CompilerName, MeshAssetCompilerVersion, MeshSourceResourceType, meshes::MeshResourceType, Discover, CompileAsset, m_impl};
-        descriptor.recognizeSource = [](const containers::StringView sourcePath, void* userData) noexcept
+        return {m_impl->compilerId, CompilerName, MeshAssetCompilerVersion, MeshSourceResourceType, meshes::MeshResourceType, Discover, CompileAsset, m_impl};
+    }
+
+    assets::SourceImporterDescriptor MeshAssetCompiler::GetImporterDescriptor() noexcept
+    {
+        const assets::CompilerDescriptor compiler = GetDescriptor();
+        return assets::MakeDirectSourceImporterDescriptor(compiler, [](const containers::StringView sourcePath, void* userData) noexcept
         {
             const auto extension = filesystem::paths::GetExtension(sourcePath);
             if (extension.Empty())
@@ -475,8 +545,7 @@ namespace vanguard::mesh_tools
                 start = end + 1u;
             }
             return false;
-        };
-        return descriptor;
+        }, ScanReferences, RewriteReferences, RelocateSource);
     }
 
     assets::Result MeshAssetCompiler::Register(assets::BuildSystem& buildSystem) noexcept

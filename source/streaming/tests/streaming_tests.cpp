@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/streaming/resource_source.hpp>
 #include <vanguard/streaming/streaming.hpp>
@@ -56,6 +57,7 @@ namespace
     constexpr std::array<u8, 13> g_tail{0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x11, 0x22, 0x33, 0x44, 0x55};
     constexpr std::array<u8, 11> g_dependency{9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 42};
     constexpr std::array<u8, 17> g_looseOverride{0x56, 0x41, 0x4e, 0x47, 0x55, 0x41, 0x52, 0x44, 0x2d, 0x4c, 0x4f, 0x4f, 0x53, 0x45, 1, 2, 3};
+    constexpr std::array<u8, 17> g_looseReplacement{0x52, 0x45, 0x50, 0x4c, 0x41, 0x43, 0x45, 0x4d, 0x45, 0x4e, 0x54, 0x2d, 0x4c, 0x4f, 0x4f, 4, 5};
     constexpr std::array<u8, 4096> g_corruptPayload{};
 
     [[nodiscard]] resources::ResourceReference MakeReference(const char* const path) noexcept
@@ -90,12 +92,21 @@ namespace
     {
         concurrency::Atomic<u32> decoded{0};
         concurrency::Atomic<u32> destroyed{0};
+        concurrency::Atomic<bool> blockDecode{false};
+        concurrency::Atomic<bool> decodeStarted{false};
+        concurrency::Atomic<bool> releaseDecode{false};
     };
 
     resources::ResourceObject* DecodeBlob(const resources::ResourceReference reference, const void* const data, const usize size, const resources::LoadContext& context,
                                           resources::Failure& failure, void* const userData) noexcept
     {
         auto& state = *static_cast<DecoderState*>(userData);
+        if (state.blockDecode.GetValue())
+        {
+            state.decodeStarted.SetValue(true);
+            while (!state.releaseDecode.GetValue())
+                concurrency::YieldCurrentThread();
+        }
         for (u32 index = 0; index < context.GetDependencyCount(); ++index)
         {
             if (!context.GetDependency(index))
@@ -739,6 +750,203 @@ namespace
         Check(false, "resource and streaming work drains");
     }
 
+    void RunManagedLooseGenerationTest(const filesystem::AbsolutePath& directory, filesystem::Manager& files,
+                                       resources::ResourcePipeline& pipeline)
+    {
+        const filesystem::AbsolutePath managedRoot = directory.AddDirPath("managed_loose_generations");
+        const filesystem::AbsolutePath generationA = managedRoot.AddFilePath("managed-a.vres");
+        const filesystem::AbsolutePath generationB = managedRoot.AddFilePath("managed-b.vres");
+        const filesystem::AbsolutePath outside = directory.AddFilePath("managed-outside.loose");
+        static_cast<void>(files.DeleteFile(generationA));
+        static_cast<void>(files.DeleteFile(generationB));
+        static_cast<void>(files.DeleteFile(outside));
+        static_cast<void>(files.DeletePath(managedRoot));
+        Check(files.CreatePath(managedRoot) && SaveBytes(generationA, g_looseOverride.data(), g_looseOverride.size()) &&
+                  SaveBytes(generationB, g_looseReplacement.data(), g_looseReplacement.size()) &&
+                  SaveBytes(outside, g_tail.data(), g_tail.size()),
+              "P4 managed loose-generation fixtures created");
+
+        streaming::Config config;
+        config.stagingBudgetBytes = 64 * 1024;
+        config.maximumResourceBytes = 256 * 1024;
+        config.maximumManagedLooseRoots = 1;
+        config.maximumManagedLooseGenerations = 8;
+        config.maximumTrackedLooseResourceOrigins = 8;
+        streaming::ResourceStreamer managed;
+        DecoderState decoder;
+        const resources::ResourceReference reference = MakeReference("stream/managed-generation.vblob");
+        Check(managed.Initialize(pipeline, config) && managed.RegisterManagedLooseRoot(managedRoot) &&
+                  managed.RegisterDecoder({BlobType, "managed loose blob", &DecodeBlob, &DestroyBlob, &decoder}),
+              "P4 managed generation streamer/root/decoder initialization");
+        Check(managed.RegisterLoose({reference, generationA, {}, vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()), 100}),
+              "P4 managed descriptor acquires exact generation A");
+        Check(managed.RetireLooseGeneration(generationA) == streaming::LooseGenerationRetireResult::Current && files.FileExist(generationA),
+              "P4 current descriptor generation is never reclaimable");
+
+        decoder.blockDecode.SetValue(true);
+        decoder.decodeStarted.SetValue(false);
+        decoder.releaseDecode.SetValue(false);
+        resources::PipelineRequest firstRequest = managed.Request(reference);
+        for (u32 spin = 0u; spin < 2000000u && !decoder.decodeStarted.GetValue(); ++spin)
+            concurrency::YieldCurrentThread();
+        Check(decoder.decodeStarted.GetValue(), "E2.5 P5 managed generation A reaches an active StreamLoad before replacement");
+
+        Check(managed.PublishLoose({reference, generationB, {}, vanguard::serialization::Crc64(g_looseReplacement.data(), g_looseReplacement.size()), 100}),
+              "E2.5 P5 descriptor replacement advances future resolution while generation A load is active");
+        Check(managed.RetireLooseGeneration(generationA) == streaming::LooseGenerationRetireResult::Busy && files.FileExist(generationA),
+              "E2.5 P5 active StreamLoad independently protects stale generation A from retirement");
+        decoder.releaseDecode.SetValue(true);
+        decoder.blockDecode.SetValue(false);
+        Check(firstRequest.TryWait(10000) && firstRequest.HasLoaded(), "P4 managed generation A decodes through ResourceStreamer");
+        resources::ResourceHandle firstHandle = firstRequest.Acquire();
+        const auto* const firstBlob = static_cast<const BlobResource*>(firstHandle.Get());
+        Check(firstBlob != nullptr && firstBlob->m_contentCrc64 == vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()),
+              "P4 decoded generation A owns the expected physical content");
+
+        streaming::ResourceSource oldSource;
+        Check(oldSource.OpenLoose(generationA) == streaming::ResourceSourceResult::Success,
+              "P4 direct OpenLoose under a managed root acquires generation A");
+        streaming::ResourceRangeReadQueue oldQueue;
+        Check(oldQueue.Open(oldSource) == streaming::ResourceSourceResult::Success,
+              "P4 managed old source opens a retained range queue");
+
+        Check(managed.RetireLooseGeneration(generationA) == streaming::LooseGenerationRetireResult::Busy && files.FileExist(generationA),
+              "P4 stale generation stays protected by source/object lifetime after descriptor replacement");
+
+        std::array<u8, 7> asyncBytes{};
+        streaming::ResourceReadRequest asyncRead;
+        streaming::CoalescedResourceReadRequest queuedRead;
+        Check(oldSource.ReadAsync({3u, asyncBytes.size(), asyncBytes.data(), asyncBytes.size()}, asyncRead) == streaming::ResourceSourceResult::Success &&
+                  oldQueue.Read(8u, 5u, queuedRead) == streaming::ResourceSourceResult::Success,
+              "P4 old managed source accepts direct and queued ranges after replacement");
+        Check(asyncRead.TryWait(10000) && asyncRead.GetResult() == streaming::ResourceSourceResult::Success &&
+                  std::memcmp(asyncBytes.data(), g_looseOverride.data() + 3u, asyncBytes.size()) == 0 &&
+                  queuedRead.TryWait(10000) && queuedRead.GetResult() == streaming::ResourceSourceResult::Success &&
+                  queuedRead.GetBytes().Count() == 5u && std::memcmp(queuedRead.GetBytes().Data(), g_looseOverride.data() + 8u, 5u) == 0,
+              "P4 managed source/range operations remain pinned to exact generation A bytes");
+        asyncRead.Reset();
+        queuedRead.Reset();
+        oldQueue.Close();
+        oldSource.Close();
+        Check(managed.RetireLooseGeneration(generationA) == streaming::LooseGenerationRetireResult::Busy,
+              "P4 decoded ResourceObject keeps stale generation A protected after all source reads close");
+
+        resources::PipelineRequest replacementRequest = managed.Replace(reference);
+        Check(replacementRequest.TryWait(10000) && replacementRequest.HasLoaded(),
+              "P4 registry replacement decodes generation B as a distinct resource generation");
+        resources::ResourceHandle replacementHandle = replacementRequest.Acquire();
+        const auto* const replacementBlob = static_cast<const BlobResource*>(replacementHandle.Get());
+        Check(replacementBlob != nullptr && replacementBlob->m_contentCrc64 == vanguard::serialization::Crc64(g_looseReplacement.data(), g_looseReplacement.size()),
+              "P4 replacement resource consumes generation B");
+        firstHandle.Reset();
+        firstRequest.Reset();
+        streaming::LooseGenerationRetireResult retiredA = streaming::LooseGenerationRetireResult::Busy;
+        for (u32 attempt = 0; attempt < 10000u && retiredA == streaming::LooseGenerationRetireResult::Busy; ++attempt)
+        {
+            retiredA = managed.RetireLooseGeneration(generationA);
+            if (retiredA == streaming::LooseGenerationRetireResult::Busy)
+                concurrency::SleepOnCurrentThread(1);
+        }
+        Check(retiredA == streaming::LooseGenerationRetireResult::Removed && !files.FileExist(generationA),
+              "P4 stale generation is reclaimed only after decoded-object retirement");
+        Check(managed.RetireLooseGeneration(generationB) == streaming::LooseGenerationRetireResult::Current && files.FileExist(generationB),
+              "P4 replacement current generation remains protected");
+
+        replacementHandle.Reset();
+        replacementRequest.Reset();
+        WaitForDrain(pipeline, managed);
+        Check(managed.UnregisterLoose(reference.GetPath()), "P4 managed current descriptor unregister releases its generation lease");
+        Check(managed.UnregisterManagedLooseRoot(managedRoot), "P4 managed root unregister succeeds after descriptor/source/object drain");
+        Check(managed.UnregisterDecoder(BlobType) && managed.Shutdown(), "P4 managed generation streamer shuts down without leaked authority state");
+
+        const filesystem::AbsolutePath capacityRoot = directory.AddDirPath("managed_loose_capacity");
+        const filesystem::AbsolutePath capacityA = capacityRoot.AddFilePath("capacity-a.vres");
+        const filesystem::AbsolutePath capacityB = capacityRoot.AddFilePath("capacity-b.vres");
+        static_cast<void>(files.DeleteFile(capacityA));
+        static_cast<void>(files.DeleteFile(capacityB));
+        static_cast<void>(files.DeletePath(capacityRoot));
+        Check(files.CreatePath(capacityRoot) && SaveBytes(capacityA, g_looseOverride.data(), g_looseOverride.size()) &&
+                  SaveBytes(capacityB, g_looseReplacement.data(), g_looseReplacement.size()),
+              "P4 bounded-capacity fixtures created");
+        streaming::Config boundedConfig = config;
+        boundedConfig.maximumManagedLooseGenerations = 1;
+        boundedConfig.maximumTrackedLooseResourceOrigins = 1;
+        streaming::ResourceStreamer bounded;
+        const resources::ResourceReference capacityReferenceA = MakeReference("stream/capacity-a.vblob");
+        const resources::ResourceReference capacityReferenceB = MakeReference("stream/capacity-b.vblob");
+        Check(bounded.Initialize(pipeline, boundedConfig) && bounded.RegisterManagedLooseRoot(capacityRoot) &&
+                  bounded.RegisterLoose({capacityReferenceA, capacityA, {}, 0, 0}),
+              "P4 bounded authority admits its first exact generation");
+        streaming::ResourceSource rejected;
+        Check(rejected.OpenLoose(capacityB) == streaming::ResourceSourceResult::LimitExceeded &&
+                  !bounded.RegisterLoose({capacityReferenceB, capacityB, {}, 0, 0}),
+              "P4 managed generation capacity fails closed for direct opens and descriptors");
+        streaming::ResourceSource ungoverned;
+        Check(ungoverned.OpenLoose(outside) == streaming::ResourceSourceResult::Success,
+              "P4 direct OpenLoose outside registered managed roots remains ungoverned");
+        ungoverned.Close();
+        Check(bounded.UnregisterLoose(capacityReferenceA.GetPath()) &&
+                  bounded.RetireLooseGeneration(capacityA) == streaming::LooseGenerationRetireResult::Removed,
+              "P4 releasing the only generation returns bounded authority capacity");
+        Check(rejected.OpenLoose(capacityB) == streaming::ResourceSourceResult::Success,
+              "P4 freed generation capacity admits a later managed direct source");
+        rejected.Close();
+        Check(bounded.RetireLooseGeneration(capacityB) == streaming::LooseGenerationRetireResult::Removed &&
+                  bounded.UnregisterManagedLooseRoot(capacityRoot) && bounded.Shutdown(),
+              "P4 bounded authority retires the later stale generation and unregisters cleanly");
+
+        const filesystem::AbsolutePath originRoot = directory.AddDirPath("managed_loose_origin_capacity");
+        const filesystem::AbsolutePath originA = originRoot.AddFilePath("origin-a.vres");
+        const filesystem::AbsolutePath originB = originRoot.AddFilePath("origin-b.vres");
+        static_cast<void>(files.DeleteFile(originA));
+        static_cast<void>(files.DeleteFile(originB));
+        static_cast<void>(files.DeletePath(originRoot));
+        Check(files.CreatePath(originRoot) && SaveBytes(originA, g_looseOverride.data(), g_looseOverride.size()) &&
+                  SaveBytes(originB, g_looseReplacement.data(), g_looseReplacement.size()),
+              "P4 decoded-origin capacity fixtures created");
+        streaming::Config originConfig = config;
+        originConfig.maximumManagedLooseGenerations = 2;
+        originConfig.maximumTrackedLooseResourceOrigins = 1;
+        streaming::ResourceStreamer originLimited;
+        DecoderState originDecoder;
+        const resources::ResourceReference originReferenceA = MakeReference("stream/origin-a.vblob");
+        const resources::ResourceReference originReferenceB = MakeReference("stream/origin-b.vblob");
+        Check(originLimited.Initialize(pipeline, originConfig) && originLimited.RegisterManagedLooseRoot(originRoot) &&
+                  originLimited.RegisterDecoder({BlobType, "origin limited blob", &DecodeBlob, &DestroyBlob, &originDecoder}) &&
+                  originLimited.RegisterLoose({originReferenceA, originA, {}, vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()), 0}) &&
+                  originLimited.RegisterLoose({originReferenceB, originB, {}, vanguard::serialization::Crc64(g_looseReplacement.data(), g_looseReplacement.size()), 0}),
+              "P4 decoded-origin capacity streamer registers two exact generations");
+        resources::PipelineRequest originRequestA = originLimited.Request(originReferenceA);
+        Check(originRequestA.TryWait(10000) && originRequestA.HasLoaded(),
+              "P4 decoded-origin capacity admits the first ResourceObject association");
+        resources::ResourceHandle originHandleA = originRequestA.Acquire();
+        resources::PipelineRequest originRequestB = originLimited.Request(originReferenceB);
+        Check(originRequestB.TryWait(10000) && originRequestB.HasFailed() && originRequestB.GetError() == resources::Failure::OutOfMemory &&
+                  originDecoder.decoded.GetValue() == 2u && originDecoder.destroyed.GetValue() == 1u &&
+                  originLimited.GetStats().trackedLooseResourceOrigins == 1u,
+              "P4 decoded-object tracking capacity destroys the rejected object before it can escape");
+        originRequestB.Reset();
+        originHandleA.Reset();
+        originRequestA.Reset();
+        WaitForDrain(pipeline, originLimited);
+        Check(originDecoder.decoded.GetValue() == originDecoder.destroyed.GetValue() &&
+                  originLimited.GetStats().trackedLooseResourceOrigins == 0u,
+              "P4 decoded-origin capacity releases the accepted association at registry destruction");
+        Check(originLimited.UnregisterLoose(originReferenceA.GetPath()) && originLimited.UnregisterLoose(originReferenceB.GetPath()) &&
+                  originLimited.UnregisterManagedLooseRoot(originRoot) && originLimited.UnregisterDecoder(BlobType) && originLimited.Shutdown(),
+              "P4 decoded-origin capacity owner tears down after associations drain");
+
+        static_cast<void>(files.DeleteFile(generationB));
+        static_cast<void>(files.DeleteFile(outside));
+        static_cast<void>(files.DeletePath(managedRoot));
+        static_cast<void>(files.DeleteFile(capacityA));
+        static_cast<void>(files.DeleteFile(capacityB));
+        static_cast<void>(files.DeletePath(capacityRoot));
+        static_cast<void>(files.DeleteFile(originA));
+        static_cast<void>(files.DeleteFile(originB));
+        static_cast<void>(files.DeletePath(originRoot));
+    }
+
     void RunShaderDerivedMaterialTest(const filesystem::AbsolutePath& directory, filesystem::Manager& files, resources::ResourcePipeline& pipeline, streaming::ResourceStreamer& streamer)
     {
         const ShaderParameter pbrParameters[] = {{"roughness", reflection::builtin::F32, reflection::ValueKind::F32, sizeof(f32), alignof(f32), reflection::FieldFlags::Required},
@@ -844,11 +1052,12 @@ int main()
     Check(vanguard::io::Initialize(), "I/O initialization");
     Check(reflection::Initialize(), "reflection initialization");
 
-    const filesystem::AbsolutePath workingDirectory = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath workingDirectory = vanguard::tests::ScratchDirectory("streaming_tests");
     const filesystem::AbsolutePath testDirectory = workingDirectory.AddDirPath("vanguard_streaming_conformance");
     const filesystem::AbsolutePath packagePath = testDirectory.AddFilePath("base.vpak");
     const filesystem::AbsolutePath corruptPackagePath = testDirectory.AddFilePath("corrupt.vpak");
     const filesystem::AbsolutePath loosePath = testDirectory.AddFilePath("root.loose");
+    const filesystem::AbsolutePath replacementLoosePath = testDirectory.AddFilePath("root_replacement.loose");
     const filesystem::AbsolutePath budgetPath = testDirectory.AddFilePath("budget.loose");
     const filesystem::AbsolutePath cancelPath = testDirectory.AddFilePath("cancel.loose");
 
@@ -857,6 +1066,7 @@ int main()
     static_cast<void>(files.DeleteFile(packagePath));
     static_cast<void>(files.DeleteFile(corruptPackagePath));
     static_cast<void>(files.DeleteFile(loosePath));
+    static_cast<void>(files.DeleteFile(replacementLoosePath));
     static_cast<void>(files.DeleteFile(budgetPath));
     static_cast<void>(files.DeleteFile(cancelPath));
     static_cast<void>(files.DeletePath(testDirectory));
@@ -870,6 +1080,7 @@ int main()
     Check(SaveBytes(packagePath, baseBytes), "write segmented VPAK");
     Check(SaveBytes(corruptPackagePath, corruptBytes), "write corrupted VPAK payload");
     Check(SaveBytes(loosePath, g_looseOverride.data(), g_looseOverride.size()), "write loose override");
+    Check(SaveBytes(replacementLoosePath, g_looseReplacement.data(), g_looseReplacement.size()), "write loose replacement generation");
     Check(SaveBytes(budgetPath, g_budgetPayload.data(), g_budgetPayload.size()), "write over-budget loose resource");
     Check(SaveBytes(cancelPath, g_budgetPayload.data(), 48 * 1024), "write cancellable loose resource");
 
@@ -885,6 +1096,7 @@ int main()
     streaming::ResourceStreamer streamer;
     Check(registry.Initialize(), "resource registry initialization");
     Check(pipeline.Initialize(registry), "resource pipeline initialization");
+    RunManagedLooseGenerationTest(testDirectory, files, pipeline);
     streaming::Config streamingConfig;
     streamingConfig.stagingBudgetBytes = 64 * 1024;
     streamingConfig.maximumResourceBytes = 256 * 1024;
@@ -905,6 +1117,62 @@ int main()
                                   vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()), 100}),
           "loose override registration");
 
+    streaming::ResourceSource retainedLooseSource;
+    containers::DynamicArray<streaming::DependencyDescriptor> retainedLooseDependencies(memory::pools::Streaming::GetInstance());
+    Check(streamer.OpenSource(root, retainedLooseSource, retainedLooseDependencies) == resources::Failure::None,
+          "P4 opened loose source pins the exact pre-removal generation");
+
+    // E2.4 P5: descriptor replacement changes only future resolution. The already-opened
+    // source, its direct async reads, and its coalesced range queue remain pinned to the
+    // original physical generation and current streamer session.
+    streaming::ResourceRangeReadQueue retainedLooseQueue;
+    Check(retainedLooseQueue.Open(retainedLooseSource) == streaming::ResourceSourceResult::Success,
+          "E2.4 P5 old loose generation opens a range queue before descriptor replacement");
+    Check(streamer.PublishLoose({root, replacementLoosePath,
+                                 containers::ArraySpan<const streaming::DependencyDescriptor>(looseDependencies.data(), static_cast<u32>(looseDependencies.size())),
+                                 vanguard::serialization::Crc64(g_looseReplacement.data(), g_looseReplacement.size()), 100}),
+          "E2.4 P5 publish replacement loose generation while old source remains open");
+
+    streaming::ResourceSource replacementLooseSource;
+    containers::DynamicArray<streaming::DependencyDescriptor> replacementLooseDependencies(memory::pools::Streaming::GetInstance());
+    Check(streamer.OpenSource(root, replacementLooseSource, replacementLooseDependencies) == resources::Failure::None &&
+              replacementLooseSource.GetPhysicalPath() == replacementLoosePath && replacementLooseDependencies.Size() == looseDependencies.size(),
+          "E2.4 P5 new source resolution observes the replacement physical generation");
+
+    std::array<u8, 7> retainedAsyncBytes{};
+    streaming::ResourceReadRequest retainedAsyncRead;
+    Check(retainedLooseSource.ReadAsync({3u, retainedAsyncBytes.size(), retainedAsyncBytes.data(), retainedAsyncBytes.size()}, retainedAsyncRead) ==
+              streaming::ResourceSourceResult::Success,
+          "E2.4 P5 already-opened old source accepts async range after descriptor replacement");
+    streaming::CoalescedResourceReadRequest retainedQueuedRead;
+    Check(retainedLooseQueue.Read(8u, 5u, retainedQueuedRead) == streaming::ResourceSourceResult::Success,
+          "E2.4 P5 pre-replacement old-source queue accepts range after descriptor replacement");
+    std::array<u8, 6> replacementAsyncBytes{};
+    streaming::ResourceReadRequest replacementAsyncRead;
+    Check(replacementLooseSource.ReadAsync({2u, replacementAsyncBytes.size(), replacementAsyncBytes.data(), replacementAsyncBytes.size()}, replacementAsyncRead) ==
+              streaming::ResourceSourceResult::Success,
+          "E2.4 P5 replacement source accepts its own async range");
+    Check(retainedAsyncRead.TryWait(10000) && retainedAsyncRead.GetResult() == streaming::ResourceSourceResult::Success &&
+              std::memcmp(retainedAsyncBytes.data(), g_looseOverride.data() + 3u, retainedAsyncBytes.size()) == 0,
+          "E2.4 P5 old direct async read returns exact pre-replacement bytes");
+    Check(retainedQueuedRead.TryWait(10000) && retainedQueuedRead.GetResult() == streaming::ResourceSourceResult::Success &&
+              retainedQueuedRead.GetBytes().Count() == 5u && std::memcmp(retainedQueuedRead.GetBytes().Data(), g_looseOverride.data() + 8u, 5u) == 0,
+          "E2.4 P5 old queued range returns exact pre-replacement bytes");
+    Check(replacementAsyncRead.TryWait(10000) && replacementAsyncRead.GetResult() == streaming::ResourceSourceResult::Success &&
+              std::memcmp(replacementAsyncBytes.data(), g_looseReplacement.data() + 2u, replacementAsyncBytes.size()) == 0,
+          "E2.4 P5 newly opened source returns exact replacement-generation bytes");
+    retainedAsyncRead.Reset();
+    retainedQueuedRead.Reset();
+    replacementAsyncRead.Reset();
+    replacementLooseSource.Close();
+    retainedLooseQueue.Close();
+    Check(streamer.GetStats().liveSources == 1u,
+          "E2.4 P5 replacement proof releases fresh/range interests while old session source remains owned");
+    Check(streamer.PublishLoose({root, loosePath,
+                                 containers::ArraySpan<const streaming::DependencyDescriptor>(looseDependencies.data(), static_cast<u32>(looseDependencies.size())),
+                                 vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()), 100}),
+          "E2.4 P5 restore original loose descriptor for existing conformance checks");
+
     resources::PipelineRequest looseRequest = streamer.Request(root, resources::LoadPriority::High);
     Check(looseRequest.TryWait(10000) && looseRequest.HasLoaded(), "loose source loads asynchronously");
     resources::ResourceHandle looseHandle = looseRequest.Acquire();
@@ -916,6 +1184,18 @@ int main()
     looseRequest.Reset();
     WaitForDrain(pipeline, streamer);
     Check(streamer.UnregisterLoose(root.GetPath()), "loose override removal");
+
+    std::array<u8, g_looseOverride.size()> retainedLooseBytes{};
+    streaming::ResourceSourceReader retainedLooseReader;
+    const bool retainedLooseOpened = retainedLooseReader.Open(retainedLooseSource) == streaming::ResourceSourceResult::Success;
+    if (retainedLooseOpened)
+        retainedLooseReader.Serialize(retainedLooseBytes.data(), retainedLooseBytes.size());
+    Check(retainedLooseOpened &&
+              std::memcmp(retainedLooseBytes.data(), g_looseOverride.data(), g_looseOverride.size()) == 0,
+          "P4 already-opened loose source remains readable after descriptor removal");
+    retainedLooseReader.Close();
+    Check(!streamer.Shutdown(), "P4 graceful shutdown refuses an idle opened source from the current streamer session");
+    retainedLooseSource.Close();
 
     RunRangeQueueTest(streamer);
 
@@ -961,7 +1241,19 @@ int main()
     Check(streamer.UnmountPackage(corruptPackage), "corrupt package unmount");
     Check(streamer.UnmountPackage(basePackage), "base package unmount");
     Check(streamer.UnregisterDecoder(BlobType), "streaming decoder unregistration");
-    Check(streamer.Shutdown(), "resource streamer shutdown");
+    Check(streamer.Shutdown(), "P4 resource streamer shutdown succeeds after retained source close");
+
+    Check(streamer.Initialize(pipeline, streamingConfig), "P4 resource streamer reinitialize creates a fresh source-owner session");
+    Check(streamer.RegisterLoose({root, loosePath, {}, vanguard::serialization::Crc64(g_looseOverride.data(), g_looseOverride.size()), 100}),
+          "P4 reinitialized session loose source registration");
+    streaming::ResourceSource freshSessionSource;
+    containers::DynamicArray<streaming::DependencyDescriptor> freshSessionDependencies(memory::pools::Streaming::GetInstance());
+    Check(streamer.OpenSource(root, freshSessionSource, freshSessionDependencies) == resources::Failure::None,
+          "P4 reinitialized session opens a newly governed source");
+    retainedLooseSource.Close();
+    Check(!streamer.Shutdown(), "P4 stale prior-session source handle cannot release the new session's live source ownership");
+    freshSessionSource.Close();
+    Check(streamer.Shutdown(), "P4 reinitialized session shuts down after its own source closes");
     Check(pipeline.Shutdown(), "resource pipeline shutdown");
     Check(registry.Shutdown(), "resource registry shutdown");
     Check(jobs::Shutdown(), "jobs shutdown");
@@ -971,6 +1263,7 @@ int main()
     static_cast<void>(files.DeleteFile(packagePath));
     static_cast<void>(files.DeleteFile(corruptPackagePath));
     static_cast<void>(files.DeleteFile(loosePath));
+    static_cast<void>(files.DeleteFile(replacementLoosePath));
     static_cast<void>(files.DeleteFile(budgetPath));
     static_cast<void>(files.DeleteFile(cancelPath));
     static_cast<void>(files.DeletePath(testDirectory));

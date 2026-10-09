@@ -4,6 +4,10 @@
 
 namespace vanguard::crypto
 {
+    // Fills the complete destination from the operating-system cryptographic
+    // random source. Partial output is cleared before failure is returned.
+    [[nodiscard]] bool SecureRandom(void* destination, usize size) noexcept;
+
     struct Digest256
     {
         static constexpr u32 ByteCount = 32;

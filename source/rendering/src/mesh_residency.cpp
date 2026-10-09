@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstring>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace vanguard::rendering
@@ -73,19 +74,28 @@ namespace vanguard::rendering
             return nullptr;
         }
 
-        [[nodiscard]] bool ValidCameraSurfaceState(const RenderPhaseKey phase, const pipelines::GraphicsState& state) noexcept
+        [[nodiscard]] const MeshDrawPhaseContext* FindDrawPhaseContext(const containers::ArraySpan<const MeshDrawPhaseContext> contexts,
+                                                                       const RenderPhaseKey phase) noexcept
+        {
+            for (const MeshDrawPhaseContext& context : contexts)
+                if (context.phase == phase)
+                    return &context;
+            return nullptr;
+        }
+
+        [[nodiscard]] bool ValidCameraSurfaceState(const RenderPhaseKey phase, const pipelines::GraphicsState& state,
+                                                   const pipelines::AttachmentSignature& attachments) noexcept
         {
             if (phase != standardRenderPhases::DepthPrepass && phase != standardRenderPhases::Opaque)
                 return true;
             // These existing camera nodes write single-sample opaque/masked
             // targets. Blended surfaces require their separately ordered phase.
-            const u32 colorCount = phase == standardRenderPhases::DepthPrepass ? 0u : 3u;
-            if (state.blend.attachmentCount != colorCount || state.blend.logicOperationEnable ||
-                state.multisample.sampleCount != 1 || state.multisample.alphaToCoverage || state.multisample.sampleMask != 0xffffffffu ||
+            if (state.blend.attachmentCount != attachments.colorCount || state.blend.logicOperationEnable ||
+                state.multisample.sampleCount != attachments.sampleCount || state.multisample.alphaToCoverage || state.multisample.sampleMask != 0xffffffffu ||
                 !state.depthStencil.depthTest || !state.depthStencil.depthWrite || state.depthStencil.stencilTest || state.depthStencil.depthBoundsTest ||
                 (state.depthStencil.depthCompare != pipelines::CompareOperation::LessEqual && state.depthStencil.depthCompare != pipelines::CompareOperation::GreaterEqual))
                 return false;
-            for (u32 index = 0; index < colorCount; ++index)
+            for (u32 index = 0; index < attachments.colorCount; ++index)
             {
                 const auto& attachment = state.blend.attachments[state.blend.independentBlend ? index : 0u];
                 if (attachment.blendEnable || attachment.writeMask != 0x0f)
@@ -96,6 +106,23 @@ namespace vanguard::rendering
             return state.rasterizer.fill == pipelines::FillMode::Solid && !state.rasterizer.rasterizerDiscard &&
                    !state.rasterizer.conservativeRasterization && state.rasterizer.depthBias == 0 &&
                    state.rasterizer.depthBiasClamp == 0.0f && state.rasterizer.slopeScaledDepthBias == 0.0f;
+        }
+
+        [[nodiscard]] bool ValidDrawPhaseContexts(const RenderPhaseRegistry& phases,
+                                                  const containers::ArraySpan<const MeshDrawPhaseContext> contexts) noexcept
+        {
+            if (contexts.Empty() || contexts.Data() == nullptr || contexts.Size() > MaximumRenderPhases)
+                return false;
+            for (u32 index = 0; index < contexts.Size(); ++index)
+            {
+                if (!contexts[index].phase.IsValid() || !phases.Find(contexts[index].phase).IsValid() ||
+                    contexts[index].attachments.colorCount > pipelines::MaximumColorAttachments)
+                    return false;
+                for (u32 previous = 0; previous < index; ++previous)
+                    if (contexts[previous].phase == contexts[index].phase)
+                        return false;
+            }
+            return true;
         }
 
         [[nodiscard]] GpuSceneDefinitionKey BuildRenderableKey(const meshes::MeshFile& mesh, const MeshResidencyHandle residency, const u32 resourceGeneration,
@@ -135,7 +162,6 @@ namespace vanguard::rendering
         MeshDemandHandle demand;
         MeshDrawableInfo info;
         GpuRenderableAllocationView allocations;
-        containers::DynamicArray<MeshDrawPhaseContext> contexts{memory::pools::Rendering::GetInstance()};
         containers::DynamicArray<MeshDrawPreparation> preparations{memory::pools::Rendering::GetInstance()};
         containers::DynamicArray<GeometryBatchLease> leases{memory::pools::Rendering::GetInstance()};
         containers::DynamicArray<GpuPrimitivePlacement> primitives{memory::pools::Rendering::GetInstance()};
@@ -238,11 +264,44 @@ namespace vanguard::rendering
             ResidencyWork* work = nullptr;
             u32 generation = 1;
             u32 demandCount = 0;
+            u32 previousSamePath = InvalidMeshResidencyIndex;
             u32 nextSamePath = InvalidMeshResidencyIndex;
+            u32 activeListIndex = InvalidMeshResidencyIndex;
+            u32 retiringListIndex = InvalidMeshResidencyIndex;
             u16 anchorLod = 0xffffu;
             MeshResidencyState state = MeshResidencyState::Invalid;
             bool active = false;
         };
+
+        struct StartCandidate
+        {
+            u32 index = InvalidMeshResidencyIndex;
+            u32 generation = 0;
+            u16 anchorLod = 0xffffu;
+        };
+
+        struct ProgressWorkItem
+        {
+            ResidencyWork* work = nullptr;
+            u32 index = InvalidMeshResidencyIndex;
+            u32 generation = 0;
+            u32 demandCount = 0;
+            MeshResidencyState state = MeshResidencyState::Invalid;
+        };
+
+        struct RetirementCandidate
+        {
+            ResidencyWork* work = nullptr;
+            u32 index = InvalidMeshResidencyIndex;
+            u32 generation = 0;
+        };
+
+        // Batched capture under the mesh lock must remain ownership-free. In
+        // particular, adding ResourceHandle-like RAII state here would reintroduce
+        // nested external owner work during high-cardinality traversal.
+        static_assert(std::is_trivially_copyable_v<StartCandidate>);
+        static_assert(std::is_trivially_copyable_v<ProgressWorkItem>);
+        static_assert(std::is_trivially_copyable_v<RetirementCandidate>);
 
         struct DemandSlot
         {
@@ -253,12 +312,24 @@ namespace vanguard::rendering
 
         explicit Impl(const MeshResidencyConfig& residencyConfig) noexcept
             : residencies(memory::pools::Rendering::GetInstance()), recycledResidencies(memory::pools::Rendering::GetInstance()), residencyByPath(memory::pools::Rendering::GetInstance()),
-              demands(memory::pools::Rendering::GetInstance()), recycledDemands(memory::pools::Rendering::GetInstance()), config(residencyConfig),
+              activeResidencies(memory::pools::Rendering::GetInstance()), retiringResidencies(memory::pools::Rendering::GetInstance()),
+              startScratch(memory::pools::Rendering::GetInstance()), progressScratch(memory::pools::Rendering::GetInstance()),
+              retirementScratch(memory::pools::Rendering::GetInstance()), retirementReadyScratch(memory::pools::Rendering::GetInstance()),
+              retirementDeleteScratch(memory::pools::Rendering::GetInstance()), retirementResourceReleaseScratch(memory::pools::Rendering::GetInstance()),
+              demands(memory::pools::Rendering::GetInstance()), recycledDemands(memory::pools::Rendering::GetInstance()), drawPhases(memory::pools::Rendering::GetInstance()), config(residencyConfig),
               stagedRequests(memory::pools::Rendering::GetInstance())
         {
             residencies.Reserve(config.maximumResidencyRecords);
             recycledResidencies.Reserve(config.maximumResidencyRecords);
             residencyByPath.Reserve(config.maximumResidencyRecords);
+            activeResidencies.Reserve(config.maximumResidencyRecords);
+            retiringResidencies.Reserve(config.maximumResidencyRecords);
+            startScratch.Reserve(config.maximumResidencyRecords);
+            progressScratch.Reserve(config.maximumResidencyRecords);
+            retirementScratch.Reserve(config.maximumResidencyRecords);
+            retirementReadyScratch.Reserve(config.maximumResidencyRecords);
+            retirementDeleteScratch.Reserve(config.maximumResidencyRecords);
+            retirementResourceReleaseScratch.Reserve(config.maximumResidencyRecords);
             demands.Reserve(config.maximumDemands);
             recycledDemands.Reserve(config.maximumDemands);
             stagedRequests.Reserve(config.geometryBatcher.maximumShells + config.geometryBatcher.maximumBins + MaximumDrawablePublications * 3u);
@@ -317,33 +388,80 @@ namespace vanguard::rendering
             return demands.Size() - 1u;
         }
 
-        void RemoveResidency(const u32 index) noexcept
+        void AddActiveResidency(const u32 index) noexcept
+        {
+            ResidencySlot& slot = residencies[index];
+            VG_ASSERT_MSG(slot.activeListIndex == InvalidMeshResidencyIndex, "mesh residency record is already active-indexed");
+            slot.activeListIndex = activeResidencies.Size();
+            activeResidencies.PushBack(index);
+        }
+
+        void RemoveActiveResidency(const u32 index) noexcept
+        {
+            ResidencySlot& slot = residencies[index];
+            if (slot.activeListIndex == InvalidMeshResidencyIndex)
+                return;
+            const u32 listIndex = slot.activeListIndex;
+            const u32 moved = activeResidencies.Back();
+            activeResidencies[listIndex] = moved;
+            activeResidencies.PopBack();
+            slot.activeListIndex = InvalidMeshResidencyIndex;
+            if (listIndex < activeResidencies.Size())
+                residencies[moved].activeListIndex = listIndex;
+        }
+
+        void AddRetiringResidency(const u32 index) noexcept
+        {
+            ResidencySlot& slot = residencies[index];
+            if (slot.retiringListIndex != InvalidMeshResidencyIndex)
+                return;
+            slot.retiringListIndex = retiringResidencies.Size();
+            retiringResidencies.PushBack(index);
+        }
+
+        void RemoveRetiringResidency(const u32 index) noexcept
+        {
+            ResidencySlot& slot = residencies[index];
+            if (slot.retiringListIndex == InvalidMeshResidencyIndex)
+                return;
+            const u32 listIndex = slot.retiringListIndex;
+            const u32 moved = retiringResidencies.Back();
+            retiringResidencies[listIndex] = moved;
+            retiringResidencies.PopBack();
+            slot.retiringListIndex = InvalidMeshResidencyIndex;
+            if (listIndex < retiringResidencies.Size())
+                residencies[moved].retiringListIndex = listIndex;
+        }
+
+        void RemoveResidency(const u32 index, resources::ResourceHandle& releasedResource) noexcept
         {
             ResidencySlot& slot = residencies[index];
             VG_ASSERT_MSG(slot.active && slot.demandCount == 0, "only an unreferenced mesh residency record may be recycled");
             VG_ASSERT_MSG(slot.work == nullptr, "mesh residency work must finish before its record may be recycled");
+            VG_ASSERT_MSG(releasedResource.GetGeneration() == 0, "mesh residency release output must be empty");
             const resources::ResourceId path = slot.resource.GetPath().Id();
             u32 head = InvalidMeshResidencyIndex;
             const bool found = residencyByPath.Find(path, head);
             VG_ASSERT_MSG(found, "active mesh residency record must be reachable from its resource-path lookup");
-            if (head == index)
+            if (slot.previousSamePath == InvalidMeshResidencyIndex)
             {
+                VG_ASSERT_MSG(head == index, "mesh residency path head backlink is inconsistent");
                 if (slot.nextSamePath == InvalidMeshResidencyIndex)
                     static_cast<void>(residencyByPath.Remove(path));
                 else
                     static_cast<void>(residencyByPath.Set(path, slot.nextSamePath));
             }
             else
-            {
-                u32 previous = head;
-                while (previous != InvalidMeshResidencyIndex && residencies[previous].nextSamePath != index)
-                    previous = residencies[previous].nextSamePath;
-                VG_ASSERT_MSG(previous != InvalidMeshResidencyIndex, "active mesh residency record must be linked from its resource-path head");
-                if (previous != InvalidMeshResidencyIndex)
-                    residencies[previous].nextSamePath = slot.nextSamePath;
-            }
-            slot.resource.Reset();
+                residencies[slot.previousSamePath].nextSamePath = slot.nextSamePath;
+            if (slot.nextSamePath != InvalidMeshResidencyIndex)
+                residencies[slot.nextSamePath].previousSamePath = slot.previousSamePath;
+            RemoveRetiringResidency(index);
+            RemoveActiveResidency(index);
+            // Move the strong resource ownership out while the slot is protected, but
+            // let the caller release it only after the mesh lock has been dropped.
+            releasedResource = static_cast<resources::ResourceHandle&&>(slot.resource);
             slot.generation = NextGeneration(slot.generation);
+            slot.previousSamePath = InvalidMeshResidencyIndex;
             slot.nextSamePath = InvalidMeshResidencyIndex;
             slot.anchorLod = 0xffffu;
             slot.state = MeshResidencyState::Invalid;
@@ -356,14 +474,26 @@ namespace vanguard::rendering
         containers::DynamicArray<ResidencySlot> residencies;
         containers::DynamicArray<u32> recycledResidencies;
         containers::HashMap<resources::ResourceId, u32> residencyByPath;
+        containers::DynamicArray<u32> activeResidencies;
+        containers::DynamicArray<u32> retiringResidencies;
+        containers::DynamicArray<StartCandidate> startScratch;
+        containers::DynamicArray<ProgressWorkItem> progressScratch;
+        containers::DynamicArray<RetirementCandidate> retirementScratch;
+        containers::DynamicArray<RetirementCandidate> retirementReadyScratch;
+        containers::DynamicArray<ResidencyWork*> retirementDeleteScratch;
+        containers::DynamicArray<resources::ResourceHandle> retirementResourceReleaseScratch;
         containers::DynamicArray<DemandSlot> demands;
         containers::DynamicArray<u32> recycledDemands;
+        // One immutable renderer-generation copy. Worlds/components never mirror it.
+        containers::DynamicArray<MeshDrawPhaseContext> drawPhases;
         MeshResidencyConfig config;
         u32 residencyCount = 0;
         u32 demandCount = 0;
         u64 demandsIssued = 0;
         u64 demandsCoalesced = 0;
         u64 demandsReleased = 0;
+        u64 progressRecordVisits = 0;
+        u64 retirementRecordVisits = 0;
         u64 publicationSerial = 0;
         RetainedMeshDrawable* firstDrawable = nullptr;
         RetainedMeshDrawable* lastDrawable = nullptr;
@@ -466,26 +596,33 @@ namespace vanguard::rendering
                       "mesh residency manager must be shut down before destruction");
     }
 
-    bool MeshResidencyManager::Initialize(GpuSceneDefinitions& definitions, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases, const MeshResidencyConfig& config,
+    bool MeshResidencyManager::Initialize(GpuSceneDefinitions& definitions, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases,
+                                          const containers::ArraySpan<const MeshDrawPhaseContext> drawPhases, const MeshResidencyConfig& config,
                                           MeshResidencyFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (!materials.IsInitialized() || !phases.IsSealed())
             return Fail(failure, MeshResidencyFailureCode::InvalidDependency, "mesh renderable topology requires initialized material residency and a sealed render phase registry");
+        if (!ValidDrawPhaseContexts(phases, drawPhases))
+            return Fail(failure, MeshResidencyFailureCode::InvalidConfiguration, "mesh renderable topology requires valid renderer-owned draw phase contexts");
         if (!Initialize(definitions, config, failure))
             return false;
+        m_impl->drawPhases.Reserve(drawPhases.Size());
+        for (const MeshDrawPhaseContext& context : drawPhases)
+            m_impl->drawPhases.PushBack(context);
         m_materials = &materials;
         m_phases = &phases;
         return true;
     }
 
-    bool MeshResidencyManager::Initialize(GpuSceneRuntime& runtime, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases, const MeshResidencyConfig& config,
+    bool MeshResidencyManager::Initialize(GpuSceneRuntime& runtime, MaterialResidencyRuntime& materials, const RenderPhaseRegistry& phases,
+                                          const containers::ArraySpan<const MeshDrawPhaseContext> drawPhases, const MeshResidencyConfig& config,
                                           MeshResidencyFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (!runtime.IsInitialized())
             return Fail(failure, MeshResidencyFailureCode::InvalidDependency, "drawable meshes require the shared GPU Scene runtime");
-        if (!Initialize(runtime.GetDefinitions(), materials, phases, config, failure))
+        if (!Initialize(runtime.GetDefinitions(), materials, phases, drawPhases, config, failure))
             return false;
         m_runtime = &runtime;
         return true;
@@ -729,22 +866,55 @@ namespace vanguard::rendering
             return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "mesh residency demand references invalid or empty mesh metadata");
         const u16 anchorLod = static_cast<u16>(mesh->GetMetadata().GetLods().Size() - 1u);
 
-        concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-        u32 residencyIndex = InvalidMeshResidencyIndex;
-        u32 candidate = InvalidMeshResidencyIndex;
-        if (m_impl->residencyByPath.Find(resource.GetPath().Id(), candidate))
+        const auto findCoalescedResidency = [&]() noexcept
         {
+            u32 candidate = InvalidMeshResidencyIndex;
+            if (!m_impl->residencyByPath.Find(resource.GetPath().Id(), candidate))
+                return InvalidMeshResidencyIndex;
             while (candidate != InvalidMeshResidencyIndex)
             {
                 const Impl::ResidencySlot& slot = m_impl->residencies[candidate];
                 if (slot.active && slot.state != MeshResidencyState::Failed && slot.state != MeshResidencyState::Retiring && slot.resource.GetGeneration() == resource.GetGeneration())
-                {
-                    residencyIndex = candidate;
-                    break;
-                }
+                    return candidate;
                 candidate = slot.nextSamePath;
             }
+            return InvalidMeshResidencyIndex;
+        };
+
+        // Fast coalescing never needs another strong resource reference. Only a fresh
+        // residency retains one, and that ResourceRegistry operation happens outside
+        // the mesh lock before the exact admission state is revalidated.
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
+            const u32 residencyIndex = findCoalescedResidency();
+            if (residencyIndex != InvalidMeshResidencyIndex)
+            {
+                if (m_impl->demandCount >= m_impl->config.maximumDemands)
+                    return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency demand capacity is exhausted");
+                Impl::ResidencySlot& residency = m_impl->residencies[residencyIndex];
+                if (residency.demandCount == 0xffffffffu)
+                    return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency demand reference count overflowed");
+                const u32 demandIndex = m_impl->AllocateDemand();
+                Impl::DemandSlot& demandSlot = m_impl->demands[demandIndex];
+                demandSlot.residency = m_impl->ResidencyId(residencyIndex);
+                demandSlot.active = true;
+                ++residency.demandCount;
+                ++m_impl->demandCount;
+                ++m_impl->demandsIssued;
+                ++m_impl->demandsCoalesced;
+                demand = MeshDemandHandle(*this, m_impl->DemandId(demandIndex), demandSlot.residency);
+                return true;
+            }
+            if (m_impl->residencyCount >= m_impl->config.maximumResidencyRecords)
+                return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency record capacity is exhausted");
+            if (m_impl->demandCount >= m_impl->config.maximumDemands)
+                return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency demand capacity is exhausted");
         }
+
+        resources::ResourceHandle retainedResource = resource;
+        resources::ResourceHandle releasedResource;
+        concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
+        u32 residencyIndex = findCoalescedResidency();
         const bool coalesced = residencyIndex != InvalidMeshResidencyIndex;
         if (!coalesced && m_impl->residencyCount >= m_impl->config.maximumResidencyRecords)
             return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency record capacity is exhausted");
@@ -755,14 +925,19 @@ namespace vanguard::rendering
         {
             residencyIndex = m_impl->AllocateResidency();
             Impl::ResidencySlot& slot = m_impl->residencies[residencyIndex];
-            slot.resource = resource;
+            VG_ASSERT_MSG(slot.resource.GetGeneration() == 0, "recycled mesh residency slot retained resource ownership");
+            slot.resource = static_cast<resources::ResourceHandle&&>(retainedResource);
             slot.demandCount = 0;
             u32 previousHead = InvalidMeshResidencyIndex;
             static_cast<void>(m_impl->residencyByPath.Find(resource.GetPath().Id(), previousHead));
+            slot.previousSamePath = InvalidMeshResidencyIndex;
             slot.nextSamePath = previousHead;
+            if (previousHead != InvalidMeshResidencyIndex)
+                m_impl->residencies[previousHead].previousSamePath = residencyIndex;
             slot.anchorLod = anchorLod;
             slot.state = MeshResidencyState::MetadataRetained;
             slot.active = true;
+            m_impl->AddActiveResidency(residencyIndex);
             const bool indexed = previousHead == InvalidMeshResidencyIndex ? m_impl->residencyByPath.Insert(resource.GetPath().Id(), residencyIndex).IsSuccessful()
                                                                            : m_impl->residencyByPath.Set(resource.GetPath().Id(), residencyIndex).IsSuccessful();
             VG_ASSERT_MSG(indexed, "reserved mesh residency lookup capacity must accept a fresh record");
@@ -773,7 +948,7 @@ namespace vanguard::rendering
         if (residency.demandCount == 0xffffffffu)
         {
             if (!coalesced)
-                m_impl->RemoveResidency(residencyIndex);
+                m_impl->RemoveResidency(residencyIndex, releasedResource);
             return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency demand reference count overflowed");
         }
         const u32 demandIndex = m_impl->AllocateDemand();
@@ -809,6 +984,7 @@ namespace vanguard::rendering
     {
         if (m_impl == nullptr)
             return;
+        resources::ResourceHandle releasedResource;
         concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
         Impl::DemandSlot* const demandSlot = m_impl->Find(demand);
         if (demandSlot == nullptr)
@@ -826,7 +1002,7 @@ namespace vanguard::rendering
             return;
         --residency->demandCount;
         if (residency->demandCount == 0 && residency->state == MeshResidencyState::MetadataRetained)
-            m_impl->RemoveResidency(residencyId.index);
+            m_impl->RemoveResidency(residencyId.index, releasedResource);
     }
 
     bool MeshResidencyManager::Tick(MeshResidencyFailure* const failure) noexcept
@@ -890,89 +1066,126 @@ namespace vanguard::rendering
             return false;
         };
 
-        u32 slotCount = 0;
+        m_impl->startScratch.Clear();
+        m_impl->progressScratch.Clear();
+        struct TickScratchReset final
+        {
+            Impl* impl = nullptr;
+            ~TickScratchReset()
+            {
+                impl->startScratch.Clear();
+                impl->progressScratch.Clear();
+            }
+        } scratchReset{m_impl};
+
         {
             concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-            slotCount = m_impl->residencies.Size();
+            m_impl->progressRecordVisits += m_impl->activeResidencies.Size();
+            for (const u32 index : m_impl->activeResidencies)
+            {
+                const Impl::ResidencySlot& slot = m_impl->residencies[index];
+                if (slot.state == MeshResidencyState::MetadataRetained && slot.demandCount != 0 && slot.work == nullptr)
+                    m_impl->startScratch.PushBack({index, slot.generation, slot.anchorLod});
+            }
         }
 
         // Start each exact resource generation once. RequestMesh remains cheap and thread-safe; all page-source and
         // uploader mutation stays serialized here on the renderer/main thread.
-        for (u32 index = 0; index < slotCount; ++index)
+        for (const Impl::StartCandidate& candidate : m_impl->startScratch)
         {
-            Impl::ResidencyWork* work = nullptr;
-            resources::ResourceHandle resource;
-            u16 anchorLod = 0xffffu;
+            Impl::ResidencyWork* const work = AllocateObject<Impl::ResidencyWork>();
+            if (work == nullptr)
+                return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency anchor-LOD work allocation failed");
+            bool accepted = false;
             {
                 concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-                Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (!slot.active || slot.state != MeshResidencyState::MetadataRetained || slot.demandCount == 0)
-                    continue;
-                work = AllocateObject<Impl::ResidencyWork>();
-                if (work == nullptr)
-                    return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "mesh residency anchor-LOD work allocation failed");
-                slot.work = work;
-                slot.state = MeshResidencyState::AnchorLodLoading;
-                resource = slot.resource;
-                anchorLod = slot.anchorLod;
+                Impl::ResidencySlot& slot = m_impl->residencies[candidate.index];
+                if (slot.active && slot.generation == candidate.generation && slot.state == MeshResidencyState::MetadataRetained &&
+                    slot.demandCount != 0 && slot.work == nullptr)
+                {
+                    slot.work = work;
+                    slot.state = MeshResidencyState::AnchorLodLoading;
+                    accepted = true;
+                }
+            }
+            if (!accepted)
+            {
+                DeleteObject(work);
+                continue;
             }
 
+            // Installing work transitions the slot out of MetadataRetained, so a
+            // concurrent demand release can no longer recycle it. The pre-reserved
+            // slot storage and exact work claim keep this owning handle stable while
+            // the ResourceRegistry/uploader work runs without the mesh lock.
+            const resources::ResourceHandle& resource = m_impl->residencies[candidate.index].resource;
             MeshLodGeometryUploadFailure uploadFailure;
             MeshLodGeometryUploadRequestId request;
-            if (!m_lodUploader.Request(resource, anchorLod, request, io::eAsyncPriority_Streaming, &uploadFailure))
+            if (!m_lodUploader.Request(resource, candidate.anchorLod, request, io::eAsyncPriority_Streaming, &uploadFailure))
             {
                 concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-                Impl::ResidencySlot& slot = m_impl->residencies[index];
-                VG_ASSERT_MSG(slot.active && slot.work == work, "anchor-LOD request record changed during serialized issue");
-                work->uploadFailure = uploadFailure;
-                slot.state = MeshResidencyState::Failed;
+                Impl::ResidencySlot& slot = m_impl->residencies[candidate.index];
+                if (slot.active && slot.generation == candidate.generation && slot.work == work)
+                {
+                    work->uploadFailure = uploadFailure;
+                    slot.state = MeshResidencyState::Failed;
+                }
             }
             else
             {
                 work->uploadRequest = request;
             }
         }
+        m_impl->startScratch.Clear();
 
         MeshLodGeometryUploadFailure tickFailure;
         if (!m_lodUploader.Tick(&tickFailure))
             return failLodUpload(tickFailure, "mesh residency anchor-LOD uploader progress failed");
 
-        const auto removeUnreferenced = [this](const u32 index, Impl::ResidencyWork* const expectedWork) noexcept
+        const auto removeUnreferenced = [this](const u32 index, const u32 generation, Impl::ResidencyWork* const expectedWork) noexcept
         {
             Impl::ResidencyWork* removed = nullptr;
+            resources::ResourceHandle releasedResource;
             {
                 concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                 Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (!slot.active || slot.demandCount != 0 || slot.work != expectedWork)
+                if (!slot.active || slot.generation != generation || slot.demandCount != 0 || slot.work != expectedWork)
                     return;
                 removed = slot.work;
                 slot.work = nullptr;
-                m_impl->RemoveResidency(index);
+                m_impl->RemoveResidency(index, releasedResource);
             }
             DeleteObject(removed);
+            releasedResource.Reset();
         };
 
-        for (u32 index = 0; index < slotCount; ++index)
         {
-            Impl::ResidencyWork* work = nullptr;
-            resources::ResourceHandle resource;
-            MeshResidencyState residencyState = MeshResidencyState::Invalid;
-            u32 demandCount = 0;
+            concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
+            m_impl->progressRecordVisits += m_impl->activeResidencies.Size();
+            for (const u32 index : m_impl->activeResidencies)
             {
-                concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                 const Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (!slot.active || slot.work == nullptr)
-                    continue;
-                work = slot.work;
-                resource = slot.resource;
-                residencyState = slot.state;
-                demandCount = slot.demandCount;
+                if (slot.work != nullptr)
+                    m_impl->progressScratch.PushBack({slot.work, index, slot.generation, slot.demandCount, slot.state});
             }
-            const auto poison = [this, index, work]() noexcept
+        }
+
+        for (const Impl::ProgressWorkItem& snapshot : m_impl->progressScratch)
+        {
+            const u32 index = snapshot.index;
+            const u32 residencyGeneration = snapshot.generation;
+            Impl::ResidencyWork* const work = snapshot.work;
+            // Work-bearing records cannot be recycled by ReleaseDemand. Tick is the
+            // sole owner that clears work, so the reserved slot's strong handle is a
+            // stable borrowed reference for this serialized progress iteration.
+            const resources::ResourceHandle& resource = m_impl->residencies[index].resource;
+            const MeshResidencyState residencyState = snapshot.state;
+            const u32 demandCount = snapshot.demandCount;
+            const auto poison = [this, index, residencyGeneration, work]() noexcept
             {
                 concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                 Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (slot.active && slot.work == work)
+                if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                     slot.state = MeshResidencyState::Failed;
             };
 
@@ -982,7 +1195,7 @@ namespace vanguard::rendering
                     continue;
                 if (!work->geometry.HasOwnership() && !work->definitions.HasOwnership() && !work->renderable.IsValid())
                 {
-                    removeUnreferenced(index, work);
+                    removeUnreferenced(index, residencyGeneration, work);
                     continue;
                 }
             }
@@ -996,7 +1209,7 @@ namespace vanguard::rendering
                         return failDefinitions(definitionFailure, "mesh residency could not acquire anchor-LOD geometry definitions");
                     concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                     Impl::ResidencySlot& slot = m_impl->residencies[index];
-                    if (slot.active && slot.work == work)
+                    if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                         slot.state = MeshResidencyState::AnchorLodDefinitionsSubmitted;
                     continue;
                 }
@@ -1037,7 +1250,7 @@ namespace vanguard::rendering
                     }
                     concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                     Impl::ResidencySlot& slot = m_impl->residencies[index];
-                    if (slot.active && slot.work == work)
+                    if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                         slot.state = MeshResidencyState::MaterialsResolving;
                     continue;
                 }
@@ -1110,7 +1323,8 @@ namespace vanguard::rendering
                         {
                             const RenderPhaseKey phaseKey{technique.name};
                             const RenderPhaseId phase = m_phases->Find(phaseKey);
-                            if (!phase.IsValid())
+                            const MeshDrawPhaseContext* const drawContext = FindDrawPhaseContext(m_impl->drawPhases, phaseKey);
+                            if (!phase.IsValid() || drawContext == nullptr)
                                 continue;
                             const resources::ResourceHandle* const pipelineResource = FindDependency(*material, technique.pipeline);
                             const auto* const pipeline = pipelineResource != nullptr ? static_cast<const pipelines::PipelineResourceObject*>(pipelineResource->Get()) : nullptr;
@@ -1119,8 +1333,15 @@ namespace vanguard::rendering
                                 poison();
                                 return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "mesh render phase technique requires a retained graphics pipeline");
                             }
+                            crypto::Digest256 concretePipelineKey;
+                            if (pipelines::CalculateConcretePipelineKey(pipeline->GetFile(), &drawContext->attachments, concretePipelineKey) != pipelines::Result::Success)
+                            {
+                                poison();
+                                return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology,
+                                            "mesh render phase pipeline is incompatible with the selected renderer attachments");
+                            }
                             const auto& graphics = pipeline->GetFile().GetGraphics();
-                            const bool validSurfaceState = ValidCameraSurfaceState(phaseKey, graphics);
+                            const bool validSurfaceState = ValidCameraSurfaceState(phaseKey, graphics, drawContext->attachments);
                             if (!validSurfaceState)
                             {
                                 poison();
@@ -1149,7 +1370,7 @@ namespace vanguard::rendering
                         if (phaseCount == 0)
                         {
                             poison();
-                            return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "mesh material exposes no technique matching a registered render phase");
+                            return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "mesh material exposes no technique supported by the selected renderer");
                         }
                         GpuPrimitiveFlags primitiveFlags = GpuPrimitiveFlags::Indexed;
                         if ((static_cast<u16>(authoredSubmesh.flags) & static_cast<u16>(meshes::SubmeshFlags::TwoSided)) != 0)
@@ -1158,11 +1379,7 @@ namespace vanguard::rendering
                     }
 
                     GpuRenderableDefinition definition;
-                    MeshResidencyHandle residency;
-                    {
-                        concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-                        residency = m_impl->ResidencyId(index);
-                    }
+                    const MeshResidencyHandle residency{index, residencyGeneration};
                     definition.key = BuildRenderableKey(metadata, residency, resource.GetGeneration(), work->materialHandles, work->lods, work->primitives, work->phases);
                     definition.flags = metadata.GetKind() == meshes::MeshKind::Skinned ? GpuRenderableFlags::Skinned : GpuRenderableFlags::None;
                     definition.lods = work->lods;
@@ -1179,7 +1396,7 @@ namespace vanguard::rendering
                     work->renderable = renderable;
                     concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                     Impl::ResidencySlot& slot = m_impl->residencies[index];
-                    if (slot.active && slot.work == work)
+                    if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                         slot.state = MeshResidencyState::RenderableTopologySubmitted;
                     continue;
                 }
@@ -1202,7 +1419,7 @@ namespace vanguard::rendering
                     {
                         concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                         Impl::ResidencySlot& slot = m_impl->residencies[index];
-                        if (slot.active && slot.work == work)
+                        if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                             slot.state = MeshResidencyState::AnchorLodUploadSubmitted;
                         continue;
                     }
@@ -1216,46 +1433,50 @@ namespace vanguard::rendering
                     work->uploadRequest = {};
                     bool remove = false;
                     bool retry = false;
+                    resources::ResourceHandle releasedResource;
                     {
                         concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                         Impl::ResidencySlot& slot = m_impl->residencies[index];
-                        if (slot.active && slot.work == work)
+                        if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                         {
                             remove = slot.demandCount == 0;
                             retry = !remove && residencyState == MeshResidencyState::Cancelling;
                             if (remove || retry)
                                 slot.work = nullptr;
                             if (remove)
-                                m_impl->RemoveResidency(index);
+                                m_impl->RemoveResidency(index, releasedResource);
                             else
                                 slot.state = retry ? MeshResidencyState::MetadataRetained : MeshResidencyState::Failed;
                         }
                     }
                     if (remove || retry)
                         DeleteObject(work);
+                    releasedResource.Reset();
                     continue;
                 }
                 else if (uploadState == MeshLodGeometryUploadState::Invalid)
                 {
                     bool remove = false;
                     bool retry = false;
+                    resources::ResourceHandle releasedResource;
                     {
                         concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                         Impl::ResidencySlot& slot = m_impl->residencies[index];
-                        if (slot.active && slot.work == work)
+                        if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                         {
                             remove = slot.demandCount == 0;
                             retry = !remove && residencyState == MeshResidencyState::Cancelling;
                             if (remove || retry)
                                 slot.work = nullptr;
                             if (remove)
-                                m_impl->RemoveResidency(index);
+                                m_impl->RemoveResidency(index, releasedResource);
                             else if (retry)
                                 slot.state = MeshResidencyState::MetadataRetained;
                         }
                     }
                     if (remove || retry)
                         DeleteObject(work);
+                    releasedResource.Reset();
                     continue;
                 }
                 else if (demandCount == 0 && residencyState != MeshResidencyState::Cancelling)
@@ -1266,13 +1487,13 @@ namespace vanguard::rendering
                     if (m_lodUploader.GetState(work->uploadRequest) == MeshLodGeometryUploadState::Invalid)
                     {
                         work->uploadRequest = {};
-                        removeUnreferenced(index, work);
+                        removeUnreferenced(index, residencyGeneration, work);
                     }
                     else
                     {
                         concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                         Impl::ResidencySlot& slot = m_impl->residencies[index];
-                        if (slot.active && slot.work == work)
+                        if (slot.active && slot.generation == residencyGeneration && slot.work == work)
                             slot.state = MeshResidencyState::Cancelling;
                     }
                     continue;
@@ -1294,10 +1515,11 @@ namespace vanguard::rendering
             work->retiringAllocations.Reserve(ownedGeometry.geometries.Size());
             for (const GeometryPlacement placement : ownedGeometry.geometries)
                 work->retiringAllocations.PushBack(placement.allocation);
+            bool cancellationClaimed = false;
             {
                 concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                 Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (!slot.active || slot.work != work)
+                if (!slot.active || slot.generation != residencyGeneration || slot.work != work)
                     continue;
                 if (slot.demandCount != 0)
                 {
@@ -1305,33 +1527,62 @@ namespace vanguard::rendering
                                  work->definitions.HasOwnership() ? MeshResidencyState::AnchorLodDefinitionsSubmitted : MeshResidencyState::AnchorLodUploadSubmitted;
                     continue;
                 }
-                // Cancellation is rare and allocator retirement is bounded metadata work. Holding the record lock
-                // here closes the only race in which a new demand could resurrect geometry while it is being retired.
-                if (work->renderable.IsValid())
-                {
-                    GpuSceneDefinitionFailure definitionFailure;
-                    if (!m_definitions->Release(work->renderable, &definitionFailure))
-                        return failRenderable(definitionFailure, "mesh residency could not release cancelled renderable topology");
-                    work->renderable = {};
-                }
-                work->materialDemands.Clear();
-                work->materialHandles.Clear();
-                work->lods.Clear();
-                work->primitives.Clear();
-                work->phases.Clear();
-                if (work->definitions.HasOwnership())
-                {
-                    MeshLodDefinitionFailure definitionFailure;
-                    if (!AbortPendingMeshLodDefinitions(work->definitions, *m_definitions, m_geometryAllocator, &definitionFailure))
-                        return failDefinitions(definitionFailure, "mesh residency could not retire cancelled anchor-LOD definitions");
-                }
-                else
-                {
-                    GeometryAllocatorFailure allocatorFailure;
-                    if (!AbortPendingMeshLodGeometry(work->geometry, m_geometryAllocator, &allocatorFailure))
-                        return failAllocator(allocatorFailure, "mesh residency could not retire cancelled anchor-LOD geometry");
-                }
                 slot.state = MeshResidencyState::Retiring;
+                cancellationClaimed = true;
+            }
+            if (!cancellationClaimed)
+                continue;
+            const auto restoreCancellationClaim = [this, index, residencyGeneration, work]() noexcept
+            {
+                concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
+                Impl::ResidencySlot& slot = m_impl->residencies[index];
+                if (!slot.active || slot.generation != residencyGeneration || slot.work != work || slot.state != MeshResidencyState::Retiring)
+                    return;
+                slot.state = work->renderable.IsValid() ? MeshResidencyState::RenderableTopologySubmitted :
+                             work->definitions.HasOwnership() ? MeshResidencyState::AnchorLodDefinitionsSubmitted :
+                             work->geometry.HasOwnership() ? MeshResidencyState::AnchorLodUploadSubmitted : MeshResidencyState::Failed;
+            };
+            if (work->renderable.IsValid())
+            {
+                GpuSceneDefinitionFailure definitionFailure;
+                if (!m_definitions->Release(work->renderable, &definitionFailure))
+                {
+                    restoreCancellationClaim();
+                    return failRenderable(definitionFailure, "mesh residency could not release cancelled renderable topology");
+                }
+                work->renderable = {};
+            }
+            work->materialDemands.Clear();
+            work->materialHandles.Clear();
+            work->lods.Clear();
+            work->primitives.Clear();
+            work->phases.Clear();
+            if (work->definitions.HasOwnership())
+            {
+                MeshLodDefinitionFailure definitionFailure;
+                if (!AbortPendingMeshLodDefinitions(work->definitions, *m_definitions, m_geometryAllocator, &definitionFailure))
+                {
+                    restoreCancellationClaim();
+                    return failDefinitions(definitionFailure, "mesh residency could not retire cancelled anchor-LOD definitions");
+                }
+            }
+            else
+            {
+                GeometryAllocatorFailure allocatorFailure;
+                if (!AbortPendingMeshLodGeometry(work->geometry, m_geometryAllocator, &allocatorFailure))
+                {
+                    restoreCancellationClaim();
+                    return failAllocator(allocatorFailure, "mesh residency could not retire cancelled anchor-LOD geometry");
+                }
+            }
+            {
+                concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
+                Impl::ResidencySlot& slot = m_impl->residencies[index];
+                if (!slot.active || slot.generation != residencyGeneration || slot.work != work || slot.state != MeshResidencyState::Retiring)
+                    continue;
+                VG_ASSERT_MSG(slot.demandCount == 0, "mesh residency retirement claim admitted an additional demand");
+                m_impl->AddRetiringResidency(index);
+                m_impl->RemoveActiveResidency(index);
             }
         }
         return true;
@@ -1377,38 +1628,48 @@ namespace vanguard::rendering
             return reclaimed;
         }
 
-        u32 slotCount = 0;
+        m_impl->retirementScratch.Clear();
+        m_impl->retirementReadyScratch.Clear();
+        m_impl->retirementDeleteScratch.Clear();
+        m_impl->retirementResourceReleaseScratch.Clear();
         {
             concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-            slotCount = m_impl->residencies.Size();
-        }
-        for (u32 index = 0; index < slotCount; ++index)
-        {
-            Impl::ResidencyWork* work = nullptr;
+            m_impl->retirementRecordVisits += m_impl->retiringResidencies.Size();
+            for (const u32 index : m_impl->retiringResidencies)
             {
-                concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
                 const Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (!slot.active || slot.state != MeshResidencyState::Retiring || slot.demandCount != 0)
-                    continue;
-                work = slot.work;
+                if (slot.active && slot.state == MeshResidencyState::Retiring && slot.demandCount == 0 && slot.work != nullptr)
+                    m_impl->retirementScratch.PushBack({slot.work, index, slot.generation});
             }
-            if (work == nullptr)
-                continue;
+        }
+        for (const Impl::RetirementCandidate& snapshot : m_impl->retirementScratch)
+        {
             bool complete = true;
-            for (const GeometryAllocationId allocation : work->retiringAllocations)
+            for (const GeometryAllocationId allocation : snapshot.work->retiringAllocations)
                 complete = complete && m_geometryAllocator.GetState(allocation) == GeometryAllocationState::Invalid;
-            if (!complete)
-                continue;
+            if (complete)
+                m_impl->retirementReadyScratch.PushBack(snapshot);
+        }
+        {
+            concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
+            for (const Impl::RetirementCandidate& snapshot : m_impl->retirementReadyScratch)
             {
-                concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
-                Impl::ResidencySlot& slot = m_impl->residencies[index];
-                if (!slot.active || slot.state != MeshResidencyState::Retiring || slot.demandCount != 0 || slot.work != work)
+                Impl::ResidencySlot& slot = m_impl->residencies[snapshot.index];
+                if (!slot.active || slot.generation != snapshot.generation || slot.state != MeshResidencyState::Retiring ||
+                    slot.demandCount != 0 || slot.work != snapshot.work)
                     continue;
                 slot.work = nullptr;
-                m_impl->RemoveResidency(index);
+                m_impl->retirementResourceReleaseScratch.PushBack({});
+                m_impl->RemoveResidency(snapshot.index, m_impl->retirementResourceReleaseScratch.Back());
+                m_impl->retirementDeleteScratch.PushBack(snapshot.work);
             }
-            DeleteObject(work);
         }
+        for (Impl::ResidencyWork* const work : m_impl->retirementDeleteScratch)
+            DeleteObject(work);
+        m_impl->retirementResourceReleaseScratch.Clear();
+        m_impl->retirementScratch.Clear();
+        m_impl->retirementReadyScratch.Clear();
+        m_impl->retirementDeleteScratch.Clear();
         return reclaimed;
     }
 
@@ -1453,7 +1714,7 @@ namespace vanguard::rendering
             return Fail(failure, MeshResidencyFailureCode::WrongThread, "mesh draw preparation must run on the main thread");
         if (output.mesh.IsValid() || output.normal.IsValid() || output.mirrored.IsValid())
             return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "mesh draw preparation output still owns a request");
-        resources::ResourceHandle resource;
+        const resources::ResourceHandle* resource = nullptr;
         Impl::ResidencyWork* work = nullptr;
         u16 anchorLod = 0;
         {
@@ -1465,11 +1726,11 @@ namespace vanguard::rendering
                 return Fail(failure, MeshResidencyFailureCode::StaleDemand, "mesh draw preparation demand is stale");
             if (slot->state != MeshResidencyState::RenderableTopologySubmitted)
                 return Fail(failure, MeshResidencyFailureCode::DrawPreparationNotReady, "mesh topology is not ready for draw preparation");
-            resource = slot->resource;
+            resource = &slot->resource;
             work = slot->work;
             anchorLod = slot->anchorLod;
         }
-        const auto& mesh = static_cast<const meshes::MeshResourceObject*>(resource.Get())->GetMetadata();
+        const auto& mesh = static_cast<const meshes::MeshResourceObject*>(resource->Get())->GetMetadata();
         const auto& lod = mesh.GetLods()[anchorLod];
         if (sourceSubmesh < lod.firstSubmesh || sourceSubmesh - lod.firstSubmesh >= lod.submeshCount)
             return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "mesh draw preparation requires an uploaded anchor-LOD primitive");
@@ -1496,7 +1757,7 @@ namespace vanguard::rendering
             return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "anchor geometry is not in authored LOD order");
         const u32 geometry = uploaded.submeshes[localSubmesh].geometry;
         MeshDrawPreparation prepared;
-        const bool meshRequested = RequestMesh(resource, prepared.mesh, failure);
+        const bool meshRequested = RequestMesh(*resource, prepared.mesh, failure);
         if (!meshRequested)
             return false;
         const auto& submesh = mesh.GetSubmeshes()[sourceSubmesh];
@@ -1591,18 +1852,18 @@ namespace vanguard::rendering
         return m_geometryBatcher.Acquire(preparation, *m_materials, output);
     }
 
-    bool MeshResidencyManager::RequestDrawable(const MeshDemandHandle& demand, const containers::ArraySpan<const MeshDrawPhaseContext> phases,
-                                                MeshDrawableBinding& output, MeshResidencyFailure* const failure) noexcept
+    bool MeshResidencyManager::RequestDrawable(const MeshDemandHandle& demand, MeshDrawableBinding& output,
+                                                MeshResidencyFailure* const failure) noexcept
     {
         ClearFailure(failure);
         if (m_impl == nullptr || m_runtime == nullptr)
             return Fail(failure, MeshResidencyFailureCode::NotInitialized, "drawable mesh requests require shared publication ownership");
         if (!concurrency::IsMainThread())
             return Fail(failure, MeshResidencyFailureCode::WrongThread, "drawable mesh preparation must run on the main thread");
-        if (output.m_drawable != nullptr || phases.Empty() || phases.Data() == nullptr || phases.Size() > MaximumRenderPhases)
-            return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "drawable mesh request requires phase contexts and empty output");
+        if (output.m_drawable != nullptr || m_impl->drawPhases.Empty())
+            return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "drawable mesh request requires renderer draw policy and empty output");
         Impl::ResidencyWork* work = nullptr;
-        resources::ResourceHandle resource;
+        const resources::ResourceHandle* resource = nullptr;
         u16 anchor = 0;
         {
             concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
@@ -1612,42 +1873,14 @@ namespace vanguard::rendering
             if (slot->state != MeshResidencyState::RenderableTopologySubmitted)
                 return Fail(failure, MeshResidencyFailureCode::DrawPreparationNotReady, "drawable mesh topology is not ready");
             work = slot->work;
-            resource = slot->resource;
+            resource = &slot->resource;
             anchor = slot->anchorLod;
-        }
-        for (u32 index = 0; index < phases.Size(); ++index)
-        {
-            if (!m_phases->Find(phases[index].phase).IsValid() || phases[index].attachments.colorCount > pipelines::MaximumColorAttachments)
-                return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "drawable phase context is invalid");
-            for (u32 previous = 0; previous < index; ++previous)
-                if (phases[previous].phase == phases[index].phase)
-                    return Fail(failure, MeshResidencyFailureCode::InvalidArgument, "drawable phase contexts contain a duplicate");
         }
         if (work->drawable != nullptr)
         {
             auto* drawable = work->drawable;
             if (drawable->references == 0 || drawable->state == MeshDrawableState::Withdrawing || drawable->state == MeshDrawableState::Retiring)
                 return Fail(failure, MeshResidencyFailureCode::DrawPreparationNotReady, "previous drawable closure is withdrawing");
-            bool compatible = drawable->contexts.Size() == phases.Size();
-            for (const auto& expected : drawable->contexts)
-            {
-                const pipelines::AttachmentSignature* actual = nullptr;
-                for (const auto& phase : phases)
-                    if (phase.phase == expected.phase)
-                        actual = &phase.attachments;
-                if (actual == nullptr)
-                {
-                    compatible = false;
-                    continue;
-                }
-                const auto& wanted = expected.attachments;
-                compatible &= wanted.colorCount == actual->colorCount && wanted.depthStencilFormat == actual->depthStencilFormat &&
-                              wanted.depthStencilClass == actual->depthStencilClass && wanted.sampleCount == actual->sampleCount;
-                for (u32 color = 0; color < wanted.colorCount; ++color)
-                    compatible &= wanted.colors[color].format == actual->colors[color].format && wanted.colors[color].numericClass == actual->colors[color].numericClass;
-            }
-            if (!compatible)
-                return Fail(failure, MeshResidencyFailureCode::IncompatibleDrawContext, "one renderable cannot publish incompatible attachment contexts concurrently");
             if (drawable->references == 0xffffffffu)
                 return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "drawable reference count is exhausted");
             ++drawable->references;
@@ -1675,16 +1908,13 @@ namespace vanguard::rendering
         if (drawable == nullptr)
             return Fail(failure, MeshResidencyFailureCode::CapacityExceeded, "drawable closure allocation failed");
         const auto rollback = [drawable]() noexcept { DeleteObject(drawable); return false; };
-        if (!RequestMesh(resource, drawable->demand, failure))
+        if (!RequestMesh(*resource, drawable->demand, failure))
             return rollback();
         if (!m_definitions->GetRenderableAllocations(work->renderable, drawable->allocations))
         {
             static_cast<void>(Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "drawable lost retained GPU Scene allocations"));
             return rollback();
         }
-        drawable->contexts.Reserve(phases.Size());
-        for (const auto& phase : phases)
-            drawable->contexts.PushBack(phase);
         drawable->preparations.Resize(memberCount);
         drawable->leases.Resize(memberCount);
         drawable->primitives.Resize(lod.primitiveCount);
@@ -1716,16 +1946,13 @@ namespace vanguard::rendering
                     static_cast<void>(Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "drawable topology contains a stale phase"));
                     return rollback();
                 }
-                const pipelines::AttachmentSignature* attachments = nullptr;
-                for (const auto& context : phases)
-                    if (context.phase == phase.key)
-                        attachments = &context.attachments;
-                if (attachments == nullptr)
+                const MeshDrawPhaseContext* const drawContext = FindDrawPhaseContext(m_impl->drawPhases, phase.key);
+                if (drawContext == nullptr)
                 {
                     static_cast<void>(Fail(failure, MeshResidencyFailureCode::InvalidArgument, "drawable request is missing a required anchor phase context"));
                     return rollback();
                 }
-                if (!PrepareDraw(demand, source, phase.key, *attachments, drawable->preparations[member++], failure))
+                if (!PrepareDraw(demand, source, phase.key, drawContext->attachments, drawable->preparations[member++], failure))
                     return rollback();
             }
         }
@@ -1868,9 +2095,10 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool MeshResidencyManager::StageGpuSceneContribution(MeshResidencyFailure* const failure) noexcept
+    bool MeshResidencyManager::StageGpuSceneContribution(bool& staged, MeshResidencyFailure* const failure) noexcept
     {
         ClearFailure(failure);
+        staged = false;
         if (m_impl == nullptr || m_runtime == nullptr)
             return Fail(failure, MeshResidencyFailureCode::NotInitialized, "drawable publication requires the shared GPU Scene runtime");
         if (!concurrency::IsMainThread())
@@ -2011,6 +2239,7 @@ namespace vanguard::rendering
             stagedDrawable->staged = true;
             m_impl->RemoveDrawable(stagedDrawable);
         }
+        staged = true;
         return true;
     }
 
@@ -2195,10 +2424,14 @@ namespace vanguard::rendering
         {
             concurrency::ScopedLock<concurrency::SpinLock> guard(m_impl->lock);
             stats.residencyRecords = m_impl->residencyCount;
+            stats.activeResidencyRecords = m_impl->activeResidencies.Size();
+            stats.retiringResidencyRecords = m_impl->retiringResidencies.Size();
             stats.liveDemands = m_impl->demandCount;
             stats.demandsIssued = m_impl->demandsIssued;
             stats.demandsCoalesced = m_impl->demandsCoalesced;
             stats.demandsReleased = m_impl->demandsReleased;
+            stats.progressRecordVisits = m_impl->progressRecordVisits;
+            stats.retirementRecordVisits = m_impl->retirementRecordVisits;
         }
         return stats;
     }

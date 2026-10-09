@@ -1,16 +1,23 @@
 #include <vanguard/engine/rendering_service.hpp>
 #include <vanguard/engine/resource_streaming_service.hpp>
+#include <vanguard/engine/rendering_service_detail.hpp>
 
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/rendering/frame_renderer.hpp>
+#include <vanguard/rendering/geometry_graph_nodes.hpp>
 #include <vanguard/rendering/material_program_layout.hpp>
 #include <vanguard/rendering/renderer_feature_programs.hpp>
+#include <vanguard/rendering/renderer_draw_contract.hpp>
 #include <vanguard/pipelines/renderer_catalog.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
+#include <vanguard/system/time.hpp>
 
+#include <algorithm>
 #include <new>
+#include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace
 {
@@ -20,15 +27,171 @@ namespace
     namespace rendering = vanguard::rendering;
     namespace rhi = vanguard::rhi;
 
+    inline constexpr engine::FrameParticipantId RenderingPreviousFrameCompletionParticipantId = 0x72656e6470727601ull;
+    inline constexpr vanguard::u64 AutomaticFrameResourceHardCeilingBytes = 1024ull * 1024ull * 1024ull;
+
+    [[nodiscard]] constexpr vanguard::u64 Minimum(const vanguard::u64 left, const vanguard::u64 right) noexcept
+    {
+        return left < right ? left : right;
+    }
+
+    struct ResolvedFrameResourceBudget final
+    {
+        rendering::RenderFlowResourceAllocatorConfig config;
+        vanguard::u64 localBudgetBytes = 0;
+        bool localBudgetAvailable = false;
+    };
+
+    [[nodiscard]] ResolvedFrameResourceBudget ResolveFrameResourceBudget(const rendering::RenderFlowResourceAllocatorConfig& requested,
+                                                                         const bool automatic) noexcept
+    {
+        ResolvedFrameResourceBudget resolved{requested};
+        if (!automatic)
+            return resolved;
+
+        vanguard::u64 hardCeiling = AutomaticFrameResourceHardCeilingBytes;
+        if (rhi::GetCapabilities().memoryBudgetQueries)
+        {
+            rhi::MemoryBudgetSnapshot budget;
+            rhi::Failure ignored;
+            if (rhi::QueryMemoryBudget(rhi::MemorySegment::Local, budget, &ignored) && budget.budget != 0)
+            {
+                resolved.localBudgetBytes = budget.budget;
+                resolved.localBudgetAvailable = true;
+                const vanguard::u64 quarterBudget = budget.budget / 4u;
+                if (quarterBudget != 0)
+                    hardCeiling = Minimum(hardCeiling, quarterBudget);
+            }
+        }
+
+        resolved.config.hardNativeByteLimit = Minimum(resolved.config.hardNativeByteLimit, hardCeiling);
+        const vanguard::u64 softCeiling = resolved.config.hardNativeByteLimit - resolved.config.hardNativeByteLimit / 4u;
+        resolved.config.textureSoftTargetBytes = Minimum(resolved.config.textureSoftTargetBytes, softCeiling);
+        resolved.config.bufferSoftTargetBytes = Minimum(resolved.config.bufferSoftTargetBytes, softCeiling);
+        return resolved;
+    }
+
     [[nodiscard]] const char* FailureMessage(const char* const message, const char* const fallback) noexcept
     {
         return message != nullptr && message[0] != '\0' ? message : fallback;
     }
 
-    class RenderingServiceImpl final : public engine::RenderingService
+    [[nodiscard]] bool RequiresRendererAbandonment(const rhi::Failure& failure) noexcept
+    {
+        return failure.code == rhi::FailureCode::DeviceLost;
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GpuSceneTablesFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GpuSceneLifetimeFailure& failure) noexcept
+    {
+        // Collect() cannot make forward progress when a sealed retirement epoch
+        // contains a stale allocation; that epoch remains at the collection head.
+        return failure.code == rendering::GpuSceneLifetimeFailureCode::InvalidState ||
+               RequiresRendererAbandonment(failure.tableFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GpuSceneUploadFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure) || RequiresRendererAbandonment(failure.lifetimeFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GpuSceneDefinitionFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.lifetimeFailure) || RequiresRendererAbandonment(failure.uploadFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::TextureResidencyFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure) || RequiresRendererAbandonment(failure.lifetimeFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::TextureUploadFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure) || RequiresRendererAbandonment(failure.residencyFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GpuSceneRuntimeFailure& failure) noexcept
+    {
+        return failure.requiresRendererAbandonment || RequiresRendererAbandonment(failure.uploadFailure) ||
+               RequiresRendererAbandonment(failure.lifetimeFailure) || RequiresRendererAbandonment(failure.tablesFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::TextureResidencyRuntimeFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.residencyFailure) || RequiresRendererAbandonment(failure.uploadFailure) ||
+               RequiresRendererAbandonment(failure.gpuSceneFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MaterialResourceResolverFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MaterialMaterializerFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.resourceFailure) || RequiresRendererAbandonment(failure.definitionFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MaterialResidencyRuntimeFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure) || RequiresRendererAbandonment(failure.materializationFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GeometryAllocatorFailure& failure) noexcept
+    {
+        // GeometryAllocator::Collect leaves a stale sealed retirement epoch in
+        // place on InvalidState, so repeating collection cannot repair ownership.
+        return failure.code == rendering::GeometryAllocatorFailureCode::InvalidState ||
+               RequiresRendererAbandonment(failure.rhiFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::GeometryUploadFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.rhiFailure) || RequiresRendererAbandonment(failure.allocatorFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MeshGeometryUploadFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.allocatorFailure) || RequiresRendererAbandonment(failure.uploadFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MeshLodGeometryUploadFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.preparationFailure) || RequiresRendererAbandonment(failure.submissionFailure) ||
+               RequiresRendererAbandonment(failure.allocatorFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MeshLodDefinitionFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.definitionFailure) || RequiresRendererAbandonment(failure.allocatorFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MeshResidencyFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.allocatorFailure) || RequiresRendererAbandonment(failure.uploadFailure) ||
+               RequiresRendererAbandonment(failure.lodUploadFailure) || RequiresRendererAbandonment(failure.lodDefinitionFailure) ||
+               RequiresRendererAbandonment(failure.materialFailure) || RequiresRendererAbandonment(failure.renderableDefinitionFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const rendering::MaterialSceneBindingFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.residencyFailure);
+    }
+
+    [[nodiscard]] bool RequiresRendererAbandonment(const engine::RenderingRetirementFailure& failure) noexcept
+    {
+        return RequiresRendererAbandonment(failure.materialFailure) || RequiresRendererAbandonment(failure.textureFailure) ||
+               RequiresRendererAbandonment(failure.meshFailure) || RequiresRendererAbandonment(failure.gpuSceneFailure);
+    }
+
+    class ManagedRenderingService final : public engine::RenderingService
     {
     public:
-        explicit RenderingServiceImpl(const engine::RenderingServiceConfig& config) noexcept
+        explicit ManagedRenderingService(const engine::RenderingServiceConfig& config) noexcept
             : m_config(config),
               m_frameRenderer(m_scenes, m_cameras, m_gpuSceneRuntime, config.geometryFrames, config.meshResidency.geometryBatcher.maximumBins,
                               &m_meshResidency.GetGeometryBatcher(), config.meshResidency.geometryBatcher.maximumShells,
@@ -85,6 +248,29 @@ namespace
         [[nodiscard]] const rendering::RenderPhaseRegistry& GetRenderPhases() const noexcept override
         {
             return m_renderPhases;
+        }
+        [[nodiscard]] engine::RenderingDeviceInfo GetDeviceInfo() const noexcept override
+        {
+            engine::RenderingDeviceInfo info;
+            if (m_backend == nullptr || m_deviceUnavailable || !rhi::IsInitialized())
+                return info;
+            const rhi::Capabilities& capabilities = rhi::GetCapabilities();
+            info.available = true;
+            info.backend = capabilities.backend;
+            info.dedicatedVideoMemory = capabilities.dedicatedVideoMemory;
+            const size_t bytes = std::min(std::strlen(capabilities.adapterName), sizeof(info.adapterName) - 1u);
+            if (bytes != 0u)
+                std::memcpy(info.adapterName, capabilities.adapterName, bytes);
+            info.adapterName[bytes] = '\0';
+            return info;
+        }
+        [[nodiscard]] rendering::RenderPhaseSet GetDefaultCameraPhases() const noexcept override
+        {
+            return m_drawInterfaceAvailable ? m_defaultCameraPhases : rendering::RenderPhaseSet{};
+        }
+        [[nodiscard]] bool IsFrameDiagnosticsEnabled() const noexcept override
+        {
+            return m_config.enableFrameDiagnostics;
         }
         [[nodiscard]] rendering::MeshResidencyManager& GetMeshResidency() noexcept override
         {
@@ -146,6 +332,143 @@ namespace
         [[nodiscard]] vanguard::u64 GetDroppedGeometryDiagnosticSamples() const noexcept override
         {
             return m_frameRenderer.GetDroppedGeometryDiagnosticSamples();
+        }
+        [[nodiscard]] bool IsGpuTimingAvailable() const noexcept override
+        {
+            return m_frameRenderer.IsGpuTimingAvailable();
+        }
+        [[nodiscard]] rendering::FrameGpuTimingPoll PollGpuTimings(rendering::FrameGpuTimingSample& output,
+                                                                    rhi::Failure* const failure) noexcept override
+        {
+            return m_frameRenderer.PollGpuTimings(output, failure);
+        }
+        [[nodiscard]] vanguard::u64 GetDroppedGpuTimingFrames() const noexcept override
+        {
+            return m_frameRenderer.GetDroppedGpuTimingFrames();
+        }
+
+        [[nodiscard]] engine::RenderingSessionDrainResult ProgressSessionDrain(const rendering::RenderSceneHandle scene,
+                                                                               engine::RenderingProgressFailure* const failure,
+                                                                               const bool requireFrameTick) noexcept override
+        {
+            if (failure != nullptr)
+                *failure = {};
+            engine::RenderingSessionDrainResult result;
+            result.rendererProgressEpoch = m_rendererProgressEpoch;
+            if (!vanguard::concurrency::IsMainThread())
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::WrongThread;
+                    failure->message = "renderer session drain must run on the main thread";
+                }
+                result.status = engine::RenderingSessionDrainStatus::Failed;
+                return result;
+            }
+
+            // Ordinary FramePipeline participants can fail before the application
+            // transitions to Exiting. Preserve that exact typed cause across the
+            // FrameParticipantStatus string boundary and transfer it once to the
+            // session drain. GameWorld/WorldSession then own the first-fault latch;
+            // later polls continue renderer cleanup instead of replaying this report.
+            engine::RenderingProgressFailure participantFailure;
+            if (m_participantFailure.Consume(participantFailure))
+            {
+                if (failure != nullptr)
+                    *failure = participantFailure;
+                result.status = engine::RenderingSessionDrainStatus::Failed;
+                return result;
+            }
+            const bool hasScene = scene != rendering::InvalidRenderSceneHandle;
+            if (hasScene && (!scene.IsValid() || !m_scenes.IsAlive(scene)))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::InvalidScene;
+                    failure->message = "renderer session drain received an invalid or stale RenderScene";
+                }
+                result.status = engine::RenderingSessionDrainStatus::Failed;
+                return result;
+            }
+
+            engine::RenderingProgressFailure progressFailure;
+            if (!ProgressRendererOwners(&progressFailure))
+            {
+                if (failure != nullptr)
+                    *failure = progressFailure;
+                result.status = engine::RenderingSessionDrainStatus::Failed;
+                return result;
+            }
+
+            bool sceneNeedsFrameTick = false;
+            bool sceneHasPendingBindings = false;
+            if (hasScene)
+            {
+                rendering::RenderSceneSnapshot sceneState;
+                if (!m_scenes.GetSnapshot(scene, sceneState))
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::InvalidScene;
+                        failure->message = "renderer session drain received an invalid or stale RenderScene";
+                    }
+                    result.status = engine::RenderingSessionDrainStatus::Failed;
+                    return result;
+                }
+                if (sceneState.framePrepared)
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::SceneFailure;
+                        failure->message = "renderer session drain found a prepared RenderScene after joining the CPU chain";
+                        failure->sceneFailure = {rendering::RenderSceneFailureCode::InvalidState, scene, {},
+                                                 "RenderScene remained prepared after renderer CPU-chain join"};
+                    }
+                    result.status = engine::RenderingSessionDrainStatus::Failed;
+                    return result;
+                }
+                sceneNeedsFrameTick = sceneState.pendingProxyMutations != 0;
+                sceneHasPendingBindings = sceneState.pendingMeshBindings != 0;
+
+                if (m_gpuSceneRuntime.IsInitialized())
+                {
+                    bool publicationPending = false;
+                    rendering::RenderSceneGpuFailure publicationFailure;
+                    if (!m_gpuSceneRuntime.GetScenePublisher().HasPendingPublicationWork(scene, publicationPending, &publicationFailure))
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->code = engine::RenderingProgressFailureCode::ScenePublicationFailure;
+                            failure->message = FailureMessage(publicationFailure.message, "RenderScene GPU publication state is unavailable");
+                            failure->scenePublicationFailure = publicationFailure;
+                        }
+                        result.status = engine::RenderingSessionDrainStatus::Failed;
+                        return result;
+                    }
+                    sceneNeedsFrameTick |= publicationPending;
+                }
+            }
+
+            sceneNeedsFrameTick |= hasScene && requireFrameTick;
+            const rendering::RenderSceneHandle sceneStorage[] = {scene};
+            const vanguard::containers::ArraySpan<const rendering::RenderSceneHandle> scenes =
+                sceneNeedsFrameTick ? vanguard::containers::ArraySpan<const rendering::RenderSceneHandle>(sceneStorage, 1u)
+                                    : vanguard::containers::ArraySpan<const rendering::RenderSceneHandle>{};
+            bool frameTickDispatched = false;
+            if (!DispatchRendererFrameTick(scenes, sceneNeedsFrameTick, frameTickDispatched, &progressFailure))
+            {
+                if (failure != nullptr)
+                    *failure = progressFailure;
+                result.status = engine::RenderingSessionDrainStatus::Failed;
+                result.rendererProgressEpoch = m_rendererProgressEpoch;
+                return result;
+            }
+
+            result.rendererProgressEpoch = m_rendererProgressEpoch;
+            result.frameTickDispatched = frameTickDispatched;
+            result.status = frameTickDispatched || sceneHasPendingBindings ? engine::RenderingSessionDrainStatus::Pending
+                                                                          : engine::RenderingSessionDrainStatus::Complete;
+            return result;
         }
 
         [[nodiscard]] bool SealResidencyRetirements(const rhi::ResidencyFenceSet& safeAfter, engine::RenderingRetirementFailure* const failure) noexcept override
@@ -217,6 +540,12 @@ namespace
             engine::FramePipelineService* const framePipeline = engine::FindFramePipelineService(context);
             if (framePipeline == nullptr)
                 return app::LifecycleStatus::Failure("RenderingService Frame Pipeline dependency is unavailable");
+            m_framePipeline = framePipeline;
+            m_diagnosticGeometrySamples = 0;
+            m_latestGpuTiming = {};
+            m_hasLatestGpuTiming = false;
+            m_rendererProgressEpoch = 0;
+            m_participantFailure.Reset();
 
             rendering::RenderSceneFailure sceneFailure;
             if (!m_scenes.Initialize({}, &sceneFailure))
@@ -256,8 +585,30 @@ namespace
                 static_cast<void>(m_scenes.Shutdown());
                 return app::LifecycleStatus::Failure(FailureMessage(viewportFailure.message, "ViewportManager initialization failed"));
             }
-
             constexpr app::ApplicationProfile renderingProfiles = app::ApplicationProfile::Runtime | app::ApplicationProfile::Editor | app::ApplicationProfile::Tool;
+            engine::FrameParticipantDescriptor previousFrameCompletionParticipant;
+            previousFrameCompletionParticipant.id = RenderingPreviousFrameCompletionParticipantId;
+            previousFrameCompletionParticipant.name = "rendering.previousFrameCompletion";
+            // Keep the previous renderer CPU-chain join ahead of FixedSimulation/Simulation,
+            // where camera and RenderScene mutation can require quiescent renderer-owned state,
+            // but do not stall platform/input/BeginFrame work on presentation and terminal cleanup.
+            previousFrameCompletionParticipant.phase = engine::FramePhase::PreSimulation;
+            previousFrameCompletionParticipant.profiles = renderingProfiles;
+            previousFrameCompletionParticipant.affinity = app::ThreadAffinity::MainThread;
+            previousFrameCompletionParticipant.execute = &ExecutePreviousFrameCompletion;
+            previousFrameCompletionParticipant.userData = this;
+
+            engine::FrameFailure frameFailure;
+            if (!framePipeline->RegisterParticipant(previousFrameCompletionParticipant, &frameFailure))
+            {
+                static_cast<void>(m_viewports.Shutdown());
+                static_cast<void>(m_commands.Shutdown());
+                static_cast<void>(m_cameras.Shutdown());
+                RollbackRendererDevice();
+                static_cast<void>(m_scenes.Shutdown());
+                return app::LifecycleStatus::Failure(FailureMessage(frameFailure.message, "Rendering previous-frame completion registration failed"));
+            }
+
             engine::FrameParticipantDescriptor updateParticipant;
             updateParticipant.id = engine::RenderingUpdateFrameParticipantId;
             updateParticipant.name = "rendering.updateBoundary";
@@ -267,7 +618,6 @@ namespace
             updateParticipant.execute = &ExecuteRenderUpdate;
             updateParticipant.userData = this;
 
-            engine::FrameFailure frameFailure;
             if (!framePipeline->RegisterParticipant(updateParticipant, &frameFailure))
             {
                 static_cast<void>(m_viewports.Shutdown());
@@ -318,6 +668,9 @@ namespace
                 return app::LifecycleStatus::Failure(FailureMessage(failure.message, "RenderingService drained failed asynchronous work"));
             if (m_gpuSceneRuntime.IsInitialized() && m_gpuSceneRuntime.ConsumePublicationFailure(gpuSceneFailure))
                 return app::LifecycleStatus::Failure(FailureMessage(gpuSceneFailure.message, "RenderingService drained failed GPU Scene publication"));
+            // Final process-service teardown is the one place where the renderer may wait for the device. World/session replacement remains non-blocking and uses ProgressSessionDrain instead.
+            if (const char* const ownerDrainFailure = DrainRendererOwnersForQuiesce())
+                return app::LifecycleStatus::Failure(ownerDrainFailure);
             if (m_gpuSceneRuntime.IsInitialized())
             {
                 rendering::GpuSceneLifetimeFailure lifetimeFailure;
@@ -334,6 +687,11 @@ namespace
                 const rendering::TextureResidencyRuntimeStats textureStats = m_textureResidency.GetStats();
                 if (textureStats.liveDemands != 0 || textureStats.residencyRecords != 0)
                     return app::LifecycleStatus::Failure("RenderingService quiesce requires zero live texture demands and zero texture residency records");
+                // Final queue/native retirement must complete during quiesce so a dependent
+                // composition owner can consume the resulting generation evidence in Drain.
+                // Delivery itself is checked in OnDrain, after dependants have had that chance.
+                if (const char* const textureRetirementFailure = FinalizeTextureGenerationRetirements(false))
+                    return app::LifecycleStatus::Failure(textureRetirementFailure);
             }
             if (m_meshResidency.IsInitialized())
             {
@@ -380,6 +738,13 @@ namespace
             return app::LifecycleStatus::Success();
         }
 
+        app::LifecycleStatus OnDrain(app::ServiceContext&) noexcept override
+        {
+            if (m_textureResidency.IsInitialized() && m_textureResidency.GetStats().residency.pendingGenerationRetirements != 0)
+                return app::LifecycleStatus::Failure("RenderingService drain has undelivered texture generation-retirement evidence");
+            return app::LifecycleStatus::Success();
+        }
+
         app::LifecycleStatus OnShutdown(app::ServiceContext&) noexcept override
         {
             rendering::ViewportFailure viewportFailure;
@@ -389,16 +754,15 @@ namespace
             if (!m_commands.Shutdown(&commandFailure))
                 return app::LifecycleStatus::Failure(FailureMessage(commandFailure.message, "RenderCommandSystem shutdown failed"));
             m_frameRenderer.ClearGraphCache();
-            const app::LifecycleStatus deviceStatus = ShutdownRendererDevice();
-            if (!deviceStatus)
-                return deviceStatus;
+            app::LifecycleStatus shutdownStatus = ShutdownRendererDevice();
             rendering::RenderCameraFailure cameraFailure;
-            if (!m_cameras.Shutdown(&cameraFailure))
-                return app::LifecycleStatus::Failure(FailureMessage(cameraFailure.message, "RenderCameraStorage shutdown failed"));
+            if (!m_cameras.Shutdown(&cameraFailure) && shutdownStatus)
+                shutdownStatus = app::LifecycleStatus::Failure(FailureMessage(cameraFailure.message, "RenderCameraStorage shutdown failed"));
             rendering::RenderSceneFailure sceneFailure;
-            if (!m_scenes.Shutdown(&sceneFailure))
-                return app::LifecycleStatus::Failure(FailureMessage(sceneFailure.message, "RenderSceneManager shutdown failed"));
-            return app::LifecycleStatus::Success();
+            if (!m_scenes.Shutdown(&sceneFailure) && shutdownStatus)
+                shutdownStatus = app::LifecycleStatus::Failure(FailureMessage(sceneFailure.message, "RenderSceneManager shutdown failed"));
+            m_framePipeline = nullptr;
+            return shutdownStatus;
         }
 
     private:
@@ -437,7 +801,7 @@ namespace
             return app::LifecycleStatus::Success();
         }
 
-        app::LifecycleStatus LoadRendererBootstrap(engine::ResourceStreamingService* const service) noexcept
+        app::LifecycleStatus LoadRendererResourceCatalog(engine::ResourceStreamingService* const service) noexcept
         {
             using namespace vanguard;
             resources::ResourceReference reference = m_config.rendererBootstrap;
@@ -612,9 +976,63 @@ namespace
             return app::LifecycleStatus::Success();
         }
 
+        app::LifecycleStatus InitializeRendererDrawInterface() noexcept
+        {
+            const rhi::ShaderStageMask staticSurfaceStages = rhi::ShaderStageBit(rhi::ShaderStage::Vertex) | rhi::ShaderStageBit(rhi::ShaderStage::Pixel);
+            const rendering::RenderPhaseId depthPrepass = m_renderPhases.Find(rendering::standardRenderPhases::DepthPrepass);
+            const rendering::RenderPhaseId opaque = m_renderPhases.Find(rendering::standardRenderPhases::Opaque);
+            if (!depthPrepass.IsValid() || !opaque.IsValid())
+                return app::LifecycleStatus::Failure("renderer draw interface requires registered depth-prepass and opaque phases");
+            if (m_config.resourceDescriptors.kind != rhi::DescriptorDomainKind::Resources || m_config.samplerDescriptors.kind != rhi::DescriptorDomainKind::Samplers ||
+                (m_config.resourceDescriptors.visibility & staticSurfaceStages) != staticSurfaceStages || (m_config.samplerDescriptors.visibility & staticSurfaceStages) != staticSurfaceStages)
+                return app::LifecycleStatus::Failure("renderer draw interface descriptor-domain types do not match renderer configuration");
+
+            if (m_config.materialBindingLayouts.Empty())
+            {
+                const rhi::BindingLayoutDesc drawLayout = rendering::GetStaticSurfaceDrawBindingLayout();
+                m_materialBindingLayouts[0] = rhi::BindingLayout(rhi::AdoptReference, rhi::RequestBindingLayout(drawLayout));
+                if (!m_materialBindingLayouts[0])
+                    return app::LifecycleStatus::Failure("static-surface draw binding layout creation failed");
+                m_materialBindingLayoutCount = 1;
+            }
+            else
+            {
+                for (vanguard::u32 index = 0; index < m_config.materialBindingLayouts.Size(); ++index)
+                {
+                    m_materialBindingLayouts[index] = rhi::BindingLayout(rhi::AdoptReference, rhi::RequestBindingLayout(m_config.materialBindingLayouts[index]));
+                    if (!m_materialBindingLayouts[index])
+                    {
+                        ResetRendererDrawInterface();
+                        return app::LifecycleStatus::Failure("material draw binding layout creation failed");
+                    }
+                }
+                m_materialBindingLayoutCount = m_config.materialBindingLayouts.Size();
+            }
+
+            rendering::RenderPhaseSet defaultCameraPhases;
+            if (!defaultCameraPhases.Add(depthPrepass) || !defaultCameraPhases.Add(opaque))
+            {
+                ResetRendererDrawInterface();
+                return app::LifecycleStatus::Failure("renderer draw interface could not resolve default camera phases");
+            }
+            m_defaultCameraPhases = defaultCameraPhases;
+            m_drawInterfaceAvailable = true;
+            return app::LifecycleStatus::Success();
+        }
+
+        void ResetRendererDrawInterface() noexcept
+        {
+            m_drawInterfaceAvailable = false;
+            m_defaultCameraPhases.Clear();
+            m_materialBindingLayoutCount = 0;
+            for (rhi::BindingLayout& layout : m_materialBindingLayouts)
+                layout.Reset();
+        }
+
         app::LifecycleStatus InitializeRendererDevice(engine::ResourceStreamingService* const streamingService) noexcept
         {
             m_deviceUnavailable = false;
+            ResetRendererDrawInterface();
             if (m_config.deviceMode == engine::RenderingDeviceMode::Disabled)
                 return m_config.rendererShaders.Empty() && m_config.rendererPipelines.Empty() && !m_config.rendererBootstrap.IsValid() &&
                        !m_config.usePackageRendererBootstrap ? app::LifecycleStatus::Success()
@@ -626,9 +1044,9 @@ namespace
             if (rhi::IsInitialized())
                 return app::LifecycleStatus::Failure("RenderingService requires exclusive ownership of the process RHI");
 
-            const app::LifecycleStatus bootstrapStatus = LoadRendererBootstrap(streamingService);
-            if (!bootstrapStatus)
-                return bootstrapStatus;
+            const app::LifecycleStatus catalogStatus = LoadRendererResourceCatalog(streamingService);
+            if (!catalogStatus)
+                return catalogStatus;
 
             m_backend = m_config.backendFactory.create();
             if (m_backend == nullptr)
@@ -662,13 +1080,25 @@ namespace
             }
 
             rendering::RenderFlowResourceFailure frameResourceFailure;
-            auto frameResources = m_config.frameResources;
+            const ResolvedFrameResourceBudget resolvedFrameResources = ResolveFrameResourceBudget(m_config.frameResources, m_config.enableAutomaticFrameResourceBudget);
+            auto frameResources = resolvedFrameResources.config;
             frameResources.resourceDescriptors = m_resourceDescriptors.GetRef();
             const bool frameResourcesInitialized = m_frameRenderer.InitializeResourceAllocator(frameResources, &frameResourceFailure);
             if (!frameResourcesInitialized)
             {
                 RollbackRendererDevice();
                 return app::LifecycleStatus::Failure(FailureMessage(frameResourceFailure.message, "frame-resource allocator initialization failed"));
+            }
+            if (m_config.enableFrameDiagnostics)
+                VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                            "render diagnostics: frameResourceHardBytes=%llu frameResourceTextureSoftBytes=%llu frameResourceBufferSoftBytes=%llu localBudgetAvailable=%u localBudgetBytes=%llu",
+                            static_cast<unsigned long long>(frameResources.hardNativeByteLimit), static_cast<unsigned long long>(frameResources.textureSoftTargetBytes),
+                            static_cast<unsigned long long>(frameResources.bufferSoftTargetBytes), resolvedFrameResources.localBudgetAvailable ? 1u : 0u,
+                            static_cast<unsigned long long>(resolvedFrameResources.localBudgetBytes));
+            if (!m_frameRenderer.InitializeGpuTimings(&rhiFailure))
+            {
+                RollbackRendererDevice();
+                return app::LifecycleStatus::Failure(FailureMessage(rhiFailure.message, "renderer GPU timing initialization failed"));
             }
 
             rendering::GpuSceneRuntimeConfig gpuSceneConfig = m_config.gpuScene;
@@ -725,26 +1155,26 @@ namespace
                 RollbackRendererDevice();
                 return pipelinesStatus;
             }
+            const app::LifecycleStatus drawInterfaceStatus = InitializeRendererDrawInterface();
+            if (!drawInterfaceStatus)
+            {
+                RollbackRendererDevice();
+                return drawInterfaceStatus;
+            }
             rendering::MaterialResidencyRuntimeFailure materialResidencyFailure;
             rhi::BindingLayoutRef materialLayouts[rhi::MaximumBindingLayoutsPerPipeline]{};
-            for (vanguard::u32 index = 0; index < m_config.materialBindingLayouts.Size(); ++index)
-            {
-                m_materialBindingLayouts[index] = rhi::BindingLayout(rhi::AdoptReference, rhi::RequestBindingLayout(m_config.materialBindingLayouts[index]));
-                if (!m_materialBindingLayouts[index])
-                {
-                    RollbackRendererDevice();
-                    return app::LifecycleStatus::Failure("material draw binding layout creation failed");
-                }
+            for (vanguard::u32 index = 0; index < m_materialBindingLayoutCount; ++index)
                 materialLayouts[index] = m_materialBindingLayouts[index].GetRef();
-            }
-            const rendering::PipelineInterfaceResources materialInterfaces{{materialLayouts, m_config.materialBindingLayouts.Size()}, {materialDomains, 2}};
+            const rendering::PipelineInterfaceResources materialInterfaces{{materialLayouts, m_materialBindingLayoutCount}, {materialDomains, 2}};
             if (!m_materialResidency.Initialize(m_materialMaterializer, m_materialPipelines, materialInterfaces, m_config.materialResidency, &materialResidencyFailure))
             {
                 RollbackRendererDevice();
                 return app::LifecycleStatus::Failure(FailureMessage(materialResidencyFailure.message, "material residency runtime initialization failed"));
             }
             rendering::MeshResidencyFailure meshResidencyFailure;
-            if (!m_meshResidency.Initialize(m_gpuSceneRuntime, m_materialResidency, m_renderPhases, m_config.meshResidency, &meshResidencyFailure))
+            if (!m_meshResidency.Initialize(m_gpuSceneRuntime, m_materialResidency, m_renderPhases,
+                                            {rendering::StandardCameraMeshDrawPhases, rendering::StandardCameraMeshDrawPhaseCount},
+                                            m_config.meshResidency, &meshResidencyFailure))
             {
                 RollbackRendererDevice();
                 return app::LifecycleStatus::Failure(FailureMessage(meshResidencyFailure.message, "mesh residency initialization failed"));
@@ -778,6 +1208,27 @@ namespace
             return lifetime.GetStats().retiring != 0 ? "renderer shutdown still has pending GPU retirements" : nullptr;
         }
 
+        [[nodiscard]] const char* FinalizeTextureGenerationRetirements(const bool requireDelivered = true) noexcept
+        {
+            if (!m_textureResidency.IsInitialized())
+                return nullptr;
+            rhi::ResidencyFenceSet cutover;
+            if (!rhi::GetSubmittedResidencyFences(cutover))
+                return "renderer shutdown has no complete texture-retirement receipt";
+            rendering::TextureResidencyRuntimeFailure textureFailure;
+            if (!m_textureResidency.SealRetirements(cutover, &textureFailure))
+                return FailureMessage(textureFailure.message, "texture residency shutdown retirement sealing failed");
+            rhi::Failure rhiFailure;
+            if (!rhi::RetireResources(&rhiFailure) || !rhi::FlushRetiredResources(&rhiFailure))
+                return FailureMessage(rhiFailure.message, "texture residency native retirement flush failed during renderer shutdown");
+            static_cast<void>(m_textureResidency.CollectRetirements(&textureFailure));
+            if (textureFailure.code != rendering::TextureResidencyRuntimeFailureCode::None)
+                return FailureMessage(textureFailure.message, "texture residency shutdown retirement collection failed");
+            if (requireDelivered && m_textureResidency.GetStats().residency.pendingGenerationRetirements != 0)
+                return "RenderingService shutdown has undelivered texture generation-retirement evidence";
+            return nullptr;
+        }
+
         app::LifecycleStatus ShutdownRendererDevice() noexcept
         {
             if (m_backend == nullptr)
@@ -798,6 +1249,8 @@ namespace
                 }
                 return app::LifecycleStatus::Failure(FailureMessage(rhiFailure.message, "RHI idle wait failed during renderer shutdown"));
             }
+            if (!m_frameRenderer.ShutdownGpuTimings(&rhiFailure))
+                return app::LifecycleStatus::Failure(FailureMessage(rhiFailure.message, "renderer GPU timing shutdown failed"));
 
             rendering::MaterialSceneBindingFailure bindingFailure;
             if (!m_materialBindings.Shutdown(&bindingFailure))
@@ -815,8 +1268,7 @@ namespace
             m_materialPipelines.WaitIdle();
             if (!m_materialPipelines.Shutdown())
                 return app::LifecycleStatus::Failure("material pipeline cache shutdown failed");
-            for (rhi::BindingLayout& layout : m_materialBindingLayouts)
-                layout.Reset();
+            ResetRendererDrawInterface();
 
             rendering::MaterialMaterializerFailure materializerFailure;
             if (!m_materialMaterializer.Shutdown(&materializerFailure))
@@ -826,9 +1278,22 @@ namespace
             if (!m_materialResources.Shutdown(&resourceFailure))
                 return app::LifecycleStatus::Failure(FailureMessage(resourceFailure.message, "material resource resolver shutdown failed"));
 
+            if (const char* const textureRetirementFailure = FinalizeTextureGenerationRetirements())
+            {
+                // Host cleanup continues after lifecycle failures. Abandon the device only after
+                // surfacing the lossless-handoff failure so backend-scoped observations cannot
+                // outlive the RHI or be discarded as a successful graceful shutdown.
+                AbandonRendererDevice();
+                return app::LifecycleStatus::Failure(textureRetirementFailure);
+            }
             rendering::TextureResidencyRuntimeFailure textureResidencyFailure;
             if (!m_textureResidency.Shutdown(&textureResidencyFailure))
-                return app::LifecycleStatus::Failure(FailureMessage(textureResidencyFailure.message, "texture residency runtime shutdown failed"));
+            {
+                const char* const message = FailureMessage(textureResidencyFailure.message, "texture residency runtime shutdown failed");
+                static_cast<void>(m_textureResidency.AbandonDevice());
+                AbandonRendererDevice();
+                return app::LifecycleStatus::Failure(message);
+            }
 
             rendering::MaterialProgramLayoutFailure layoutFailure;
             if (!m_materialProgramLayouts.Shutdown(&layoutFailure))
@@ -902,8 +1367,7 @@ namespace
                 m_materialPipelines.WaitIdle();
                 static_cast<void>(m_materialPipelines.Shutdown());
             }
-            for (rhi::BindingLayout& layout : m_materialBindingLayouts)
-                layout.Reset();
+            ResetRendererDrawInterface();
             if (m_materialMaterializer.IsInitialized())
             {
                 static_cast<void>(m_materialMaterializer.AbandonDevice());
@@ -922,6 +1386,7 @@ namespace
                 static_cast<void>(m_renderPhases.Shutdown());
             if (m_gpuSceneRuntime.IsInitialized())
                 static_cast<void>(m_gpuSceneRuntime.AbandonDevice());
+            m_frameRenderer.AbandonGpuTimings();
             static_cast<void>(m_frameRenderer.ShutdownResourceAllocator());
         }
 
@@ -930,6 +1395,7 @@ namespace
             if (m_backend == nullptr)
                 return;
             static_cast<void>(rhi::WaitIdle());
+            static_cast<void>(m_frameRenderer.ShutdownGpuTimings());
             if (m_materialBindings.IsInitialized())
                 static_cast<void>(m_materialBindings.Shutdown());
             if (m_meshResidency.IsInitialized())
@@ -942,8 +1408,7 @@ namespace
                 m_materialPipelines.WaitIdle();
                 static_cast<void>(m_materialPipelines.Shutdown());
             }
-            for (rhi::BindingLayout& layout : m_materialBindingLayouts)
-                layout.Reset();
+            ResetRendererDrawInterface();
             if (m_materialMaterializer.IsInitialized())
                 static_cast<void>(m_materialMaterializer.Shutdown());
             if (m_materialResources.IsInitialized())
@@ -969,115 +1434,812 @@ namespace
             m_backend = nullptr;
         }
 
+        static engine::FrameParticipantStatus ExecutePreviousFrameCompletion(const engine::FrameContext&, void* const userData) noexcept
+        {
+            auto* const service = static_cast<ManagedRenderingService*>(userData);
+            return service != nullptr ? service->CompletePreviousFrame() : engine::FrameParticipantStatus::Failure("RenderingService is unavailable");
+        }
+
         static engine::FrameParticipantStatus ExecuteRenderUpdate(const engine::FrameContext&, void* const userData) noexcept
         {
-            auto* const service = static_cast<RenderingServiceImpl*>(userData);
+            auto* const service = static_cast<ManagedRenderingService*>(userData);
             return service != nullptr ? service->RenderUpdate() : engine::FrameParticipantStatus::Failure("RenderingService is unavailable");
         }
 
-        static engine::FrameParticipantStatus ExecuteRenderingFrameTick(const engine::FrameContext& context, void* const userData) noexcept
+        static engine::FrameParticipantStatus ExecuteRenderingFrameTick(const engine::FrameContext&, void* const userData) noexcept
         {
-            auto* const service = static_cast<RenderingServiceImpl*>(userData);
-            return service != nullptr ? service->DispatchFrameTick(context) : engine::FrameParticipantStatus::Failure("RenderingService is unavailable");
+            auto* const service = static_cast<ManagedRenderingService*>(userData);
+            return service != nullptr ? service->DispatchFrameTick() : engine::FrameParticipantStatus::Failure("RenderingService is unavailable");
         }
 
-        engine::FrameParticipantStatus RenderUpdate() noexcept
+        [[nodiscard]] bool ResolvePreviousFrame(engine::RenderingProgressFailure* const failure) noexcept
         {
-            rendering::RenderCommandFailure failure;
-            if (!m_commands.FlushPreviousFrameProcessing(&failure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(failure.message, "previous CPU rendering chain flush failed"));
+            if (failure != nullptr)
+                *failure = {};
+            rendering::RenderCommandFailure commandFailure;
+            if (!m_commands.FlushPreviousFrameProcessing(&commandFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::CommandFailure;
+                    failure->message = FailureMessage(commandFailure.message, "previous CPU rendering chain flush failed");
+                    failure->commandFailure = commandFailure;
+                }
+                return false;
+            }
+            // The joined CPU chain can publish a concrete asynchronous failure
+            // before device-state polling observes a later removal/reset. Preserve
+            // that first owner-reported cause; a subsequent stop poll will still
+            // observe and terminalize device loss if it also occurred.
+            if (m_commands.ConsumeExecutionFailure(commandFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::CommandFailure;
+                    failure->message = FailureMessage(commandFailure.message, "asynchronous rendering execution failed");
+                    failure->commandFailure = commandFailure;
+                }
+                return false;
+            }
+            rendering::GpuSceneRuntimeFailure gpuSceneFailure;
+            if (m_gpuSceneRuntime.IsInitialized() && m_gpuSceneRuntime.ConsumePublicationFailure(gpuSceneFailure))
+            {
+                const bool abandonOwners = RequiresRendererAbandonment(gpuSceneFailure);
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::GpuSceneFailure;
+                    failure->message = FailureMessage(gpuSceneFailure.message, "asynchronous GPU Scene publication failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->gpuSceneFailure = gpuSceneFailure;
+                }
+                return false;
+            }
             const rhi::DeviceState deviceState = m_backend != nullptr ? rhi::TestDeviceState() : rhi::DeviceState::Unknown;
             if (deviceState == rhi::DeviceState::Removed || deviceState == rhi::DeviceState::ResetRequired)
             {
                 AbandonRendererOwners();
-                return engine::FrameParticipantStatus::Failure("renderer device became unavailable");
+                if (failure != nullptr)
+                    static_cast<void>(engine::detail::BuildDeviceUnavailableFailure(deviceState, *failure));
+                return false;
             }
             if (m_deviceUnavailable)
-                return engine::FrameParticipantStatus::Failure("renderer device is unavailable");
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::DeviceUnavailable;
+                    failure->message = "renderer device is unavailable";
+                    failure->ownersAbandoned = true;
+                }
+                return false;
+            }
+            const bool contributionsResolved = !m_gpuSceneRuntime.IsInitialized() || m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure);
+            if (!contributionsResolved)
+            {
+                const bool abandonOwners = RequiresRendererAbandonment(gpuSceneFailure);
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::GpuSceneFailure;
+                    failure->message = FailureMessage(gpuSceneFailure.message, "GPU Scene contribution resolution failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->gpuSceneFailure = gpuSceneFailure;
+                }
+                return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool ResolvePreviousFrameOwners(engine::RenderingProgressFailure* const failure) noexcept
+        {
+            if (failure != nullptr)
+                *failure = {};
+
+            bool requiresTerminalResolution = false;
+            rendering::RenderCommandFailure commandFailure;
+            if (!m_commands.FlushPreviousFrameOwnerProcessing(requiresTerminalResolution, &commandFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::CommandFailure;
+                    failure->message = FailureMessage(commandFailure.message, "previous renderer-owner CPU chain flush failed");
+                    failure->commandFailure = commandFailure;
+                }
+                return false;
+            }
+
+            // Core/FrameTick failures retain the old full-drain semantics. Terminal-only
+            // presentation/output failures are deliberately not consumed here even if that
+            // work happened to finish early: doing so would make the Simulation failure point
+            // scheduling-dependent. RenderUpdate owns the deterministic terminal boundary.
+            if (requiresTerminalResolution)
+                return ResolvePreviousFrame(failure);
+
+            if (m_gpuSceneRuntime.IsInitialized() && m_gpuSceneRuntime.GetStats().publicationFailurePending)
+                return ResolvePreviousFrame(failure);
+
+            if (m_deviceUnavailable)
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::DeviceUnavailable;
+                    failure->message = "renderer device is unavailable";
+                    failure->ownersAbandoned = true;
+                }
+                return false;
+            }
+
+            // GPU Scene publication is renderer-owner state: Simulation may mutate
+            // RenderScene proxies only after these accepted contributions return to
+            // their producers. This is deliberately earlier than terminal Present.
             rendering::GpuSceneRuntimeFailure gpuSceneFailure;
-            if (m_gpuSceneRuntime.IsInitialized() && !m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(gpuSceneFailure.message, "GPU Scene contribution resolution failed"));
+            if (!m_gpuSceneRuntime.IsInitialized() || m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure))
+                return true;
+
+            // A contribution-resolution failure may require renderer abandonment.
+            // Drain terminal output first so owner teardown cannot race the still-live
+            // frame. Preserve the canonical command/publication-failure precedence.
+            rendering::RenderCommandFailure terminalCommandFailure;
+            if (!m_commands.FlushPreviousFrameProcessing(&terminalCommandFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::CommandFailure;
+                    failure->message = FailureMessage(terminalCommandFailure.message, "previous CPU rendering chain flush failed after owner-resolution failure");
+                    failure->commandFailure = terminalCommandFailure;
+                }
+                return false;
+            }
+            if (m_commands.ConsumeExecutionFailure(terminalCommandFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::CommandFailure;
+                    failure->message = FailureMessage(terminalCommandFailure.message, "asynchronous rendering execution failed");
+                    failure->commandFailure = terminalCommandFailure;
+                }
+                return false;
+            }
+            rendering::GpuSceneRuntimeFailure publicationFailure;
+            if (m_gpuSceneRuntime.ConsumePublicationFailure(publicationFailure))
+                gpuSceneFailure = publicationFailure;
+
+            const bool abandonOwners = RequiresRendererAbandonment(gpuSceneFailure);
+            if (abandonOwners)
+                AbandonRendererOwners();
+            if (failure != nullptr)
+            {
+                failure->code = engine::RenderingProgressFailureCode::GpuSceneFailure;
+                failure->message = FailureMessage(gpuSceneFailure.message, "GPU Scene contribution resolution failed");
+                failure->ownersAbandoned = abandonOwners;
+                failure->gpuSceneFailure = gpuSceneFailure;
+            }
+            return false;
+        }
+
+        [[nodiscard]] bool ProgressRendererOwners(engine::RenderingProgressFailure* const failure) noexcept
+        {
+            if (!ResolvePreviousFrame(failure))
+                return false;
+            // ResolvePreviousFrame joins every retained-frame submission, so this snapshot is the exact
+            // prior-reader cutover required before same-generation texture transitions may copy shared mips.
+            // A later fresh snapshot still seals retirements after this frame's producer progress.
+            rhi::ResidencyFenceSet priorReaderCutover;
+            if (m_textureResidency.IsInitialized() && !rhi::GetSubmittedResidencyFences(priorReaderCutover))
+            {
+                AbandonRendererOwners();
+                if (failure != nullptr)
+                    engine::detail::BuildSubmittedReceiptCoverageFailure(*failure);
+                return false;
+            }
             rendering::RenderSceneFailure sceneBindingFailure;
             if (!m_scenes.ResolveMeshBindings(256u, &sceneBindingFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(sceneBindingFailure.message, "mesh scene-binding acceptance failed"));
-            if (m_commands.ConsumeExecutionFailure(failure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(failure.message, "asynchronous rendering execution failed"));
-            if (m_gpuSceneRuntime.IsInitialized() && m_gpuSceneRuntime.ConsumePublicationFailure(gpuSceneFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(gpuSceneFailure.message, "asynchronous GPU Scene publication failed"));
+            {
+                // ResolveMeshBindings only reports InvalidState here after an accepted
+                // binding receipt has become unreadable/stale. That transaction has no
+                // forward-progress action left; terminalize the existing renderer owners
+                // once, then let GameWorld perform CPU-only proxy/scene release.
+                const bool abandonOwners = sceneBindingFailure.code == rendering::RenderSceneFailureCode::InvalidState;
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::SceneFailure;
+                    failure->message = FailureMessage(sceneBindingFailure.message, "mesh scene-binding acceptance failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->sceneFailure = sceneBindingFailure;
+                }
+                return false;
+            }
             if (m_gpuSceneRuntime.IsInitialized())
             {
                 rendering::GpuSceneLifetimeFailure lifetimeFailure;
                 static_cast<void>(m_gpuSceneRuntime.GetLifetime().Collect(&lifetimeFailure));
                 if (lifetimeFailure.code != rendering::GpuSceneLifetimeFailureCode::None)
-                    return engine::FrameParticipantStatus::Failure(FailureMessage(lifetimeFailure.message, "GPU Scene retirement collection failed"));
+                {
+                    const bool abandonOwners = RequiresRendererAbandonment(lifetimeFailure);
+                    if (abandonOwners)
+                        AbandonRendererOwners();
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::GpuSceneLifetimeFailure;
+                        failure->message = FailureMessage(lifetimeFailure.message, "GPU Scene retirement collection failed");
+                        failure->ownersAbandoned = abandonOwners;
+                        failure->gpuSceneLifetimeFailure = lifetimeFailure;
+                    }
+                    return false;
+                }
             }
             if (m_meshResidency.IsInitialized())
             {
                 rendering::MeshResidencyFailure meshFailure;
                 static_cast<void>(m_meshResidency.CollectRetirements(&meshFailure));
                 if (meshFailure.code != rendering::MeshResidencyFailureCode::None)
-                    return engine::FrameParticipantStatus::Failure(FailureMessage(meshFailure.message, "mesh retirement collection failed"));
+                {
+                    const bool abandonOwners = RequiresRendererAbandonment(meshFailure);
+                    if (abandonOwners)
+                        AbandonRendererOwners();
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::MeshFailure;
+                        failure->message = FailureMessage(meshFailure.message, "mesh retirement collection failed");
+                        failure->ownersAbandoned = abandonOwners;
+                        failure->meshFailure = meshFailure;
+                    }
+                    return false;
+                }
             }
             rendering::TextureResidencyRuntimeFailure textureRetirementFailure;
             if (m_textureResidency.IsInitialized())
             {
                 static_cast<void>(m_textureResidency.CollectRetirements(&textureRetirementFailure));
                 if (textureRetirementFailure.code != rendering::TextureResidencyRuntimeFailureCode::None)
-                    return engine::FrameParticipantStatus::Failure(FailureMessage(textureRetirementFailure.message, "texture retirement collection failed"));
+                {
+                    const bool abandonOwners = RequiresRendererAbandonment(textureRetirementFailure);
+                    if (abandonOwners)
+                        AbandonRendererOwners();
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::TextureFailure;
+                        failure->message = FailureMessage(textureRetirementFailure.message, "texture retirement collection failed");
+                        failure->ownersAbandoned = abandonOwners;
+                        failure->textureFailure = textureRetirementFailure;
+                    }
+                    return false;
+                }
             }
             rhi::Failure rhiFailure;
-            if (m_backend != nullptr && !rhi::RetireResources(&rhiFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(rhiFailure.message, "retired native resource collection failed"));
+            bool retiredResources = true;
+            if (m_backend != nullptr)
+            {
+#if defined(VG_BUILD_PROFILE)
+                const vanguard::u64 retireBegin = vanguard::system::GetMonotonicTicks();
+#endif
+                retiredResources = rhi::RetireResources(&rhiFailure);
+#if defined(VG_BUILD_PROFILE)
+                const vanguard::u64 retireTicks = vanguard::system::GetMonotonicTicks() - retireBegin;
+                static vanguard::u64 accumulatedRetireTicks = 0;
+                static vanguard::u64 maximumRetireTicks = 0;
+                static vanguard::u64 retireWindow[256]{};
+                static vanguard::u32 retireSamples = 0;
+                accumulatedRetireTicks += retireTicks;
+                maximumRetireTicks = retireTicks > maximumRetireTicks ? retireTicks : maximumRetireTicks;
+                retireWindow[retireSamples++] = retireTicks;
+                if (retireSamples == 256u)
+                {
+                    std::sort(retireWindow, retireWindow + 256u);
+                    const double microsecondsPerTick = 1'000'000.0 / static_cast<double>(vanguard::system::GetMonotonicFrequency());
+                    std::fprintf(stderr, "RF2_PROFILE_RHI_RETIRE samples=256 p50_us=%.3f p95_us=%.3f mean_us=%.3f max_us=%.3f\n",
+                                 static_cast<double>(retireWindow[127]) * microsecondsPerTick,
+                                 static_cast<double>(retireWindow[242]) * microsecondsPerTick,
+                                 static_cast<double>(accumulatedRetireTicks) * microsecondsPerTick / 256.0,
+                                 static_cast<double>(maximumRetireTicks) * microsecondsPerTick);
+                    accumulatedRetireTicks = 0;
+                    maximumRetireTicks = 0;
+                    retireSamples = 0;
+                }
+#endif
+            }
+            if (!retiredResources)
+            {
+                const bool abandonOwners = rhiFailure.code == rhi::FailureCode::DeviceLost;
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::NativeResourceFailure;
+                    failure->message = FailureMessage(rhiFailure.message, "retired native resource collection failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->nativeFailure = rhiFailure;
+                }
+                return false;
+            }
             rendering::TextureResidencyRuntimeFailure textureResidencyFailure;
-            if (m_textureResidency.IsInitialized() && !m_textureResidency.Tick(&textureResidencyFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(textureResidencyFailure.message, "texture residency progress failed"));
+            if (m_textureResidency.IsInitialized() && !m_textureResidency.Tick(priorReaderCutover, &textureResidencyFailure))
+            {
+                const bool abandonOwners = RequiresRendererAbandonment(textureResidencyFailure);
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::TextureFailure;
+                    failure->message = FailureMessage(textureResidencyFailure.message, "texture residency progress failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->textureFailure = textureResidencyFailure;
+                }
+                return false;
+            }
             rendering::MaterialResidencyRuntimeFailure materialResidencyFailure;
             if (m_materialResidency.IsInitialized() && !m_materialResidency.Update(&materialResidencyFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(materialResidencyFailure.message, "material residency progress failed"));
+            {
+                const bool abandonOwners = RequiresRendererAbandonment(materialResidencyFailure);
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::MaterialFailure;
+                    failure->message = FailureMessage(materialResidencyFailure.message, "material residency progress failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->materialFailure = materialResidencyFailure;
+                }
+                return false;
+            }
             rendering::MeshResidencyFailure meshResidencyFailure;
             if (m_meshResidency.IsInitialized() && !m_meshResidency.Tick(&meshResidencyFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(meshResidencyFailure.message, "mesh residency progress failed"));
+            {
+                const bool abandonOwners = RequiresRendererAbandonment(meshResidencyFailure);
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::MeshFailure;
+                    failure->message = FailureMessage(meshResidencyFailure.message, "mesh residency progress failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->meshFailure = meshResidencyFailure;
+                }
+                return false;
+            }
             rendering::MaterialSceneBindingFailure bindingFailure;
             if (m_materialBindings.IsInitialized() && !m_materialBindings.Update(&bindingFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(bindingFailure.message, "material scene-binding progress failed"));
+            {
+                const bool abandonOwners = RequiresRendererAbandonment(bindingFailure);
+                if (abandonOwners)
+                    AbandonRendererOwners();
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::MaterialBindingFailure;
+                    failure->message = FailureMessage(bindingFailure.message, "material scene-binding progress failed");
+                    failure->ownersAbandoned = abandonOwners;
+                    failure->materialBindingFailure = bindingFailure;
+                }
+                return false;
+            }
             // FlushPreviousFrameProcessing above joins every retained-frame
-            // submission. Snapshot actual RHI receipts after residency producers
+            // submission. Read actual RHI receipts after residency producers
             // progress; do not fabricate work for a queue that has never run.
             if (m_gpuSceneRuntime.IsInitialized())
             {
                 rhi::ResidencyFenceSet cutover;
                 if (!rhi::GetSubmittedResidencyFences(cutover))
-                    return engine::FrameParticipantStatus::Failure("submitted renderer work has no complete retirement receipt");
+                {
+                    AbandonRendererOwners();
+                    if (failure != nullptr)
+                        engine::detail::BuildSubmittedReceiptCoverageFailure(*failure);
+                    return false;
+                }
                 engine::RenderingRetirementFailure retirementFailure;
                 if (!SealResidencyRetirements(cutover, &retirementFailure))
-                    return engine::FrameParticipantStatus::Failure(FailureMessage(retirementFailure.message, "normal renderer residency retirement sealing failed"));
+                {
+                    const bool abandonOwners = RequiresRendererAbandonment(retirementFailure);
+                    if (abandonOwners)
+                        AbandonRendererOwners();
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::RetirementFailure;
+                        failure->message = FailureMessage(retirementFailure.message, "renderer residency retirement sealing failed");
+                        failure->ownersAbandoned = abandonOwners;
+                        failure->retirementFailure = retirementFailure;
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        [[nodiscard]] vanguard::u64 QuiesceOwnerWorkCount() const noexcept
+        {
+            vanguard::u64 work = 0;
+            if (m_textureResidency.IsInitialized())
+            {
+                const rendering::TextureResidencyRuntimeStats stats = m_textureResidency.GetStats();
+                work += stats.liveDemands;
+                work += stats.residencyRecords;
+            }
+            if (m_meshResidency.IsInitialized())
+            {
+                const rendering::MeshResidencyStats stats = m_meshResidency.GetStats();
+                work += stats.liveDemands;
+                work += stats.residencyRecords;
+            }
+            if (m_materialBindings.IsInitialized())
+                work += m_materialBindings.GetStats().bindings;
+            if (m_materialResidency.IsInitialized())
+            {
+                const rendering::MaterialResidencyRuntimeStats stats = m_materialResidency.GetStats();
+                work += stats.residencyRecords;
+                work += stats.liveDemands;
+                work += stats.liveTechniqueRequests;
+                work += stats.referencedNativePrograms;
+            }
+            if (m_materialMaterializer.IsInitialized())
+            {
+                const rendering::MaterialMaterializerStats stats = m_materialMaterializer.GetStats();
+                work += stats.activeOperations;
+                work += stats.liveReferences;
+            }
+            if (m_materialResources.IsInitialized())
+            {
+                const rendering::MaterialResourceResolverStats stats = m_materialResources.GetStats();
+                work += stats.activeOperations;
+                work += stats.liveReferences;
+                work += stats.cachedDescriptors;
+            }
+            return work;
+        }
+
+        [[nodiscard]] const char* DrainRendererOwnersForQuiesce() noexcept
+        {
+            if (m_backend == nullptr || m_deviceUnavailable)
+                return nullptr;
+
+            rhi::Failure rhiFailure;
+            if (!rhi::WaitIdle(&rhiFailure))
+            {
+                if (rhiFailure.code == rhi::FailureCode::DeviceLost)
+                {
+                    AbandonRendererDevice();
+                    return nullptr;
+                }
+                return FailureMessage(rhiFailure.message, "RHI idle wait failed during renderer quiesce");
+            }
+
+            const vanguard::u64 initialWork = QuiesceOwnerWorkCount();
+            const vanguard::u64 maximumPasses = 32u + initialWork * 4u;
+            for (vanguard::u64 pass = 0; pass < maximumPasses && QuiesceOwnerWorkCount() != 0; ++pass)
+            {
+                engine::RenderingProgressFailure progressFailure;
+                if (!ProgressRendererOwners(&progressFailure))
+                    return FailureMessage(progressFailure.message, "renderer owner quiesce progression failed");
+                if (!rhi::RetireResources(&rhiFailure) || !rhi::FlushRetiredResources(&rhiFailure))
+                    return FailureMessage(rhiFailure.message, "renderer owner quiesce native retirement flush failed");
+            }
+            return QuiesceOwnerWorkCount() == 0 ? nullptr : "renderer owner quiesce did not settle after device idle";
+        }
+
+        [[nodiscard]] bool StageFrameContributions(bool& contributionStaged, engine::RenderingProgressFailure* const failure) noexcept
+        {
+            contributionStaged = false;
+            if (failure != nullptr)
+                *failure = {};
+            if (m_deviceUnavailable)
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::DeviceUnavailable;
+                    failure->message = "renderer device is unavailable";
+                }
+                return false;
+            }
+            if (!m_gpuSceneRuntime.IsInitialized())
+                return true;
+
+            bool textureContributionStaged = false;
+            rendering::TextureResidencyRuntimeFailure textureResidencyFailure;
+            if (m_textureResidency.IsInitialized() &&
+                !m_textureResidency.StageGpuSceneContribution(m_gpuSceneRuntime, textureContributionStaged, &textureResidencyFailure))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::TextureFailure;
+                    failure->message = FailureMessage(textureResidencyFailure.message, "texture GPU Scene contribution staging failed");
+                    failure->textureFailure = textureResidencyFailure;
+                }
+                return false;
+            }
+            bool meshContributionStaged = false;
+            rendering::MeshResidencyFailure meshFailure;
+            if (m_meshResidency.IsInitialized() && !m_meshResidency.StageGpuSceneContribution(meshContributionStaged, &meshFailure))
+            {
+                rendering::GpuSceneRuntimeFailure gpuSceneFailure;
+                if (!m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure))
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::GpuSceneFailure;
+                        failure->message = FailureMessage(gpuSceneFailure.message, "GPU Scene contribution rollback failed after mesh staging rejection");
+                        failure->meshFailure = meshFailure;
+                        failure->gpuSceneFailure = gpuSceneFailure;
+                    }
+                    return false;
+                }
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::MeshFailure;
+                    failure->message = FailureMessage(meshFailure.message, "mesh GPU Scene contribution staging failed");
+                    failure->meshFailure = meshFailure;
+                }
+                return false;
+            }
+            contributionStaged = textureContributionStaged || meshContributionStaged;
+            return true;
+        }
+
+        [[nodiscard]] bool DispatchRendererFrameTick(const vanguard::containers::ArraySpan<const rendering::RenderSceneHandle> scenes,
+                                                     const bool forceDispatch, bool& dispatched,
+                                                     engine::RenderingProgressFailure* const failure) noexcept
+        {
+            dispatched = false;
+            bool contributionStaged = false;
+            if (!StageFrameContributions(contributionStaged, failure))
+                return false;
+            if (!forceDispatch && !contributionStaged)
+                return true;
+            if (m_rendererProgressEpoch == std::numeric_limits<vanguard::u64>::max())
+            {
+                if (contributionStaged && m_gpuSceneRuntime.IsInitialized())
+                {
+                    rendering::GpuSceneRuntimeFailure rollbackFailure;
+                    if (!m_gpuSceneRuntime.ResolveContributions(&rollbackFailure))
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->code = engine::RenderingProgressFailureCode::GpuSceneFailure;
+                            failure->message = FailureMessage(rollbackFailure.message, "GPU Scene contribution rollback failed at renderer epoch exhaustion");
+                            failure->gpuSceneFailure = rollbackFailure;
+                        }
+                        return false;
+                    }
+                }
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::ProgressEpochExhausted;
+                    failure->message = "renderer progress epoch is exhausted";
+                }
+                return false;
+            }
+            const vanguard::u64 progressEpoch = ++m_rendererProgressEpoch;
+            rendering::RenderCommandFrameTickResult result;
+            rendering::RenderCommandFailure commandFailure;
+            if (!m_commands.FrameTick(scenes, progressEpoch, result, &commandFailure))
+            {
+                rendering::GpuSceneRuntimeFailure gpuSceneFailure;
+                if (m_gpuSceneRuntime.IsInitialized() && !m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure))
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->code = engine::RenderingProgressFailureCode::GpuSceneFailure;
+                        failure->message = FailureMessage(gpuSceneFailure.message, "GPU Scene contribution rollback failed after FrameTick rejection");
+                        failure->commandFailure = commandFailure;
+                        failure->gpuSceneFailure = gpuSceneFailure;
+                    }
+                    return false;
+                }
+                if (failure != nullptr)
+                {
+                    failure->code = engine::RenderingProgressFailureCode::CommandFailure;
+                    failure->message = FailureMessage(commandFailure.message, "render command FrameTick dispatch failed");
+                    failure->commandFailure = commandFailure;
+                }
+                return false;
+            }
+            dispatched = true;
+            return true;
+        }
+
+        void ReportFrameDiagnostics() noexcept
+        {
+            if (!m_config.enableFrameDiagnostics)
+                return;
+
+            rendering::FrameGpuTimingSample gpuTiming;
+            rhi::Failure gpuFailure;
+            const rendering::FrameGpuTimingPoll gpuPoll = m_frameRenderer.PollGpuTimings(gpuTiming, &gpuFailure);
+            if (gpuPoll == rendering::FrameGpuTimingPoll::Ready)
+            {
+                m_latestGpuTiming = gpuTiming;
+                m_hasLatestGpuTiming = true;
+            }
+            else if (gpuPoll == rendering::FrameGpuTimingPoll::Failed)
+            {
+                VG_LOG_ERROR(vanguard::diagnostics::Category::Rendering, "render diagnostics GPU timing poll failed: code=%u backendCode=%lld message=%s",
+                             static_cast<vanguard::u32>(gpuFailure.code), static_cast<long long>(gpuFailure.backendCode),
+                             gpuFailure.message[0] != '\0' ? gpuFailure.message : "<none>");
+            }
+
+            rendering::GeometryFrameDiagnostics geometry;
+            rhi::Failure geometryFailure;
+            const rendering::GeometryDiagnosticsPoll geometryPoll = m_frameRenderer.PollGeometryDiagnostics(geometry, &geometryFailure);
+            if (geometryPoll == rendering::GeometryDiagnosticsPoll::Failed)
+            {
+                VG_LOG_ERROR(vanguard::diagnostics::Category::Rendering, "render diagnostics geometry poll failed: code=%u backendCode=%lld message=%s",
+                             static_cast<vanguard::u32>(geometryFailure.code), static_cast<long long>(geometryFailure.backendCode),
+                             geometryFailure.message[0] != '\0' ? geometryFailure.message : "<none>");
+                return;
+            }
+            if (geometryPoll != rendering::GeometryDiagnosticsPoll::Ready)
+                return;
+
+            ++m_diagnosticGeometrySamples;
+            if (m_diagnosticGeometrySamples != 1 && (m_diagnosticGeometrySamples % 120u) != 0)
+                return;
+
+            const rendering::GeometryCpuTimingSample geometryCpu = rendering::ConsumeGeometryCpuTimingSample();
+            const vanguard::u64 geometryCpuFrequency = vanguard::system::GetMonotonicFrequency();
+            const auto averageMicroseconds = [geometryCpuFrequency](const vanguard::u64 ticks, const vanguard::u32 calls) noexcept
+            {
+                return geometryCpuFrequency != 0 && calls != 0
+                           ? static_cast<double>(ticks) * 1000000.0 / static_cast<double>(geometryCpuFrequency) / static_cast<double>(calls)
+                           : 0.0;
+            };
+            VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                        "geometry CPU recording: initUs=%.3f initUploadUs=%.3f initClearUs=%.3f initShellsUs=%.3f cullUs=%.3f "
+                        "expandAppendUs=%.3f allocateBinsUs=%.3f scatterInstancesUs=%.3f",
+                        averageMicroseconds(geometryCpu.initializeTicks, geometryCpu.initializeCalls),
+                        averageMicroseconds(geometryCpu.initializeUploadTicks, geometryCpu.initializeCalls),
+                        averageMicroseconds(geometryCpu.initializeClearTicks, geometryCpu.initializeCalls),
+                        averageMicroseconds(geometryCpu.stageTicks[static_cast<vanguard::u32>(rendering::GeometryComputeStage::InitializeShells)],
+                                            geometryCpu.stageCalls[static_cast<vanguard::u32>(rendering::GeometryComputeStage::InitializeShells)]),
+                        averageMicroseconds(geometryCpu.stageTicks[static_cast<vanguard::u32>(rendering::GeometryComputeStage::Cull)],
+                                            geometryCpu.stageCalls[static_cast<vanguard::u32>(rendering::GeometryComputeStage::Cull)]),
+                        averageMicroseconds(geometryCpu.stageTicks[static_cast<vanguard::u32>(rendering::GeometryComputeStage::ExpandAppend)],
+                                            geometryCpu.stageCalls[static_cast<vanguard::u32>(rendering::GeometryComputeStage::ExpandAppend)]),
+                        averageMicroseconds(geometryCpu.stageTicks[static_cast<vanguard::u32>(rendering::GeometryComputeStage::AllocateBins)],
+                                            geometryCpu.stageCalls[static_cast<vanguard::u32>(rendering::GeometryComputeStage::AllocateBins)]),
+                        averageMicroseconds(geometryCpu.stageTicks[static_cast<vanguard::u32>(rendering::GeometryComputeStage::ScatterInstances)],
+                                            geometryCpu.stageCalls[static_cast<vanguard::u32>(rendering::GeometryComputeStage::ScatterInstances)]));
+
+            const engine::FramePipelineStats cpu = m_framePipeline != nullptr ? m_framePipeline->GetStats() : engine::FramePipelineStats{};
+            const rendering::RenderFlowResourceAllocatorStats frameResources = m_frameRenderer.GetResourceAllocatorStats();
+            const rhi::ResourceLifetimeStats nativeLifetime = rhi::GetResourceLifetimeStats();
+            const rhi::DescriptorDomainStats resourceDescriptors =
+                m_resourceDescriptors.IsValid() ? rhi::GetDescriptorDomainStats(m_resourceDescriptors.GetRef()) : rhi::DescriptorDomainStats{};
+            const auto phaseMilliseconds = [&](const engine::FramePhase phase) noexcept
+            {
+                return static_cast<double>(cpu.lastPhaseSeconds[static_cast<vanguard::u32>(phase)]) * 1000.0;
+            };
+            const rendering::FrameGpuTimingSample timing = m_hasLatestGpuTiming ? m_latestGpuTiming : rendering::FrameGpuTimingSample{};
+            if (geometry.viewCount == 0)
+            {
+                VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                            "render diagnostics: geometryFrame=%llu views=0 frameFailed=%u gpuAvailable=%u gpuFrame=%llu geometryWorkNs=%llu "
+                            "cameraGeometryNs=%llu cameraSamples=%u droppedScopes=%u droppedGeometry=%llu droppedGpu=%llu cpuFrame=%llu "
+                            "cpuExecutionMs=%.3f renderUpdateMs=%.3f presentationMs=%.3f renderMs=%.3f frameNativeBytes=%llu frameTextureBytes=%llu frameBufferBytes=%llu "
+                            "framePoolHits=%llu framePoolMisses=%llu framePendingRetire=%llu framePendingDestroy=%llu framePlacedHeapHits=%llu framePlacedHeapMisses=%llu frameExports=%u "
+                            "frameCanonicalLive=%u frameCanonicalReusable=%u frameCanonicalPeak=%u frameCanonicalHits=%llu frameCanonicalMisses=%llu "
+                            "frameCanonicalPressureEvictions=%llu frameCanonicalMaintenanceEvictions=%llu frameCanonicalRejected=%llu "
+                            "resourceDescriptorAllocated=%u resourceDescriptorPopulated=%u resourceDescriptorPendingRetire=%u resourceDescriptorCompletedRetire=%llu "
+                            "resourceDescriptorAllocationFailures=%llu rhiLive=%u rhiPendingRetire=%u rhiDestroying=%u rhiReclaimActive=%u",
+                            static_cast<unsigned long long>(geometry.frameSerial), geometry.frameFailed ? 1u : 0u, geometry.gpuAvailable ? 1u : 0u,
+                            static_cast<unsigned long long>(timing.frameSerial), static_cast<unsigned long long>(timing.geometryWorkNanoseconds),
+                            static_cast<unsigned long long>(timing.cameraGeometryNanoseconds), timing.cameraGeometrySamples, timing.droppedScopes,
+                            static_cast<unsigned long long>(m_frameRenderer.GetDroppedGeometryDiagnosticSamples()),
+                            static_cast<unsigned long long>(m_frameRenderer.GetDroppedGpuTimingFrames()), static_cast<unsigned long long>(cpu.frames),
+                            static_cast<double>(cpu.lastExecutionSeconds) * 1000.0, phaseMilliseconds(engine::FramePhase::RenderUpdate),
+                            phaseMilliseconds(engine::FramePhase::Presentation), phaseMilliseconds(engine::FramePhase::Render),
+                            static_cast<unsigned long long>(frameResources.chargedNativeBytes), static_cast<unsigned long long>(frameResources.chargedTextureBytes),
+                            static_cast<unsigned long long>(frameResources.chargedBufferBytes), static_cast<unsigned long long>(frameResources.dedicatedResourcePoolHits),
+                            static_cast<unsigned long long>(frameResources.dedicatedResourcePoolMisses), static_cast<unsigned long long>(frameResources.pendingRetirementResources),
+                            static_cast<unsigned long long>(frameResources.pendingNativeDestructionResources), static_cast<unsigned long long>(frameResources.placedHeapPoolHits),
+                            static_cast<unsigned long long>(frameResources.placedHeapPoolMisses), frameResources.outstandingPublishedExports,
+                            frameResources.canonicalDescriptorLiveSlots, frameResources.canonicalDescriptorReusableSlots, frameResources.canonicalDescriptorPeakLiveSlots,
+                            static_cast<unsigned long long>(frameResources.canonicalDescriptorPublicationHits),
+                            static_cast<unsigned long long>(frameResources.canonicalDescriptorPublicationMisses),
+                            static_cast<unsigned long long>(frameResources.canonicalDescriptorPressureEvictions),
+                            static_cast<unsigned long long>(frameResources.canonicalDescriptorMaintenanceEvictions),
+                            static_cast<unsigned long long>(frameResources.canonicalDescriptorRejectedReservations), resourceDescriptors.allocated, resourceDescriptors.populated,
+                            resourceDescriptors.pendingRetirement, static_cast<unsigned long long>(resourceDescriptors.completedRetirements),
+                            static_cast<unsigned long long>(resourceDescriptors.allocationFailures),
+                            nativeLifetime.liveResources, nativeLifetime.pendingRetirements, nativeLifetime.destroyingResources, nativeLifetime.reclamationJobActive ? 1u : 0u);
+                return;
+            }
+
+            const rendering::GeometryViewDiagnostics& view = geometry.views[0];
+            const rendering::TextureResidencyRuntimeStats textureStats = m_textureResidency.GetStats();
+            const rendering::MaterialResourceResolverStats resourceStats = m_materialResources.GetStats();
+            const rendering::MaterialResidencyRuntimeStats materialStats = m_materialResidency.GetStats();
+            const rendering::MaterialSceneBindingStats bindingStats = m_materialBindings.GetStats();
+            VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                        "render diagnostics: geometryFrame=%llu views=%u regions=%u lights=%u frameFailed=%u gpuAvailable=%u candidates=%u unresolved=%u shells=%u pipelineBinds=%u "
+                        "visibleCapacity=%u workCapacity=%u instanceCapacity=%u argumentCapacity=%u visible=%u culled=%u visibilityOverflow=%u visibilityRejected=%u "
+                        "requestedWork=%u emittedWork=%u rejectedWork=%u expansionOverflow=%u invalidBin=%u instanceOverflow=%u visibleBins=%u rejectedIndirectBins=%u "
+                        "emittedArguments=%u argumentOverflow=%u nonemptyShells=%u gpuFrame=%llu geometryWorkNs=%llu cameraGeometryNs=%llu cameraSamples=%u "
+                        "droppedScopes=%u droppedGeometry=%llu droppedGpu=%llu textureRecords=%u textureDemands=%u textureReady=%u texturePending=%u textureFailed=%llu "
+                        "resourceOperations=%u resourceReferences=%u resourceReady=%llu resourceFallbacks=%llu resourceRejected=%llu materialRecords=%u materialDemands=%u "
+                        "materialFailed=%llu bindings=%u activeBindings=%u candidateBindings=%u bindingFailures=%llu cpuFrame=%llu cpuExecutionMs=%.3f renderUpdateMs=%.3f "
+                        "presentationMs=%.3f renderMs=%.3f frameNativeBytes=%llu frameTextureBytes=%llu frameBufferBytes=%llu framePoolHits=%llu framePoolMisses=%llu "
+                        "framePendingRetire=%llu framePendingDestroy=%llu framePlacedHeapHits=%llu framePlacedHeapMisses=%llu frameExports=%u "
+                        "frameCanonicalLive=%u frameCanonicalReusable=%u frameCanonicalPeak=%u frameCanonicalHits=%llu frameCanonicalMisses=%llu "
+                        "frameCanonicalPressureEvictions=%llu frameCanonicalMaintenanceEvictions=%llu frameCanonicalRejected=%llu "
+                        "resourceDescriptorAllocated=%u resourceDescriptorPopulated=%u resourceDescriptorPendingRetire=%u resourceDescriptorCompletedRetire=%llu "
+                        "resourceDescriptorAllocationFailures=%llu rhiLive=%u rhiPendingRetire=%u rhiDestroying=%u rhiReclaimActive=%u",
+                        static_cast<unsigned long long>(geometry.frameSerial), geometry.viewCount, geometry.outputRegions, view.directionalLights, geometry.frameFailed ? 1u : 0u,
+                        geometry.gpuAvailable ? 1u : 0u, view.candidates, view.unresolvedGpuIdentities, view.plannedShells, view.pipelineBinds, view.visibleCapacity, view.workCapacity,
+                        view.instanceCapacity, view.argumentCapacity, view.gpu.visibility.visibleCount, view.gpu.visibility.culledCount,
+                        view.gpu.visibility.overflowCount, view.gpu.visibility.rejectedCount, view.gpu.geometry.requestedWorkCount, view.gpu.geometry.emittedWorkCount,
+                        view.gpu.geometry.rejectedWorkCount, view.gpu.geometry.expansionOverflowCount, view.gpu.geometry.invalidBinWorkCount,
+                        view.gpu.geometry.instanceOverflowCount, view.gpu.geometry.visibleBinCount, view.gpu.geometry.rejectedIndirectBinCount,
+                        view.gpu.emittedArguments, view.gpu.argumentOverflow, view.gpu.nonemptyShells, static_cast<unsigned long long>(timing.frameSerial),
+                        static_cast<unsigned long long>(timing.geometryWorkNanoseconds), static_cast<unsigned long long>(timing.cameraGeometryNanoseconds),
+                        timing.cameraGeometrySamples, timing.droppedScopes, static_cast<unsigned long long>(m_frameRenderer.GetDroppedGeometryDiagnosticSamples()),
+                        static_cast<unsigned long long>(m_frameRenderer.GetDroppedGpuTimingFrames()), textureStats.residencyRecords, textureStats.liveDemands,
+                        textureStats.residency.bindlessReady, textureStats.residency.pendingInstallations, static_cast<unsigned long long>(textureStats.failedResidencies),
+                        resourceStats.activeOperations, resourceStats.liveReferences, static_cast<unsigned long long>(resourceStats.resolutionsReady),
+                        static_cast<unsigned long long>(resourceStats.fallbacksSelected), static_cast<unsigned long long>(resourceStats.rejectedOperations), materialStats.residencyRecords,
+                        materialStats.liveDemands, static_cast<unsigned long long>(materialStats.materializationsFailed), bindingStats.bindings, bindingStats.activeBindings,
+                        bindingStats.candidateBindings, static_cast<unsigned long long>(bindingStats.candidateFailures), static_cast<unsigned long long>(cpu.frames),
+                        static_cast<double>(cpu.lastExecutionSeconds) * 1000.0, phaseMilliseconds(engine::FramePhase::RenderUpdate),
+                        phaseMilliseconds(engine::FramePhase::Presentation), phaseMilliseconds(engine::FramePhase::Render),
+                        static_cast<unsigned long long>(frameResources.chargedNativeBytes), static_cast<unsigned long long>(frameResources.chargedTextureBytes),
+                        static_cast<unsigned long long>(frameResources.chargedBufferBytes), static_cast<unsigned long long>(frameResources.dedicatedResourcePoolHits),
+                        static_cast<unsigned long long>(frameResources.dedicatedResourcePoolMisses), static_cast<unsigned long long>(frameResources.pendingRetirementResources),
+                        static_cast<unsigned long long>(frameResources.pendingNativeDestructionResources), static_cast<unsigned long long>(frameResources.placedHeapPoolHits),
+                        static_cast<unsigned long long>(frameResources.placedHeapPoolMisses), frameResources.outstandingPublishedExports,
+                        frameResources.canonicalDescriptorLiveSlots, frameResources.canonicalDescriptorReusableSlots, frameResources.canonicalDescriptorPeakLiveSlots,
+                        static_cast<unsigned long long>(frameResources.canonicalDescriptorPublicationHits),
+                        static_cast<unsigned long long>(frameResources.canonicalDescriptorPublicationMisses),
+                        static_cast<unsigned long long>(frameResources.canonicalDescriptorPressureEvictions),
+                        static_cast<unsigned long long>(frameResources.canonicalDescriptorMaintenanceEvictions),
+                        static_cast<unsigned long long>(frameResources.canonicalDescriptorRejectedReservations), resourceDescriptors.allocated, resourceDescriptors.populated,
+                        resourceDescriptors.pendingRetirement, static_cast<unsigned long long>(resourceDescriptors.completedRetirements),
+                        static_cast<unsigned long long>(resourceDescriptors.allocationFailures),
+                        nativeLifetime.liveResources, nativeLifetime.pendingRetirements, nativeLifetime.destroyingResources, nativeLifetime.reclamationJobActive ? 1u : 0u);
+        }
+
+        engine::FrameParticipantStatus CompletePreviousFrame() noexcept
+        {
+            engine::RenderingProgressFailure failure;
+            if (ResolvePreviousFrameOwners(&failure))
+            {
+                ReportFrameDiagnostics();
+                return engine::FrameParticipantStatus::Success();
+            }
+            LatchParticipantFailure(failure);
+            return engine::FrameParticipantStatus::Failure(FailureMessage(failure.message, "previous renderer frame completion failed"));
+        }
+
+        engine::FrameParticipantStatus RenderUpdate() noexcept
+        {
+            engine::RenderingProgressFailure failure;
+            if (ProgressRendererOwners(&failure))
+                return engine::FrameParticipantStatus::Success();
+            if (failure.code == engine::RenderingProgressFailureCode::GpuSceneFailure)
+            {
+                const rendering::GpuSceneUploadFailure& upload = failure.gpuSceneFailure.uploadFailure;
+                VG_LOG_ERROR(vanguard::diagnostics::Category::Rendering, "GPU Scene progression failed: uploadCode=%u request=%u rhiCode=%u backendCode=%lld rhiMessage=%s uploadMessage=%s",
+                             static_cast<vanguard::u32>(upload.code), upload.request, static_cast<vanguard::u32>(upload.rhiFailure.code), static_cast<long long>(upload.rhiFailure.backendCode),
+                             upload.rhiFailure.message[0] != '\0' ? upload.rhiFailure.message : "<none>", upload.message != nullptr ? upload.message : "<none>");
+            }
+            LatchParticipantFailure(failure);
+            return engine::FrameParticipantStatus::Failure(FailureMessage(failure.message, "renderer owner progression failed"));
+        }
+
+        engine::FrameParticipantStatus DispatchFrameTick() noexcept
+        {
+            engine::RenderingProgressFailure failure;
+            bool dispatched = false;
+            if (!DispatchRendererFrameTick(m_scenes.GetFramePipelineScenes(), true, dispatched, &failure))
+            {
+                LatchParticipantFailure(failure);
+                return engine::FrameParticipantStatus::Failure(FailureMessage(failure.message, "renderer FrameTick progression failed"));
             }
             return engine::FrameParticipantStatus::Success();
         }
 
-        engine::FrameParticipantStatus DispatchFrameTick(const engine::FrameContext& context) noexcept
+        void LatchParticipantFailure(const engine::RenderingProgressFailure& failure) noexcept
         {
-            if (m_deviceUnavailable)
-                return engine::FrameParticipantStatus::Failure("renderer device is unavailable");
-            rendering::TextureResidencyRuntimeFailure textureResidencyFailure;
-            if (m_textureResidency.IsInitialized() && !m_textureResidency.StageGpuSceneContribution(m_gpuSceneRuntime, &textureResidencyFailure))
-                return engine::FrameParticipantStatus::Failure(FailureMessage(textureResidencyFailure.message, "texture GPU Scene contribution staging failed"));
-            rendering::MeshResidencyFailure meshFailure;
-            if (m_meshResidency.IsInitialized() && !m_meshResidency.StageGpuSceneContribution(&meshFailure))
-            {
-                rendering::GpuSceneRuntimeFailure gpuSceneFailure;
-                static_cast<void>(m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure));
-                return engine::FrameParticipantStatus::Failure(FailureMessage(meshFailure.message, "mesh GPU Scene contribution staging failed"));
-            }
-            rendering::RenderCommandFrameTickResult result;
-            rendering::RenderCommandFailure failure;
-            if (!m_commands.FrameTick(m_scenes.GetFramePipelineScenes(), context.frame + 1u, result, &failure))
-            {
-                rendering::GpuSceneRuntimeFailure gpuSceneFailure;
-                static_cast<void>(m_gpuSceneRuntime.ResolveContributions(&gpuSceneFailure));
-                return engine::FrameParticipantStatus::Failure(FailureMessage(failure.message, "render command FrameTick dispatch failed"));
-            }
-            return engine::FrameParticipantStatus::Success();
+            m_participantFailure.Latch(failure);
         }
 
         engine::RenderingServiceConfig m_config;
@@ -1095,33 +2257,42 @@ namespace
         rendering::GpuSceneRuntime m_gpuSceneRuntime;
         rendering::MaterialProgramLayoutRegistry m_materialProgramLayouts;
         rendering::RenderPhaseRegistry m_renderPhases;
+        bool m_drawInterfaceAvailable = false;
+        rendering::RenderPhaseSet m_defaultCameraPhases;
         rendering::MeshResidencyManager m_meshResidency;
         rendering::TextureResidencyRuntime m_textureResidency;
         rendering::MaterialResourceResolver m_materialResources;
         rendering::MaterialMaterializer m_materialMaterializer;
         rendering::PipelineCache m_materialPipelines;
         rhi::BindingLayout m_materialBindingLayouts[rhi::MaximumBindingLayoutsPerPipeline];
+        vanguard::u32 m_materialBindingLayoutCount = 0;
         rendering::MaterialResidencyRuntime m_materialResidency;
         rendering::MaterialSceneBindingBridge m_materialBindings;
         rendering::FrameRenderer m_frameRenderer;
         rendering::RenderCommandSystem m_commands;
         rendering::ViewportManager m_viewports;
+        engine::FramePipelineService* m_framePipeline = nullptr;
+        rendering::FrameGpuTimingSample m_latestGpuTiming;
+        vanguard::u64 m_diagnosticGeometrySamples = 0;
+        bool m_hasLatestGpuTiming = false;
+        vanguard::u64 m_rendererProgressEpoch = 0;
+        engine::detail::RenderingProgressFailureLatch m_participantFailure;
     };
 
     app::Service* CreateRenderingService(void* const userData) noexcept
     {
         if (userData == nullptr)
             return nullptr;
-        auto block = memory::Allocate(memory::PoolId::Rendering, sizeof(RenderingServiceImpl), alignof(RenderingServiceImpl));
-        return block ? ::new (block.address) RenderingServiceImpl(*static_cast<const engine::RenderingServiceConfig*>(userData)) : nullptr;
+        auto block = memory::Allocate(memory::PoolId::Rendering, sizeof(ManagedRenderingService), alignof(ManagedRenderingService));
+        return block ? ::new (block.address) ManagedRenderingService(*static_cast<const engine::RenderingServiceConfig*>(userData)) : nullptr;
     }
 
     void DestroyRenderingService(app::Service* const service, void*) noexcept
     {
         if (service == nullptr)
             return;
-        static_cast<RenderingServiceImpl*>(service)->~RenderingServiceImpl();
-        memory::MemoryBlock block{service, sizeof(RenderingServiceImpl), memory::PoolId::Rendering};
+        static_cast<ManagedRenderingService*>(service)->~ManagedRenderingService();
+        memory::MemoryBlock block{service, sizeof(ManagedRenderingService), memory::PoolId::Rendering};
         memory::Free(block);
     }
 } // namespace

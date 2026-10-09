@@ -31,6 +31,7 @@ int main()
     descriptor.initialPlacement = InitialWindowPlacement::CenteredOnDisplay;
     descriptor.placement.visible = false;
     descriptor.constraints = {{320, 180}, {1920, 1080}};
+    descriptor.flags = WindowFlag::AcceptFileDrop;
     BackendWindowId window;
     BackendWindowState state;
     if (!backend.Create(descriptor, window, state) || !window.IsValid())
@@ -56,6 +57,49 @@ int main()
     if (!translation.windowEvent || translation.displayTopologyChanged || translated.type != BackendEventType::CloseRequested || translated.window != window ||
         translated.timestampNanoseconds != 123)
         return 8;
+
+    SDL_Event dropBegin{};
+    dropBegin.type = SDL_EVENT_DROP_BEGIN;
+    dropBegin.drop.windowID = static_cast<SDL_WindowID>(window.value);
+    dropBegin.drop.timestamp = 201;
+    if (!backend.ProcessEvent(dropBegin, translated).windowEvent || translated.type != BackendEventType::FileDropBegin ||
+        translated.window != window || translated.timestampNanoseconds != 201 || translated.dropPath != nullptr)
+        return 16;
+
+    const char borrowedDropPath[] = "C:/external/drop.png";
+    SDL_Event dropFile{};
+    dropFile.type = SDL_EVENT_DROP_FILE;
+    dropFile.drop.windowID = static_cast<SDL_WindowID>(window.value);
+    dropFile.drop.timestamp = 202;
+    dropFile.drop.x = 37.0f;
+    dropFile.drop.y = 49.0f;
+    dropFile.drop.data = borrowedDropPath;
+    if (!backend.ProcessEvent(dropFile, translated).windowEvent || translated.type != BackendEventType::FileDropped ||
+        translated.window != window || translated.timestampNanoseconds != 202 || translated.dropPosition.x != 37 ||
+        translated.dropPosition.y != 49 || translated.dropPath != borrowedDropPath)
+        return 17;
+
+    SDL_Event dropComplete{};
+    dropComplete.type = SDL_EVENT_DROP_COMPLETE;
+    dropComplete.drop.windowID = static_cast<SDL_WindowID>(window.value);
+    dropComplete.drop.timestamp = 203;
+    dropComplete.drop.x = 37.0f;
+    dropComplete.drop.y = 49.0f;
+    if (!backend.ProcessEvent(dropComplete, translated).windowEvent || translated.type != BackendEventType::FileDropComplete ||
+        translated.window != window || translated.timestampNanoseconds != 203)
+        return 18;
+
+    BackendWindowDescriptor noDropDescriptor = descriptor;
+    noDropDescriptor.flags = WindowFlag::None;
+    BackendWindowId noDropWindow;
+    BackendWindowState noDropState;
+    if (!backend.Create(noDropDescriptor, noDropWindow, noDropState))
+        return 19;
+    dropFile.drop.windowID = static_cast<SDL_WindowID>(noDropWindow.value);
+    if (backend.ProcessEvent(dropFile, translated).windowEvent)
+        return 20;
+    if (!backend.DestroyWindow(noDropWindow))
+        return 21;
 
     SDL_Event display{};
     display.type = SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED;

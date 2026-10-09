@@ -16,6 +16,14 @@ namespace vanguard::resources
         Critical
     };
 
+    enum class PipelineCancelStatus : u8
+    {
+        Cancelled,
+        Completed,
+        Failed,
+        Invalid
+    };
+
     enum class DependencyRequirement : u8
     {
         Required,
@@ -26,6 +34,7 @@ namespace vanguard::resources
     {
         u32 maximumDependenciesPerResource = 4096;
         u32 maximumFailureTraceDepth = 32;
+        u32 maximumRetainedOperations = 16384;
     };
 
     class DependencyBuilder final
@@ -179,6 +188,11 @@ namespace vanguard::resources
         // Cancels only this caller's interest. Shared operations continue
         // while another root request or dependency edge still needs them.
         [[nodiscard]] bool Cancel() noexcept;
+        /// Atomically withdraws this caller's interest while distinguishing an
+        /// unfinished cancellation from an operation that had already reached a
+        /// terminal success/failure at the pipeline ownership linearization point.
+        /// terminalFailure is meaningful only when Failed is returned.
+        [[nodiscard]] PipelineCancelStatus CancelWithStatus(Failure* terminalFailure = nullptr) noexcept;
         [[nodiscard]] bool GetFailureTrace(FailureTrace& trace) const noexcept;
         void Reset() noexcept;
 
@@ -187,6 +201,8 @@ namespace vanguard::resources
 
         ResourcePipeline* m_pipeline = nullptr;
         PipelineOperation* m_operation = nullptr;
+        ResourceReference m_reference;
+        LoadPriority m_priority = LoadPriority::Normal;
         bool m_hasInterest = false;
         bool m_cancelled = false;
 
@@ -218,6 +234,10 @@ namespace vanguard::resources
         // PipelineRequest is one caller interest. Dropping its last interest
         // cancels unfinished work or evicts a completed unreferenced object.
         [[nodiscard]] PipelineRequest Request(ResourceReference reference, LoadPriority priority = LoadPriority::Normal) noexcept;
+        // Loads a fresh candidate generation without replacing the current
+        // operation until the candidate has constructed and the registry has
+        // atomically cut the path over to its new slot.
+        [[nodiscard]] PipelineRequest Replace(ResourceReference reference, LoadPriority priority = LoadPriority::Normal) noexcept;
         [[nodiscard]] PipelineStats GetStats() const noexcept;
 
     private:
@@ -228,6 +248,7 @@ namespace vanguard::resources
 
         void OnBeginRegistryLoad(ResourceRegistry& registry, const ResourceRequest& request) noexcept;
         void ReleaseRequestInterest(PipelineOperation* operation, bool cancelled) noexcept;
+        [[nodiscard]] PipelineCancelStatus CancelRequestInterest(PipelineOperation* operation, Failure& terminalFailure) noexcept;
         [[nodiscard]] bool PromoteRequest(PipelineOperation* operation, LoadPriority priority) noexcept;
         [[nodiscard]] bool BuildFailureTrace(const PipelineOperation* operation, FailureTrace& trace) const noexcept;
         [[nodiscard]] bool CompletePreparation(PipelineOperation* operation, Failure failure) noexcept;

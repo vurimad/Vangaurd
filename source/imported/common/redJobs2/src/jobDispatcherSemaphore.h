@@ -20,9 +20,9 @@ public:
 	~DispatcherSemaphore();
 
 	void SetSpinCount( Int32 spinCount );
-	void Acquire();
+	void Acquire( Bool* optUsedKernelWait = nullptr );
 	Bool TryAcquire();
-	void Release( Int32 releaseCount = 1 );
+	void Release( Int32 releaseCount = 1, Int32* optNumThreadsWoken = nullptr );
 
 private:
 	red::Atomic<Int32 > m_count;

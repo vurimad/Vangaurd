@@ -148,6 +148,7 @@ namespace vanguard::entities
         containers::DynamicArray<u64> completed;
         world::StreamingProcessInput input;
         bool hasInput = false;
+        bool releaseOnly = false;
         bool failed = false;
         u64 queuedCells = 0;
         u64 activatedCells = 0;
@@ -232,7 +233,7 @@ namespace vanguard::entities
 
     bool CellStreamingSystem::SetProcessInput(const world::StreamingProcessInput& input) noexcept
     {
-        if (m_impl == nullptr || input.observers.Size() > world::MaximumStreamingObservers || input.globalDistanceScale <= 0.0f)
+        if (m_impl == nullptr || m_impl->releaseOnly || input.observers.Size() > world::MaximumStreamingObservers || input.globalDistanceScale <= 0.0f)
             return false;
         m_impl->observers.Clear();
         for (const world::StreamingObserver& observer : input.observers)
@@ -241,6 +242,195 @@ namespace vanguard::entities
         m_impl->input.observers = containers::ArraySpan<const world::StreamingObserver>(m_impl->observers);
         m_impl->hasInput = true;
         return true;
+    }
+
+    bool CellStreamingSystem::BeginReleaseOnly() noexcept
+    {
+        if (m_impl == nullptr || m_impl->failed)
+            return false;
+        if (!m_impl->hasInput)
+        {
+            m_impl->input = {};
+            m_impl->input.globalDistanceScale = 1.0f;
+            m_impl->observers.Clear();
+            m_impl->observers.PushBack({});
+            m_impl->input.observers = containers::ArraySpan<const world::StreamingObserver>(m_impl->observers);
+            m_impl->hasInput = true;
+        }
+        m_impl->releaseOnly = true;
+        return true;
+    }
+
+    CellStreamingReleaseStatus CellStreamingSystem::ProgressReleaseOnly(CellStreamingReleaseFailure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (m_impl == nullptr || !m_impl->releaseOnly || m_impl->failed)
+        {
+            if (failure != nullptr)
+                *failure = {CellStreamingReleaseFailureCode::InvalidState, {}, Result::InvalidState, {},
+                            "cell streaming release-only progression is not available"};
+            return CellStreamingReleaseStatus::Failed;
+        }
+        if (!m_config.executor->Process(m_impl->input, m_impl->events))
+        {
+            m_impl->failed = true;
+            if (failure != nullptr)
+                *failure = {CellStreamingReleaseFailureCode::Executor, {}, Result::Success, {},
+                            "world streaming executor release progression failed"};
+            return CellStreamingReleaseStatus::Failed;
+        }
+
+        for (const world::StreamingResourceEvent& event : m_impl->events)
+        {
+            if (event.key.kind != world::StreamingNodeKind::Cell)
+            {
+                if (m_config.forwardNonCellEvent != nullptr)
+                    m_config.forwardNonCellEvent(event, m_config.userData);
+                if (m_impl->failed)
+                    return CellStreamingReleaseStatus::Failed;
+                continue;
+            }
+            if (event.type == world::StreamingResourceEventType::ResourceAvailable)
+                continue;
+            if (event.type != world::StreamingResourceEventType::ReleaseRequested)
+                continue;
+
+            Impl::Operation* const operation = m_impl->Find(event.key.id);
+            if (operation == nullptr)
+            {
+                if (!m_config.executor->CompleteRelease(event.key))
+                {
+                    m_impl->failed = true;
+                    if (failure != nullptr)
+                        *failure = {CellStreamingReleaseFailureCode::ReleaseAcknowledgement, event.key, Result::Success, {},
+                                    "cell release acknowledgement failed"};
+                    return CellStreamingReleaseStatus::Failed;
+                }
+                ++m_impl->releasedCells;
+                continue;
+            }
+
+            Result result = Result::InvalidState;
+            MaterializerReleaseFailure materializerFailure;
+            const CellState state = m_impl->materializer.GetState(event.key.id);
+            if (state == CellState::PendingActivation || state == CellState::PendingReferences)
+                result = m_impl->materializer.Cancel(event.key.id, operation->generation, &materializerFailure);
+            else if (state == CellState::Active || state == CellState::Failed || state == CellState::PendingRelease)
+                result = m_impl->materializer.QueueRelease(event.key.id, operation->generation, &materializerFailure);
+            if (result == Result::NotReady)
+            {
+                operation->phase = Impl::Phase::PreparingRelease;
+                continue;
+            }
+            if (result != Result::Success)
+            {
+                m_impl->failed = true;
+                if (failure != nullptr)
+                    *failure = {CellStreamingReleaseFailureCode::Materializer, event.key, result, materializerFailure.componentFailure,
+                                "cell materializer release preparation failed"};
+                return CellStreamingReleaseStatus::Failed;
+            }
+            if (m_impl->materializer.GetState(event.key.id) == CellState::Unknown)
+            {
+                m_impl->completed.PushBack(event.key.id);
+                if (!m_config.executor->CompleteRelease(event.key))
+                {
+                    m_impl->failed = true;
+                    if (failure != nullptr)
+                        *failure = {CellStreamingReleaseFailureCode::ReleaseAcknowledgement, event.key, Result::Success, {},
+                                    "cell release acknowledgement failed"};
+                    return CellStreamingReleaseStatus::Failed;
+                }
+                ++m_impl->releasedCells;
+            }
+            else
+                operation->phase = Impl::Phase::AwaitingRelease;
+        }
+
+        for (const u64 cellId : m_impl->completed)
+        {
+            Impl::Operation* const operation = m_impl->Find(cellId);
+            static_cast<void>(m_impl->operations.Remove(cellId));
+            DeleteCellStreamingObject(memory::PoolId::Streaming, operation);
+        }
+        m_impl->completed.Clear();
+
+        for (auto iterator = m_impl->operations.Begin(), end = m_impl->operations.End(); iterator != end; ++iterator)
+        {
+            Impl::Operation* const operation = iterator.Value();
+            if (operation->phase == Impl::Phase::PreparingRelease)
+            {
+                const CellState state = m_impl->materializer.GetState(operation->key.id);
+                MaterializerReleaseFailure materializerFailure;
+                const Result result = state == CellState::PendingActivation || state == CellState::PendingReferences
+                                          ? m_impl->materializer.Cancel(operation->key.id, operation->generation, &materializerFailure)
+                                          : m_impl->materializer.QueueRelease(operation->key.id, operation->generation, &materializerFailure);
+                if (result == Result::NotReady)
+                    continue;
+                if (result != Result::Success)
+                {
+                    m_impl->failed = true;
+                    if (failure != nullptr)
+                        *failure = {CellStreamingReleaseFailureCode::Materializer, operation->key, result,
+                                    materializerFailure.componentFailure,
+                                    "cell materializer release preparation failed"};
+                    return CellStreamingReleaseStatus::Failed;
+                }
+                if (m_impl->materializer.GetState(operation->key.id) == CellState::Unknown)
+                {
+                    m_impl->completed.PushBack(operation->key.id);
+                    if (!m_config.executor->CompleteRelease(operation->key))
+                    {
+                        m_impl->failed = true;
+                        if (failure != nullptr)
+                            *failure = {CellStreamingReleaseFailureCode::ReleaseAcknowledgement, operation->key, Result::Success, {},
+                                        "cell release acknowledgement failed"};
+                        return CellStreamingReleaseStatus::Failed;
+                    }
+                    ++m_impl->releasedCells;
+                }
+                else
+                    operation->phase = Impl::Phase::AwaitingRelease;
+            }
+            if (operation->phase != Impl::Phase::AwaitingRelease && operation->phase != Impl::Phase::FailureRelease)
+                continue;
+            MaterializerReleaseFailure materializerFailure;
+            const Result result = m_impl->materializer.CompleteRelease(operation->key.id, operation->generation, &materializerFailure);
+            if (result == Result::NotReady)
+                continue;
+            if (result != Result::Success)
+            {
+                m_impl->failed = true;
+                if (failure != nullptr)
+                    *failure = {CellStreamingReleaseFailureCode::Materializer, operation->key, result,
+                                materializerFailure.componentFailure,
+                                "cell materializer release completion failed"};
+                return CellStreamingReleaseStatus::Failed;
+            }
+            const bool acknowledged = operation->phase == Impl::Phase::AwaitingRelease
+                                          ? m_config.executor->CompleteRelease(operation->key)
+                                          : m_config.executor->FailResident(operation->key, operation->failure);
+            if (!acknowledged)
+            {
+                m_impl->failed = true;
+                if (failure != nullptr)
+                    *failure = {CellStreamingReleaseFailureCode::ReleaseAcknowledgement, operation->key, Result::Success, {},
+                                "cell release acknowledgement failed"};
+                return CellStreamingReleaseStatus::Failed;
+            }
+            m_impl->completed.PushBack(operation->key.id);
+            ++m_impl->releasedCells;
+        }
+
+        for (const u64 cellId : m_impl->completed)
+        {
+            Impl::Operation* const operation = m_impl->Find(cellId);
+            static_cast<void>(m_impl->operations.Remove(cellId));
+            DeleteCellStreamingObject(memory::PoolId::Streaming, operation);
+        }
+        m_impl->completed.Clear();
+        return m_impl->operations.Empty() ? CellStreamingReleaseStatus::Complete : CellStreamingReleaseStatus::Pending;
     }
 
     void CellStreamingSystem::OnBeginFrame(game::GameWorld&, const f32) noexcept
@@ -493,7 +683,7 @@ namespace vanguard::entities
 
     Result CellStreamingSystem::AcquireActivationGroup(const u64 cellId, const u64 groupId, const ActivationOwnerId ownerId) noexcept
     {
-        if (m_impl == nullptr)
+        if (m_impl == nullptr || m_impl->releaseOnly)
             return Result::InvalidState;
         Impl::Operation* const operation = m_impl->Find(cellId);
         if (operation == nullptr || operation->phase != Impl::Phase::Active)

@@ -80,7 +80,7 @@ renderNode_AntyAliasing.cpp    representative authored feature graph
 ## Port Rules
 
 1. Preserve RED behavior and structure during mechanical conversion. Do not redesign while resolving names, containers, ownership, or Jobs APIs.
-2. Make every intentional departure explicit against `docs/development/render-graph-design.md` Section 51.
+2. Make every intentional departure explicit against `docs/development/designs/render-graph-design.md` Section 51.
 3. Keep Vanguard's deliberate seams: the existing `RenderFlowResourceAllocator`, RHI, Jobs, cache-entry lifetime for the composed graph and its external node containers, explicit queue synchronization and receipts, Shipping-active validation, and same-frame graph-owned presentation.
 4. Convert files in bounded execution-plan stages. Do not import the complete renderer feature-node library to satisfy a core dependency.
 5. Record temporary compatibility adapters and remove them before the RG7 exit gate.

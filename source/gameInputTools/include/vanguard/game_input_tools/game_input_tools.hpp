@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/assets/assets.hpp>
+#include <vanguard/assets/source_database.hpp>
 #include <vanguard/game_input/mapping_resource.hpp>
 
 namespace vanguard::game_input_tools
@@ -44,5 +45,6 @@ namespace vanguard::game_input_tools
 
     /// Descriptor for assets::BuildSystem and its DDC/build graph. The compiler has no generated dependencies.
     [[nodiscard]] assets::CompilerDescriptor MakeMappingCompilerDescriptor() noexcept;
+    [[nodiscard]] assets::SourceImporterDescriptor MakeMappingImporterDescriptor() noexcept;
     [[nodiscard]] assets::Result RegisterMappingCompiler(assets::BuildSystem& buildSystem) noexcept;
 } // namespace vanguard::game_input_tools

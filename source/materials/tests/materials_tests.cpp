@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/materials/materials.hpp>
@@ -193,7 +194,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "materialsTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("materials_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
 
     ShaderFixture shaderFixture;

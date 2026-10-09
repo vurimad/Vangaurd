@@ -3,6 +3,7 @@
 
 #include <vanguard/assets/derived_data_artifact_source_internal.hpp>
 
+#include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/serialization/serialization.hpp>
 
@@ -79,6 +80,61 @@ namespace vanguard::assets::detail
         {
             return value < 10 ? static_cast<char>('0' + value) : static_cast<char>('a' + value - 10);
         }
+
+        [[nodiscard]] bool HexValue(const char value, u8& output) noexcept
+        {
+            if (value >= '0' && value <= '9')
+            {
+                output = static_cast<u8>(value - '0');
+                return true;
+            }
+            if (value >= 'a' && value <= 'f')
+            {
+                output = static_cast<u8>(value - 'a' + 10);
+                return true;
+            }
+            if (value >= 'A' && value <= 'F')
+            {
+                output = static_cast<u8>(value - 'A' + 10);
+                return true;
+            }
+            return false;
+        }
+
+        [[nodiscard]] int CompareFingerprint(const BuildFingerprint& left, const BuildFingerprint& right) noexcept
+        {
+            for (u32 index = 0; index < BuildFingerprint::ByteCount; ++index)
+            {
+                if (left.bytes[index] < right.bytes[index])
+                    return -1;
+                if (left.bytes[index] > right.bytes[index])
+                    return 1;
+            }
+            return 0;
+        }
+
+        [[nodiscard]] bool IsBuildProtected(const containers::ArraySpan<const ArtifactSetKey> keys,
+                                            const BuildFingerprint& build) noexcept
+        {
+            u32 first = 0u;
+            u32 count = keys.Count();
+            while (count != 0u)
+            {
+                const u32 step = count / 2u;
+                const u32 middle = first + step;
+                const int comparison = CompareFingerprint(keys[middle].build, build);
+                if (comparison < 0)
+                {
+                    first = middle + 1u;
+                    count -= step + 1u;
+                }
+                else
+                {
+                    count = step;
+                }
+            }
+            return first < keys.Count() && keys[first].build == build;
+        }
     } // namespace
 
     filesystem::AbsolutePath PersistentRecordDirectory(const filesystem::AbsolutePath& root,
@@ -105,6 +161,67 @@ namespace vanguard::assets::detail
         fileName[68] = 'c';
         fileName[69] = '\0';
         return PersistentRecordDirectory(root, fingerprint).AddFilePath(fileName);
+    }
+
+    filesystem::AbsolutePath PersistentRecordStagePath(const filesystem::AbsolutePath& root,
+                                                        const BuildFingerprint& fingerprint) noexcept
+    {
+        char fileName[74];
+        for (u32 index = 0; index < BuildFingerprint::ByteCount; ++index)
+        {
+            fileName[index * 2u] = HexDigit(fingerprint.bytes[index] >> 4u);
+            fileName[index * 2u + 1u] = HexDigit(fingerprint.bytes[index] & 0x0fu);
+        }
+        constexpr char suffix[] = ".vddc.tmp";
+        for (u32 index = 0; index < sizeof(suffix); ++index)
+            fileName[64u + index] = suffix[index];
+        return PersistentRecordDirectory(root, fingerprint).AddFilePath(fileName);
+    }
+
+    bool ParsePersistentRecordPath(const filesystem::AbsolutePath& root, const filesystem::AbsolutePath& path,
+                                   BuildFingerprint& fingerprint) noexcept
+    {
+        fingerprint = {};
+        if (root.Empty() || path.Empty())
+            return false;
+        const containers::StringView name = filesystem::paths::GetFileName(path);
+        if (name.Length() != 69u || name.Slice(64u, 69u) != containers::StringView(".vddc"))
+            return false;
+        for (u32 index = 0; index < BuildFingerprint::ByteCount; ++index)
+        {
+            u8 high = 0;
+            u8 low = 0;
+            if (!HexValue(name[index * 2u], high) || !HexValue(name[index * 2u + 1u], low))
+            {
+                fingerprint = {};
+                return false;
+            }
+            fingerprint.bytes[index] = static_cast<u8>((high << 4u) | low);
+        }
+        return PersistentRecordPath(root, fingerprint) == path;
+    }
+
+    bool ParsePersistentRecordStagePath(const filesystem::AbsolutePath& root, const filesystem::AbsolutePath& path,
+                                        BuildFingerprint& fingerprint) noexcept
+    {
+        fingerprint = {};
+        if (root.Empty() || path.Empty())
+            return false;
+        const containers::StringView name = filesystem::paths::GetFileName(path);
+        if (name.Length() != 73u || name.Slice(64u, 73u) != containers::StringView(".vddc.tmp"))
+            return false;
+        for (u32 index = 0; index < BuildFingerprint::ByteCount; ++index)
+        {
+            u8 high = 0;
+            u8 low = 0;
+            if (!HexValue(name[index * 2u], high) || !HexValue(name[index * 2u + 1u], low))
+            {
+                fingerprint = {};
+                return false;
+            }
+            fingerprint.bytes[index] = static_cast<u8>((high << 4u) | low);
+        }
+        return PersistentRecordStagePath(root, fingerprint) == path;
     }
 
     ArtifactSetFingerprintBuilder::ArtifactSetFingerprintBuilder(const u32 artifactCount) noexcept
@@ -140,6 +257,475 @@ namespace vanguard::assets::detail
 
 namespace vanguard::assets
 {
+    struct BuildOutputProtection::Impl final
+    {
+        VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
+
+        detail::PersistentRootAuthority* authority = nullptr;
+        BuildFingerprint build;
+        BuildFingerprint durableContent;
+        u64 durableDomainGeneration = 0u;
+        u32 references = 1;
+    };
+} // namespace vanguard::assets
+
+namespace vanguard::assets::detail
+{
+    struct PersistentLeaseRecord final
+    {
+        BuildFingerprint build;
+        u32 readers = 0;
+        u32 writers = 0;
+        u32 publications = 0;
+        u32 deletions = 0;
+    };
+
+    struct PersistentRootAuthority final
+    {
+        VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
+
+        PersistentRootAuthority() noexcept : leases(memory::pools::Assets::GetInstance()) {}
+
+        filesystem::AbsolutePath root;
+        PersistentCacheCoordinationLimits limits;
+        containers::DynamicArray<PersistentLeaseRecord> leases;
+        const void* protectionDomainOwner = nullptr;
+        u64 protectionDomainGeneration = 0u;
+        u32 participants = 0;
+        u32 liveLeases = 0;
+        u64 protectionEpoch = 1;
+    };
+
+    namespace
+    {
+        struct PersistentAuthorityRegistry final
+        {
+            PersistentAuthorityRegistry() noexcept : roots(memory::pools::Assets::GetInstance()) {}
+
+            concurrency::Mutex lock;
+            containers::DynamicArray<PersistentRootAuthority*> roots;
+            u32 maximumRegisteredRoots = 0;
+        };
+
+        [[nodiscard]] PersistentAuthorityRegistry& AuthorityRegistry() noexcept
+        {
+            static PersistentAuthorityRegistry registry;
+            return registry;
+        }
+
+        [[nodiscard]] u32 FindLease(const PersistentRootAuthority& authority, const BuildFingerprint& build) noexcept
+        {
+            for (u32 index = 0; index < authority.leases.Size(); ++index)
+                if (authority.leases[index].build == build)
+                    return index;
+            return authority.leases.Size();
+        }
+
+        [[nodiscard]] PersistentLeaseRecord* EnsureLease(PersistentRootAuthority& authority, const BuildFingerprint& build) noexcept
+        {
+            const u32 found = FindLease(authority, build);
+            if (found < authority.leases.Size())
+                return &authority.leases[found];
+            const u32 previous = authority.leases.Size();
+            authority.leases.PushBack({build});
+            return authority.leases.Size() == previous + 1u ? &authority.leases.Back() : nullptr;
+        }
+
+        void RemoveEmptyLease(PersistentRootAuthority& authority, const BuildFingerprint& build) noexcept
+        {
+            const u32 index = FindLease(authority, build);
+            if (index >= authority.leases.Size())
+                return;
+            const PersistentLeaseRecord& lease = authority.leases[index];
+            if (lease.readers == 0u && lease.writers == 0u && lease.publications == 0u && lease.deletions == 0u)
+                static_cast<void>(authority.leases.RemoveAt(index));
+        }
+
+        void DestroyAuthorityIfUnusedLocked(PersistentAuthorityRegistry& registry, PersistentRootAuthority* const authority) noexcept
+        {
+            if (authority == nullptr || authority->participants != 0u || authority->liveLeases != 0u ||
+                authority->protectionDomainOwner != nullptr)
+                return;
+            for (u32 index = 0; index < registry.roots.Size(); ++index)
+            {
+                if (registry.roots[index] != authority)
+                    continue;
+                static_cast<void>(registry.roots.RemoveAt(index));
+                authority->leases.Clear();
+                authority->leases.Shrink();
+                VANGUARD_DELETE(authority);
+                if (registry.roots.Empty())
+                {
+                    registry.roots.Shrink();
+                    registry.maximumRegisteredRoots = 0u;
+                }
+                return;
+            }
+        }
+
+        [[nodiscard]] bool BeginDeleteLocked(PersistentRootAuthority& authority, const BuildFingerprint& build) noexcept
+        {
+            if (authority.liveLeases >= authority.limits.maximumLiveLeasesPerRoot)
+                return false;
+            PersistentLeaseRecord* const record = EnsureLease(authority, build);
+            if (record == nullptr || record->readers != 0u || record->writers != 0u || record->publications != 0u || record->deletions != 0u)
+                return false;
+            record->deletions = 1u;
+            ++authority.liveLeases;
+            return true;
+        }
+
+        void EndDeleteLocked(PersistentRootAuthority& authority, const BuildFingerprint& build) noexcept
+        {
+            const u32 index = FindLease(authority, build);
+            if (index < authority.leases.Size() && authority.leases[index].deletions != 0u)
+            {
+                authority.leases[index].deletions = 0u;
+                if (authority.liveLeases != 0u)
+                    --authority.liveLeases;
+            }
+            RemoveEmptyLease(authority, build);
+        }
+
+        [[nodiscard]] bool IsExactMutationPath(const PersistentRootAuthority& authority, const BuildFingerprint& build,
+                                               const filesystem::AbsolutePath& path, const bool stage) noexcept
+        {
+            const filesystem::AbsolutePath expected = stage ? PersistentRecordStagePath(authority.root, build)
+                                                            : PersistentRecordPath(authority.root, build);
+            return expected == path && filesystem::ValidateMutationPath(authority.root, path) == filesystem::MutationPathResult::Success;
+        }
+    } // namespace
+
+    bool PersistentCacheAuthorityAccess::Join(const filesystem::AbsolutePath& root, const PersistentCacheCoordinationLimits& limits,
+                                              PersistentRootAuthority*& authority) noexcept
+    {
+        authority = nullptr;
+        if (root.Empty() || !limits.IsValid() || filesystem::ValidateMutationRoot(root) != filesystem::MutationPathResult::Success)
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        for (PersistentRootAuthority* const existing : registry.roots)
+        {
+            if (existing->root != root)
+                continue;
+            if (existing->limits != limits)
+                return false;
+            ++existing->participants;
+            authority = existing;
+            return true;
+        }
+        if ((registry.maximumRegisteredRoots != 0u && registry.maximumRegisteredRoots != limits.maximumRegisteredRoots) ||
+            registry.roots.Size() >= limits.maximumRegisteredRoots)
+            return false;
+        PersistentRootAuthority* const created = VANGUARD_NEW(PersistentRootAuthority);
+        if (created == nullptr)
+            return false;
+        created->root = root;
+        created->limits = limits;
+        created->participants = 1u;
+        const u32 previous = registry.roots.Size();
+        registry.roots.PushBack(created);
+        if (registry.roots.Size() != previous + 1u)
+        {
+            VANGUARD_DELETE(created);
+            return false;
+        }
+        if (registry.maximumRegisteredRoots == 0u)
+            registry.maximumRegisteredRoots = limits.maximumRegisteredRoots;
+        authority = created;
+        return true;
+    }
+
+    void PersistentCacheAuthorityAccess::Leave(PersistentRootAuthority*& authority) noexcept
+    {
+        if (authority == nullptr)
+            return;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        PersistentRootAuthority* const leaving = authority;
+        authority = nullptr;
+        if (leaving->participants != 0u)
+            --leaving->participants;
+        DestroyAuthorityIfUnusedLocked(registry, leaving);
+    }
+
+    DerivedDataArtifactResult PersistentCacheAuthorityAccess::AcquireReader(PersistentRootAuthority* const authority,
+                                                                            const BuildFingerprint& build) noexcept
+    {
+        if (authority == nullptr || build.IsEmpty())
+            return DerivedDataArtifactResult::InvalidArgument;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (authority->liveLeases >= authority->limits.maximumLiveLeasesPerRoot)
+            return DerivedDataArtifactResult::LimitExceeded;
+        PersistentLeaseRecord* const record = EnsureLease(*authority, build);
+        if (record == nullptr)
+            return DerivedDataArtifactResult::OutOfMemory;
+        if (record->writers != 0u || record->deletions != 0u)
+            return DerivedDataArtifactResult::InvalidState;
+        ++record->readers;
+        ++authority->liveLeases;
+        return DerivedDataArtifactResult::Success;
+    }
+
+    void PersistentCacheAuthorityAccess::ReleaseReader(PersistentRootAuthority* const authority, const BuildFingerprint& build) noexcept
+    {
+        if (authority == nullptr || build.IsEmpty())
+            return;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        const u32 index = FindLease(*authority, build);
+        if (index < authority->leases.Size() && authority->leases[index].readers != 0u)
+        {
+            --authority->leases[index].readers;
+            if (authority->liveLeases != 0u)
+                --authority->liveLeases;
+        }
+        RemoveEmptyLease(*authority, build);
+        DestroyAuthorityIfUnusedLocked(registry, authority);
+    }
+
+    bool PersistentCacheAuthorityAccess::AcquirePublication(PersistentRootAuthority* const authority, const BuildFingerprint& build,
+                                                            BuildOutputProtection& protection) noexcept
+    {
+        protection.Reset();
+        if (authority == nullptr || build.IsEmpty())
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (authority->liveLeases >= authority->limits.maximumLiveLeasesPerRoot)
+            return false;
+        PersistentLeaseRecord* const record = EnsureLease(*authority, build);
+        if (record == nullptr || record->writers != 0u || record->deletions != 0u)
+            return false;
+        BuildOutputProtection::Impl* const implementation = VANGUARD_NEW(BuildOutputProtection::Impl);
+        if (implementation == nullptr)
+            return false;
+        implementation->authority = authority;
+        implementation->build = build;
+        ++record->publications;
+        ++authority->liveLeases;
+        protection.m_impl = implementation;
+        return true;
+    }
+
+    DerivedDataArtifactResult PersistentCacheAuthorityAccess::AcquireWriter(PersistentRootAuthority* const authority,
+                                                                            const BuildFingerprint& build,
+                                                                            PersistentWriterLease& lease) noexcept
+    {
+        lease.Reset();
+        if (authority == nullptr || build.IsEmpty())
+            return DerivedDataArtifactResult::InvalidArgument;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (authority->liveLeases >= authority->limits.maximumLiveLeasesPerRoot)
+            return DerivedDataArtifactResult::LimitExceeded;
+        PersistentLeaseRecord* const record = EnsureLease(*authority, build);
+        if (record == nullptr)
+            return DerivedDataArtifactResult::OutOfMemory;
+        if (record->readers != 0u || record->writers != 0u || record->publications != 0u || record->deletions != 0u)
+            return DerivedDataArtifactResult::InvalidState;
+        record->writers = 1u;
+        ++authority->liveLeases;
+        lease.m_authority = authority;
+        lease.m_build = build;
+        return DerivedDataArtifactResult::Success;
+    }
+
+    bool PersistentCacheAuthorityAccess::PromoteWriterToPublication(PersistentWriterLease& writer,
+                                                                    BuildOutputProtection& protection) noexcept
+    {
+        protection.Reset();
+        if (!writer.IsValid())
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        PersistentRootAuthority* const authority = writer.m_authority;
+        const BuildFingerprint build = writer.m_build;
+        const u32 index = FindLease(*authority, build);
+        if (index >= authority->leases.Size() || authority->leases[index].writers == 0u)
+            return false;
+        BuildOutputProtection::Impl* const implementation = VANGUARD_NEW(BuildOutputProtection::Impl);
+        if (implementation == nullptr)
+            return false;
+        implementation->authority = authority;
+        implementation->build = build;
+        authority->leases[index].writers = 0u;
+        ++authority->leases[index].publications;
+        writer.m_authority = nullptr;
+        writer.m_build = {};
+        protection.m_impl = implementation;
+        return true;
+    }
+
+    bool PersistentCacheAuthorityAccess::DeleteCanonical(PersistentRootAuthority* const authority, const BuildFingerprint& build,
+                                                         const filesystem::AbsolutePath& path) noexcept
+    {
+        if (authority == nullptr || build.IsEmpty())
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        registry.lock.Acquire();
+        if (!BeginDeleteLocked(*authority, build))
+        {
+            registry.lock.Release();
+            return false;
+        }
+        registry.lock.Release();
+        filesystem::Manager& manager = filesystem::GetManager();
+        const bool valid = IsExactMutationPath(*authority, build, path, false);
+        const bool removed = valid && (!manager.FileExist(path) || manager.DeleteFile(path));
+        registry.lock.Acquire();
+        EndDeleteLocked(*authority, build);
+        DestroyAuthorityIfUnusedLocked(registry, authority);
+        registry.lock.Release();
+        return removed;
+    }
+
+    PersistentCacheAuthorityAccess::MaintenanceDeleteResult PersistentCacheAuthorityAccess::DeleteCanonicalForMaintenance(
+        PersistentRootAuthority* const authority, const void* const protectionDomainOwner, const u64 protectionEpoch,
+        const BuildFingerprint& build, const filesystem::AbsolutePath& path,
+        const containers::ArraySpan<const ArtifactSetKey> protectedKeys) noexcept
+    {
+        if (authority == nullptr || protectionDomainOwner == nullptr || protectionEpoch == 0u || build.IsEmpty() || path.Empty())
+            return MaintenanceDeleteResult::InvalidPath;
+
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        registry.lock.Acquire();
+        if (authority->protectionDomainOwner != protectionDomainOwner || authority->protectionEpoch != protectionEpoch)
+        {
+            registry.lock.Release();
+            return MaintenanceDeleteResult::ProtectionChanged;
+        }
+        if (IsBuildProtected(protectedKeys, build) || !BeginDeleteLocked(*authority, build))
+        {
+            registry.lock.Release();
+            return MaintenanceDeleteResult::Deferred;
+        }
+        registry.lock.Release();
+
+        filesystem::Manager& manager = filesystem::GetManager();
+        const bool valid = IsExactMutationPath(*authority, build, path, false);
+        const bool removed = valid && (!manager.FileExist(path) || manager.DeleteFile(path));
+
+        registry.lock.Acquire();
+        EndDeleteLocked(*authority, build);
+        DestroyAuthorityIfUnusedLocked(registry, authority);
+        registry.lock.Release();
+
+        if (!valid)
+            return MaintenanceDeleteResult::InvalidPath;
+        return removed ? MaintenanceDeleteResult::Removed : MaintenanceDeleteResult::IoFailure;
+    }
+
+    bool PersistentCacheAuthorityAccess::DeleteCanonical(PersistentWriterLease& writer, const filesystem::AbsolutePath& path) noexcept
+    {
+        if (!writer.IsValid())
+            return false;
+        filesystem::Manager& manager = filesystem::GetManager();
+        return IsExactMutationPath(*writer.m_authority, writer.m_build, path, false) &&
+               (!manager.FileExist(path) || manager.DeleteFile(path));
+    }
+
+    bool PersistentCacheAuthorityAccess::DeleteStage(PersistentWriterLease& writer, const filesystem::AbsolutePath& path) noexcept
+    {
+        if (!writer.IsValid())
+            return false;
+        filesystem::Manager& manager = filesystem::GetManager();
+        return IsExactMutationPath(*writer.m_authority, writer.m_build, path, true) &&
+               (!manager.FileExist(path) || manager.DeleteFile(path));
+    }
+
+    bool PersistentCacheAuthorityAccess::RegisterProtectionDomain(PersistentRootAuthority* const authority, const void* const owner) noexcept
+    {
+        if (authority == nullptr || owner == nullptr)
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (authority->protectionDomainOwner != nullptr)
+            return authority->protectionDomainOwner == owner;
+        ++authority->protectionDomainGeneration;
+        if (authority->protectionDomainGeneration == 0u)
+            ++authority->protectionDomainGeneration;
+        if (authority->protectionDomainGeneration == 0u)
+            return false;
+        authority->protectionDomainOwner = owner;
+        return true;
+    }
+
+    void PersistentCacheAuthorityAccess::UnregisterProtectionDomain(PersistentRootAuthority* const authority, const void* const owner) noexcept
+    {
+        if (authority == nullptr || owner == nullptr)
+            return;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (authority->protectionDomainOwner == owner)
+            authority->protectionDomainOwner = nullptr;
+        DestroyAuthorityIfUnusedLocked(registry, authority);
+    }
+
+    bool PersistentCacheAuthorityAccess::MarkDurablePublication(PersistentRootAuthority* const authority, const void* const owner,
+                                                                const BuildFingerprint& build, const BuildFingerprint& content,
+                                                                BuildOutputProtection& protection) noexcept
+    {
+        if (authority == nullptr || owner == nullptr || build.IsEmpty() || content.IsEmpty() || !protection.IsValid())
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (authority->protectionDomainOwner != owner || authority->protectionDomainGeneration == 0u || protection.m_impl == nullptr ||
+            protection.m_impl->authority != authority || protection.m_impl->build != build)
+            return false;
+        protection.m_impl->durableContent = content;
+        protection.m_impl->durableDomainGeneration = authority->protectionDomainGeneration;
+        return true;
+    }
+
+    void PersistentCacheAuthorityAccess::AdoptPublication(BuildOutputProtection& protection) noexcept
+    {
+        if (!protection.IsValid())
+            return;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        registry.lock.Acquire();
+        if (protection.m_impl != nullptr && protection.m_impl->authority != nullptr)
+            ++protection.m_impl->authority->protectionEpoch;
+        registry.lock.Release();
+        protection.Reset();
+    }
+
+    bool PersistentCacheAuthorityAccess::OwnsDurablePublication(PersistentRootAuthority* const authority, const void* const owner,
+                                                                const BuildFingerprint& build, const BuildFingerprint& content,
+                                                                const BuildOutputProtection& protection) noexcept
+    {
+        if (authority == nullptr || owner == nullptr || build.IsEmpty() || content.IsEmpty() || !protection.IsValid())
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        return authority->protectionDomainOwner == owner && authority->protectionDomainGeneration != 0u &&
+               protection.m_impl != nullptr && protection.m_impl->authority == authority && protection.m_impl->build == build &&
+               protection.m_impl->durableContent == content &&
+               protection.m_impl->durableDomainGeneration == authority->protectionDomainGeneration;
+    }
+
+    u64 PersistentCacheAuthorityAccess::ProtectionEpoch(PersistentRootAuthority* const authority) noexcept
+    {
+        if (authority == nullptr)
+            return 0u;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        return authority->protectionEpoch;
+    }
+
+    filesystem::AbsolutePath PersistentCacheAuthorityAccess::Root(PersistentRootAuthority* const authority) noexcept
+    {
+        if (authority == nullptr)
+            return {};
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        return authority->root;
+    }
+} // namespace vanguard::assets::detail
+
+namespace vanguard::assets
+{
     struct ArtifactSetReader::Impl final
     {
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
@@ -151,11 +737,40 @@ namespace vanguard::assets
         }
 
         ArtifactSetKey key;
+        detail::PersistentRootAuthority* authority = nullptr;
         red::UniquePtr<filesystem::IFile> file;
         containers::DynamicArray<CachedArtifactDescriptor> artifacts;
         containers::DynamicArray<u64> payloadOffsets;
         containers::HashMap<ArtifactIdentity, u32> lookup;
     };
+
+    bool detail::PersistentCacheAuthorityAccess::PromoteReaderToPublication(ArtifactSetReader& reader,
+                                                                           BuildOutputProtection& protection) noexcept
+    {
+        protection.Reset();
+        if (reader.m_impl == nullptr || reader.m_impl->authority == nullptr || reader.m_impl->key.build.IsEmpty())
+            return false;
+        PersistentAuthorityRegistry& registry = AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        PersistentRootAuthority* const authority = reader.m_impl->authority;
+        const BuildFingerprint build = reader.m_impl->key.build;
+        const u32 index = FindLease(*authority, build);
+        if (index >= authority->leases.Size() || authority->leases[index].readers == 0u)
+            return false;
+        BuildOutputProtection::Impl* const implementation = VANGUARD_NEW(BuildOutputProtection::Impl);
+        if (implementation == nullptr)
+            return false;
+        implementation->authority = authority;
+        implementation->build = build;
+        --authority->leases[index].readers;
+        ++authority->leases[index].publications;
+        // The publication lease is the same live lease, transferred from this
+        // exact reader. Detach it while the authority is locked so Close() can
+        // never release a different same-key reader's aggregate count.
+        reader.m_impl->authority = nullptr;
+        protection.m_impl = implementation;
+        return true;
+    }
 
     struct DerivedDataArtifactSource::Impl final
     {
@@ -163,7 +778,136 @@ namespace vanguard::assets
 
         filesystem::AbsolutePath root;
         DerivedDataArtifactLimits limits;
+        detail::PersistentRootAuthority* authority = nullptr;
     };
+
+    detail::PersistentRootAuthority* detail::PersistentCacheAuthorityAccess::Authority(const DerivedDataArtifactSource& source) noexcept
+    {
+        return source.m_impl != nullptr ? source.m_impl->authority : nullptr;
+    }
+
+    BuildOutputProtection::BuildOutputProtection(const BuildOutputProtection& other) noexcept
+    {
+        if (other.m_impl == nullptr)
+            return;
+        detail::PersistentAuthorityRegistry& registry = detail::AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        ++other.m_impl->references;
+        m_impl = other.m_impl;
+    }
+
+    BuildOutputProtection& BuildOutputProtection::operator=(const BuildOutputProtection& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+        Reset();
+        if (other.m_impl == nullptr)
+            return *this;
+        detail::PersistentAuthorityRegistry& registry = detail::AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        ++other.m_impl->references;
+        m_impl = other.m_impl;
+        return *this;
+    }
+
+    BuildOutputProtection::BuildOutputProtection(BuildOutputProtection&& other) noexcept : m_impl(other.m_impl)
+    {
+        other.m_impl = nullptr;
+    }
+
+    BuildOutputProtection& BuildOutputProtection::operator=(BuildOutputProtection&& other) noexcept
+    {
+        if (this != &other)
+        {
+            Reset();
+            m_impl = other.m_impl;
+            other.m_impl = nullptr;
+        }
+        return *this;
+    }
+
+    BuildOutputProtection::~BuildOutputProtection()
+    {
+        Reset();
+    }
+
+    void BuildOutputProtection::Reset() noexcept
+    {
+        if (m_impl == nullptr)
+            return;
+        Impl* const implementation = m_impl;
+        m_impl = nullptr;
+        detail::PersistentAuthorityRegistry& registry = detail::AuthorityRegistry();
+        registry.lock.Acquire();
+        if (implementation->references > 1u)
+        {
+            --implementation->references;
+            registry.lock.Release();
+            return;
+        }
+        detail::PersistentRootAuthority* const authority = implementation->authority;
+        const BuildFingerprint build = implementation->build;
+        if (authority != nullptr)
+        {
+            const u32 index = detail::FindLease(*authority, build);
+            if (index < authority->leases.Size() && authority->leases[index].publications != 0u)
+            {
+                --authority->leases[index].publications;
+                if (authority->liveLeases != 0u)
+                    --authority->liveLeases;
+            }
+            detail::RemoveEmptyLease(*authority, build);
+            detail::DestroyAuthorityIfUnusedLocked(registry, authority);
+        }
+        registry.lock.Release();
+        VANGUARD_DELETE(implementation);
+    }
+
+    detail::PersistentWriterLease::PersistentWriterLease(PersistentWriterLease&& other) noexcept
+        : m_authority(other.m_authority), m_build(other.m_build)
+    {
+        other.m_authority = nullptr;
+        other.m_build = {};
+    }
+
+    detail::PersistentWriterLease& detail::PersistentWriterLease::operator=(PersistentWriterLease&& other) noexcept
+    {
+        if (this != &other)
+        {
+            Reset();
+            m_authority = other.m_authority;
+            m_build = other.m_build;
+            other.m_authority = nullptr;
+            other.m_build = {};
+        }
+        return *this;
+    }
+
+    detail::PersistentWriterLease::~PersistentWriterLease()
+    {
+        Reset();
+    }
+
+    void detail::PersistentWriterLease::Reset() noexcept
+    {
+        if (m_authority == nullptr)
+            return;
+        detail::PersistentAuthorityRegistry& registry = detail::AuthorityRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        detail::PersistentRootAuthority* const authority = m_authority;
+        const BuildFingerprint build = m_build;
+        m_authority = nullptr;
+        m_build = {};
+        const u32 index = detail::FindLease(*authority, build);
+        if (index < authority->leases.Size() && authority->leases[index].writers != 0u)
+        {
+            authority->leases[index].writers = 0u;
+            if (authority->liveLeases != 0u)
+                --authority->liveLeases;
+        }
+        detail::RemoveEmptyLease(*authority, build);
+        detail::DestroyAuthorityIfUnusedLocked(registry, authority);
+    }
 
     DerivedDataPackageArtifactReader::DerivedDataPackageArtifactReader(const DerivedDataArtifactSource& source) noexcept
         : m_source(&source)
@@ -233,8 +977,12 @@ namespace vanguard::assets
     {
         if (m_impl != nullptr)
         {
+            detail::PersistentRootAuthority* const authority = m_impl->authority;
+            const BuildFingerprint build = m_impl->key.build;
             VANGUARD_DELETE(m_impl);
             m_impl = nullptr;
+            if (authority != nullptr)
+                detail::PersistentCacheAuthorityAccess::ReleaseReader(authority, build);
         }
     }
 
@@ -322,6 +1070,36 @@ namespace vanguard::assets
         return DerivedDataArtifactResult::Success;
     }
 
+    DerivedDataArtifactResult ArtifactSetReader::Hash(const CachedArtifactDescriptor& expected,
+                                                      const containers::ArraySpan<u8> scratch,
+                                                      crypto::Sha256Builder& contentHash) noexcept
+    {
+        if (m_impl == nullptr)
+            return DerivedDataArtifactResult::InvalidState;
+        if (scratch.Empty())
+            return DerivedDataArtifactResult::InvalidArgument;
+        const CachedArtifactDescriptor* const stored = Find(expected.resource, expected.segment);
+        if (stored == nullptr || stored->flags != expected.flags || stored->alignmentLog2 != expected.alignmentLog2 ||
+            stored->byteCount != expected.byteCount)
+            return DerivedDataArtifactResult::DescriptorMismatch;
+        const u32* const index = m_impl->lookup.FindPtr(Identity(*stored));
+        if (index == nullptr || *index >= m_impl->payloadOffsets.Size())
+            return DerivedDataArtifactResult::Corrupt;
+
+        serialization::BinaryReader reader(*m_impl->file);
+        if (!reader.Seek(m_impl->payloadOffsets[*index]))
+            return DerivedDataArtifactResult::IoFailure;
+        u64 remaining = stored->byteCount;
+        while (remaining != 0)
+        {
+            const u32 chunk = static_cast<u32>(remaining < scratch.Count() ? remaining : scratch.Count());
+            if (!reader.ReadBytes(scratch.Data(), chunk) || !contentHash.Update(scratch.Data(), chunk))
+                return DerivedDataArtifactResult::IoFailure;
+            remaining -= chunk;
+        }
+        return DerivedDataArtifactResult::Success;
+    }
+
     DerivedDataArtifactResult ArtifactSetReader::ReadAll(BuildOutput& output) noexcept
     {
         output.Reset();
@@ -372,14 +1150,15 @@ namespace vanguard::assets
 
     bool DerivedDataArtifactSource::Initialize(const DerivedDataArtifactSourceConfig& config) noexcept
     {
-        if (m_impl != nullptr || config.root == nullptr || config.root[0] == '\0' || !config.limits.IsValid())
+        if (m_impl != nullptr || config.root == nullptr || config.root[0] == '\0' || !config.limits.IsValid() || !config.coordination.IsValid())
             return false;
         Impl* const implementation = VANGUARD_NEW(Impl);
         if (implementation == nullptr)
             return false;
         implementation->root = filesystem::AbsolutePath::ParseDirPath(config.root);
         implementation->limits = config.limits;
-        if (implementation->root.Empty())
+        if (implementation->root.Empty() ||
+            !detail::PersistentCacheAuthorityAccess::Join(implementation->root, config.coordination, implementation->authority))
         {
             VANGUARD_DELETE(implementation);
             return false;
@@ -392,6 +1171,7 @@ namespace vanguard::assets
     {
         if (m_impl != nullptr)
         {
+            detail::PersistentCacheAuthorityAccess::Leave(m_impl->authority);
             VANGUARD_DELETE(m_impl);
             m_impl = nullptr;
         }
@@ -555,11 +1335,19 @@ namespace vanguard::assets
         if (!key.IsValid())
             return DerivedDataArtifactResult::InvalidArgument;
 
+        const DerivedDataArtifactResult acquired = detail::PersistentCacheAuthorityAccess::AcquireReader(m_impl->authority, key.build);
+        if (acquired != DerivedDataArtifactResult::Success)
+            return acquired;
         ArtifactSetReader::Impl* opened = nullptr;
         const DerivedDataArtifactResult result = OpenPersistentArtifactSet(
             detail::PersistentRecordPath(m_impl->root, key.build), key, m_impl->limits, opened);
         if (result == DerivedDataArtifactResult::Success)
+        {
+            opened->authority = m_impl->authority;
             output.m_impl = opened;
+        }
+        else
+            detail::PersistentCacheAuthorityAccess::ReleaseReader(m_impl->authority, key.build);
         return result;
     }
 } // namespace vanguard::assets

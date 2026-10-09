@@ -4,8 +4,8 @@
 
 namespace vanguard::rendering::detail
 {
-    /// Internal canonical registration seam used by the public shader-object
-    /// path and focused collision/capacity proofs. Production callers register
+    /// Internal canonical registration path shared by shader-object registration
+    /// and canonical layout validation. Public callers register
     /// only validated ShaderResourceObject instances.
     struct MaterialProgramLayoutCanonical
     {

@@ -56,9 +56,22 @@ namespace vanguard::jobs
 
     // A lock-free diagnostic snapshot for editor panels, captures, and health
     // checks. Individual fields may advance while the snapshot is collected.
-    struct SchedulerStats
-    {
-        QueueDepths queued;
+	struct SchedulerStats
+	{
+		struct DependencyContinuation
+		{
+			u32 pendingRecruitmentControls = 0;
+			u64 recruitmentControlsAdmitted = 0;
+			u64 recruitmentControlsPopped = 0;
+			u64 recruitmentControlsDroppedBound = 0;
+			u64 recruitmentControlsDroppedQueueFull = 0;
+			u64 recruitmentControlsAbandoned = 0;
+			u64 relaysInlined = 0;
+			u64 relaysQueuedFallback = 0;
+		};
+
+		QueueDepths queued;
+		DependencyContinuation dependencyContinuation;
         u32 workerCount = 0;
         u32 outstandingJobs = 0;
         u32 liveBuilders = 0;

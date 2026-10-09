@@ -40,6 +40,41 @@ namespace vanguard::rhi::d3d12
     {
         constexpr u32 MaximumQueryPools = 256;
 
+        void LogDeviceRemovedDred(ID3D12Device* const device) noexcept
+        {
+            if (device == nullptr)
+                return;
+            ID3D12DeviceRemovedExtendedData1* dred = nullptr;
+            if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))) || dred == nullptr)
+                return;
+
+            D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs{};
+            if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&breadcrumbs)))
+            {
+                for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext)
+                {
+                    const u32 completed = node->pLastBreadcrumbValue != nullptr ? *node->pLastBreadcrumbValue : 0u;
+                    const u32 lastIndex = completed != 0u && node->pCommandHistory != nullptr
+                        ? (completed - 1u < node->BreadcrumbCount ? completed - 1u : node->BreadcrumbCount - 1u)
+                        : 0u;
+                    const u32 lastOperation = node->pCommandHistory != nullptr && node->BreadcrumbCount != 0u
+                        ? static_cast<u32>(node->pCommandHistory[lastIndex])
+                        : ~0u;
+                    VG_LOG_ERROR(diagnostics::Category::Rendering,
+                                 "DRED breadcrumbs: queue=%s list=%s completed=%u/%u lastOperation=%u",
+                                 node->pCommandQueueDebugNameA != nullptr ? node->pCommandQueueDebugNameA : "<unnamed>",
+                                 node->pCommandListDebugNameA != nullptr ? node->pCommandListDebugNameA : "<unnamed>",
+                                 completed, node->BreadcrumbCount, lastOperation);
+                }
+            }
+
+            D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault{};
+            if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pageFault)) && pageFault.PageFaultVA != 0)
+                VG_LOG_ERROR(diagnostics::Category::Rendering, "DRED page fault VA=0x%016llx",
+                             static_cast<unsigned long long>(pageFault.PageFaultVA));
+            dred->Release();
+        }
+
         enum class QueryPoolSlotState : u8
         {
             Free,
@@ -356,12 +391,18 @@ namespace vanguard::rhi::d3d12
             const PresentParameters& parameters = payload.stats.presentParameters;
             const UINT interval = parameters.mode == PresentMode::Fifo ? parameters.synchronizationInterval : 0u;
             const UINT flags = interval == 0 && parameters.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
-#if VG_BUILD_DEBUG
             const u64 presentStart = system::GetMonotonicTicks();
-#endif
             const HRESULT result = payload.native->Present(interval, flags);
+            const u64 presentElapsedTicks = system::GetMonotonicTicks() - presentStart;
+            const u64 presentFrequency = system::GetMonotonicFrequency();
+            const u64 presentElapsedNanoseconds = presentFrequency != 0
+                ? static_cast<u64>(1000000000.0 * static_cast<double>(presentElapsedTicks) / static_cast<double>(presentFrequency))
+                : 0;
+            payload.stats.presentNanoseconds += presentElapsedNanoseconds;
+            if (payload.stats.longestPresentNanoseconds < presentElapsedNanoseconds)
+                payload.stats.longestPresentNanoseconds = presentElapsedNanoseconds;
 #if VG_BUILD_DEBUG
-            const double presentMilliseconds = 1000.0 * double(system::GetMonotonicTicks() - presentStart) / double(system::GetMonotonicFrequency());
+            const double presentMilliseconds = static_cast<double>(presentElapsedNanoseconds) / 1000000.0;
             if (presentMilliseconds >= 100.0)
                 VG_LOG_WARNING(diagnostics::Category::Rendering, "DXGI Present stall: %.2f ms interval=%u result=%ld mainThread=%u", presentMilliseconds, interval, static_cast<long>(result), u32(concurrency::IsMainThread()));
 #endif
@@ -1286,6 +1327,14 @@ namespace vanguard::rhi::d3d12
 #if VG_ENABLE_ASSERTS
         if (params.enableValidation)
         {
+            ID3D12DeviceRemovedExtendedDataSettings1* dredSettings = nullptr;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings))))
+            {
+                dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings->Release();
+            }
             ID3D12Debug* debug = nullptr;
             if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
             {
@@ -1379,6 +1428,12 @@ namespace vanguard::rhi::d3d12
         deviceDesc.samplerHeapSize = 2048;
         deviceDesc.enableHeapDirectlyIndexed = true;
         deviceDesc.enableEnhancedBarriers = true;
+        // The NVRHI validation device wrapper (nvrhi::validation::createValidationLayer) is declared in
+        // nvrhi/validation.h but is not built by this repository: external/nvrhi/premake5.lua compiles
+        // only nvrhiCore and nvrhiD3D12, never src/validation. Validation mode therefore enables the
+        // D3D12 debug layer and NVRHI buffer-lifetime logging without wrapping the device. Adding the
+        // wrapper would require a new Premake target for the vendored validation sources, so it is
+        // intentionally deferred rather than linked as a broken dependency.
         deviceDesc.logBufferLifetime = params.enableValidation;
         nvrhi::d3d12::DeviceHandle device = nvrhi::d3d12::createDevice(deviceDesc);
         if (!device)
@@ -1483,8 +1538,19 @@ namespace vanguard::rhi::d3d12
     {
         if (m_impl == nullptr || !m_impl->initialized || !m_impl->common.IsInitialized())
             return BackendStatus::Failure(FailureCode::NotInitialized, 0, "D3D12 backend is not initialized");
-        return m_impl->common.WaitIdle() ? BackendStatus::Success()
-                                         : BackendStatus::Failure(FailureCode::DeviceLost, m_impl->nativeDevice->GetDeviceRemovedReason(), "D3D12 device failed while waiting for idle");
+        if (!m_impl->common.WaitIdle())
+        {
+            const HRESULT deviceState = m_impl->nativeDevice->GetDeviceRemovedReason();
+            LogDeviceRemovedDred(m_impl->nativeDevice);
+            return BackendStatus::Failure(FailureCode::DeviceLost, deviceState, "D3D12 device failed while waiting for idle");
+        }
+        const HRESULT deviceState = m_impl->nativeDevice->GetDeviceRemovedReason();
+        if (deviceState != S_OK)
+        {
+            LogDeviceRemovedDred(m_impl->nativeDevice);
+            return BackendStatus::Failure(FailureCode::DeviceLost, deviceState, "D3D12 device reported failure after reaching idle");
+        }
+        return BackendStatus::Success();
     }
 
     BackendStatus Backend::RetireResources() noexcept
@@ -1935,6 +2001,9 @@ namespace vanguard::rhi::d3d12
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "query index is unavailable for begin");
         if (payload->type == QueryType::PipelineStatistics && m_impl->common.GetCommandListType(commandList) != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::Unsupported, 0, "pipeline statistics require a graphics command list");
+        const BackendStatus barriers = m_impl->common.FlushPendingBarriers(commandList);
+        if (!barriers)
+            return barriers;
         if (!m_impl->TrackQueryPoolUse(commandList, *payload))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain query pool use");
         native->BeginQuery(payload->heap, ToNativeQueryType(payload->type), index);
@@ -1952,6 +2021,9 @@ namespace vanguard::rhi::d3d12
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid query pool or command list");
         if (!IsRangedQuery(payload->type) || index >= payload->capacity || payload->openQueries[index] == 0)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "query was not begun");
+        const BackendStatus barriers = m_impl->common.FlushPendingBarriers(commandList);
+        if (!barriers)
+            return barriers;
         if (!m_impl->TrackQueryPoolUse(commandList, *payload))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain query pool use");
         native->EndQuery(payload->heap, ToNativeQueryType(payload->type), index);
@@ -1969,6 +2041,9 @@ namespace vanguard::rhi::d3d12
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "invalid query pool or command list");
         if (payload->type != QueryType::Timestamp || index >= payload->capacity || (payload->mapped != nullptr && index >= payload->mappedStart && index < payload->mappedEnd))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "query cannot be issued at this index");
+        const BackendStatus barriers = m_impl->common.FlushPendingBarriers(commandList);
+        if (!barriers)
+            return barriers;
         if (!m_impl->TrackQueryPoolUse(commandList, *payload))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain query pool use");
         native->EndQuery(payload->heap, D3D12_QUERY_TYPE_TIMESTAMP, index);
@@ -1990,6 +2065,9 @@ namespace vanguard::rhi::d3d12
         for (u32 index = start; index < start + count; ++index)
             if (payload->openQueries[index] != 0)
                 return BackendStatus::Failure(FailureCode::Busy, 0, "query resolve range contains an open query");
+        const BackendStatus barriers = m_impl->common.FlushPendingBarriers(commandList);
+        if (!barriers)
+            return barriers;
         if (!m_impl->TrackQueryPoolUse(commandList, *payload, true))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain query pool use");
         native->ResolveQueryData(payload->heap, ToNativeQueryType(payload->type), start, count, payload->readback, static_cast<u64>(start) * payload->resultStride);
@@ -2151,9 +2229,9 @@ namespace vanguard::rhi::d3d12
     {
         return m_impl != nullptr ? m_impl->common.GetResourceLifetimeStats() : ResourceLifetimeStats{};
     }
-    CommandListRef Backend::CreateCommandList(const CommandListType type, const u64 debugHash) noexcept
+    CommandListRef Backend::CreateCommandList(const CommandListType type, const u64 debugHash, const CommandListRetentionPolicy retentionPolicy) noexcept
     {
-        return m_impl->common.CreateCommandList(type, debugHash);
+        return m_impl->common.CreateCommandList(type, debugHash, retentionPolicy);
     }
     void Backend::DiscardCommandList(const CommandListRef commandList) noexcept
     {
@@ -2533,19 +2611,23 @@ namespace vanguard::rhi::d3d12
                 return BackendStatus::Failure(FailureCode::Busy, 0, "swap-chain back buffers are still retained by recorded or external work");
             }
         payload->stats.state = SwapChainState::Reconfiguring;
-        if (!m_impl->common.WaitIdle())
-        {
-            payload->stats.state = SwapChainState::Failed;
-            return BackendStatus::Failure(FailureCode::DeviceLost, 0, "GPU idle wait failed before swap-chain resize");
-        }
         if (!WaitForAllPresents(*payload))
         {
             payload->stats.state = SwapChainState::Failed;
             return BackendStatus::Failure(FailureCode::DeviceLost, 0, "presentation fence wait failed before swap-chain resize");
         }
 
+        for (u32 index = 0; index < payload->bufferCount; ++index)
+        {
+            const BackendStatus release = m_impl->common.ReleaseNativeTextureHandleAfterGpuUse(payload->backBuffers[index]);
+            if (!release)
+            {
+                payload->stats.state = SwapChainState::Failed;
+                return release;
+            }
+        }
         ReleaseBackBufferHandles(*payload);
-        m_impl->common.DrainRetiredResourcesAfterGpuIdle();
+        m_impl->common.RetireResources();
         const HRESULT result =
             payload->native->ResizeBuffers(payload->bufferCount, width, height, ToSwapChainFormat(payload->desc.format),
                                            (payload->tearingEnabled ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0) | (payload->desc.frameLatency.enabled ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0));

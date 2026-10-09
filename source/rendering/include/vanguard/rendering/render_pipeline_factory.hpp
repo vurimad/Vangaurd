@@ -44,5 +44,15 @@ namespace vanguard::rendering
         bool twoSided = false;
     };
 
+    /// Pipeline and RHI format enums intentionally share stable numeric values.
+    /// Keep the conversion in one rendering-layer helper so graph/cooker consumers
+    /// do not grow independent format mapping tables.
+    [[nodiscard]] constexpr rhi::Format ToRhiFormat(const pipelines::Format format) noexcept
+    {
+        static_assert(static_cast<u16>(pipelines::Format::R8UNorm) == static_cast<u16>(rhi::Format::R8UNorm));
+        static_assert(static_cast<u16>(pipelines::Format::BC7UNormSrgb) == static_cast<u16>(rhi::Format::BC7UNormSrgb));
+        return format < pipelines::Format::Count ? static_cast<rhi::Format>(format) : rhi::Format::Unknown;
+    }
+
     [[nodiscard]] RenderPipelineResult RequestRenderPipeline(const RenderPipelineRequest& request, PipelineCache& cache, PipelineRequest& output) noexcept;
 } // namespace vanguard::rendering

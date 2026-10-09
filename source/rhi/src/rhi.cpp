@@ -1499,7 +1499,8 @@ namespace vanguard::rhi
         return ReleaseResourceReference(resource);
     }
 
-    CommandListRef CreateCommandList(const CommandListType type, const u64 debugHash, Failure* const failure) noexcept
+    CommandListRef CreateCommandList(const CommandListType type, const u64 debugHash, Failure* const failure,
+                                     const CommandListRetentionPolicy retentionPolicy) noexcept
     {
         ClearFailure(failure);
         if (!RequireBackend(failure))
@@ -1510,7 +1511,17 @@ namespace vanguard::rhi
             Reject(failure, FailureCode::InvalidArgument, "invalid command-list type");
             return {};
         }
-        const CommandListRef commandList = g_backend->CreateCommandList(type, debugHash);
+        if (retentionPolicy != CommandListRetentionPolicy::Default && retentionPolicy != CommandListRetentionPolicy::BoundedUploadReuse)
+        {
+            Reject(failure, FailureCode::InvalidArgument, "invalid command-list retention policy");
+            return {};
+        }
+        if (retentionPolicy == CommandListRetentionPolicy::BoundedUploadReuse && debugHash == 0)
+        {
+            Reject(failure, FailureCode::InvalidArgument, "bounded command-list reuse requires a stable nonzero role");
+            return {};
+        }
+        const CommandListRef commandList = g_backend->CreateCommandList(type, debugHash, retentionPolicy);
         if (!commandList.IsValid())
             Reject(failure, FailureCode::BackendFailure, "RHI backend failed to create command list");
         return commandList;

@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/serialization/serialization.hpp>
 
@@ -87,7 +88,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "serializationTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("serialization_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
 
     {

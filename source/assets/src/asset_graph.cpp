@@ -17,72 +17,6 @@ namespace
         Resolved
     };
 
-    struct OwnedBuildRequest
-    {
-        OwnedBuildRequest() noexcept
-            : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()), settings(memory::pools::Assets::GetInstance())
-        {
-        }
-
-        [[nodiscard]] bool CopyFrom(const BuildRequest& request) noexcept
-        {
-            sourceReference = request.source.identity;
-            outputReference = request.output;
-            target = request.target;
-            source.Resize(request.source.content.Count());
-            metadata.Resize(request.source.metadata.Count());
-            settings.Resize(request.settings.Count());
-            if (source.Size() != request.source.content.Count() || metadata.Size() != request.source.metadata.Count() ||
-                settings.Size() != request.settings.Count())
-            {
-                return false;
-            }
-            for (u32 index = 0; index < source.Size(); ++index)
-            {
-                source[index] = request.source.content[index];
-            }
-            for (u32 index = 0; index < metadata.Size(); ++index)
-            {
-                metadata[index] = request.source.metadata[index];
-            }
-            for (u32 index = 0; index < settings.Size(); ++index)
-            {
-                settings[index] = request.settings[index];
-            }
-            return true;
-        }
-
-        [[nodiscard]] BuildRequest View() const noexcept
-        {
-            return {{sourceReference, {source.TypedData(), source.Size()}, {metadata.TypedData(), metadata.Size()}},
-                    outputReference,
-                    target,
-                    {settings.TypedData(), settings.Size()}};
-        }
-
-        [[nodiscard]] u64 ByteCount() const noexcept
-        {
-            return static_cast<u64>(source.Size()) + metadata.Size() + settings.Size();
-        }
-
-        void ReleasePayload() noexcept
-        {
-            source.Clear();
-            source.Shrink();
-            metadata.Clear();
-            metadata.Shrink();
-            settings.Clear();
-            settings.Shrink();
-        }
-
-        resources::ResourceReference sourceReference;
-        resources::ResourceReference outputReference;
-        TargetPlatform target = TargetPlatform::WindowsD3D12;
-        containers::DynamicArray<u8> source;
-        containers::DynamicArray<u8> metadata;
-        containers::DynamicArray<u8> settings;
-    };
-
     struct BuildEdge
     {
         BuildOperation* operation = nullptr;
@@ -193,7 +127,7 @@ namespace
 
     void ReleaseOutputArtifacts(BuildOutput& output) noexcept
     {
-        output.artifacts.Clear();
+        output.Reset();
         output.artifacts.Shrink();
     }
 } // namespace
@@ -211,6 +145,7 @@ namespace vanguard::assets
         BuildPlan plan;
         containers::DynamicArray<BuildEdge> edges;
         BuildOutput output;
+        BuildOutputProtection deferredPublicationProtection;
         BuildReport report;
         concurrency::Atomic<u32> state{static_cast<u32>(BuildState::Resolving)};
         concurrency::Atomic<u32> failure{static_cast<u32>(BuildFailure::None)};
@@ -353,7 +288,31 @@ namespace vanguard::assets
             operation.outputBytesTracked = false;
             stats.retainedOutputBytes -= operation.outputBytes;
             operation.outputBytes = 0;
+            if (operation.output.m_publicationProtection.IsValid())
+                operation.deferredPublicationProtection = static_cast<BuildOutputProtection&&>(operation.output.m_publicationProtection);
             ReleaseOutputArtifacts(operation.output);
+        }
+
+        void DrainDeferredPublicationProtections() noexcept
+        {
+            for (;;)
+            {
+                BuildOutputProtection pending;
+                lock.Acquire();
+                for (BuildOperation* const operation : operations)
+                {
+                    if (operation != nullptr && operation->deferredPublicationProtection.IsValid())
+                    {
+                        pending = static_cast<BuildOutputProtection&&>(operation->deferredPublicationProtection);
+                        break;
+                    }
+                }
+                lock.Release();
+                if (!pending.IsValid())
+                    return;
+                // Root-authority release is deliberately outside the graph lock.
+                pending.Reset();
+            }
         }
 
         [[nodiscard]] bool CanReserveExecutionLocked(const u64 bytes) const noexcept
@@ -462,6 +421,8 @@ namespace vanguard::assets
                     stats.retainedOutputBytes -= operation.outputBytes;
                 }
                 operation.outputBytes = 0;
+                if (operation.output.m_publicationProtection.IsValid())
+                    operation.deferredPublicationProtection = static_cast<BuildOutputProtection&&>(operation.output.m_publicationProtection);
                 ReleaseOutputArtifacts(operation.output);
             }
             if (stats.activeOperations != 0)
@@ -481,6 +442,7 @@ namespace vanguard::assets
                 ++stats.failedOperations;
             }
             lock.Release();
+            DrainDeferredPublicationProtections();
             operation.finished.Signal();
             operation.completionDeferral.Finish();
             if (drainAdmission)
@@ -578,9 +540,10 @@ namespace vanguard::assets
                     operation.resolution = ResolutionMark::Resolved;
                     return false;
                 }
-                BuildRequest dependencyRequest;
+                OwnedBuildRequest dependencyRequest;
                 const bool resolved = resolver != nullptr && resolver(dependency, dependencyRequest, resolverUserData);
-                if (!resolved || !dependencyRequest.IsValid() || dependencyRequest.output != dependency.identity)
+                const BuildRequest dependencyView = dependencyRequest.View();
+                if (!resolved || !dependencyView.IsValid() || dependencyView.output != dependency.identity)
                 {
                     if (dependency.requirement == DependencyRequirement::Optional)
                     {
@@ -593,7 +556,7 @@ namespace vanguard::assets
                 }
 
                 BuildFailure childFailure = BuildFailure::None;
-                BuildOperation* const child = ResolveRequest(dependencyRequest, operation.priority, childFailure);
+                BuildOperation* const child = ResolveRequest(dependencyView, operation.priority, childFailure);
                 if (child == nullptr)
                 {
                     failure = childFailure;
@@ -844,6 +807,7 @@ namespace vanguard::assets
                 u64 outputBytes = 0;
                 if (!ArtifactByteCount(operation.output, outputBytes))
                 {
+                    operation.output.m_publicationProtection.Reset();
                     Complete(operation, BuildState::Failed, BuildFailure::LimitExceeded, Result::LimitExceeded);
                     return;
                 }
@@ -857,16 +821,19 @@ namespace vanguard::assets
                 lock.Release();
                 if (cancelledBeforeCommit)
                 {
+                    operation.output.m_publicationProtection.Reset();
                     Complete(operation, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled);
                     return;
                 }
                 if (!retained)
                 {
+                    operation.output.m_publicationProtection.Reset();
                     Complete(operation, BuildState::Failed, BuildFailure::LimitExceeded, Result::LimitExceeded);
                     return;
                 }
                 if (dependencyIndex != nullptr && dependencyIndex->Publish(request, operation.plan, operation.output) != IndexResult::Success)
                 {
+                    operation.output.m_publicationProtection.Reset();
                     Complete(operation, BuildState::Failed, BuildFailure::IndexPublicationFailed, Result::InvalidState);
                     return;
                 }
@@ -1059,6 +1026,12 @@ namespace vanguard::assets
         m_impl->dependencyIndex = dependencyIndex;
         m_impl->resolver = resolver;
         m_impl->resolverUserData = resolverUserData;
+        if (dependencyIndex != nullptr && !dependencyIndex->BindPersistentProtectionDomain(buildSystem))
+        {
+            VANGUARD_DELETE(m_impl);
+            m_impl = nullptr;
+            return false;
+        }
         return true;
     }
 
@@ -1099,6 +1072,8 @@ namespace vanguard::assets
                 return false;
             }
         }
+
+        impl->DrainDeferredPublicationProtections();
 
         impl->lock.Acquire();
         if (!canShutdownLocked())
@@ -1167,6 +1142,42 @@ namespace vanguard::assets
         return m_impl->stats;
     }
 
+    Result BuildGraph::CaptureProtectionKeys(containers::DynamicArray<ArtifactSetKey>& keys,
+                                             const u32 maximumRecords, const u64 maximumBytes) const noexcept
+    {
+        keys.Clear();
+        if (m_impl == nullptr || maximumRecords == 0u || maximumBytes == 0u)
+            return Result::InvalidArgument;
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (m_impl->stats.activeOperations != 0u || !m_impl->readyOperations.Empty())
+            return Result::InvalidState;
+
+        u32 count = 0u;
+        for (const BuildOperation* const operation : m_impl->operations)
+        {
+            if (operation != nullptr && static_cast<BuildState>(operation->state.GetValue()) == BuildState::Succeeded &&
+                !operation->output.buildFingerprint.IsEmpty() && !operation->output.contentFingerprint.IsEmpty())
+                ++count;
+        }
+        if (count > maximumRecords || static_cast<u64>(count) > maximumBytes / sizeof(ArtifactSetKey))
+            return Result::LimitExceeded;
+        keys.Resize(count);
+        if (keys.Size() != count)
+        {
+            keys.Clear();
+            return Result::OutOfMemory;
+        }
+        u32 write = 0u;
+        for (const BuildOperation* const operation : m_impl->operations)
+        {
+            if (operation == nullptr || static_cast<BuildState>(operation->state.GetValue()) != BuildState::Succeeded ||
+                operation->output.buildFingerprint.IsEmpty() || operation->output.contentFingerprint.IsEmpty())
+                continue;
+            keys[write++] = {operation->output.buildFingerprint, operation->output.contentFingerprint};
+        }
+        return Result::Success;
+    }
+
     void BuildGraph::ReleaseInterest(BuildOperation* const operation, const bool) noexcept
     {
         if (m_impl == nullptr || operation == nullptr)
@@ -1193,6 +1204,7 @@ namespace vanguard::assets
             completeCancelled = operation->waitingForAdmission;
         }
         m_impl->lock.Release();
+        m_impl->DrainDeferredPublicationProtections();
         if (completeCancelled)
         {
             m_impl->Complete(*operation, BuildState::Cancelled, BuildFailure::Cancelled, Result::Cancelled);
@@ -1208,6 +1220,7 @@ namespace vanguard::assets
         }
         concurrency::ScopedLock guard(m_impl->lock);
         output.disposition = operation->output.disposition;
+        output.origin = operation->output.origin;
         output.buildFingerprint = operation->output.buildFingerprint;
         output.contentFingerprint = operation->output.contentFingerprint;
         return CopyArtifacts({operation->output.artifacts.TypedData(), operation->output.artifacts.Size()}, output.artifacts);

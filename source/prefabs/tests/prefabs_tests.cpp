@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/packages/packages.hpp>
@@ -89,7 +90,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "prefabsTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("prefabs_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
     Check(reflection::Initialize(), "reflection initialization");
     Check(reflection::RegisterSchema(TransformSchema), "register transform schema");

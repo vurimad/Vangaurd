@@ -9,9 +9,9 @@ namespace
     namespace world = vanguard::world;
     namespace serialization = vanguard::serialization;
 
-    constexpr serialization::Version FileVersion{1, 0};
+    constexpr serialization::Version FileVersion{2, 0};
     constexpr u32 WorldSection = serialization::MakeFourCC('W', 'R', 'L', 'D');
-    constexpr u32 BodyWireVersion = 1;
+    constexpr u32 BodyWireVersion = 2;
     constexpr u32 BodyPrefixSize = 36;
     constexpr u32 KnownCellFlags = static_cast<u32>(world::WorldCellFlags::AlwaysLoaded) | static_cast<u32>(world::WorldCellFlags::Interior) |
                                    static_cast<u32>(world::WorldCellFlags::Mission) | static_cast<u32>(world::WorldCellFlags::TwoDimensionalStreaming) |
@@ -38,6 +38,7 @@ namespace
         f64 origin[3]{};
         world::WorldBounds bounds;
         crypto::Digest256 sourceFingerprint;
+        world::WorldCameraLocator startupCamera;
         containers::DynamicArray<world::WorldCellRecord> cells;
         containers::DynamicArray<world::DistantProxyRecord> proxies;
         containers::DynamicArray<world::ProxyChildRecord> children;
@@ -340,6 +341,23 @@ namespace
         if (result != world::Result::Success)
             return result;
 
+        const world::WorldCameraLocator camera = description.startupCamera;
+        const bool hasAnyCameraField = camera.cellId != world::InvalidCellId || camera.entityId != world::InvalidEntityId ||
+                                       camera.componentStableId != prefabs::InvalidStableId;
+        const bool hasCompleteCamera = camera.cellId != world::InvalidCellId && camera.entityId != world::InvalidEntityId &&
+                                       camera.componentStableId != prefabs::InvalidStableId;
+        if (hasAnyCameraField != hasCompleteCamera)
+            return world::Result::InvalidArgument;
+        if (hasCompleteCamera)
+        {
+            const world::WorldCellRecord* cameraCell = FindById(containers::ArraySpan<const world::WorldCellRecord>(output.cells), camera.cellId);
+            if (cameraCell == nullptr)
+                return world::Result::InvalidReference;
+            if ((static_cast<u32>(cameraCell->flags) & static_cast<u32>(world::WorldCellFlags::AlwaysLoaded)) == 0)
+                return world::Result::InvalidArgument;
+            output.startupCamera = camera;
+        }
+
         output.proxies.Reserve(description.distantProxies.Size());
         for (const world::DistantProxyBuildRecord& source : description.distantProxies)
         {
@@ -582,7 +600,8 @@ namespace
         for (const f64 coordinate : data.origin)
             if (!writer.WriteF64(coordinate))
                 return WriterResult(writer);
-        if (!WriteBounds(writer, data.bounds) || !WriteDigest(writer, data.sourceFingerprint) || !writer.WriteU32(data.cells.Size()) ||
+        if (!WriteBounds(writer, data.bounds) || !WriteDigest(writer, data.sourceFingerprint) || !writer.WriteU64(data.startupCamera.cellId) ||
+            !writer.WriteU64(data.startupCamera.entityId) || !writer.WriteU64(data.startupCamera.componentStableId) || !writer.WriteU32(data.cells.Size()) ||
             !writer.WriteU32(data.proxies.Size()) || !writer.WriteU32(data.children.Size()) || !writer.WriteU32(data.dependencies.Size()))
             return WriterResult(writer);
         for (const world::WorldCellRecord& value : data.cells)
@@ -690,6 +709,21 @@ namespace
         world::Result result = ValidateCellHierarchy(cellCopy, file.Bounds());
         if (result != world::Result::Success)
             return result;
+        const world::WorldCameraLocator& camera = file.GetStartupCamera();
+        const bool hasAnyCameraField = camera.cellId != world::InvalidCellId || camera.entityId != world::InvalidEntityId ||
+                                       camera.componentStableId != prefabs::InvalidStableId;
+        const bool hasCompleteCamera = camera.cellId != world::InvalidCellId && camera.entityId != world::InvalidEntityId &&
+                                       camera.componentStableId != prefabs::InvalidStableId;
+        if (hasAnyCameraField != hasCompleteCamera)
+            return world::Result::InvalidLayout;
+        if (hasCompleteCamera)
+        {
+            const world::WorldCellRecord* cameraCell = FindById(cells, camera.cellId);
+            if (cameraCell == nullptr)
+                return world::Result::InvalidReference;
+            if ((static_cast<u32>(cameraCell->flags) & static_cast<u32>(world::WorldCellFlags::AlwaysLoaded)) == 0)
+                return world::Result::InvalidLayout;
+        }
         u32 expectedChild = 0;
         for (u32 index = 0; index < proxies.Size(); ++index)
         {
@@ -767,7 +801,7 @@ namespace vanguard::world
         serialization::ReadLimits documentLimits;
         documentLimits.maximumFileSize = limits.maximumFileSize;
         documentLimits.maximumSections = 1;
-        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, WorldMagic, {1, 0, 0}, documentLimits, header);
+        const serialization::Result headerResult = serialization::ReadDocumentHeader(reader, WorldMagic, {2, 0, 0}, documentLimits, header);
         if (headerResult != serialization::Result::Success)
             return Convert(headerResult);
         containers::DynamicArray<serialization::SectionDescriptor> sections(memory::pools::Serialization::GetInstance());
@@ -805,7 +839,8 @@ namespace vanguard::world
         u32 proxyCount = 0;
         u32 childCount = 0;
         u32 dependencyCount = 0;
-        if (!ReadBounds(bodyReader, m_bounds) || !ReadDigest(bodyReader, m_sourceFingerprint) || !bodyReader.ReadU32(cellCount) ||
+        if (!ReadBounds(bodyReader, m_bounds) || !ReadDigest(bodyReader, m_sourceFingerprint) || !bodyReader.ReadU64(m_startupCamera.cellId) ||
+            !bodyReader.ReadU64(m_startupCamera.entityId) || !bodyReader.ReadU64(m_startupCamera.componentStableId) || !bodyReader.ReadU32(cellCount) ||
             !bodyReader.ReadU32(proxyCount) || !bodyReader.ReadU32(childCount) || !bodyReader.ReadU32(dependencyCount))
             return ReaderResult(bodyReader);
         if (!ResizeChecked(m_cells, cellCount, limits.maximumCells) || !ResizeChecked(m_distantProxies, proxyCount, limits.maximumDistantProxies) ||
@@ -841,6 +876,7 @@ namespace vanguard::world
         m_bounds = {};
         m_sourceFingerprint = {};
         m_contentFingerprint = {};
+        m_startupCamera = {};
         m_cells.Clear();
         m_distantProxies.Clear();
         m_proxyChildren.Clear();
@@ -891,6 +927,14 @@ namespace vanguard::world
     const crypto::Digest256& WorldFile::GetContentFingerprint() const noexcept
     {
         return m_contentFingerprint;
+    }
+    bool WorldFile::HasStartupCamera() const noexcept
+    {
+        return m_startupCamera.cellId != InvalidCellId;
+    }
+    const WorldCameraLocator& WorldFile::GetStartupCamera() const noexcept
+    {
+        return m_startupCamera;
     }
     containers::ArraySpan<const WorldCellRecord> WorldFile::GetCells() const noexcept
     {

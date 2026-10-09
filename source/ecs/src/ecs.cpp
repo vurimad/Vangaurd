@@ -499,14 +499,24 @@ namespace vanguard::ecs
 
     bool World::FlushActions(ActionReport* const output) noexcept
     {
+        return FlushActions(~u32{0}, output);
+    }
+
+    bool World::FlushActions(const u32 maximumActions, ActionReport* const output) noexcept
+    {
         if (output != nullptr)
             *output = {};
-        if (m_impl == nullptr || m_impl->progressing)
+        if (m_impl == nullptr || m_impl->progressing || maximumActions == 0)
             return false;
         containers::DynamicArray<Impl::Action> actions(memory::pools::Gameplay::GetInstance());
         {
             VG_SCOPE_LOCK(m_impl->queueLock);
-            actions.Swap(m_impl->pendingActions);
+            const u32 count = m_impl->pendingActions.Size() < maximumActions ? m_impl->pendingActions.Size() : maximumActions;
+            actions.Reserve(count);
+            for (u32 index = 0; index < count; ++index)
+                actions.PushBack(m_impl->pendingActions[index]);
+            if (count != 0)
+                static_cast<void>(m_impl->pendingActions.RemoveAt(0, count));
         }
         ActionReport report;
         report.queued = actions.Size();
@@ -583,14 +593,25 @@ namespace vanguard::ecs
 
     bool World::FlushComponentActions(ComponentActionReport* const output) noexcept
     {
+        return FlushComponentActions(~u32{0}, output);
+    }
+
+    bool World::FlushComponentActions(const u32 maximumActions, ComponentActionReport* const output) noexcept
+    {
         if (output != nullptr)
             *output = {};
-        if (m_impl == nullptr || m_impl->progressing)
+        if (m_impl == nullptr || m_impl->progressing || maximumActions == 0)
             return false;
         containers::DynamicArray<Impl::ComponentAction> actions(memory::pools::Gameplay::GetInstance());
         {
             VG_SCOPE_LOCK(m_impl->queueLock);
-            actions.Swap(m_impl->pendingComponentActions);
+            const u32 count =
+                m_impl->pendingComponentActions.Size() < maximumActions ? m_impl->pendingComponentActions.Size() : maximumActions;
+            actions.Reserve(count);
+            for (u32 index = 0; index < count; ++index)
+                actions.PushBack(m_impl->pendingComponentActions[index]);
+            if (count != 0)
+                static_cast<void>(m_impl->pendingComponentActions.RemoveAt(0, count));
         }
         ComponentActionReport report;
         report.queued = actions.Size();

@@ -21,19 +21,6 @@ namespace vanguard::assets
 
     [[nodiscard]] const char* ToString(DerivedDataArtifactResult result) noexcept;
 
-    struct ArtifactSetKey
-    {
-        BuildFingerprint build;
-        BuildFingerprint content;
-
-        [[nodiscard]] friend bool operator==(const ArtifactSetKey&, const ArtifactSetKey&) noexcept = default;
-
-        [[nodiscard]] bool IsValid() const noexcept
-        {
-            return !build.IsEmpty();
-        }
-    };
-
     struct DerivedDataArtifactLimits
     {
         u32 maximumArtifacts = 4096;
@@ -74,6 +61,9 @@ namespace vanguard::assets
 
         [[nodiscard]] DerivedDataArtifactResult Read(const CachedArtifactDescriptor& expected,
                                                      containers::DynamicArray<u8>& bytes) noexcept;
+        [[nodiscard]] DerivedDataArtifactResult Hash(const CachedArtifactDescriptor& expected,
+                                                     containers::ArraySpan<u8> scratch,
+                                                     crypto::Sha256Builder& contentHash) noexcept;
         [[nodiscard]] DerivedDataArtifactResult CopyTo(const CachedArtifactDescriptor& expected,
                                                        filesystem::IFile& output,
                                                        containers::ArraySpan<u8> scratch,
@@ -84,12 +74,14 @@ namespace vanguard::assets
         Impl* m_impl = nullptr;
 
         friend class DerivedDataArtifactSource;
+        friend class detail::PersistentCacheAuthorityAccess;
     };
 
     struct DerivedDataArtifactSourceConfig
     {
         const char* root = nullptr;
         DerivedDataArtifactLimits limits;
+        PersistentCacheCoordinationLimits coordination;
     };
 
     class DerivedDataArtifactSource final
@@ -110,5 +102,7 @@ namespace vanguard::assets
 
     private:
         Impl* m_impl = nullptr;
+
+        friend class detail::PersistentCacheAuthorityAccess;
     };
 } // namespace vanguard::assets

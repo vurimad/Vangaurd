@@ -328,7 +328,8 @@ int main(const int argumentCount, char** const arguments)
             rendering::DecodeGpuSceneIndex<rendering::GpuInstance>(rendering::GpuSceneElementsPerPage<rendering::GpuInstance>() * 2u + 7u);
         Check(firstInstancePageTwo.page == 2 && firstInstancePageTwo.element == 7 &&
                   rendering::GpuSceneElementsPerPage<rendering::GpuMaterialIndex>() == 262'144 && sizeof(rendering::GpuSceneTableDirectory) == 32 &&
-                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16 && rendering::GpuSceneLayoutVersion == 7 &&
+                  sizeof(rendering::GpuScenePageDirectoryEntry) == 16 && rendering::GpuSceneLayoutVersion == 10 &&
+                  offsetof(rendering::GpuInstance, sceneIndex) == 76 && offsetof(rendering::GpuInstance, sceneGeneration) == 108 &&
                   static_cast<u32>(rendering::GpuSceneTableKind::TextureResidency) == 18 &&
                   static_cast<u32>(rendering::GpuSceneTableKind::MaterialParameterWord) == 19 &&
                   rendering::GpuSceneElementsPerPage<rendering::GpuMaterialParameterWord>() == 262'144 &&
@@ -758,7 +759,7 @@ int main(const int argumentCount, char** const arguments)
     commandSceneDesc.name = "Render command scene";
     commandSceneDesc.maximumProxies = 8;
     commandSceneDesc.maximumPendingProxyMutations = 8;
-    commandSceneDesc.maximumViews = 1;
+    commandSceneDesc.maximumViews = 2;
     rendering::RenderSceneHandle commandScene;
     Check(commandScenes.CreateScene(commandSceneDesc, commandScene, &commandSceneFailure), "render command participating scene creation");
     rendering::RenderCommandSystem commands;
@@ -774,10 +775,57 @@ int main(const int argumentCount, char** const arguments)
     commandCameraDesc.state.phases = rendering::RenderPhaseSet(1);
     rendering::RenderCameraHandle commandCamera;
     Check(commands.RegisterCamera(commandCameraDesc, commandCamera, &commandCameraFailure), "render command camera registration");
+    commandCameraDesc.name = "Render command secondary camera";
+    rendering::RenderCameraHandle commandCameraB;
+    Check(commands.RegisterCamera(commandCameraDesc, commandCameraB, &commandCameraFailure), "second render command camera registration");
     rendering::ViewportFailure failure;
 
     rendering::ViewportManager manager;
     Check(manager.Initialize(commands, &failure), "viewport manager initialization");
+
+    rendering::RenderTextureOutputContract defaultTextureContract;
+    Check(defaultTextureContract.IsSupported() && defaultTextureContract.restingState == vanguard::rhi::ResourceState::Common &&
+              defaultTextureContract.restingQueue == vanguard::rhi::QueueType::Graphics &&
+              defaultTextureContract.publicationReadiness == rendering::RenderOutputPublicationReadinessKind::SameQueueContinuation,
+          "texture output contract defaults to an explicit supported Graphics resting publication; EndRender transitions from the producer render-target endpoint");
+    rendering::RenderTextureOutputContract invalidTextureQueue = defaultTextureContract;
+    invalidTextureQueue.restingQueue = vanguard::rhi::QueueType::Copy;
+    rendering::RenderTextureOutputContract invalidTextureState = defaultTextureContract;
+    invalidTextureState.restingState = vanguard::rhi::ResourceState::Unknown;
+    rendering::RenderTextureOutputContract invalidTextureReadiness = defaultTextureContract;
+    invalidTextureReadiness.publicationReadiness = static_cast<rendering::RenderOutputPublicationReadinessKind>(0xffu);
+    rendering::RenderTextureOutputContract explicitFenceTextureContract = defaultTextureContract;
+    explicitFenceTextureContract.publicationReadiness = rendering::RenderOutputPublicationReadinessKind::ExplicitFence;
+    Check(!invalidTextureQueue.IsSupported() && !invalidTextureState.IsSupported() && !invalidTextureReadiness.IsSupported(),
+          "texture output contract rejects unsupported queue, state, and publication-readiness values before submission");
+    Check(explicitFenceTextureContract.IsSupported() && rendering::RenderViewportDesc{}.outputColorEncoding == rendering::RenderOutputColorEncoding::SceneLinear,
+          "texture output contract admits explicit-fence publication while generic output encoding defaults to scene-linear");
+    rendering::RenderViewportDesc displayEncodingDesc;
+    displayEncodingDesc.name = "Display encoding test output";
+    displayEncodingDesc.outputKind = rendering::RenderViewportOutputKind::Headless;
+    displayEncodingDesc.outputColorEncoding = rendering::RenderOutputColorEncoding::DisplaySrgb;
+    rendering::RenderViewportHandle displayEncodingOutput;
+    Check(manager.CreateRenderViewport(displayEncodingDesc, displayEncodingOutput, &failure) &&
+              manager.Resolve(displayEncodingOutput) != nullptr &&
+              manager.Resolve(displayEncodingOutput)->GetOutputColorEncoding() == rendering::RenderOutputColorEncoding::DisplaySrgb,
+          "render viewport preserves the neutral DisplaySrgb output-encoding contract");
+    Check(manager.DestroyRenderViewport(displayEncodingOutput, &failure), "display-encoding proof viewport destruction");
+    rendering::RenderViewportDesc invalidEncodingDesc = displayEncodingDesc;
+    invalidEncodingDesc.name = "Invalid encoding test output";
+    invalidEncodingDesc.outputColorEncoding = static_cast<rendering::RenderOutputColorEncoding>(0xffu);
+    rendering::RenderViewportHandle invalidEncodingOutput;
+    Check(!manager.CreateRenderViewport(invalidEncodingDesc, invalidEncodingOutput, &failure) &&
+              failure.code == rendering::ViewportFailureCode::InvalidDescriptor && !invalidEncodingOutput.IsValid(),
+          "render viewport rejects an unknown output encoding before any frame can begin");
+    rendering::RenderOutputReceipt receipt;
+    Check(!receipt.IsValid() && !receipt.IsReady(), "empty texture output receipt has no producer epoch");
+    receipt.viewport = {0, 1};
+    receipt.outputRevision = 1;
+    receipt.producerSerial = 7;
+    Check(receipt.IsValid() && !receipt.IsReady(), "pending texture output receipt is exact but not consumable");
+    receipt.state = rendering::RenderOutputReceiptState::Ready;
+    receipt.readyFence = {vanguard::rhi::QueueType::Graphics, 9};
+    Check(receipt.IsReady(), "ready texture output receipt requires exact producer identity and real GPU fence evidence");
 
     const rendering::RenderSceneHandle duplicateFrameScenes[]{commandScene, commandScene};
     rendering::RenderCommandFrameTickResult duplicateFrameTickResult;
@@ -848,8 +896,27 @@ int main(const int argumentCount, char** const arguments)
     rendering::RenderFrameViewSetup commandViewSetup;
     commandViewSetup.scene = commandScene;
     commandViewSetup.rootCameras = commandRoots;
-    Check(game->ConfigureViews(first, commandViewSetup, &failure) && first.HasViewSetup() && !first.GetViewFamily().IsValid(),
-          "building frame retains camera roots without preparing renderer-owned views early");
+    const rendering::RenderCameraHandle commandTwoRoots[]{commandCamera, commandCameraB};
+    const rendering::RenderCameraOutputRegion commandOutputRegions[]{
+        {commandCamera, {0, 0, 960, 1080}},
+        {commandCameraB, {960, 0, 960, 1080}}
+    };
+    rendering::RenderFrameViewSetup commandTwoViewSetup;
+    commandTwoViewSetup.scene = commandScene;
+    commandTwoViewSetup.rootCameras = commandTwoRoots;
+    commandTwoViewSetup.outputRegions = commandOutputRegions;
+    Check(game->ConfigureViews(first, commandTwoViewSetup, &failure) && first.HasViewSetup() && !first.GetViewFamily().IsValid(),
+          "building frame retains multiple camera roots and explicit output regions without preparing renderer-owned views early");
+    const rendering::RenderFrameViewSetup retainedTwoViewSetup = first.GetViewSetup();
+    Check(retainedTwoViewSetup.rootCameras.Size() == 2 && retainedTwoViewSetup.outputRegions.Size() == 2 &&
+              retainedTwoViewSetup.rootCameras[0] == commandCamera && retainedTwoViewSetup.rootCameras[1] == commandCameraB &&
+              retainedTwoViewSetup.outputRegions[0].camera == commandCamera &&
+              retainedTwoViewSetup.outputRegions[0].rect.x == 0 && retainedTwoViewSetup.outputRegions[0].rect.y == 0 &&
+              retainedTwoViewSetup.outputRegions[0].rect.width == 960 && retainedTwoViewSetup.outputRegions[0].rect.height == 1080 &&
+              retainedTwoViewSetup.outputRegions[1].camera == commandCameraB &&
+              retainedTwoViewSetup.outputRegions[1].rect.x == 960 && retainedTwoViewSetup.outputRegions[1].rect.y == 0 &&
+              retainedTwoViewSetup.outputRegions[1].rect.width == 960 && retainedTwoViewSetup.outputRegions[1].rect.height == 1080,
+          "two-view split output retains exact camera/region identity in the submitted frame packet");
     Check(!game->ConfigureViews(first, commandViewSetup, &failure) && failure.code == rendering::ViewportFailureCode::InvalidState,
           "building frame view setup is configured exactly once");
 
@@ -868,13 +935,24 @@ int main(const int argumentCount, char** const arguments)
               renderOutput->GetRenderHeight() == 900,
           "applied viewport mutation is immediately observable through the owned viewport object");
 
+    rendering::RenderViewportDesc previewOutputDesc = outputDesc;
+    previewOutputDesc.name = "Preview headless test output";
+    previewOutputDesc.renderExtent = {1600, 900};
+    previewOutputDesc.outputExtent = {1600, 900};
+    rendering::RenderViewportHandle previewOutput;
+    Check(manager.CreateRenderViewport(previewOutputDesc, previewOutput, &failure), "second independent render output creation");
+    rendering::RenderViewport* const previewRenderOutput = manager.Resolve(previewOutput);
+    Check(previewRenderOutput != nullptr && previewRenderOutput != renderOutput,
+          "second EngineViewport is backed by a distinct RenderViewport output");
+
     rendering::EngineViewportDesc previewDesc;
     previewDesc.contextName = "EditorPreview";
-    previewDesc.output = output;
+    previewDesc.output = previewOutput;
     previewDesc.presentByDefault = false;
     rendering::EngineViewportHandle previewViewport;
     Check(manager.CreateEngineViewport(previewDesc, previewViewport, &failure), "second engine viewport creation");
 
+    execution.expectedViewport = previewRenderOutput;
     rendering::RenderFrameInfo second = Begin(manager, previewViewport);
     Check(second.GetRenderExtent() == rendering::ViewportExtent{1600, 900}, "the next frame captures the applied viewport extent");
     Check(manager.ConfigureViews(previewViewport, second, commandViewSetup, &failure), "second viewport configures the same scene camera independently");
@@ -902,24 +980,75 @@ int main(const int argumentCount, char** const arguments)
     Check(firstPayload.retains.GetValue() == 1 && firstPayload.releases.GetValue() == 1 && secondPayload.retains.GetValue() == 1 &&
               secondPayload.releases.GetValue() == 1,
           "frame payload ownership spans asynchronous execution exactly once");
+    Check(commandStats.frameTicks == 1 && commandStats.completedFrameTicks == 1 &&
+              renderOutput->GetRenderedFrameCount() == 1 && renderOutput->GetEngineViewportReferenceCount() == 1 &&
+              previewRenderOutput->GetRenderedFrameCount() == 1 && previewRenderOutput->GetEngineViewportReferenceCount() == 1,
+          "one process FrameTick feeds two submitted frames on two independent outputs without duplicating global renderer update");
 
     execution.failFrameTick.SetValue(true);
     rendering::RenderCommandFrameTickResult failedFrameTickResult;
     Check(commands.FrameTick(commandScenes.GetFramePipelineScenes(), 2, failedFrameTickResult, &commandFailure) &&
               commands.FlushPreviousFrameProcessing(&commandFailure),
           "failed renderer FrameTick still reaches its explicit CPU completion boundary");
+    rendering::RenderCameraFailure drainedOwnerCameraFailure;
+    Check(commands.SetCameraEnabled(commandCamera, true, &drainedOwnerCameraFailure),
+          "owner mutation can make camera state safe without stealing the engine-level failure acknowledgment");
+    rendering::RenderCommandFrameTickResult unacknowledgedFailureTickResult;
+    Check(!commands.FrameTick(commandScenes.GetFramePipelineScenes(), 3, unacknowledgedFailureTickResult, &commandFailure) &&
+              commandFailure.code == rendering::RenderCommandFailureCode::InvalidState,
+          "new render generation is rejected while a drained renderer-owner failure still awaits engine acknowledgment");
+    bool drainedOwnerRequiresTerminalResolution = false;
+    Check(commands.FlushPreviousFrameOwnerProcessing(drainedOwnerRequiresTerminalResolution, &commandFailure) && drainedOwnerRequiresTerminalResolution,
+          "owner failure evidence survives both an earlier strong terminal drain and an intervening owner mutation until the owner boundary acknowledges it");
     Check(commands.ConsumeExecutionFailure(commandFailure) && commandFailure.code == rendering::RenderCommandFailureCode::ExecutionFailure &&
               commandFailure.executionStage == rendering::RenderCommandExecutionStage::FrameTick && commandFailure.executionSerial == 2,
           "asynchronous failure latch preserves renderer stage and serial identity");
     execution.failFrameTick.SetValue(false);
 
+    rendering::RenderCommandFrameTickResult ownerBoundaryTickResult;
+    Check(commands.FrameTick(commandScenes.GetFramePipelineScenes(), 3, ownerBoundaryTickResult, &commandFailure),
+          "owner-boundary regression starts from a fresh render generation");
+    execution.expectedViewport = renderOutput;
+    PayloadState ownerBoundaryPayloadA;
+    ownerBoundaryPayloadA.expectedOrder = 2;
+    rendering::RenderFrameInfo ownerBoundaryFrameA = Begin(*game);
+    Check(game->ConfigureViews(ownerBoundaryFrameA, commandViewSetup, &failure) &&
+              ownerBoundaryFrameA.SetPayload({&ownerBoundaryPayloadA, RetainPayload, ReleasePayload}),
+          "first owner-boundary frame retains its view-family inputs and payload");
+    rendering::RenderFrameSubmission ownerBoundarySubmissionA;
+    Check(game->SubmitFrame(ownerBoundaryFrameA, ownerBoundarySubmissionA, &failure),
+          "first owner-boundary frame submission");
+
+    PayloadState ownerBoundaryPayloadB;
+    ownerBoundaryPayloadB.expectedOrder = 3;
+    rendering::RenderFrameInfo ownerBoundaryFrameB = Begin(*game);
+    Check(game->ConfigureViews(ownerBoundaryFrameB, commandViewSetup, &failure) &&
+              ownerBoundaryFrameB.SetPayload({&ownerBoundaryPayloadB, RetainPayload, ReleasePayload}),
+          "second owner-boundary frame retains its view-family inputs and payload");
+    rendering::RenderFrameSubmission ownerBoundarySubmissionB;
+    Check(game->SubmitFrame(ownerBoundaryFrameB, ownerBoundarySubmissionB, &failure),
+          "multiple frames append to one renderer-owner completion aggregate without an intervening flush");
+
+    bool requiresTerminalResolution = true;
+    Check(commands.FlushPreviousFrameOwnerProcessing(requiresTerminalResolution, &commandFailure) && !requiresTerminalResolution &&
+              ownerBoundaryPayloadA.releases.GetValue() == 1 && ownerBoundaryPayloadB.releases.GetValue() == 1,
+          "owner-only flush joins every accepted frame, releases retained owner state, and preserves a clean core result");
+    rendering::RenderCommandFrameTickResult terminalStillOwnedTickResult;
+    Check(!commands.FrameTick(commandScenes.GetFramePipelineScenes(), 4, terminalStillOwnedTickResult, &commandFailure) &&
+              commandFailure.code == rendering::RenderCommandFailureCode::InvalidState,
+          "owner-only flush permits mutation but does not authorize a new render generation before terminal consumption");
+    Check(commands.FlushPreviousFrameProcessing(&commandFailure) && !commands.ConsumeExecutionFailure(commandFailure),
+          "terminal flush completes the owner-boundary regression without manufacturing an execution failure");
+    rendering::RenderCommandFrameTickResult postTerminalTickResult;
+    Check(commands.FrameTick(commandScenes.GetFramePipelineScenes(), 4, postTerminalTickResult, &commandFailure) &&
+              commands.FlushPreviousFrameProcessing(&commandFailure) && !commands.ConsumeExecutionFailure(commandFailure),
+          "new render generation is admitted after the terminal boundary is consumed");
+
     rendering::RenderFrameInfo abandoned = Begin(*game, false);
     Check(game->ConfigureViews(abandoned, commandViewSetup, &failure), "abandoned frame can retain an unprepared view request");
     Check(game->AbandonFrame(abandoned, &failure) && abandoned.GetSerial() == 0, "building frame can be explicitly abandoned");
 
-    Check(renderOutput->GetRenderedFrameCount() == 2 && renderOutput->GetEngineViewportReferenceCount() == 2,
-          "render output tracks submissions and engine viewport references");
-    Check(game->GetBegunFrameCount() == 2 && game->GetSubmittedFrameCount() == 1,
+    Check(game->GetBegunFrameCount() == 4 && game->GetSubmittedFrameCount() == 3,
           "engine viewport tracks begun, submitted, and abandoned frames");
     Check(!manager.DestroyRenderViewport(output, &failure) && failure.code == rendering::ViewportFailureCode::OutputStillReferenced,
           "render output cannot be destroyed while engine viewports reference it");
@@ -956,6 +1085,9 @@ int main(const int argumentCount, char** const arguments)
               detachedOutput->GetRequiredSurfaceRevision() == 2 && detachedOutput->GetAppliedSurfaceRevision() == 0 && !presentationResult.resizeApplied &&
               !presentationResult.surfaceReplaced,
           "presentation viewport separates requested and successfully applied swapchain state");
+    Check(detachedOutput->RequestRenderExtent(presentationState.pixelExtent, &failure) &&
+              detachedOutput->GetRenderExtent() == presentationState.pixelExtent,
+          "presentation render extent follows the actual native pixel extent through the existing joined viewport mutation boundary");
     window::PresentationAcknowledgement acknowledgement;
     Check(!detachedOutput->GetPresentationAcknowledgement(acknowledgement), "unbound presentation viewport does not acknowledge unapplied work");
     const u64 reconciledOutputRevision = detachedOutput->GetOutputRevision();
@@ -969,6 +1101,7 @@ int main(const int argumentCount, char** const arguments)
     Check(manager.DestroyRenderViewport(presentation, &failure), "destroy unbound presentation viewport");
     const rendering::RenderViewportHandle staleOutput = output;
     Check(manager.DestroyEngineViewport(previewViewport, &failure), "destroy preview engine viewport");
+    Check(manager.DestroyRenderViewport(previewOutput, &failure), "destroy preview render output");
     Check(manager.DestroyEngineViewport(gameViewport, &failure), "destroy game engine viewport");
     Check(!game->IsValid(), "engine viewport object is invalidated on destruction");
     Check(manager.DestroyRenderViewport(output, &failure), "destroy headless render viewport");
@@ -982,14 +1115,15 @@ int main(const int argumentCount, char** const arguments)
     Check(manager.DestroyRenderViewport(replacement, &failure), "destroy replacement viewport");
 
     const rendering::ViewportManagerStats managerStats = manager.GetStats();
-    Check(managerStats.renderViewports == 0 && managerStats.engineViewports == 0 && managerStats.buildingFrames == 0 && managerStats.begunFrames == 3 &&
-              managerStats.submittedFrames == 2,
+    Check(managerStats.renderViewports == 0 && managerStats.engineViewports == 0 && managerStats.buildingFrames == 0 && managerStats.begunFrames == 5 &&
+              managerStats.submittedFrames == 4,
           "viewport manager reaches a fully drained state");
 
     Check(manager.Shutdown(&failure), "viewport manager shutdown");
+    Check(commands.UnregisterCamera(commandCameraB, &commandCameraFailure), "second render command camera unregistration");
     Check(commands.UnregisterCamera(commandCamera, &commandCameraFailure), "render command camera unregistration");
     Check(commands.Shutdown(&commandFailure), "render command system shutdown");
-    Check(commandScenes.GetStats().preparedFrames == 2 && commandScenes.DestroyScene(commandScene, &commandSceneFailure),
+    Check(commandScenes.GetStats().preparedFrames == 4 && commandScenes.DestroyScene(commandScene, &commandSceneFailure),
           "render command scene participates once per frame and retires after the CPU tail drains");
     Check(commandCameras.Shutdown(&commandCameraFailure), "render command camera storage shutdown");
     Check(commandScenes.Shutdown(&commandSceneFailure), "render command scene manager shutdown");

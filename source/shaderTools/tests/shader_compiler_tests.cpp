@@ -456,6 +456,18 @@ int main()
     Check(buildSystem.Build(assetRequest, cachedAssetBuild) == assets::Result::Success && cachedAssetBuild.disposition == assets::BuildDisposition::CacheHit &&
               cachedAssetBuild.buildFingerprint == firstAssetBuild.buildFingerprint,
           "unchanged shader resolves through DDC");
+    const sht::Define contractVariantDefine{"VANGUARD_TEST_CONTRACT_VARIANT", "1"};
+    sht::ShaderBuildDescription contractVariantDescription = assetDescription;
+    contractVariantDescription.defines = {&contractVariantDefine, 1};
+    containers::DynamicArray<u8> contractVariantSettings(memory::pools::Assets::GetInstance());
+    Check(sht::EncodeShaderBuildSettings(contractVariantDescription, contractVariantSettings) == sht::BuildSettingsResult::Success,
+          "shader contract define participates in canonical build settings");
+    const assets::BuildRequest contractVariantRequest{
+        {assetSourceReference, assetSource, {}}, assetOutputReference, assets::TargetPlatform::WindowsD3D12, contractVariantSettings};
+    assets::BuildOutput contractVariantBuild;
+    Check(buildSystem.Build(contractVariantRequest, contractVariantBuild) == assets::Result::Success &&
+              contractVariantBuild.disposition == assets::BuildDisposition::Built && contractVariantBuild.buildFingerprint != firstAssetBuild.buildFingerprint,
+          "shader contract define invalidates ordinary build output identity");
     if (!firstAssetBuild.artifacts.Empty())
     {
         filesystem::MemoryFileReader assetReader(firstAssetBuild.artifacts[0].bytes, 0);

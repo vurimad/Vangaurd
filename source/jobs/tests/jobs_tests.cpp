@@ -84,6 +84,7 @@ int main()
     std::fflush(stdout);
     Config config = RuntimeConfig();
     config.maxWorkers = 4;
+    config.maxLatentJobs = 8;
     config.enableDebugger = true;
 
     std::puts("[jobsTests] initializing");
@@ -103,6 +104,9 @@ int main()
     JobName bulkName{"Vanguard.Jobs.Bulk"};
     JobName explicitFenceName{"Vanguard.Jobs.ExplicitFence"};
     JobName dependencyName{"Vanguard.Jobs.Dependency"};
+    JobName priorityDependencyName{"Vanguard.Jobs.PriorityDependency"};
+    JobName fanoutDependencyName{"Vanguard.Jobs.FanoutDependency"};
+    JobName recruitmentPressureName{"Vanguard.Jobs.RecruitmentPressure"};
     JobName parallelName{"Vanguard.Jobs.Parallel"};
     JobName continuationName{"Vanguard.Jobs.Continuation"};
     JobName deferralName{"Vanguard.Jobs.Deferral"};
@@ -222,6 +226,197 @@ int main()
             {
                 return 8;
             }
+        }
+    }
+
+    Atomic<u32> priorityDependencyStage{0};
+    {
+        ManualResetEvent parentStarted;
+        ManualResetEvent releaseParent{false};
+        Builder parent({Priority::CriticalPath, Affinity::AnyWorker});
+        Task parentTask = Task::Create(
+            [&priorityDependencyStage, &parentStarted, &releaseParent](const JobContext&) noexcept
+            {
+                priorityDependencyStage.SetValue(1);
+                parentStarted.Signal();
+                releaseParent.Wait();
+            });
+        if (!parent.Dispatch(priorityDependencyName, std::move(parentTask)))
+        {
+            return 34;
+        }
+        Counter prerequisite = parent.ExtractCounter();
+        parentStarted.Wait();
+
+        Builder child({Priority::RenderPath, Affinity::AnyWorker});
+        Task childTask = Task::Create(
+            [&priorityDependencyStage](const JobContext&) noexcept
+            {
+                if (priorityDependencyStage.GetValue() == 1)
+                {
+                    priorityDependencyStage.SetValue(2);
+                }
+            });
+        if (!child.DispatchAfter(prerequisite, priorityDependencyName, std::move(childTask), Fence::Full))
+        {
+            return 35;
+        }
+        Counter dependent = child.ExtractCounter();
+        releaseParent.Signal();
+        if (!Check(dependent.Wait() && priorityDependencyStage.GetValue() == 2,
+                   "Mixed-priority dependency fallback violated ordering"))
+        {
+            return 36;
+        }
+    }
+
+    {
+        constexpr u32 dependentCount = 32;
+        ManualResetEvent parentStarted;
+        ManualResetEvent releaseParent{false};
+        Atomic<u32> fanoutVisits{0};
+        Builder parent({Priority::RenderPath, Affinity::AnyWorker});
+        Task parentTask = Task::Create(
+            [&parentStarted, &releaseParent](const JobContext&) noexcept
+            {
+                parentStarted.Signal();
+                releaseParent.Wait();
+            });
+        if (!parent.Dispatch(fanoutDependencyName, std::move(parentTask)))
+        {
+            return 37;
+        }
+        Counter prerequisite = parent.ExtractCounter();
+        parentStarted.Wait();
+
+        Counter dependents[dependentCount];
+        for (u32 index = 0; index < dependentCount; ++index)
+        {
+            Builder child({Priority::RenderPath, Affinity::AnyWorker});
+            Task childTask = Task::Create([&fanoutVisits](const JobContext&) noexcept { (void)fanoutVisits.Increment(); });
+            if (!child.DispatchAfter(prerequisite, fanoutDependencyName, std::move(childTask), Fence::Full))
+            {
+                return 38;
+            }
+            dependents[index] = child.ExtractCounter();
+        }
+
+        releaseParent.Signal();
+        for (Counter& dependent : dependents)
+        {
+            if (!dependent.Wait())
+            {
+                return 39;
+            }
+        }
+        if (!Check(fanoutVisits.GetValue() == dependentCount, "Multi-waiter dependency fan-out lost work"))
+        {
+            return 40;
+        }
+    }
+
+    {
+        std::puts("[jobsTests] recruitment pressure");
+        std::fflush(stdout);
+
+        bool controlsDrained = false;
+        for (u32 attempt = 0; attempt < 100000; ++attempt)
+        {
+            const SchedulerStats stats = GetSchedulerStats();
+            if (stats.queued.latent == 0 && stats.dependencyContinuation.pendingRecruitmentControls == 0)
+            {
+                controlsDrained = true;
+                break;
+            }
+            vanguard::concurrency::YieldCurrentThread();
+        }
+        if (!Check(controlsDrained, "Recruitment controls did not drain before pressure proof"))
+        {
+            return 41;
+        }
+
+        ManualResetEvent blockerRelease[4];
+        Atomic<u32> blockersStarted{0};
+        Builder blockers({Priority::CriticalPath, Affinity::AnyWorker});
+        for (u32 index = 0; index < 4; ++index)
+        {
+            Task blocker = Task::Create(
+                [&blockersStarted, &blockerRelease, index](const JobContext&) noexcept
+                {
+                    (void)blockersStarted.Increment();
+                    blockerRelease[index].Wait();
+                });
+            if (!blockers.Dispatch(recruitmentPressureName, std::move(blocker), Fence::None))
+            {
+                return 42;
+            }
+        }
+        blockers.DispatchFence();
+        Counter blockerCounter = blockers.ExtractCounter();
+
+        while (blockersStarted.GetValue() != 4)
+        {
+            vanguard::concurrency::YieldCurrentThread();
+        }
+
+        Builder latent({Priority::Latent, Affinity::AnyWorker});
+        for (u32 index = 0; index < 8; ++index)
+        {
+            Task queued = Task::Create([](const JobContext&) noexcept {});
+            if (!latent.Dispatch(recruitmentPressureName, std::move(queued), Fence::None))
+            {
+                return 43;
+            }
+        }
+        latent.DispatchFence();
+        Counter latentCounter = latent.ExtractCounter();
+        if (!Check(GetSchedulerStats().queued.latent == 8, "Latent queue did not reach configured pressure capacity"))
+        {
+            return 44;
+        }
+
+        Builder parent({Priority::RenderPath, Affinity::AnyWorker});
+        Task parentTask = Task::Create([](const JobContext&) noexcept {});
+        if (!parent.Dispatch(recruitmentPressureName, std::move(parentTask)))
+        {
+            return 45;
+        }
+        Counter prerequisite = parent.ExtractCounter();
+
+        Atomic<u32> pressureChildVisits{0};
+        Builder child({Priority::RenderPath, Affinity::AnyWorker});
+        Task childTask = Task::Create([&pressureChildVisits](const JobContext&) noexcept { (void)pressureChildVisits.Increment(); });
+        if (!child.DispatchAfter(prerequisite, recruitmentPressureName, std::move(childTask), Fence::Full))
+        {
+            return 46;
+        }
+        Counter dependent = child.ExtractCounter();
+
+        blockerRelease[0].Signal();
+
+        bool childProgressedWhileLatentSaturated = false;
+        for (u32 attempt = 0; attempt < 100000; ++attempt)
+        {
+            if (pressureChildVisits.GetValue() == 1)
+            {
+                childProgressedWhileLatentSaturated = true;
+                break;
+            }
+            vanguard::concurrency::YieldCurrentThread();
+        }
+
+        for (u32 index = 1; index < 4; ++index)
+        {
+            blockerRelease[index].Signal();
+        }
+
+        if (!Check(childProgressedWhileLatentSaturated, "Full Latent queue blocked dependency continuation progress") ||
+            !Check(dependent.Wait(), "Pressure dependency did not complete") ||
+            !Check(blockerCounter.Wait(), "Pressure blockers did not drain") ||
+            !Check(latentCounter.Wait(), "Pressure Latent queue did not drain") ||
+            !Check(pressureChildVisits.GetValue() == 1, "Pressure dependency child execution count mismatched"))
+        {
+            return 47;
         }
     }
 
@@ -407,6 +602,13 @@ int main()
     {
         return 19;
     }
+#if defined(VG_BUILD_PROFILE)
+    if (!Check(finalStats.dependencyContinuation.relaysInlined != 0, "Production dependency continuation path was not exercised") ||
+        !Check(finalStats.dependencyContinuation.recruitmentControlsDroppedQueueFull != 0, "Recruitment pressure drop was not recorded"))
+    {
+        return 48;
+    }
+#endif
     if (!Check(!IsInitialized(), "Jobs remained initialized after shutdown"))
     {
         return 20;

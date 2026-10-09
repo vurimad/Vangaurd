@@ -7,7 +7,6 @@ static const uint VG_GPU_PRIMITIVE_INDEXED = 1u << 0u;
 static const uint VG_GPU_GEOMETRY_RESIDENT = 1u << 0u;
 static const uint VG_GPU_GEOMETRY_INDEXED = 1u << 1u;
 static const uint VG_GPU_VIEW_ORTHOGRAPHIC = 1u << 1u;
-static const uint VG_GPU_GEOMETRY_WORK_MIRRORED = 1u << 0u;
 static const uint VG_GPU_VISIBILITY_CULLED = 0u;
 static const uint VG_GPU_VISIBILITY_VISIBLE = 1u;
 static const uint VG_GPU_VISIBILITY_REJECTED = 2u;
@@ -49,36 +48,20 @@ struct GpuVisibilityConstants
 {
     uint tableDirectoryDescriptor;
     uint pageDirectoryDescriptor;
-    uint candidateDescriptor;
-    uint workRangeDescriptor;
     uint viewDescriptor;
     uint resultRangeDescriptor;
     uint visibleDescriptor;
     uint counterDescriptor;
-    uint workRangeCount;
+    uint sceneIndex;
+    uint sceneGeneration;
+    uint instanceTraversalExtent;
+    uint viewCount;
     uint instanceTable;
     uint renderableTable;
     uint layoutVersion;
     float worldCellSize;
     uint reserved0;
     uint reserved1;
-    uint reserved2;
-};
-
-struct GpuGeometryExpansionWorkRange
-{
-    uint visibleOrdinal;
-    uint visibleCount;
-    uint resultIndex;
-    uint prefixBlockIndex;
-};
-
-struct GpuGeometryExpansionItem
-{
-    uint validWorkCount;
-    uint rejectedWorkCount;
-    uint outputOffset;
-    uint outputCapacity;
 };
 
 struct GpuGeometryWork
@@ -90,7 +73,7 @@ struct GpuGeometryWork
     uint phase;
     uint shell;
     uint bin;
-    uint flags;
+    uint binOrdinal;
 };
 
 struct GpuGeometryResultRange
@@ -103,10 +86,10 @@ struct GpuGeometryResultRange
     uint instanceCapacity;
     uint argumentOffset;
     uint argumentCapacity;
-    uint expansionBlockOffset;
-    uint expansionBlockCount;
-    uint binBlockOffset;
-    uint binBlockCount;
+    uint activeBinOffset;
+    uint activeBinCapacity;
+    uint reserved0;
+    uint reserved1;
 };
 
 struct GpuGeometryCounters
@@ -129,30 +112,6 @@ struct GpuGeometryBinItem
     uint instanceCapacity;
 };
 
-struct GpuGeometryWorkRange
-{
-    uint workOrdinal;
-    uint workCount;
-    uint resultIndex;
-    uint reserved;
-};
-
-struct GpuGeometryPrefixWorkRange
-{
-    uint itemOrdinal;
-    uint itemCount;
-    uint resultIndex;
-    uint prefixBlockIndex;
-};
-
-struct GpuGeometryPrefixBlock
-{
-    uint requestedCount;
-    uint rejectedCount;
-    uint outputOffset;
-    uint outputCapacity;
-};
-
 struct MeshDrawInstance
 {
     uint instance;
@@ -170,60 +129,56 @@ struct GpuIndirectDrawIndexedArguments
     uint firstInstance;
 };
 
-struct GpuGeometryPrefixConstants
-{
-    uint visibilityResultDescriptor;
-    uint visibilityCounterDescriptor;
-    uint itemDescriptor;
-    uint resultDescriptor;
-    uint counterDescriptor;
-    uint expansionRangeDescriptor;
-    uint binRangeDescriptor;
-    uint binItemDescriptor;
-    uint prefixBlockDescriptor;
-    uint expansionRangeCount;
-    uint binRangeCount;
-    uint resultCount;
-    uint layoutVersion;
-    uint reserved0;
-    uint reserved1;
-    uint reserved2;
-};
-
-struct GpuGeometryBinningConstants
-{
-    uint workDescriptor;
-    uint workRangeDescriptor;
-    uint resultDescriptor;
-    uint counterDescriptor;
-    uint binItemDescriptor;
-    uint instanceDescriptor;
-    uint workRangeCount;
-    uint resultCount;
-    uint layoutVersion;
-    uint reserved0;
-    uint reserved1;
-    uint reserved2;
-};
-
-struct GpuGeometryExpansionConstants
+struct GpuGeometryExpandConstants
 {
     uint tableDirectoryDescriptor;
     uint pageDirectoryDescriptor;
     uint visibleDescriptor;
     uint visibilityResultDescriptor;
     uint visibilityCounterDescriptor;
-    uint workRangeDescriptor;
-    uint itemDescriptor;
-    uint workDescriptor;
     uint viewDescriptor;
-    uint workRangeCount;
+    uint workDescriptor;
+    uint resultDescriptor;
+    uint counterDescriptor;
+    uint binItemDescriptor;
+    uint activeBinDescriptor;
+    uint resultCount;
+    uint visibleCapacityPerResult;
+    uint layoutVersion;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct GpuGeometryAllocateConstants
+{
+    uint tableDirectoryDescriptor;
+    uint pageDirectoryDescriptor;
+    uint resultDescriptor;
+    uint counterDescriptor;
+    uint binItemDescriptor;
+    uint activeBinDescriptor;
+    uint shellRangeDescriptor;
+    uint shellCounterDescriptor;
+    uint argumentDescriptor;
+    uint resultCount;
+    uint shellCapacity;
+    uint shellPlanCount;
     uint layoutVersion;
     uint reserved0;
     uint reserved1;
     uint reserved2;
-    uint reserved3;
-    uint reserved4;
+};
+
+struct GpuGeometryScatterConstants
+{
+    uint workDescriptor;
+    uint resultDescriptor;
+    uint counterDescriptor;
+    uint binItemDescriptor;
+    uint instanceDescriptor;
+    uint resultCount;
+    uint workCapacityPerResult;
+    uint layoutVersion;
 };
 
 struct GpuGeometryShellRange
@@ -246,31 +201,31 @@ struct GpuGeometryShellCounters
     uint reserved1;
 };
 
-struct GpuGeometryIndirectConstants
+struct GpuGeometryInitializeConstants
 {
-    uint tableDirectoryDescriptor;
-    uint pageDirectoryDescriptor;
-    uint resultDescriptor;
-    uint binItemDescriptor;
     uint shellPlanDescriptor;
     uint shellRangeDescriptor;
     uint shellCounterDescriptor;
-    uint argumentDescriptor;
-    uint binRangeDescriptor;
-    uint binRangeCount;
+    uint counterDescriptor;
     uint shellPlanCount;
     uint shellCapacity;
-    uint counterDescriptor;
     uint resultCount;
     uint layoutVersion;
-    uint reserved;
 };
 
+#if defined(VG_GPU_SCENE_VISIBILITY)
 [[push_constant]] ConstantBuffer<GpuVisibilityConstants> constants;
-[[push_constant]] ConstantBuffer<GpuGeometryExpansionConstants> expansionConstants;
-[[push_constant]] ConstantBuffer<GpuGeometryPrefixConstants> prefixConstants;
-[[push_constant]] ConstantBuffer<GpuGeometryBinningConstants> binningConstants;
-[[push_constant]] ConstantBuffer<GpuGeometryIndirectConstants> indirectConstants;
+#elif defined(VG_GPU_SCENE_SPARSE_EXPAND)
+[[push_constant]] ConstantBuffer<GpuGeometryExpandConstants> expandConstants;
+#elif defined(VG_GPU_SCENE_SPARSE_ALLOCATE)
+[[push_constant]] ConstantBuffer<GpuGeometryAllocateConstants> allocateConstants;
+#elif defined(VG_GPU_SCENE_SPARSE_SCATTER)
+[[push_constant]] ConstantBuffer<GpuGeometryScatterConstants> scatterConstants;
+#elif defined(VG_GPU_SCENE_INITIALIZE)
+[[push_constant]] ConstantBuffer<GpuGeometryInitializeConstants> initializeConstants;
+#else
+#error gpu_scene_visibility requires one VG_GPU_SCENE_* feature-family define
+#endif
 
 groupshared uint groupVisibility[VG_GPU_VISIBILITY_THREADS];
 groupshared uint groupOutputBase;
@@ -408,10 +363,11 @@ bool SelectResidentLod(GpuRenderable renderable, GpuRenderableResidency residenc
     return false;
 }
 
-uint ResolveVisibleCandidate(uint instanceIndex, GpuView view,
-                             StructuredBuffer<GpuSceneTableDirectory> tables,
-                             StructuredBuffer<GpuScenePageDirectoryEntry> pages,
-                             out GpuVisibleInstance visible)
+#if defined(VG_GPU_SCENE_VISIBILITY)
+uint ResolveVisibleInstance(uint instanceIndex, GpuView view, uint sceneIndex, uint sceneGeneration,
+                            StructuredBuffer<GpuSceneTableDirectory> tables,
+                            StructuredBuffer<GpuScenePageDirectoryEntry> pages,
+                            out GpuVisibleInstance visible)
 {
     visible = (GpuVisibleInstance)0;
     GpuScenePageDirectoryEntry page;
@@ -420,6 +376,7 @@ uint ResolveVisibleCandidate(uint instanceIndex, GpuView view,
         return VG_GPU_VISIBILITY_REJECTED;
     GpuInstance instance = LoadGpuInstance(page, element);
     if ((instance.flags & VG_GPU_INSTANCE_ACTIVE) == 0u || instance.generation == 0u ||
+        instance.sceneIndex != sceneIndex || instance.sceneGeneration != sceneGeneration ||
         instance.renderable == VG_GPU_SCENE_INVALID_INDEX)
         return VG_GPU_VISIBILITY_REJECTED;
     if ((instance.visibilityMask & view.visibilityMask) == 0u ||
@@ -457,6 +414,7 @@ uint ResolveVisibleCandidate(uint instanceIndex, GpuView view,
     visible.placementRevision = residency.placementRevision;
     return VG_GPU_VISIBILITY_VISIBLE;
 }
+#endif
 
 bool ResolveExpansionRoot(GpuVisibleInstance visible,
                           StructuredBuffer<GpuSceneTableDirectory> tables,
@@ -573,34 +531,38 @@ bool ResolveGeometryWork(GpuVisibleInstance visible, GpuInstance instance, GpuVi
     work.phase = participation.phase;
     work.shell = shellIndex;
     work.bin = binIndex;
-    work.flags = mirrored ? VG_GPU_GEOMETRY_WORK_MIRRORED : 0u;
+    work.binOrdinal = VG_GPU_SCENE_INVALID_INDEX;
     return true;
 }
 
+#if defined(VG_GPU_SCENE_VISIBILITY)
 [shader("compute")]
 [numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void CullGpuSceneCandidates(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
+void CullGpuSceneInstances(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
 {
-    if (constants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= constants.workRangeCount)
+    if (constants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.y >= constants.viewCount)
+        return;
+    uint firstInstance = groupId.x * VG_GPU_VISIBILITY_THREADS;
+    if (firstInstance >= constants.instanceTraversalExtent)
         return;
     StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[constants.tableDirectoryDescriptor];
     StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[constants.pageDirectoryDescriptor];
-    StructuredBuffer<uint> candidates = ResourceDescriptorHeap[constants.candidateDescriptor];
-    StructuredBuffer<GpuVisibilityWorkRange> workRanges = ResourceDescriptorHeap[constants.workRangeDescriptor];
     StructuredBuffer<GpuView> views = ResourceDescriptorHeap[constants.viewDescriptor];
     StructuredBuffer<GpuVisibilityResultRange> results = ResourceDescriptorHeap[constants.resultRangeDescriptor];
     RWStructuredBuffer<GpuVisibleInstance> visibleInstances = ResourceDescriptorHeap[constants.visibleDescriptor];
     RWStructuredBuffer<GpuVisibilityCounters> counters = ResourceDescriptorHeap[constants.counterDescriptor];
 
-    GpuVisibilityWorkRange range = workRanges[groupId.x];
-    GpuVisibilityResultRange result = results[range.resultIndex];
-    if (result.viewIndex != range.viewIndex)
+    uint viewIndex = groupId.y;
+    GpuVisibilityResultRange result = results[viewIndex];
+    if (result.viewIndex != viewIndex)
         return;
-    GpuView view = views[range.viewIndex];
-    bool participates = threadIndex < range.candidateCount;
-    uint instanceIndex = participates ? candidates[range.candidateOffset + threadIndex] : VG_GPU_SCENE_INVALID_INDEX;
+    GpuView view = views[viewIndex];
+    uint candidateCount = min(VG_GPU_VISIBILITY_THREADS, constants.instanceTraversalExtent - firstInstance);
+    bool participates = threadIndex < candidateCount;
+    uint instanceIndex = participates ? firstInstance + threadIndex : VG_GPU_SCENE_INVALID_INDEX;
     GpuVisibleInstance visible = (GpuVisibleInstance)0;
-    uint visibility = participates ? ResolveVisibleCandidate(instanceIndex, view, tables, pages, visible)
+    uint visibility = participates ? ResolveVisibleInstance(instanceIndex, view, constants.sceneIndex, constants.sceneGeneration,
+                                                            tables, pages, visible)
                                    : VG_GPU_VISIBILITY_CULLED;
     bool isVisible = visibility == VG_GPU_VISIBILITY_VISIBLE;
     groupVisibility[threadIndex] = isVisible ? 1u :
@@ -626,7 +588,7 @@ void CullGpuSceneCandidates(uint3 groupId : SV_GroupID, uint threadIndex : SV_Gr
         groupOutputBase = 0u;
         if (groupVisibleCount != 0u)
             InterlockedAdd(counters[result.counterIndex].visibleCount, groupVisibleCount, groupOutputBase);
-        uint groupCulledCount = range.candidateCount - groupVisibleCount - groupRejectedCount;
+        uint groupCulledCount = candidateCount - groupVisibleCount - groupRejectedCount;
         if (groupCulledCount != 0u)
             InterlockedAdd(counters[result.counterIndex].culledCount, groupCulledCount);
         if (groupRejectedCount != 0u)
@@ -645,34 +607,44 @@ void CullGpuSceneCandidates(uint3 groupId : SV_GroupID, uint threadIndex : SV_Gr
             visibleInstances[result.visibleOffset + destination] = visible;
     }
 }
+#endif
 
+#if defined(VG_GPU_SCENE_SPARSE_EXPAND)
 [shader("compute")]
 [numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void CountGpuSceneGeometryWork(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
+void ExpandAppendGpuSceneGeometry(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
 {
-    if (expansionConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION ||
-        groupId.x >= expansionConstants.workRangeCount)
+    if (expandConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || expandConstants.resultCount == 0u ||
+        expandConstants.visibleCapacityPerResult == 0u)
         return;
-    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[expansionConstants.tableDirectoryDescriptor];
-    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[expansionConstants.pageDirectoryDescriptor];
-    StructuredBuffer<GpuVisibleInstance> visibleInstances = ResourceDescriptorHeap[expansionConstants.visibleDescriptor];
-    StructuredBuffer<GpuVisibilityResultRange> results = ResourceDescriptorHeap[expansionConstants.visibilityResultDescriptor];
-    StructuredBuffer<GpuVisibilityCounters> counters = ResourceDescriptorHeap[expansionConstants.visibilityCounterDescriptor];
-    StructuredBuffer<GpuGeometryExpansionWorkRange> ranges = ResourceDescriptorHeap[expansionConstants.workRangeDescriptor];
-    StructuredBuffer<GpuView> views = ResourceDescriptorHeap[expansionConstants.viewDescriptor];
-    RWStructuredBuffer<GpuGeometryExpansionItem> items = ResourceDescriptorHeap[expansionConstants.itemDescriptor];
+    uint globalOrdinal = groupId.x * VG_GPU_VISIBILITY_THREADS + threadIndex;
+    uint resultIndex = globalOrdinal / expandConstants.visibleCapacityPerResult;
+    if (resultIndex >= expandConstants.resultCount)
+        return;
+    uint visibleOrdinal = globalOrdinal - resultIndex * expandConstants.visibleCapacityPerResult;
 
-    GpuGeometryExpansionWorkRange range = ranges[groupId.x];
-    GpuVisibilityResultRange result = results[range.resultIndex];
-    uint visibleOrdinal = range.visibleOrdinal + threadIndex;
-    uint visibleCount = min(counters[result.counterIndex].visibleCount, result.visibleCapacity);
-    if (threadIndex >= range.visibleCount || visibleOrdinal >= visibleCount)
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[expandConstants.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[expandConstants.pageDirectoryDescriptor];
+    StructuredBuffer<GpuVisibleInstance> visibleInstances = ResourceDescriptorHeap[expandConstants.visibleDescriptor];
+    StructuredBuffer<GpuVisibilityResultRange> visibilityResults = ResourceDescriptorHeap[expandConstants.visibilityResultDescriptor];
+    StructuredBuffer<GpuVisibilityCounters> visibilityCounters = ResourceDescriptorHeap[expandConstants.visibilityCounterDescriptor];
+    StructuredBuffer<GpuView> views = ResourceDescriptorHeap[expandConstants.viewDescriptor];
+    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[expandConstants.resultDescriptor];
+    RWStructuredBuffer<GpuGeometryWork> output = ResourceDescriptorHeap[expandConstants.workDescriptor];
+    RWStructuredBuffer<GpuGeometryCounters> geometryCounters = ResourceDescriptorHeap[expandConstants.counterDescriptor];
+    RWStructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[expandConstants.binItemDescriptor];
+    RWStructuredBuffer<uint> activeBins = ResourceDescriptorHeap[expandConstants.activeBinDescriptor];
+
+    GpuVisibilityResultRange visibility = visibilityResults[resultIndex];
+    GpuGeometryResultRange result = results[resultIndex];
+    if (visibility.viewIndex != resultIndex || visibility.visibleCapacity != expandConstants.visibleCapacityPerResult)
         return;
-    uint itemIndex = result.visibleOffset + visibleOrdinal;
-    GpuVisibleInstance visible = visibleInstances[itemIndex];
+    uint visibleCount = min(visibilityCounters[visibility.counterIndex].visibleCount, visibility.visibleCapacity);
+    if (visibleOrdinal >= visibleCount)
+        return;
+    GpuVisibleInstance visible = visibleInstances[visibility.visibleOffset + visibleOrdinal];
     GpuInstance instance;
     GpuLod lod;
-    uint validCount = 0u;
     uint rejectedCount = 0u;
     if (!ResolveExpansionRoot(visible, tables, pages, instance, lod))
         rejectedCount = 1u;
@@ -700,498 +672,71 @@ void CountGpuSceneGeometryWork(uint3 groupId : SV_GroupID, uint threadIndex : SV
             {
                 GpuGeometryWork work;
                 bool rejected;
-                if (ResolveGeometryWork(visible, instance, views[result.viewIndex], primitiveIndex,
-                                        primitive.firstPhaseParticipation + phaseOffset, tables, pages, work, rejected))
-                    ++validCount;
-                else if (rejected)
-                    ++rejectedCount;
+                if (!ResolveGeometryWork(visible, instance, views[visibility.viewIndex], primitiveIndex,
+                                         primitive.firstPhaseParticipation + phaseOffset, tables, pages, work, rejected))
+                {
+                    if (rejected)
+                        ++rejectedCount;
+                    continue;
+                }
+
+                uint workOrdinal = 0u;
+                InterlockedAdd(geometryCounters[resultIndex].requestedWorkCount, 1u, workOrdinal);
+                if (workOrdinal >= result.workCapacity)
+                    continue;
+                if (work.bin >= result.binCapacity)
+                {
+                    InterlockedAdd(geometryCounters[resultIndex].invalidBinWorkCount, 1u);
+                    work.binOrdinal = VG_GPU_SCENE_INVALID_INDEX;
+                    output[result.workOffset + workOrdinal] = work;
+                    continue;
+                }
+
+                uint frameBin = result.binOffset + work.bin;
+                uint binOrdinal = 0u;
+                InterlockedAdd(bins[frameBin].instanceCount, 1u, binOrdinal);
+                work.binOrdinal = binOrdinal;
+                if (binOrdinal == 0u)
+                {
+                    uint activeOrdinal = 0u;
+                    InterlockedAdd(geometryCounters[resultIndex].visibleBinCount, 1u, activeOrdinal);
+                    if (activeOrdinal < result.activeBinCapacity)
+                        activeBins[result.activeBinOffset + activeOrdinal] = work.bin;
+                }
+                output[result.workOffset + workOrdinal] = work;
             }
         }
     }
-    items[itemIndex] = {validCount, rejectedCount, 0u, 0u};
+    if (rejectedCount != 0u)
+        InterlockedAdd(geometryCounters[resultIndex].rejectedWorkCount, rejectedCount);
 }
+#endif
 
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void ScatterGpuSceneGeometryWork(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (expansionConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION ||
-        groupId.x >= expansionConstants.workRangeCount)
-        return;
-    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[expansionConstants.tableDirectoryDescriptor];
-    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[expansionConstants.pageDirectoryDescriptor];
-    StructuredBuffer<GpuVisibleInstance> visibleInstances = ResourceDescriptorHeap[expansionConstants.visibleDescriptor];
-    StructuredBuffer<GpuVisibilityResultRange> results = ResourceDescriptorHeap[expansionConstants.visibilityResultDescriptor];
-    StructuredBuffer<GpuVisibilityCounters> counters = ResourceDescriptorHeap[expansionConstants.visibilityCounterDescriptor];
-    StructuredBuffer<GpuGeometryExpansionWorkRange> ranges = ResourceDescriptorHeap[expansionConstants.workRangeDescriptor];
-    StructuredBuffer<GpuGeometryExpansionItem> items = ResourceDescriptorHeap[expansionConstants.itemDescriptor];
-    StructuredBuffer<GpuView> views = ResourceDescriptorHeap[expansionConstants.viewDescriptor];
-    RWStructuredBuffer<GpuGeometryWork> output = ResourceDescriptorHeap[expansionConstants.workDescriptor];
-
-    GpuGeometryExpansionWorkRange range = ranges[groupId.x];
-    GpuVisibilityResultRange result = results[range.resultIndex];
-    uint visibleOrdinal = range.visibleOrdinal + threadIndex;
-    uint visibleCount = min(counters[result.counterIndex].visibleCount, result.visibleCapacity);
-    if (threadIndex >= range.visibleCount || visibleOrdinal >= visibleCount)
-        return;
-    uint itemIndex = result.visibleOffset + visibleOrdinal;
-    GpuVisibleInstance visible = visibleInstances[itemIndex];
-    GpuGeometryExpansionItem item = items[itemIndex];
-    GpuInstance instance;
-    GpuLod lod;
-    if (!ResolveExpansionRoot(visible, tables, pages, instance, lod))
-        return;
-
-    uint outputOrdinal = 0u;
-    [loop]
-    for (uint primitiveOffset = 0u; primitiveOffset < lod.primitiveCount; ++primitiveOffset)
-    {
-        uint primitiveIndex = lod.firstPrimitive + primitiveOffset;
-        GpuScenePageDirectoryEntry page;
-        uint element;
-        if (!ResolveGpuSceneAddress(primitiveIndex, VG_GPU_SCENE_TABLE_PRIMITIVE, tables, pages, page, element))
-            continue;
-        GpuPrimitive primitive = LoadGpuPrimitive(page, element);
-        if (primitive.firstPhaseParticipation + primitive.phaseParticipationCount < primitive.firstPhaseParticipation)
-            continue;
-        [loop]
-        for (uint phaseOffset = 0u; phaseOffset < primitive.phaseParticipationCount; ++phaseOffset)
-        {
-            GpuGeometryWork work;
-            bool rejected;
-            if (!ResolveGeometryWork(visible, instance, views[result.viewIndex], primitiveIndex,
-                                     primitive.firstPhaseParticipation + phaseOffset, tables, pages, work, rejected))
-                continue;
-            if (outputOrdinal < item.outputCapacity)
-                output[item.outputOffset + outputOrdinal] = work;
-            ++outputOrdinal;
-        }
-    }
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void ScanGpuSceneGeometryWorkBlocks(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (prefixConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= prefixConstants.expansionRangeCount)
-        return;
-    StructuredBuffer<GpuVisibilityResultRange> visibilityResults = ResourceDescriptorHeap[prefixConstants.visibilityResultDescriptor];
-    StructuredBuffer<GpuVisibilityCounters> visibilityCounters = ResourceDescriptorHeap[prefixConstants.visibilityCounterDescriptor];
-    StructuredBuffer<GpuGeometryExpansionWorkRange> ranges = ResourceDescriptorHeap[prefixConstants.expansionRangeDescriptor];
-    RWStructuredBuffer<GpuGeometryExpansionItem> items = ResourceDescriptorHeap[prefixConstants.itemDescriptor];
-    RWStructuredBuffer<GpuGeometryPrefixBlock> blocks = ResourceDescriptorHeap[prefixConstants.prefixBlockDescriptor];
-
-    GpuGeometryExpansionWorkRange range = ranges[groupId.x];
-    GpuVisibilityResultRange visibility = visibilityResults[range.resultIndex];
-    uint visibleCount = min(visibilityCounters[visibility.counterIndex].visibleCount, visibility.visibleCapacity);
-    uint ordinal = range.visibleOrdinal + threadIndex;
-    uint itemIndex = visibility.visibleOffset + ordinal;
-    GpuGeometryExpansionItem item = threadIndex < range.visibleCount && ordinal < visibleCount
-                                        ? items[itemIndex] : (GpuGeometryExpansionItem)0;
-    groupPrefix[threadIndex] = item.validWorkCount;
-    groupRejected[threadIndex] = item.rejectedWorkCount;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll]
-    for (uint offset = 1u; offset < VG_GPU_VISIBILITY_THREADS; offset <<= 1u)
-    {
-        uint precedingWork = threadIndex >= offset ? groupPrefix[threadIndex - offset] : 0u;
-        uint precedingRejected = threadIndex >= offset ? groupRejected[threadIndex - offset] : 0u;
-        GroupMemoryBarrierWithGroupSync();
-        groupPrefix[threadIndex] = SaturatingAdd(groupPrefix[threadIndex], precedingWork);
-        groupRejected[threadIndex] = SaturatingAdd(groupRejected[threadIndex], precedingRejected);
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (threadIndex < range.visibleCount && ordinal < visibleCount)
-    {
-        item.outputOffset = groupPrefix[threadIndex] - item.validWorkCount;
-        item.outputCapacity = item.validWorkCount;
-        items[itemIndex] = item;
-    }
-    if (threadIndex == 0u)
-        blocks[range.prefixBlockIndex] = {groupPrefix[VG_GPU_VISIBILITY_THREADS - 1u],
-                                         groupRejected[VG_GPU_VISIBILITY_THREADS - 1u], 0u, 0u};
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void PrefixGpuSceneGeometryWorkBlocks(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (prefixConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= prefixConstants.resultCount)
-        return;
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[prefixConstants.resultDescriptor];
-    RWStructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[prefixConstants.counterDescriptor];
-    RWStructuredBuffer<GpuGeometryPrefixBlock> blocks = ResourceDescriptorHeap[prefixConstants.prefixBlockDescriptor];
-    GpuGeometryResultRange result = results[groupId.x];
-    uint requested = 0u;
-    uint rejected = 0u;
-    for (uint chunk = 0u; chunk < result.expansionBlockCount; chunk += VG_GPU_VISIBILITY_THREADS)
-    {
-        uint ordinal = chunk + threadIndex;
-        GpuGeometryPrefixBlock block = ordinal < result.expansionBlockCount
-                                           ? blocks[result.expansionBlockOffset + ordinal] : (GpuGeometryPrefixBlock)0;
-        groupPrefix[threadIndex] = block.requestedCount;
-        groupRejected[threadIndex] = block.rejectedCount;
-        GroupMemoryBarrierWithGroupSync();
-        [unroll]
-        for (uint offset = 1u; offset < VG_GPU_VISIBILITY_THREADS; offset <<= 1u)
-        {
-            uint precedingWork = threadIndex >= offset ? groupPrefix[threadIndex - offset] : 0u;
-            uint precedingRejected = threadIndex >= offset ? groupRejected[threadIndex - offset] : 0u;
-            GroupMemoryBarrierWithGroupSync();
-            groupPrefix[threadIndex] = SaturatingAdd(groupPrefix[threadIndex], precedingWork);
-            groupRejected[threadIndex] = SaturatingAdd(groupRejected[threadIndex], precedingRejected);
-            GroupMemoryBarrierWithGroupSync();
-        }
-        if (threadIndex == 0u)
-            groupChunkBase = requested;
-        GroupMemoryBarrierWithGroupSync();
-        if (ordinal < result.expansionBlockCount)
-        {
-            uint localOffset = groupPrefix[threadIndex] - block.requestedCount;
-            uint requestedOffset = SaturatingAdd(groupChunkBase, localOffset);
-            block.outputOffset = result.workOffset + min(requestedOffset, result.workCapacity);
-            block.outputCapacity = requestedOffset < result.workCapacity
-                                       ? min(block.requestedCount, result.workCapacity - requestedOffset) : 0u;
-            blocks[result.expansionBlockOffset + ordinal] = block;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        if (threadIndex == 0u)
-        {
-            requested = SaturatingAdd(requested, groupPrefix[VG_GPU_VISIBILITY_THREADS - 1u]);
-            rejected = SaturatingAdd(rejected, groupRejected[VG_GPU_VISIBILITY_THREADS - 1u]);
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (threadIndex == 0u)
-    {
-        uint emitted = min(requested, result.workCapacity);
-        GpuGeometryCounters value = (GpuGeometryCounters)0;
-        value.requestedWorkCount = requested;
-        value.emittedWorkCount = emitted;
-        value.rejectedWorkCount = rejected;
-        value.expansionOverflowCount = requested - emitted;
-        counters[groupId.x] = value;
-    }
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void ResolveGpuSceneGeometryWorkOffsets(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (prefixConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= prefixConstants.expansionRangeCount)
-        return;
-    StructuredBuffer<GpuVisibilityResultRange> visibilityResults = ResourceDescriptorHeap[prefixConstants.visibilityResultDescriptor];
-    StructuredBuffer<GpuVisibilityCounters> visibilityCounters = ResourceDescriptorHeap[prefixConstants.visibilityCounterDescriptor];
-    StructuredBuffer<GpuGeometryExpansionWorkRange> ranges = ResourceDescriptorHeap[prefixConstants.expansionRangeDescriptor];
-    RWStructuredBuffer<GpuGeometryExpansionItem> items = ResourceDescriptorHeap[prefixConstants.itemDescriptor];
-    StructuredBuffer<GpuGeometryPrefixBlock> blocks = ResourceDescriptorHeap[prefixConstants.prefixBlockDescriptor];
-    GpuGeometryExpansionWorkRange range = ranges[groupId.x];
-    GpuVisibilityResultRange visibility = visibilityResults[range.resultIndex];
-    uint ordinal = range.visibleOrdinal + threadIndex;
-    uint visibleCount = min(visibilityCounters[visibility.counterIndex].visibleCount, visibility.visibleCapacity);
-    if (threadIndex >= range.visibleCount || ordinal >= visibleCount)
-        return;
-    uint itemIndex = visibility.visibleOffset + ordinal;
-    GpuGeometryExpansionItem item = items[itemIndex];
-    GpuGeometryPrefixBlock block = blocks[range.prefixBlockIndex];
-    uint localOffset = item.outputOffset;
-    item.outputOffset = block.outputOffset + min(localOffset, block.outputCapacity);
-    item.outputCapacity = localOffset < block.outputCapacity
-                              ? min(item.outputCapacity, block.outputCapacity - localOffset) : 0u;
-    items[itemIndex] = item;
-}
-
-// Called only by participating lanes after rejection. Match an absolute frame
-// bin index or dense shell-counter index; both include view identity.
-struct GeometryWaveGroup
-{
-    uint leader;
-    uint count;
-    uint rank;
-};
-
-GeometryWaveGroup MatchGeometryWaveDestination(uint destination)
-{
-    uint lane = WaveGetLaneIndex();
-    GeometryWaveGroup group;
-    group.leader = 0xffffffffu;
-    group.count = 0u;
-    group.rank = 0u;
-    uint4 remaining = WaveActiveBallot(true);
-    [loop]
-    while ((remaining.x | remaining.y | remaining.z | remaining.w) != 0u)
-    {
-        uint leaderWord = remaining.x != 0u ? 0u : (remaining.y != 0u ? 1u : (remaining.z != 0u ? 2u : 3u));
-        uint leaderBits = remaining[leaderWord];
-        uint leader = leaderWord * 32u + uint(firstbitlow(leaderBits));
-        uint leaderDestination = WaveReadLaneAt(destination, leader);
-        uint4 matches = WaveActiveBallot(destination == leaderDestination);
-        if (destination == leaderDestination)
-        {
-            uint laneWord = lane >> 5u;
-            // Shift is always 0..31, including lanes at a mask-word boundary.
-            uint precedingBits = (1u << (lane & 31u)) - 1u;
-            group.leader = leader;
-            [unroll]
-            for (uint word = 0u; word < 4u; ++word)
-            {
-                uint bits = matches[word];
-                group.count += countbits(bits);
-                uint earlier = word < laneWord ? bits : (word == laneWord ? bits & precedingBits : 0u);
-                group.rank += countbits(earlier);
-            }
-        }
-        remaining &= ~matches;
-    }
-    return group;
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void CountGpuSceneGeometryBins(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (binningConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= binningConstants.workRangeCount)
-        return;
-    StructuredBuffer<GpuGeometryWork> workItems = ResourceDescriptorHeap[binningConstants.workDescriptor];
-    StructuredBuffer<GpuGeometryWorkRange> ranges = ResourceDescriptorHeap[binningConstants.workRangeDescriptor];
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[binningConstants.resultDescriptor];
-    RWStructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[binningConstants.counterDescriptor];
-    RWStructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[binningConstants.binItemDescriptor];
-
-    GpuGeometryWorkRange range = ranges[groupId.x];
-    GpuGeometryResultRange result = results[range.resultIndex];
-    uint ordinal = range.workOrdinal + threadIndex;
-    uint emittedCount = min(counters[range.resultIndex].emittedWorkCount, result.workCapacity);
-    if (threadIndex >= range.workCount || ordinal >= emittedCount)
-        return;
-    GpuGeometryWork work = workItems[result.workOffset + ordinal];
-    bool invalidBin = work.bin >= result.binCapacity;
-    // Each workgroup belongs to one result. Aggregate diagnostics too, before
-    // invalid lanes exit; the first active lane need not itself be invalid.
-    uint invalidCount = WaveActiveCountBits(invalidBin);
-    if (WaveIsFirstLane() && invalidCount != 0u)
-        InterlockedAdd(counters[range.resultIndex].invalidBinWorkCount, invalidCount);
-    if (invalidBin)
-        return;
-    uint binIndex = result.binOffset + work.bin;
-    GeometryWaveGroup group = MatchGeometryWaveDestination(binIndex);
-    // One update per distinct bin represented in a wave. Many waves targeting
-    // one bin can still contend; group-wide hashing needs profiling to justify.
-    if (WaveGetLaneIndex() == group.leader)
-        InterlockedAdd(bins[binIndex].instanceCount, group.count);
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void ScanGpuSceneGeometryBinBlocks(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (prefixConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= prefixConstants.binRangeCount)
-        return;
-    StructuredBuffer<GpuGeometryPrefixWorkRange> ranges = ResourceDescriptorHeap[prefixConstants.binRangeDescriptor];
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[prefixConstants.resultDescriptor];
-    RWStructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[prefixConstants.binItemDescriptor];
-    RWStructuredBuffer<GpuGeometryPrefixBlock> blocks = ResourceDescriptorHeap[prefixConstants.prefixBlockDescriptor];
-
-    GpuGeometryPrefixWorkRange range = ranges[groupId.x];
-    GpuGeometryResultRange result = results[range.resultIndex];
-    uint ordinal = range.itemOrdinal + threadIndex;
-    uint binIndex = result.binOffset + ordinal;
-    GpuGeometryBinItem item = threadIndex < range.itemCount ? bins[binIndex] : (GpuGeometryBinItem)0;
-    groupPrefix[threadIndex] = item.instanceCount;
-    groupRejected[threadIndex] = item.instanceCount != 0u ? 1u : 0u;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll]
-    for (uint offset = 1u; offset < VG_GPU_VISIBILITY_THREADS; offset <<= 1u)
-    {
-        uint precedingCount = threadIndex >= offset ? groupPrefix[threadIndex - offset] : 0u;
-        uint precedingBin = threadIndex >= offset ? groupRejected[threadIndex - offset] : 0u;
-        GroupMemoryBarrierWithGroupSync();
-        groupPrefix[threadIndex] = SaturatingAdd(groupPrefix[threadIndex], precedingCount);
-        groupRejected[threadIndex] = SaturatingAdd(groupRejected[threadIndex], precedingBin);
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (threadIndex < range.itemCount)
-    {
-        item.instanceCursor = 0u;
-        item.instanceOffset = groupPrefix[threadIndex] - item.instanceCount;
-        item.instanceCapacity = item.instanceCount;
-        bins[binIndex] = item;
-    }
-    if (threadIndex == 0u)
-        blocks[range.prefixBlockIndex] = {groupPrefix[VG_GPU_VISIBILITY_THREADS - 1u],
-                                         groupRejected[VG_GPU_VISIBILITY_THREADS - 1u], 0u, 0u};
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void PrefixGpuSceneGeometryBinBlocks(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (prefixConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= prefixConstants.resultCount)
-        return;
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[prefixConstants.resultDescriptor];
-    RWStructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[prefixConstants.counterDescriptor];
-    RWStructuredBuffer<GpuGeometryPrefixBlock> blocks = ResourceDescriptorHeap[prefixConstants.prefixBlockDescriptor];
-    GpuGeometryResultRange result = results[groupId.x];
-    uint requested = 0u;
-    uint visibleBins = 0u;
-    for (uint chunk = 0u; chunk < result.binBlockCount; chunk += VG_GPU_VISIBILITY_THREADS)
-    {
-        uint ordinal = chunk + threadIndex;
-        GpuGeometryPrefixBlock block = ordinal < result.binBlockCount
-                                           ? blocks[result.binBlockOffset + ordinal] : (GpuGeometryPrefixBlock)0;
-        groupPrefix[threadIndex] = block.requestedCount;
-        groupRejected[threadIndex] = block.rejectedCount;
-        GroupMemoryBarrierWithGroupSync();
-        [unroll]
-        for (uint offset = 1u; offset < VG_GPU_VISIBILITY_THREADS; offset <<= 1u)
-        {
-            uint precedingCount = threadIndex >= offset ? groupPrefix[threadIndex - offset] : 0u;
-            uint precedingBin = threadIndex >= offset ? groupRejected[threadIndex - offset] : 0u;
-            GroupMemoryBarrierWithGroupSync();
-            groupPrefix[threadIndex] = SaturatingAdd(groupPrefix[threadIndex], precedingCount);
-            groupRejected[threadIndex] = SaturatingAdd(groupRejected[threadIndex], precedingBin);
-            GroupMemoryBarrierWithGroupSync();
-        }
-        if (threadIndex == 0u)
-            groupChunkBase = requested;
-        GroupMemoryBarrierWithGroupSync();
-        if (ordinal < result.binBlockCount)
-        {
-            uint localOffset = groupPrefix[threadIndex] - block.requestedCount;
-            uint requestedOffset = SaturatingAdd(groupChunkBase, localOffset);
-            block.outputOffset = result.instanceOffset + min(requestedOffset, result.instanceCapacity);
-            block.outputCapacity = requestedOffset < result.instanceCapacity
-                                       ? min(block.requestedCount, result.instanceCapacity - requestedOffset) : 0u;
-            blocks[result.binBlockOffset + ordinal] = block;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        if (threadIndex == 0u)
-        {
-            requested = SaturatingAdd(requested, groupPrefix[VG_GPU_VISIBILITY_THREADS - 1u]);
-            visibleBins = SaturatingAdd(visibleBins, groupRejected[VG_GPU_VISIBILITY_THREADS - 1u]);
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (threadIndex == 0u)
-    {
-        GpuGeometryCounters value = counters[groupId.x];
-        value.instanceOverflowCount = requested - min(requested, result.instanceCapacity);
-        value.visibleBinCount = visibleBins;
-        counters[groupId.x] = value;
-    }
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void ResolveGpuSceneGeometryBinOffsets(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (prefixConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= prefixConstants.binRangeCount)
-        return;
-    StructuredBuffer<GpuGeometryPrefixWorkRange> ranges = ResourceDescriptorHeap[prefixConstants.binRangeDescriptor];
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[prefixConstants.resultDescriptor];
-    RWStructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[prefixConstants.binItemDescriptor];
-    StructuredBuffer<GpuGeometryPrefixBlock> blocks = ResourceDescriptorHeap[prefixConstants.prefixBlockDescriptor];
-    GpuGeometryPrefixWorkRange range = ranges[groupId.x];
-    if (threadIndex >= range.itemCount)
-        return;
-    GpuGeometryResultRange result = results[range.resultIndex];
-    uint binIndex = result.binOffset + range.itemOrdinal + threadIndex;
-    GpuGeometryBinItem item = bins[binIndex];
-    GpuGeometryPrefixBlock block = blocks[range.prefixBlockIndex];
-    uint localOffset = item.instanceOffset;
-    item.instanceOffset = block.outputOffset + min(localOffset, block.outputCapacity);
-    item.instanceCapacity = localOffset < block.outputCapacity
-                                ? min(item.instanceCapacity, block.outputCapacity - localOffset) : 0u;
-    bins[binIndex] = item;
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void ScatterGpuSceneGeometryInstances(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
-{
-    if (binningConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= binningConstants.workRangeCount)
-        return;
-    StructuredBuffer<GpuGeometryWork> workItems = ResourceDescriptorHeap[binningConstants.workDescriptor];
-    StructuredBuffer<GpuGeometryWorkRange> ranges = ResourceDescriptorHeap[binningConstants.workRangeDescriptor];
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[binningConstants.resultDescriptor];
-    StructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[binningConstants.counterDescriptor];
-    RWStructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[binningConstants.binItemDescriptor];
-    RWStructuredBuffer<MeshDrawInstance> instances = ResourceDescriptorHeap[binningConstants.instanceDescriptor];
-
-    GpuGeometryWorkRange range = ranges[groupId.x];
-    GpuGeometryResultRange result = results[range.resultIndex];
-    uint ordinal = range.workOrdinal + threadIndex;
-    uint emittedCount = min(counters[range.resultIndex].emittedWorkCount, result.workCapacity);
-    if (threadIndex >= range.workCount || ordinal >= emittedCount)
-        return;
-    GpuGeometryWork work = workItems[result.workOffset + ordinal];
-    if (work.bin >= result.binCapacity)
-        return;
-    uint binIndex = result.binOffset + work.bin;
-    // Only these prefix-assigned fields are read non-atomically. The cursor is
-    // concurrently updated by other waves and must not be loaded as a struct.
-    uint instanceCapacity = bins[binIndex].instanceCapacity;
-    // Prefix already accounts for discarded work. A wholly unwritable bin
-    // needs no cursor reservation; instanceCount retains its requested total.
-    if (instanceCapacity == 0u)
-        return;
-    uint instanceOffset = bins[binIndex].instanceOffset;
-    GeometryWaveGroup group = MatchGeometryWaveDestination(binIndex);
-    uint base = 0u;
-    if (WaveGetLaneIndex() == group.leader)
-        InterlockedAdd(bins[binIndex].instanceCursor, group.count, base);
-    // All matching lanes reconverge here; their elected source lane is active.
-    base = WaveReadLaneAt(base, group.leader);
-    // Subtraction guards the reservation before addition and preserves the
-    // prefix pass's overflow accounting, including partially writable groups.
-    if (base < instanceCapacity && group.rank < instanceCapacity - base)
-        instances[instanceOffset + base + group.rank] = {work.instance, work.primitive, work.geometry, work.material};
-}
-
-[shader("compute")]
-[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void InitializeGpuSceneGeometryShellRanges(uint3 dispatchId : SV_DispatchThreadID)
-{
-    if (indirectConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || dispatchId.x >= indirectConstants.shellPlanCount)
-        return;
-    StructuredBuffer<GpuGeometryShellRange> plans = ResourceDescriptorHeap[indirectConstants.shellPlanDescriptor];
-    RWStructuredBuffer<GpuGeometryShellRange> ranges = ResourceDescriptorHeap[indirectConstants.shellRangeDescriptor];
-    RWStructuredBuffer<GpuGeometryShellCounters> counters = ResourceDescriptorHeap[indirectConstants.shellCounterDescriptor];
-    // Unique writer per dense plan. The graph clears the direct range table
-    // (generation zero means unmapped) before this dispatch, then orders both
-    // outputs before argument generation. No atomic initialization is needed.
-    counters[dispatchId.x] = (GpuGeometryShellCounters)0;
-    GpuGeometryShellRange plan = plans[dispatchId.x];
-    if (plan.generation == 0u || plan.shell >= indirectConstants.shellCapacity ||
-        plan.resultIndex >= indirectConstants.resultCount || plan.counterIndex != dispatchId.x)
-        return;
-    ranges[plan.resultIndex * indirectConstants.shellCapacity + plan.shell] = plan;
-}
-
-bool ResolveIndirectShellRange(uint binIndex, uint resultIndex, GpuGeometryResultRange result,
-                              out GpuGeometryBin bin, out GpuGeometryShellRange shellRange)
+#if defined(VG_GPU_SCENE_SPARSE_ALLOCATE)
+bool ResolveSparseIndirectShellRange(uint binIndex, uint resultIndex, GpuGeometryResultRange result,
+                                    out GpuGeometryBin bin, out GpuGeometryShellRange shellRange)
 {
     bin = (GpuGeometryBin)0;
     shellRange = (GpuGeometryShellRange)0;
-    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[indirectConstants.tableDirectoryDescriptor];
-    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[indirectConstants.pageDirectoryDescriptor];
-    StructuredBuffer<GpuGeometryShellRange> shellRanges = ResourceDescriptorHeap[indirectConstants.shellRangeDescriptor];
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[allocateConstants.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[allocateConstants.pageDirectoryDescriptor];
+    StructuredBuffer<GpuGeometryShellRange> shellRanges = ResourceDescriptorHeap[allocateConstants.shellRangeDescriptor];
     GpuScenePageDirectoryEntry page;
     uint element;
     if (!ResolveGpuSceneAddress(binIndex, VG_GPU_SCENE_TABLE_GEOMETRY_BIN, tables, pages, page, element))
         return false;
     bin = LoadGpuGeometryBin(page, element);
     if ((bin.flags & VG_GPU_GEOMETRY_CATALOG_ACTIVE) == 0u || bin.generation == 0u ||
-        bin.indexCount == 0u || bin.firstVertex > 0x7fffffffu || bin.shell >= indirectConstants.shellCapacity ||
+        bin.indexCount == 0u || bin.firstVertex > 0x7fffffffu || bin.shell >= allocateConstants.shellCapacity ||
         !ResolveGpuSceneAddress(bin.shell, VG_GPU_SCENE_TABLE_GEOMETRY_SHELL, tables, pages, page, element))
         return false;
     GpuGeometryShell shell = LoadGpuGeometryShell(page, element);
-    shellRange = shellRanges[resultIndex * indirectConstants.shellCapacity + bin.shell];
+    shellRange = shellRanges[resultIndex * allocateConstants.shellCapacity + bin.shell];
     if ((shell.flags & VG_GPU_GEOMETRY_CATALOG_ACTIVE) == 0u || shell.generation == 0u ||
         shell.generation != bin.shellGeneration || shellRange.generation != shell.generation ||
         shellRange.shell != bin.shell || shellRange.resultIndex != resultIndex || shellRange.phase != shell.phase ||
         shellRange.argumentCapacity != shell.binCount || bin.shellOrdinal >= shell.binCount ||
-        shellRange.counterIndex >= indirectConstants.shellPlanCount || shellRange.argumentOffset < result.argumentOffset)
+        shellRange.counterIndex >= allocateConstants.shellPlanCount || shellRange.argumentOffset < result.argumentOffset)
         return false;
     uint relativeOffset = shellRange.argumentOffset - result.argumentOffset;
     return relativeOffset <= result.argumentCapacity && shellRange.argumentCapacity <= result.argumentCapacity - relativeOffset;
@@ -1199,63 +744,162 @@ bool ResolveIndirectShellRange(uint binIndex, uint resultIndex, GpuGeometryResul
 
 [shader("compute")]
 [numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
-void BuildGpuSceneGeometryIndirectArguments(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
+void AllocateGpuSceneGeometryBins(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
 {
-    if (indirectConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= indirectConstants.binRangeCount)
+    if (allocateConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || groupId.x >= allocateConstants.resultCount)
         return;
-    StructuredBuffer<GpuGeometryPrefixWorkRange> ranges = ResourceDescriptorHeap[indirectConstants.binRangeDescriptor];
-    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[indirectConstants.resultDescriptor];
-    StructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[indirectConstants.binItemDescriptor];
-    RWStructuredBuffer<GpuGeometryShellCounters> shellCounters = ResourceDescriptorHeap[indirectConstants.shellCounterDescriptor];
-    RWStructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[indirectConstants.counterDescriptor];
-    RWStructuredBuffer<GpuIndirectDrawIndexedArguments> arguments = ResourceDescriptorHeap[indirectConstants.argumentDescriptor];
+    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[allocateConstants.resultDescriptor];
+    RWStructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[allocateConstants.counterDescriptor];
+    RWStructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[allocateConstants.binItemDescriptor];
+    StructuredBuffer<uint> activeBins = ResourceDescriptorHeap[allocateConstants.activeBinDescriptor];
+    RWStructuredBuffer<GpuGeometryShellCounters> shellCounters = ResourceDescriptorHeap[allocateConstants.shellCounterDescriptor];
+    RWStructuredBuffer<GpuIndirectDrawIndexedArguments> arguments = ResourceDescriptorHeap[allocateConstants.argumentDescriptor];
 
-    GpuGeometryPrefixWorkRange range = ranges[groupId.x];
-    if (threadIndex >= range.itemCount || range.resultIndex >= indirectConstants.resultCount)
-        return;
-    GpuGeometryResultRange result = results[range.resultIndex];
-    if (range.itemOrdinal >= result.binCapacity || threadIndex >= result.binCapacity - range.itemOrdinal)
-        return;
-    uint ordinal = range.itemOrdinal + threadIndex;
-    GpuGeometryBinItem item = bins[result.binOffset + ordinal];
-    if (item.instanceCapacity == 0u)
-        return;
-    GpuGeometryBin bin;
-    GpuGeometryShellRange shellRange;
-    bool valid = ResolveIndirectShellRange(ordinal, range.resultIndex, result, bin, shellRange);
-    valid = valid && item.instanceOffset >= result.instanceOffset;
-    uint relativeInstance = item.instanceOffset - result.instanceOffset;
-    valid = valid && relativeInstance <= result.instanceCapacity && item.instanceCapacity <= result.instanceCapacity - relativeInstance;
-    uint rejectedCount = WaveActiveCountBits(!valid);
-    // Expansion prefix initializes this per-view diagnostic. Once per nonempty
-    // invalid wave, consumed after this pass; invalid lanes reserve no draws.
-    if (WaveIsFirstLane() && rejectedCount != 0u)
-        InterlockedAdd(counters[range.resultIndex].rejectedIndirectBinCount, rejectedCount);
-    if (!valid)
-        return;
-    GeometryWaveGroup group = MatchGeometryWaveDestination(shellRange.counterIndex);
-    uint base = 0u;
-    if (WaveGetLaneIndex() == group.leader)
+    uint resultIndex = groupId.x;
+    GpuGeometryResultRange result = results[resultIndex];
+    uint activeCount = min(counters[resultIndex].visibleBinCount, result.activeBinCapacity);
+    if (threadIndex == 0u)
+        groupChunkBase = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint chunk = 0u; chunk < activeCount; chunk += VG_GPU_VISIBILITY_THREADS)
     {
-        // One reservation per distinct (view, shell) per wave. Init owns zero;
-        // counted indirect consumes drawCount only after a UAV/indirect barrier.
-        // The RHI maximum count clamps a defensive overflow to the shell range.
-        InterlockedAdd(shellCounters[shellRange.counterIndex].drawCount, group.count, base);
-        uint writable = base < shellRange.argumentCapacity ? min(group.count, shellRange.argumentCapacity - base) : 0u;
-        uint overflow = group.count - writable;
-        // Same scope/rate as reservations, but only nonzero drops are counted.
-        if (overflow != 0u)
-            InterlockedAdd(shellCounters[shellRange.counterIndex].overflowCount, overflow);
+        uint activeOrdinal = chunk + threadIndex;
+        uint localBin = activeOrdinal < activeCount ? activeBins[result.activeBinOffset + activeOrdinal] : VG_GPU_SCENE_INVALID_INDEX;
+        bool validBin = localBin < result.binCapacity;
+        uint frameBin = validBin ? result.binOffset + localBin : 0u;
+        GpuGeometryBinItem item = validBin ? bins[frameBin] : (GpuGeometryBinItem)0;
+        uint requested = validBin ? item.instanceCount : 0u;
+
+        groupPrefix[threadIndex] = requested;
+        GroupMemoryBarrierWithGroupSync();
+        [unroll]
+        for (uint offset = 1u; offset < VG_GPU_VISIBILITY_THREADS; offset <<= 1u)
+        {
+            uint preceding = threadIndex >= offset ? groupPrefix[threadIndex - offset] : 0u;
+            GroupMemoryBarrierWithGroupSync();
+            groupPrefix[threadIndex] = SaturatingAdd(groupPrefix[threadIndex], preceding);
+            GroupMemoryBarrierWithGroupSync();
+        }
+
+        uint chunkBase = groupChunkBase;
+        if (validBin)
+        {
+            uint localOffset = groupPrefix[threadIndex] - requested;
+            uint requestedOffset = SaturatingAdd(chunkBase, localOffset);
+            item.instanceCursor = 0u;
+            item.instanceOffset = result.instanceOffset + min(requestedOffset, result.instanceCapacity);
+            item.instanceCapacity = requestedOffset < result.instanceCapacity
+                                      ? min(requested, result.instanceCapacity - requestedOffset) : 0u;
+            bins[frameBin] = item;
+
+            if (item.instanceCapacity != 0u)
+            {
+                GpuGeometryBin bin;
+                GpuGeometryShellRange shellRange;
+                bool valid = ResolveSparseIndirectShellRange(localBin, resultIndex, result, bin, shellRange);
+                valid = valid && item.instanceOffset >= result.instanceOffset;
+                uint relativeInstance = item.instanceOffset - result.instanceOffset;
+                valid = valid && relativeInstance <= result.instanceCapacity &&
+                        item.instanceCapacity <= result.instanceCapacity - relativeInstance;
+                if (!valid)
+                    InterlockedAdd(counters[resultIndex].rejectedIndirectBinCount, 1u);
+                else
+                {
+                    uint argumentOrdinal = 0u;
+                    InterlockedAdd(shellCounters[shellRange.counterIndex].drawCount, 1u, argumentOrdinal);
+                    if (argumentOrdinal >= shellRange.argumentCapacity)
+                        InterlockedAdd(shellCounters[shellRange.counterIndex].overflowCount, 1u);
+                    else
+                    {
+                        GpuIndirectDrawIndexedArguments argument;
+                        argument.indexCount = bin.indexCount;
+                        argument.instanceCount = item.instanceCapacity;
+                        argument.firstIndex = bin.firstIndex;
+                        argument.baseVertex = int(bin.firstVertex);
+                        argument.firstInstance = item.instanceOffset;
+                        arguments[shellRange.argumentOffset + argumentOrdinal] = argument;
+                    }
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+        if (threadIndex == 0u)
+            groupChunkBase = SaturatingAdd(groupChunkBase, groupPrefix[VG_GPU_VISIBILITY_THREADS - 1u]);
+        GroupMemoryBarrierWithGroupSync();
     }
-    base = WaveReadLaneAt(base, group.leader);
-    if (base < shellRange.argumentCapacity && group.rank < shellRange.argumentCapacity - base)
+
+    if (threadIndex == 0u)
     {
-        GpuIndirectDrawIndexedArguments argument;
-        argument.indexCount = bin.indexCount;
-        argument.instanceCount = item.instanceCapacity;
-        argument.firstIndex = bin.firstIndex;
-        argument.baseVertex = int(bin.firstVertex);
-        argument.firstInstance = item.instanceOffset;
-        arguments[shellRange.argumentOffset + base + group.rank] = argument;
+        uint requestedWork = counters[resultIndex].requestedWorkCount;
+        uint emittedWork = min(requestedWork, result.workCapacity);
+        counters[resultIndex].emittedWorkCount = emittedWork;
+        counters[resultIndex].expansionOverflowCount = requestedWork - emittedWork;
+        uint requestedInstances = groupChunkBase;
+        counters[resultIndex].instanceOverflowCount = requestedInstances - min(requestedInstances, result.instanceCapacity);
     }
 }
+#endif
+
+#if defined(VG_GPU_SCENE_SPARSE_SCATTER)
+[shader("compute")]
+[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
+void ScatterGpuSceneGeometryInstances(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
+{
+    if (scatterConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION || scatterConstants.resultCount == 0u ||
+        scatterConstants.workCapacityPerResult == 0u)
+        return;
+    uint globalOrdinal = groupId.x * VG_GPU_VISIBILITY_THREADS + threadIndex;
+    uint resultIndex = globalOrdinal / scatterConstants.workCapacityPerResult;
+    if (resultIndex >= scatterConstants.resultCount)
+        return;
+    uint ordinal = globalOrdinal - resultIndex * scatterConstants.workCapacityPerResult;
+
+    StructuredBuffer<GpuGeometryWork> workItems = ResourceDescriptorHeap[scatterConstants.workDescriptor];
+    StructuredBuffer<GpuGeometryResultRange> results = ResourceDescriptorHeap[scatterConstants.resultDescriptor];
+    StructuredBuffer<GpuGeometryCounters> counters = ResourceDescriptorHeap[scatterConstants.counterDescriptor];
+    StructuredBuffer<GpuGeometryBinItem> bins = ResourceDescriptorHeap[scatterConstants.binItemDescriptor];
+    RWStructuredBuffer<MeshDrawInstance> instances = ResourceDescriptorHeap[scatterConstants.instanceDescriptor];
+    GpuGeometryResultRange result = results[resultIndex];
+    uint emittedCount = min(counters[resultIndex].emittedWorkCount, result.workCapacity);
+    if (ordinal >= emittedCount)
+        return;
+    GpuGeometryWork work = workItems[result.workOffset + ordinal];
+    if (work.bin >= result.binCapacity || work.binOrdinal == VG_GPU_SCENE_INVALID_INDEX)
+        return;
+    GpuGeometryBinItem item = bins[result.binOffset + work.bin];
+    if (work.binOrdinal >= item.instanceCapacity)
+        return;
+    instances[item.instanceOffset + work.binOrdinal] = {work.instance, work.primitive, work.geometry, work.material};
+}
+#endif
+
+#if defined(VG_GPU_SCENE_INITIALIZE)
+[shader("compute")]
+[numthreads(VG_GPU_VISIBILITY_THREADS, 1, 1)]
+void InitializeGpuSceneGeometryShellRanges(uint3 dispatchId : SV_DispatchThreadID)
+{
+    if (initializeConstants.layoutVersion != VG_GPU_SCENE_LAYOUT_VERSION)
+        return;
+    if (dispatchId.x < initializeConstants.resultCount)
+    {
+        RWStructuredBuffer<GpuGeometryCounters> geometryCounters = ResourceDescriptorHeap[initializeConstants.counterDescriptor];
+        geometryCounters[dispatchId.x] = (GpuGeometryCounters)0;
+    }
+    if (dispatchId.x >= initializeConstants.shellPlanCount)
+        return;
+    StructuredBuffer<GpuGeometryShellRange> plans = ResourceDescriptorHeap[initializeConstants.shellPlanDescriptor];
+    RWStructuredBuffer<GpuGeometryShellRange> ranges = ResourceDescriptorHeap[initializeConstants.shellRangeDescriptor];
+    RWStructuredBuffer<GpuGeometryShellCounters> counters = ResourceDescriptorHeap[initializeConstants.shellCounterDescriptor];
+    // Unique writer per dense plan. The graph clears the direct range table
+    // (generation zero means unmapped) before this dispatch, then orders both
+    // outputs before argument generation. No atomic initialization is needed.
+    counters[dispatchId.x] = (GpuGeometryShellCounters)0;
+    GpuGeometryShellRange plan = plans[dispatchId.x];
+    if (plan.generation == 0u || plan.shell >= initializeConstants.shellCapacity ||
+        plan.resultIndex >= initializeConstants.resultCount || plan.counterIndex != dispatchId.x)
+        return;
+    ranges[plan.resultIndex * initializeConstants.shellCapacity + plan.shell] = plan;
+}
+#endif

@@ -24,6 +24,10 @@ namespace vanguard::diagnostics::backend
     void ClearNetworkPeerId() noexcept;
 
     void SetSinkCallback(SinkCallback callback, void* userData) noexcept;
+    [[nodiscard]] SinkRegistrationResult RegisterSinkCallback(SinkCallback callback, void* userData,
+                                                              SinkRegistrationToken& token) noexcept;
+    [[nodiscard]] SinkRegistrationResult UnregisterSinkCallback(SinkRegistrationToken token) noexcept;
+    [[nodiscard]] bool IsSinkCallbackRegistered(SinkRegistrationToken token) noexcept;
     [[nodiscard]] bool OpenFileSink(const char* path, FileMode mode) noexcept;
     void CloseFileSink() noexcept;
 

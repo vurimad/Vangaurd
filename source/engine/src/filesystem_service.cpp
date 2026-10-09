@@ -12,7 +12,7 @@ namespace
     [[nodiscard]] vanguard::filesystem::Config MakeFilesystemConfig() noexcept
     {
         const vanguard::filesystem::AbsolutePath root = vanguard::filesystem::paths::GetRootDirectory();
-        return {root, root.AddDirPath("data"), root.AddDirPath("cache")};
+        return {root, root.AddDirPath("data"), vanguard::filesystem::paths::GetUserCacheDirectory()};
     }
 
     class FilesystemService final : public app::Service

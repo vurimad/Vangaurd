@@ -32,5 +32,10 @@ their dispatch, counter, or buffer contracts.
   barriers between initialization, counting, prefixing, scatter and consumers.
   Atomics and wave operations do not replace those resource dependencies.
 
-Validation must follow the user's current build/test schedule. Record deferred
-checks honestly; do not claim that a source audit establishes GPU performance.
+The root `AGENTS.md` hard rule applies here: **no tests or validation runs by
+default during ordinary/intermediate work**. The final authorized gate must leave
+the relevant source compiling and run only the focused proof needed for closure;
+a genuinely new engine system/subsystem may also justify narrowly critical
+validation earlier. Broad matrices and interactive native automation still require
+explicit user authorization. Record deferred checks honestly; do not claim that a
+source audit establishes GPU performance.

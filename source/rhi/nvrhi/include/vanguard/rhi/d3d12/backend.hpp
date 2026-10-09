@@ -81,7 +81,7 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] i32 Release(ResourceRef) noexcept override;
         [[nodiscard]] ResourceLifetimeStats GetResourceLifetimeStats() const noexcept override;
 
-        [[nodiscard]] CommandListRef CreateCommandList(CommandListType, u64) noexcept override;
+        [[nodiscard]] CommandListRef CreateCommandList(CommandListType, u64, CommandListRetentionPolicy) noexcept override;
         void DiscardCommandList(CommandListRef) noexcept override;
         [[nodiscard]] CommandListType GetCommandListType(CommandListRef) const noexcept override;
         [[nodiscard]] BackendStatus CloseCommandList(CommandListRef) noexcept override;

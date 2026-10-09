@@ -126,9 +126,20 @@ namespace
         {
             if (m_status != vanguard::engine::WorldResourceStatus::Loading)
                 return false;
-            static_cast<void>(m_request.Cancel());
+            vanguard::resources::Failure terminalFailure = vanguard::resources::Failure::None;
+            const vanguard::resources::PipelineCancelStatus cancelStatus = m_request.CancelWithStatus(&terminalFailure);
             m_request.Reset();
             m_status = vanguard::engine::WorldResourceStatus::Idle;
+            if (cancelStatus == vanguard::resources::PipelineCancelStatus::Failed)
+            {
+                m_failure = terminalFailure;
+                return false;
+            }
+            if (cancelStatus == vanguard::resources::PipelineCancelStatus::Invalid)
+            {
+                m_failure = vanguard::resources::Failure::InternalError;
+                return false;
+            }
             m_failure = vanguard::resources::Failure::None;
             return true;
         }

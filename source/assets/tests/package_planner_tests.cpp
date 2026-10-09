@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/assets/package_planner.hpp>
 #include <vanguard/assets/package_set_assembly.hpp>
 #include <vanguard/assets/derived_data_package_artifact_reader.hpp>
@@ -276,7 +277,7 @@ int main()
     diagnostics::EnableCategory(diagnostics::Category::FunctionalTests, true);
     Check(containers::Initialize(), "containers initialization");
     Check(vanguard::io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath working = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath working = vanguard::tests::ScratchDirectory("package_planner_tests");
     const filesystem::AbsolutePath root = working.AddDirPath("vanguard_package_planner_tests");
     Check(filesystem::Initialize({working, working, root}), "filesystem initialization");
     filesystem::Manager& manager = filesystem::GetManager();
@@ -308,6 +309,7 @@ int main()
     indexConfig.settingsFingerprint = crypto::Sha256("package-planner-settings", 24);
     assets::DependencyIndex index;
     Check(index.Initialize(indexConfig) == assets::IndexResult::Success, "index initialization");
+    Check(index.BindPersistentProtectionDomain(buildSystem), "bind package-planner index to persistent protection domain");
 
     Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.materialSource, fixture.material, fixture.materialByte)), "material publication");
     Check(BuildAndPublish(buildSystem, index, MakeRequest(fixture.decalSource, fixture.decal, fixture.decalByte)), "decal publication");

@@ -2837,19 +2837,20 @@ namespace vanguard::rendering
         return true;
     }
 
-    bool RenderSceneManager::CollectDirectionalLights(const RenderSceneGpuCandidatePlan& plan, const containers::ArraySpan<const RenderView> views,
+    bool RenderSceneManager::CollectDirectionalLights(const RenderSceneHandle sceneHandle, const u64 mutationEpoch, const containers::ArraySpan<const RenderView> views,
                                                        containers::ArraySpan<GpuDirectionalLightSelection> selections, RenderSceneFailure* const failure) const noexcept
     {
         ClearFailure(failure);
-        if (m_impl == nullptr || !plan.IsValid() || views.Empty() || views.Size() > MaximumRenderViewsPerFamily || views.Size() != selections.Size())
-            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "directional selection requires a sealed family and matching storage", plan.scene);
+        if (m_impl == nullptr || !sceneHandle.IsValid() || mutationEpoch == 0 || views.Empty() || views.Size() > MaximumRenderViewsPerFamily || views.Size() != selections.Size())
+            return Fail(failure, RenderSceneFailureCode::InvalidDescriptor, "directional selection requires an exact scene epoch and matching storage", sceneHandle);
         concurrency::ScopedSharedLock<concurrency::RWLock> publicationGuard(m_impl->publicationLock);
-        if (!m_impl->ValidAliveScene(plan.scene))
-            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "directional selection scene is unavailable", plan.scene);
-        const auto* relinks = m_impl->relinkStates[plan.scene.index];
-        const auto& scene = m_impl->slots[plan.scene.index];
-        if (relinks == nullptr || !relinks->candidateProduction.GetValue() || relinks->candidateSerial != plan.serial || scene.completedMutationEpoch != plan.mutationEpoch)
-            return Fail(failure, RenderSceneFailureCode::Busy, "directional selection requires the active scene epoch seal", plan.scene);
+        if (!m_impl->ValidAliveScene(sceneHandle))
+            return Fail(failure, RenderSceneFailureCode::InvalidHandle, "directional selection scene is unavailable", sceneHandle);
+        const auto* relinks = m_impl->relinkStates[sceneHandle.index];
+        const auto& scene = m_impl->slots[sceneHandle.index];
+        if (relinks == nullptr || relinks->dispatched.GetValue() || scene.framePrepared || scene.pendingMutationCount != 0 ||
+            scene.completedMutationEpoch != mutationEpoch)
+            return Fail(failure, RenderSceneFailureCode::Busy, "directional selection requires the exact completed scene epoch", sceneHandle);
         for (auto& selection : selections)
             selection = {};
         for (const RenderProxyHandle proxy : scene.spatial.globalProxies)
@@ -2867,10 +2868,10 @@ namespace vanguard::rendering
                 if ((base.layerMask & views[viewIndex].layerMask) == 0 || (base.visibilityMask & views[viewIndex].visibilityMask) == 0)
                     continue;
                 if (!light.gpuIdentity.IsValid())
-                    return Fail(failure, RenderSceneFailureCode::InvalidState, "selected directional light has no GPU identity", plan.scene);
+                    return Fail(failure, RenderSceneFailureCode::InvalidState, "selected directional light has no GPU identity", sceneHandle);
                 auto& selection = selections[viewIndex];
                 if (selection.count == MaximumDirectionalLightsPerView)
-                    return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "directional lights exceed the per-view lighting budget", plan.scene);
+                    return Fail(failure, RenderSceneFailureCode::CapacityExceeded, "directional lights exceed the per-view lighting budget", sceneHandle);
                 selection.lights[selection.count++] = light.gpuIdentity;
             }
         }
@@ -3011,6 +3012,14 @@ namespace vanguard::rendering
         return true;
     }
 
+    bool RenderSceneManager::AbandonGpuPublisher(RenderSceneGpuPublisher& publisher) noexcept
+    {
+        if (m_impl == nullptr || m_impl->gpuPublisher != &publisher)
+            return false;
+        m_impl->gpuPublisher = nullptr;
+        return true;
+    }
+
     bool RenderSceneManager::IsGpuPublicationReady(const RenderSceneHandle sceneHandle, const u64 mutationEpoch) const noexcept
     {
         if (m_impl == nullptr || !m_impl->ValidAliveScene(sceneHandle))
@@ -3032,6 +3041,7 @@ namespace vanguard::rendering
         view.visibility = &base.visibility;
         view.layerMask = &base.layerMask;
         view.visibilityMask = &base.visibilityMask;
+        view.spatialMode = &base.spatialMode;
         view.payloadKind = base.payloadKind;
 
         if (base.payloadKind == RenderProxyPayloadKind::Mesh)

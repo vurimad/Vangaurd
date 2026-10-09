@@ -1,9 +1,11 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/jobs/jobs.hpp>
 #include <vanguard/packages/packages.hpp>
 #include <vanguard/resources/resource_pipeline.hpp>
+#include <vanguard/serialization/serialization.hpp>
 #include <vanguard/world/cells.hpp>
 #include <vanguard/world/streaming_executor.hpp>
 #include <vanguard/world/streaming_grid.hpp>
@@ -187,7 +189,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "worldTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("world_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
     Check(reflection::Initialize(), "reflection initialization");
     Check(reflection::RegisterSchema(VisualOverrideSchema), "register override schema");
@@ -317,6 +319,15 @@ int main()
     Check(world::CookCell(invalid, duplicateWriter) == world::Result::DuplicateIdentifier, "reject duplicate entity identity");
 
     invalidPlacements = placements;
+    invalidPlacements[0].bounds.minimum[0] = 2.0f;
+    invalidPlacements[0].bounds.maximum[0] = -2.0f;
+    invalid = description;
+    invalid.placements = {invalidPlacements.data(), static_cast<vanguard::u32>(invalidPlacements.size())};
+    scratch.Clear();
+    filesystem::MemoryFileWriter boundsWriter(scratch);
+    Check(world::CookCell(invalid, boundsWriter) == world::Result::InvalidArgument, "reject invalid cell placement bounds");
+
+    invalidPlacements = placements;
     invalidPlacements[2].parentEntityId = 999;
     invalid.placements = {invalidPlacements.data(), static_cast<vanguard::u32>(invalidPlacements.size())};
     scratch.Clear();
@@ -368,6 +379,7 @@ int main()
     worldCells[1].bounds = MakeWorldBounds(-1000.0, 1000.0);
     worldCells[1].activationDistance = 5000.0f;
     worldCells[1].retentionDistance = 5500.0f;
+    worldCells[1].flags = world::WorldCellFlags::AlwaysLoaded;
     worldCells[2].cellId = 30;
     worldCells[2].parentCellId = 10;
     worldCells[2].cell = westCellResource;
@@ -404,6 +416,7 @@ int main()
     world::WorldBuildDescription worldDescription;
     worldDescription.worldId = description.worldId;
     worldDescription.bounds = MakeWorldBounds(-10000.0, 10000.0);
+    worldDescription.startupCamera = {10, 0x43414d4552410001ull, 0x43414d4552410002ull};
     worldDescription.cells = {worldCells.data(), static_cast<vanguard::u32>(worldCells.size())};
     worldDescription.distantProxies = {distantProxies.data(), static_cast<vanguard::u32>(distantProxies.size())};
     worldDescription.proxyChildren = {proxyChildren.data(), static_cast<vanguard::u32>(proxyChildren.size())};
@@ -431,6 +444,10 @@ int main()
     const world::DistantProxyRecord* tower = worldFile.FindDistantProxy(200);
     Check(worldFile.GetCells().Size() == 3 && worldFile.FindCell(20) != nullptr && worldFile.FindCell(20)->parentCellId == 10,
           "stable world cell lookup and coarse-to-fine hierarchy");
+    Check(worldFile.HasStartupCamera() && worldFile.GetStartupCamera().cellId == 10 &&
+              worldFile.GetStartupCamera().entityId == worldDescription.startupCamera.entityId &&
+              worldFile.GetStartupCamera().componentStableId == worldDescription.startupCamera.componentStableId,
+          "vworld round-trips the durable startup-camera locator without runtime handles");
     Check(skyline != nullptr && tower != nullptr && tower->parentProxyId == skyline->proxyId && worldFile.GetChildrenOf(*skyline).Size() == 1 &&
               worldFile.GetChildrenOf(*tower).Size() == 2,
           "nested distant proxies and contiguous readiness children");
@@ -682,9 +699,75 @@ int main()
         Check(packagedWorldView.Open(worldPackageReader, *packagedWorldRecord, worldPackageReaderFile) == packages::Result::Success,
               "open logical vworld over VPAK");
         world::WorldFile packageBackedWorld;
-        Check(packageBackedWorld.Open(packagedWorldView) == world::Result::Success && packageBackedWorld.GetContentFingerprint() == worldFile.GetContentFingerprint(),
-              "package-backed vworld opens without reconstruction or translation");
+        Check(packageBackedWorld.Open(packagedWorldView) == world::Result::Success && packageBackedWorld.GetContentFingerprint() == worldFile.GetContentFingerprint() &&
+                  packageBackedWorld.HasStartupCamera() && packageBackedWorld.GetStartupCamera().entityId == worldDescription.startupCamera.entityId,
+              "package-backed vworld preserves the canonical startup-camera locator without package metadata duplication");
     }
+
+    world::WorldBuildDescription invalidCameraWorld = worldDescription;
+    invalidCameraWorld.startupCamera.entityId = world::InvalidEntityId;
+    scratch.Clear();
+    filesystem::MemoryFileWriter partialCameraWriter(scratch);
+    Check(world::CookWorld(invalidCameraWorld, partialCameraWriter) == world::Result::InvalidArgument,
+          "reject partially specified startup-camera locator");
+
+    invalidCameraWorld = worldDescription;
+    invalidCameraWorld.startupCamera.cellId = 999;
+    scratch.Clear();
+    filesystem::MemoryFileWriter missingCameraCellWriter(scratch);
+    Check(world::CookWorld(invalidCameraWorld, missingCameraCellWriter) == world::Result::InvalidReference,
+          "reject startup-camera locator whose cell is absent");
+
+    invalidCameraWorld = worldDescription;
+    invalidCameraWorld.startupCamera.cellId = 20;
+    scratch.Clear();
+    filesystem::MemoryFileWriter streamableCameraCellWriter(scratch);
+    Check(world::CookWorld(invalidCameraWorld, streamableCameraCellWriter) == world::Result::InvalidArgument,
+          "reject startup-camera locator outside an AlwaysLoaded cell");
+
+    ByteArray legacyFileVersion(memory::pools::World::GetInstance());
+    legacyFileVersion = worldBytes;
+    {
+        filesystem::MemoryFileWriter legacyWriterFile(legacyFileVersion);
+        vanguard::serialization::BinaryWriter legacyWriter(legacyWriterFile);
+        vanguard::serialization::DocumentHeader header;
+        filesystem::MemoryFileReader sourceReader(worldBytes, 0);
+        vanguard::serialization::BinaryReader sourceBinary(sourceReader);
+        Check(vanguard::serialization::ReadDocumentHeader(sourceBinary, world::WorldMagic, {2, 0, 0}, {}, header) == vanguard::serialization::Result::Success,
+              "read current vworld header for legacy-version proof");
+        header.version = {1, 0};
+        Check(legacyWriter.Seek(0) && vanguard::serialization::WriteDocumentHeader(legacyWriter, header) == vanguard::serialization::Result::Success,
+              "construct legacy vworld file-version fixture");
+    }
+    filesystem::MemoryFileReader legacyFileReader(legacyFileVersion, 0);
+    world::WorldFile legacyFile;
+    Check(legacyFile.Open(legacyFileReader) == world::Result::UnsupportedVersion,
+          "reject legacy vworld file version 1 deterministically");
+
+    ByteArray legacyBodyVersion(memory::pools::World::GetInstance());
+    legacyBodyVersion = worldBytes;
+    {
+        filesystem::MemoryFileReader sourceReader(legacyBodyVersion, 0);
+        vanguard::serialization::BinaryReader sourceBinary(sourceReader);
+        vanguard::serialization::DocumentHeader header;
+        containers::DynamicArray<vanguard::serialization::SectionDescriptor> sections(memory::pools::Serialization::GetInstance());
+        Check(vanguard::serialization::ReadDocumentHeader(sourceBinary, world::WorldMagic, {2, 0, 0}, {}, header) == vanguard::serialization::Result::Success &&
+                  vanguard::serialization::ReadSectionTable(sourceBinary, header, {}, sections) == vanguard::serialization::Result::Success && sections.Size() == 1,
+              "read current vworld section for legacy-body proof");
+        if (sections.Size() == 1)
+        {
+            filesystem::MemoryFileWriter legacyWriterFile(legacyBodyVersion);
+            vanguard::serialization::BinaryWriter legacyWriter(legacyWriterFile);
+            Check(legacyWriter.Seek(sections[0].offset) && legacyWriter.WriteU32(1), "construct legacy vworld body-version fixture");
+            sections[0].storedCrc64 = vanguard::serialization::Crc64(legacyBodyVersion.TypedData() + sections[0].offset, static_cast<vanguard::usize>(sections[0].storedSize));
+            Check(legacyWriter.Seek(header.sectionTableOffset) && vanguard::serialization::WriteSectionDescriptor(legacyWriter, sections[0]) == vanguard::serialization::Result::Success,
+                  "refresh legacy vworld section checksum");
+        }
+    }
+    filesystem::MemoryFileReader legacyBodyReader(legacyBodyVersion, 0);
+    world::WorldFile legacyBodyFile;
+    Check(legacyBodyFile.Open(legacyBodyReader) == world::Result::UnsupportedVersion,
+          "reject legacy vworld body version 1 deterministically");
 
     auto invalidWorldCells = worldCells;
     invalidWorldCells[0].parentCellId = 999;
@@ -713,6 +796,8 @@ int main()
     file.Close();
     corruptedFile.Close();
     worldFile.Close();
+    legacyFile.Close();
+    legacyBodyFile.Close();
     corruptedWorldFile.Close();
     filesystem::Shutdown();
     io::Shutdown();

@@ -92,6 +92,18 @@ namespace vanguard::entities
         u64 activatedEntities = 0;
         u64 releasedEntities = 0;
         u64 cancelledCells = 0;
+        u64 dependencyClosurePlacementsVisited = 0;
+        u64 dependencyClosureReferencesVisited = 0;
+        u64 activationClosureGroupsVisited = 0;
+        u64 activationClosurePlacementsVisited = 0;
+        u64 activationClosureReferencesVisited = 0;
+    };
+
+    struct MaterializerReleaseFailure
+    {
+        Result result = Result::Success;
+        ComponentDirectoryFailure componentFailure;
+        const char* message = nullptr;
     };
 
     /// Returns the placement identity for the prefab root and a deterministic hierarchical identity
@@ -132,9 +144,9 @@ namespace vanguard::entities
         /// Attach epilogue. Publishes identities only after the coordinator has prepared every cell in
         /// the current batch, then reports readiness once required references resolve.
         [[nodiscard]] Result PublishActivation(u64 cellId, u32 generation) noexcept;
-        [[nodiscard]] Result QueueRelease(u64 cellId, u32 generation) noexcept;
-        [[nodiscard]] Result CompleteRelease(u64 cellId, u32 generation) noexcept;
-        [[nodiscard]] Result Cancel(u64 cellId, u32 generation) noexcept;
+        [[nodiscard]] Result QueueRelease(u64 cellId, u32 generation, MaterializerReleaseFailure* failure = nullptr) noexcept;
+        [[nodiscard]] Result CompleteRelease(u64 cellId, u32 generation, MaterializerReleaseFailure* failure = nullptr) noexcept;
+        [[nodiscard]] Result Cancel(u64 cellId, u32 generation, MaterializerReleaseFailure* failure = nullptr) noexcept;
 
         /// Acquires one authored activation group for an explicit owner. Required-local references pull their
         /// target groups into the same retained dependency closure. Overlapping owners share one live instance.

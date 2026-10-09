@@ -94,6 +94,7 @@ namespace vanguard::rendering
         m_surfaceReplacements = 0;
         m_colorFallbacks = 0;
         m_failures = 0;
+        m_pendingSurfaceRetirement = false;
         m_active = false;
     }
 
@@ -238,6 +239,11 @@ namespace vanguard::rendering
         viewportDesc.renderExtent = desc.renderExtent;
         viewportDesc.outputExtent = desc.renderExtent;
         viewportDesc.presentation = attachment;
+        // Explicit SDR presentation uses the supported display transfer. HDR-preference
+        // transfer remains undefined and therefore keeps the neutral encoding here.
+        viewportDesc.outputColorEncoding = desc.swapChain.colorPreference == SwapChainPolicy::ColorPreference::Sdr
+                                               ? RenderOutputColorEncoding::DisplaySrgb
+                                               : RenderOutputColorEncoding::SceneLinear;
         ViewportFailure viewportFailure;
         RenderViewportHandle renderViewport;
         if (!m_impl->viewports->CreateRenderViewport(viewportDesc, renderViewport, &viewportFailure))
@@ -385,43 +391,50 @@ namespace vanguard::rendering
                 success = false;
                 continue;
             }
+            if (viewport->GetRenderExtent() != update.pixelExtent && !viewport->RequestRenderExtent(update.pixelExtent, &viewportFailure))
+            {
+                output.m_state = PresentationOutputState::Failed;
+                ++output.m_failures;
+                ++m_impl->stats.failures;
+                if (success)
+                    Fail(failure, PresentationFailureCode::ViewportFailure, "presentation render extent update failed", output.m_handle, nullptr,
+                         &viewportFailure);
+                success = false;
+                continue;
+            }
             if (updateResult.resizeApplied)
             {
                 ++output.m_resizeApplications;
                 ++m_impl->stats.resizeApplications;
             }
+            if (detail::ShouldInvalidatePresentationActiveFormat(viewport->GetSwapChain().IsValid()))
+                output.m_activeFormat = rhi::Format::Unknown;
             if (updateResult.surfaceReplaced)
             {
                 ++output.m_surfaceReplacements;
                 ++m_impl->stats.surfaceReplacements;
+                output.m_pendingSurfaceRetirement = true;
             }
 
             if (viewport->GetState() == RenderViewportState::Suspended)
             {
+                output.m_pendingSurfaceRetirement =
+                    detail::EvaluatePresentationSurfaceRetirement(output.m_pendingSurfaceRetirement,
+                                                                 detail::PresentationRecreationStage::Suspended)
+                        .pendingRetirement;
                 output.m_state = PresentationOutputState::Suspended;
                 continue;
             }
             if (!viewport->GetSwapChain().IsValid())
             {
-                if (updateResult.surfaceReplaced)
-                {
-                    rhi::Failure rhiFailure;
-                    if (!rhi::FlushRetiredResources(&rhiFailure))
-                    {
-                        output.m_state = PresentationOutputState::Failed;
-                        ++output.m_failures;
-                        ++m_impl->stats.failures;
-                        if (success)
-                            Fail(failure, PresentationFailureCode::RhiFailure, "retired swap-chain destruction failed before surface replacement",
-                                 output.m_handle, nullptr, nullptr, &rhiFailure);
-                        success = false;
-                        continue;
-                    }
-                }
                 window::NativePresentationSurface nativeSurface;
                 window::Failure windowFailure;
                 if (!m_impl->windows->ResolvePresentationSurface(output.m_attachment, nativeSurface, &windowFailure))
                 {
+                    output.m_pendingSurfaceRetirement =
+                        detail::EvaluatePresentationSurfaceRetirement(output.m_pendingSurfaceRetirement,
+                                                                     detail::PresentationRecreationStage::SurfaceUnavailable)
+                            .pendingRetirement;
                     output.m_state = PresentationOutputState::AwaitingSurface;
                     ++output.m_failures;
                     ++m_impl->stats.failures;
@@ -433,6 +446,10 @@ namespace vanguard::rendering
                 rhi::PresentationSurface surface;
                 if (!ConvertSurface(nativeSurface, surface))
                 {
+                    output.m_pendingSurfaceRetirement =
+                        detail::EvaluatePresentationSurfaceRetirement(output.m_pendingSurfaceRetirement,
+                                                                     detail::PresentationRecreationStage::UnsupportedSurface)
+                            .pendingRetirement;
                     output.m_state = PresentationOutputState::Failed;
                     ++output.m_failures;
                     ++m_impl->stats.failures;
@@ -458,6 +475,10 @@ namespace vanguard::rendering
                 swapChainDesc.allowTearing = policy.allowTearing;
                 if (!attachment.hdrCapable && IsRequiredHdr(policy.colorPreference) && !policy.allowSdrFallback)
                 {
+                    output.m_pendingSurfaceRetirement =
+                        detail::EvaluatePresentationSurfaceRetirement(output.m_pendingSurfaceRetirement,
+                                                                     detail::PresentationRecreationStage::HdrPrerequisiteMissing)
+                            .pendingRetirement;
                     output.m_state = PresentationOutputState::AwaitingSurface;
                     ++output.m_failures;
                     ++m_impl->stats.failures;
@@ -466,6 +487,30 @@ namespace vanguard::rendering
                              output.m_handle);
                     success = false;
                     continue;
+                }
+                const detail::PresentationSurfaceRetirementDecision retirement =
+                    detail::EvaluatePresentationSurfaceRetirement(output.m_pendingSurfaceRetirement,
+                                                                 detail::PresentationRecreationStage::ReadyToCreate);
+                output.m_pendingSurfaceRetirement = retirement.pendingRetirement;
+                if (retirement.drainBeforeCreate)
+                {
+                    rhi::Failure retirementFailure;
+                    if (!rhi::FlushRetiredResources(&retirementFailure))
+                    {
+                        output.m_state = PresentationOutputState::Failed;
+                        ++output.m_failures;
+                        ++m_impl->stats.failures;
+                        if (success)
+                            Fail(failure, PresentationFailureCode::RhiFailure,
+                                 "retired swap-chain destruction failed before surface recreation", output.m_handle,
+                                 nullptr, nullptr, &retirementFailure);
+                        success = false;
+                        continue;
+                    }
+                    output.m_pendingSurfaceRetirement =
+                        detail::EvaluatePresentationSurfaceRetirement(retirement.pendingRetirement,
+                                                                     detail::PresentationRecreationStage::ReadyToCreate, true)
+                            .pendingRetirement;
                 }
                 rhi::Failure rhiFailure;
                 rhi::SwapChainRef swapChain = rhi::CreateSwapChainWithBackBuffer(swapChainDesc, &rhiFailure);

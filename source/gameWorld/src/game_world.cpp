@@ -234,14 +234,10 @@ namespace vanguard::game
         for (const Impl::SystemEntry& entry : m_impl->systems)
             if (entry.system->m_needsPostWorldDetached)
                 return false;
-        ecs::ActionReport actions;
-        ecs::ComponentActionReport componentActions;
-        if (!m_impl->entities.FlushActions(&actions) || !m_impl->entities.FlushComponentActions(&componentActions))
+        const ecs::WorldStats entityStats = m_impl->entities.GetStats();
+        if (entityStats.pendingActions != 0 || entityStats.pendingComponentActions != 0)
             return false;
-        for (Impl::SystemEntry& entry : m_impl->systems)
-            if (entry.active)
-                entry.system->OnAfterWorldFlush(*this);
-        if (m_impl->entities.GetStats().entities != 0)
+        if (entityStats.entities != 0)
             return false;
         for (u32 index = m_impl->systems.Size(); index > 0; --index)
         {

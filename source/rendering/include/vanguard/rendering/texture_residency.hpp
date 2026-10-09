@@ -81,6 +81,20 @@ namespace vanguard::rendering
         crypto::Digest256 contentFingerprint;
     };
 
+    /// Neutral completion evidence for one exact resource generation that is no longer
+    /// resident, whether superseded or finally retired, after queue cutover and native RHI release.
+    struct TextureGenerationRetirement
+    {
+        resources::ResourcePath resourcePath;
+        u32 resourceGeneration = 0;
+        u64 retirementId = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return resourcePath.IsValid() && resourceGeneration != 0 && retirementId != 0;
+        }
+    };
+
     /// Read-only view of the manager-owned source retained for one active compact-texture transition.
     struct TextureTransitionInfo
     {
@@ -112,7 +126,8 @@ namespace vanguard::rendering
         MissingRetirementFence,
         LiveResidenciesRemain,
         LifetimeFailure,
-        DescriptorFailure
+        DescriptorFailure,
+        NativeReleaseFailure
     };
 
     struct TextureResidencyFailure
@@ -130,6 +145,7 @@ namespace vanguard::rendering
         u32 pendingInstallations = 0;
         u32 frozenInstallations = 0;
         u32 pendingDescriptorRetirements = 0;
+        u32 pendingGenerationRetirements = 0;
         u64 allocations = 0;
         u64 installations = 0;
         u64 replacements = 0;
@@ -193,6 +209,14 @@ namespace vanguard::rendering
         [[nodiscard]] bool SealRetirements(const rhi::ResidencyFenceSet& safeAfter, TextureResidencyFailure* failure = nullptr) noexcept;
         /// Recycles records after the owner has also collected the shared GpuSceneLifetime allocation.
         [[nodiscard]] u32 CollectRetirements(TextureResidencyFailure* failure = nullptr) noexcept;
+        /// Peeks exact resource generations that are no longer resident, whether superseded or finally retired,
+        /// only after the merged graphics/compute/copy cutover and old physical texture's native RHI lifetime are complete. Peeking never consumes evidence;
+        /// the composition owner must acknowledge a record only after its downstream owner accepts it.
+        [[nodiscard]] u32 PeekCompletedGenerationRetirements(containers::ArraySpan<TextureGenerationRetirement> output,
+                                                             TextureResidencyFailure* failure = nullptr) const noexcept;
+        /// Consumes one previously peeked completed retirement. The opaque retirement id prevents an
+        /// acknowledgement from consuming a different physical retirement of the same resource generation.
+        [[nodiscard]] bool AcknowledgeGenerationRetirement(u64 retirementId, TextureResidencyFailure* failure = nullptr) noexcept;
 
         [[nodiscard]] bool GetInfo(GpuTextureResidencyHandle handle, TextureResidencyInfo& info, TextureResidencyFailure* failure = nullptr) const noexcept;
         [[nodiscard]] TextureResidencyStats GetStats() const noexcept;

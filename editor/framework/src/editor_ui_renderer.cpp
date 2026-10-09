@@ -1,5 +1,4 @@
 #include <vanguard/editor/editor_ui_renderer.hpp>
-#include <vanguard/editor/editor_ui_stall_probe.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/editor/editor_ui_render_data.hpp>
 #include <vanguard/editor/editor_ui_shader.hpp>
@@ -9,6 +8,7 @@
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/shader_tools/shader_compiler.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/system/time.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -85,10 +85,19 @@ namespace vanguard::editor::detail
             for (u32 index = 0; index < frame.textures.Size(); ++index)
             {
                 RetainedTextureImportDesc desc;
-                desc.texture = draws != nullptr ? draws->textures[index].texture.GetRef() : uploads->uploads[index].texture.GetRef();
-                desc.token = {rhi::ResourceRef(desc.texture).value};
-                if (!rhi::GetTextureDesc(desc.texture, desc.expected)) return false;
-                desc.initialState = desc.terminalState = desc.expected.initialState;
+                const EditorUiRenderTexture* const drawTexture = draws != nullptr ? &draws->textures[index] : nullptr;
+                if (drawTexture != nullptr)
+                {
+                    if (!ResolveEditorUiTextureImport(*drawTexture, desc))
+                        return false;
+                }
+                else
+                {
+                    desc.texture = uploads->uploads[index].texture.GetRef();
+                    desc.token = {rhi::ResourceRef(desc.texture).value};
+                    if (!rhi::GetTextureDesc(desc.texture, desc.expected)) return false;
+                    desc.initialState = desc.terminalState = desc.expected.initialState;
+                }
                 if (!allocator.RegisterImport(desc, frame.textures[index].imported, failure)) return false;
             }
             return true;
@@ -261,6 +270,18 @@ namespace vanguard::editor::detail
             rhi::Buffer indices;
             u64 vertexCapacity = 0;
             u64 indexCapacity = 0;
+            u64 diagnosticsHeartbeatTick = 0;
+            u64 diagnosticsPresentedFrames = 0;
+            u64 diagnosticsWindowRevision = 0;
+            rendering::PresentationOutputState diagnosticsPresentationState = rendering::PresentationOutputState::Vacant;
+            rendering::RenderViewportState diagnosticsViewportState = rendering::RenderViewportState::Vacant;
+            rhi::SwapChainState diagnosticsSwapChainState = rhi::SwapChainState::Failed;
+            bool diagnosticsFocused = false;
+            bool diagnosticsMouseFocus = false;
+            bool diagnosticsVisible = false;
+            bool diagnosticsMinimized = false;
+            bool diagnosticsOccluded = false;
+            bool diagnosticsInitialized = false;
         };
         struct CachedTexture
         {
@@ -276,6 +297,7 @@ namespace vanguard::editor::detail
         };
         struct Pipeline { rhi::Format format; rhi::Pipeline pipeline; };
         engine::RenderingService* rendering = nullptr;
+        window::WindowManager* windows = nullptr;
         rendering::PresentationService presentation;
         rendering::RenderViewportHandle uploadOutput;
         rendering::EngineViewportHandle uploadViewport;
@@ -333,7 +355,16 @@ namespace vanguard::editor::detail
             }
             if (available == nullptr) available = &samplerCache.EmplaceBack();
             available->descriptor = rhi::AllocateDescriptor(samplers.GetRef());
-            if (!available->descriptor.IsValid() || !rhi::WriteDescriptor(samplers.GetRef(), available->descriptor, input.sampler.GetRef())) return false;
+            if (!available->descriptor.IsValid() || !rhi::WriteDescriptor(samplers.GetRef(), available->descriptor, input.sampler.GetRef()))
+            {
+                // Publication failed after a successful allocation. The cache identity is still
+                // invalid, so retire the unreferenced descriptor immediately; otherwise the next
+                // reuse of this entry would overwrite the live handle and leak the slot.
+                if (available->descriptor.IsValid() &&
+                    !rhi::RetireDescriptor(samplers.GetRef(), available->descriptor, rhi::DescriptorRetirement{})) return false;
+                available->descriptor = {};
+                return false;
+            }
             available->identity = input.sampler.GetRef(); available->used = frame; output.sampler = available->descriptor;
             return true;
         }
@@ -359,7 +390,6 @@ namespace vanguard::editor::detail
         }
         bool Submit(rendering::EngineViewportHandle viewport, UiFrame& payload, bool upload, EditorUiFailure* failure) noexcept
         {
-            UiStallProbe probe(upload ? "upload BeginFrame/SubmitFrame" : "host BeginFrame/Acquire/SubmitFrame");
             RenderFrameInfo frameInfo;
             RenderFrameSetup setup;
             setup.mode = RenderingMode::OverlayOnly; setup.purpose = RenderFramePurpose::Blank; setup.present = !upload;
@@ -393,6 +423,7 @@ namespace vanguard::editor::detail
         m_impl = new (block.address) Impl();
         auto& impl = *m_impl;
         impl.rendering = &rendering;
+        impl.windows = &windows;
         if (!impl.presentation.Initialize(windows, rendering.GetViewports())) return Fail(failure, "editor presentation initialization failed");
         RenderViewportDesc output; output.name = "EditorUiUploads"; output.outputKind = RenderViewportOutputKind::Headless;
         if (!rendering.GetViewports().CreateRenderViewport(output, impl.uploadOutput) ||
@@ -432,42 +463,143 @@ namespace vanguard::editor::detail
 
     bool EditorUiRenderer::BeginFrame(EditorUiFailure* failure) noexcept
     {
-        UiStallProbe probe("renderer BeginFrame including join/reconciliation");
         if (m_impl == nullptr) return Fail(failure, "editor UI renderer unavailable");
         auto& impl = *m_impl;
-        {
-            UiStallProbe joinProbe("previous render-chain join");
-            if (!impl.rendering->GetCommands().FlushPreviousFrameProcessing()) return Fail(failure, "editor UI previous frame join failed");
-        }
+        const bool diagnosticsEnabled = impl.rendering->IsFrameDiagnosticsEnabled();
+        const u64 frequency = diagnosticsEnabled ? system::GetMonotonicFrequency() : 0;
+        const u64 beginTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
+        if (!impl.rendering->GetCommands().FlushPreviousFrameProcessing()) return Fail(failure, "editor UI previous frame join failed");
+        const u64 afterPreviousFrameJoinTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
         rhi::ResidencyFenceSet fences;
         if (!rhi::GetSubmittedResidencyFences(fences)) return Fail(failure, "editor UI descriptor retirement fences unavailable");
         impl.retirement = {fences.graphics, fences.compute, fences.copy};
+        const u64 afterFenceQueryTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
         for (auto& cached : impl.textures)
             if (cached.identity.IsValid() && cached.used < impl.frame && !impl.Retire(cached)) return Fail(failure, "editor UI descriptor retirement failed");
+        const u64 afterTextureRetireTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
         for (auto& sampler : impl.samplerCache)
             if (sampler.identity.IsValid() && sampler.used < impl.frame)
             {
                 if (!rhi::RetireDescriptor(impl.samplers.GetRef(), sampler.descriptor, impl.retirement)) return Fail(failure, "editor UI sampler retirement failed");
                 sampler = {};
             }
+        const u64 afterSamplerRetireTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
         ++impl.frame;
-        UiStallProbe reconcileProbe("presentation reconciliation/resize");
-        return impl.presentation.Tick() || Fail(failure, "editor host reconciliation failed");
+        PresentationFailure presentationFailure;
+        const bool presentationReady = impl.presentation.Tick(&presentationFailure);
+        const u64 finishedTick = frequency != 0 ? system::GetMonotonicTicks() : 0;
+        const RenderNodeGraphExclusiveUpdateStats drawGraphUpdateStats = impl.drawGraph.GetExclusiveUpdateStats();
+        const RenderNodeGraphExclusiveUpdateStats uploadGraphUpdateStats = impl.uploadGraph.GetExclusiveUpdateStats();
+        if (diagnosticsEnabled && impl.windows != nullptr)
+        {
+            for (auto& host : impl.hosts)
+            {
+                if (!host.handle.IsValid() || !host.output.IsValid())
+                    continue;
+                const PresentationOutput* const output = impl.presentation.Resolve(host.output);
+                if (output == nullptr || !output->IsValid())
+                    continue;
+                window::WindowSnapshot windowState;
+                if (!impl.windows->GetSnapshot(output->GetWindow(), windowState))
+                    continue;
+                const RenderViewport* const viewport = output->GetRenderViewport();
+                if (viewport == nullptr || !viewport->IsValid())
+                    continue;
+                const rhi::SwapChainRef swapChain = viewport->GetSwapChain();
+                const rhi::SwapChainStats swapChainStats = swapChain.IsValid() ? rhi::GetSwapChainStats(swapChain) : rhi::SwapChainStats{};
+                const bool focused = windowState.nativeState.focused;
+                const bool mouseFocus = windowState.nativeState.mouseFocus;
+                const bool visible = windowState.nativeState.placement.visible;
+                const bool minimized = windowState.nativeState.minimized;
+                const bool occluded = windowState.nativeState.occluded;
+                const PresentationOutputState presentationState = output->GetState();
+                const RenderViewportState viewportState = viewport->GetState();
+                const rhi::SwapChainState swapChainState = swapChain.IsValid() ? swapChainStats.state : rhi::SwapChainState::Failed;
+                const u64 presentedFrames = viewport->GetPresentedFrameCount();
+                const bool changed = !host.diagnosticsInitialized || focused != host.diagnosticsFocused || mouseFocus != host.diagnosticsMouseFocus ||
+                                     visible != host.diagnosticsVisible || minimized != host.diagnosticsMinimized || occluded != host.diagnosticsOccluded ||
+                                     presentationState != host.diagnosticsPresentationState || viewportState != host.diagnosticsViewportState ||
+                                     swapChainState != host.diagnosticsSwapChainState || windowState.stateRevision != host.diagnosticsWindowRevision;
+                const bool unfocusedHeartbeat = frequency != 0 && !focused &&
+                                                (host.diagnosticsHeartbeatTick == 0 || finishedTick - host.diagnosticsHeartbeatTick >= frequency / 2u);
+                if (changed || unfocusedHeartbeat)
+                {
+                    VG_LOG_INFO(diagnostics::Category::Engine,
+                                "editor host state: host=%u frame=%llu windowRevision=%llu focused=%u mouseFocus=%u visible=%u minimized=%u occluded=%u presentationState=%u viewportState=%u swapChainValid=%u swapChainState=%u presentedFrames=%llu presentedDelta=%llu rhiPresentedFrames=%llu acquisitions=%llu acquireWaits=%llu acquireWaitMs=%.3f presentMs=%.3f longestPresentMs=%.3f presentationFailures=%llu",
+                                host.handle.index, static_cast<unsigned long long>(impl.frame),
+                                static_cast<unsigned long long>(windowState.stateRevision), u32(focused), u32(mouseFocus), u32(visible), u32(minimized), u32(occluded),
+                                u32(presentationState), u32(viewportState), u32(swapChain.IsValid()), u32(swapChainState),
+                                static_cast<unsigned long long>(presentedFrames),
+                                static_cast<unsigned long long>(host.diagnosticsInitialized && presentedFrames >= host.diagnosticsPresentedFrames
+                                                                    ? presentedFrames - host.diagnosticsPresentedFrames
+                                                                    : 0),
+                                static_cast<unsigned long long>(swapChainStats.presentedFrames), static_cast<unsigned long long>(swapChainStats.acquisitions),
+                                static_cast<unsigned long long>(swapChainStats.acquireWaits),
+                                static_cast<double>(swapChainStats.acquireWaitNanoseconds) / 1000000.0,
+                                static_cast<double>(swapChainStats.presentNanoseconds) / 1000000.0,
+                                static_cast<double>(swapChainStats.longestPresentNanoseconds) / 1000000.0,
+                                static_cast<unsigned long long>(swapChainStats.presentationFailures));
+                    host.diagnosticsHeartbeatTick = finishedTick;
+                    host.diagnosticsPresentedFrames = presentedFrames;
+                }
+                host.diagnosticsWindowRevision = windowState.stateRevision;
+                host.diagnosticsPresentationState = presentationState;
+                host.diagnosticsViewportState = viewportState;
+                host.diagnosticsSwapChainState = swapChainState;
+                host.diagnosticsFocused = focused;
+                host.diagnosticsMouseFocus = mouseFocus;
+                host.diagnosticsVisible = visible;
+                host.diagnosticsMinimized = minimized;
+                host.diagnosticsOccluded = occluded;
+                host.diagnosticsInitialized = true;
+            }
+        }
+        if (frequency != 0)
+        {
+            const auto milliseconds = [frequency](const u64 from, const u64 to) noexcept
+            {
+                return to >= from ? 1000.0 * static_cast<double>(to - from) / static_cast<double>(frequency) : 0.0;
+            };
+            const double previousFrameJoinMs = milliseconds(beginTick, afterPreviousFrameJoinTick);
+            const double fenceQueryMs = milliseconds(afterPreviousFrameJoinTick, afterFenceQueryTick);
+            const double textureRetireMs = milliseconds(afterFenceQueryTick, afterTextureRetireTick);
+            const double samplerRetireMs = milliseconds(afterTextureRetireTick, afterSamplerRetireTick);
+            const double presentationTickMs = milliseconds(afterSamplerRetireTick, finishedTick);
+            const double totalMs = milliseconds(beginTick, finishedTick);
+            if (totalMs >= 20.0 || previousFrameJoinMs >= 10.0 || fenceQueryMs >= 10.0 || textureRetireMs >= 10.0 || samplerRetireMs >= 10.0 || presentationTickMs >= 10.0)
+                VG_LOG_WARNING(diagnostics::Category::Engine,
+                               "editor UI renderer begin stall: frame=%llu totalMs=%.3f previousFrameJoinMs=%.3f drawGraphWaitMs=%.3f uploadGraphWaitMs=%.3f fenceQueryMs=%.3f textureRetireMs=%.3f samplerRetireMs=%.3f presentationTickMs=%.3f",
+                               static_cast<unsigned long long>(impl.frame), totalMs, previousFrameJoinMs,
+                               static_cast<double>(drawGraphUpdateStats.lastWaitNanoseconds) / 1000000.0,
+                               static_cast<double>(uploadGraphUpdateStats.lastWaitNanoseconds) / 1000000.0,
+                               fenceQueryMs, textureRetireMs, samplerRetireMs, presentationTickMs);
+        }
+        if (presentationReady)
+            return true;
+        VG_LOG_ERROR(diagnostics::Category::Engine,
+                     "editor host reconciliation failed: presentationCode=%u viewportCode=%u rhiCode=%u backendCode=%lld detail=%s",
+                     u32(presentationFailure.code), u32(presentationFailure.viewportFailure.code),
+                     u32(presentationFailure.viewportFailure.rhiFailure.code),
+                     static_cast<long long>(presentationFailure.viewportFailure.rhiFailure.backendCode),
+                     presentationFailure.viewportFailure.rhiFailure.message != nullptr
+                         ? presentationFailure.viewportFailure.rhiFailure.message
+                         : "<none>");
+        return Fail(failure, "editor host reconciliation failed");
     }
 
     bool EditorUiRenderer::CreateHost(EditorHostWindowHandle handle, EditorHostWindowDesc& desc, EditorUiFailure* failure) noexcept
     {
-        UiStallProbe probe("CreateHost");
         if (m_impl == nullptr || !handle.IsValid() || desc.presentationOutput.IsValid()) return Fail(failure, "editor host must supply a native window without external presentation ownership");
         auto& host = m_impl->hosts[handle.index];
         PresentationOutputDesc output; output.name = "EditorUiHost"; output.window = desc.window; output.swapChain.colorPreference = SwapChainPolicy::ColorPreference::Sdr;
         // Independent tool windows must not each pace the main-thread UI loop.
         // Back-buffer reuse still waits for its GPU completion fence in the RHI.
         output.swapChain.enableFrameLatencyPacing = false;
-        // Editor-host presentation comparison: keep interval-zero secondary hosts without tearing.
+        // Editor frames already have independent CPU pacing. Keep DXGI presentation
+        // out of the UI interaction critical path so a compositor/window move does
+        // not stall docking or resize for an entire refresh wait.
         output.swapChain.allowTearing = false;
-        // Pace on the primary host only; secondary windows must not each wait for another refresh.
-        if (!desc.primary) output.swapChain.presentMode = rhi::PresentMode::Immediate;
+        output.swapChain.presentMode = rhi::PresentMode::Immediate;
         if (!m_impl->presentation.CreateOutput(output, host.output)) return Fail(failure, "editor host presentation creation failed");
         const auto* presentation = m_impl->presentation.Resolve(host.output);
         const auto viewport = presentation->GetRenderViewport()->GetHandle();
@@ -482,7 +614,6 @@ namespace vanguard::editor::detail
 
     bool EditorUiRenderer::DestroyHost(EditorHostWindowHandle handle, EditorUiFailure* failure) noexcept
     {
-        UiStallProbe probe("DestroyHost");
         if (m_impl == nullptr || !handle.IsValid()) return true;
         auto& host = m_impl->hosts[handle.index];
         if (host.handle != handle) return true;
@@ -511,7 +642,6 @@ namespace vanguard::editor::detail
 
     bool EditorUiRenderer::SubmitHost(const EditorUiFrameData& data, EditorUiFailure* failure) noexcept
     {
-        UiStallProbe probe("SubmitHost including buffers/descriptors");
         if (!data.IsValid()) return true;
         if (m_impl == nullptr) return Fail(failure, "editor UI renderer unavailable");
         auto& impl = *m_impl;

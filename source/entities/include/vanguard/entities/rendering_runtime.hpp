@@ -2,13 +2,13 @@
 
 #include <vanguard/entities/transform_runtime.hpp>
 #include <vanguard/entities/visual_component.hpp>
+#include <vanguard/rendering/render_phase.hpp>
 #include <vanguard/rendering/render_scene.hpp>
 #include <vanguard/world/streaming_executor.hpp>
 
 namespace vanguard::rendering
 {
     class MeshResidencyManager;
-    struct MeshDrawPhaseContext;
     class RenderCommandSystem;
     class RenderPhaseRegistry;
 }
@@ -31,9 +31,6 @@ namespace vanguard::entities
         u32 proxyRetirementDelayFrames = 2u;
         u32 maximumPendingMeshPreparations = 64u * 1024u;
         u32 maximumMeshPreparationsPerFrame = 128u;
-        /// Startup-only source, copied during world initialization. Attachments come
-        /// from renderer composition, never from serialized component properties.
-        containers::ArraySpan<const rendering::MeshDrawPhaseContext> meshDrawPhases;
         u32 maximumPendingCameraTransforms = 1024u;
     };
 
@@ -59,6 +56,47 @@ namespace vanguard::entities
         bool initialized = false;
     };
 
+    enum class RenderingReleaseStatus : u8
+    {
+        Complete,
+        Pending,
+        Failed
+    };
+
+    enum class DistantProxyStreamingFailureCode : u8
+    {
+        None,
+        InvalidState,
+        Resource,
+        Admission,
+        Retirement,
+        ReleaseAcknowledgement
+    };
+
+    struct DistantProxyStreamingFailure
+    {
+        DistantProxyStreamingFailureCode code = DistantProxyStreamingFailureCode::None;
+        world::StreamingNodeKey key;
+        resources::Failure resourceFailure = resources::Failure::None;
+        rendering::RenderSceneFailure sceneFailure;
+        const char* message = nullptr;
+    };
+
+    enum class RenderingReleaseFailureCode : u8
+    {
+        None,
+        Scene,
+        DistantProxy
+    };
+
+    struct RenderingReleaseFailure
+    {
+        RenderingReleaseFailureCode code = RenderingReleaseFailureCode::None;
+        rendering::RenderSceneFailure sceneFailure;
+        DistantProxyStreamingFailure distantProxyFailure;
+        const char* message = nullptr;
+    };
+
     /// Per-world runtime that wraps one RenderScene and provides the proxy creation
     /// boundary used by visual components. The engine RenderingService owns the
     /// renderer itself; this runtime owns only world-session rendering state.
@@ -81,10 +119,13 @@ namespace vanguard::entities
         /// Bind before world initialization. The engine service outlives this runtime.
         [[nodiscard]] bool BindMeshResidency(rendering::MeshResidencyManager& residency) noexcept;
         [[nodiscard]] rendering::MeshResidencyManager* GetMeshResidency() noexcept;
-        [[nodiscard]] containers::ArraySpan<const rendering::MeshDrawPhaseContext> GetMeshDrawPhases() const noexcept;
-        [[nodiscard]] bool BindCommands(rendering::RenderCommandSystem& commands, const rendering::RenderPhaseRegistry& phases) noexcept;
+        /// Binds renderer-generation command ownership and the compact default view mask.
+        /// The registry is used only for immediate validation; the mask is copied by
+        /// value and no registry or renderer-policy span is retained.
+        [[nodiscard]] bool BindCommands(rendering::RenderCommandSystem& commands, const rendering::RenderPhaseRegistry& phases,
+                                        rendering::RenderPhaseSet defaultCameraPhases) noexcept;
         [[nodiscard]] rendering::RenderCommandSystem* GetCommands() noexcept { return m_commands; }
-        [[nodiscard]] const rendering::RenderPhaseRegistry* GetRenderPhases() const noexcept { return m_renderPhases; }
+        [[nodiscard]] rendering::RenderPhaseSet GetDefaultCameraPhases() const noexcept { return m_defaultCameraPhases; }
         /// Owner-thread only, after joining the complete transform CPU tail and before
         /// frame view preparation. Processes changed cameras only; no camera-table scan.
         [[nodiscard]] bool FlushCameraTransforms() noexcept;
@@ -97,7 +138,24 @@ namespace vanguard::entities
         /// Consumes one non-cell streaming event. A distant proxy becomes render-ready only
         /// after admission to RenderScene; release is acknowledged after visibility is removed
         /// and proxy lifetime has transferred to the deferred-retirement queue.
-        [[nodiscard]] bool HandleStreamingEvent(const world::StreamingResourceEvent& event) noexcept;
+        [[nodiscard]] bool HandleStreamingEvent(const world::StreamingResourceEvent& event,
+                                                DistantProxyStreamingFailure* failure = nullptr) noexcept;
+
+        /// Closes world-scoped renderer admission without running the normal preparation/admission
+        /// frame path. Existing component owners remain responsible for cancelling their own
+        /// queued admissions as they detach.
+        [[nodiscard]] bool BeginReleaseOnly(RenderingReleaseFailure* failure = nullptr) noexcept;
+        /// True while release ownership requires another renderer FrameTick. The caller feeds the
+        /// resulting renderer epoch back to ProgressReleaseOnly; stop-poll frequency is not a frame clock.
+        [[nodiscard]] bool RequiresReleaseFrameTick() const noexcept;
+        /// Advances only already accepted distant-proxy and deferred-retirement ownership.
+        [[nodiscard]] RenderingReleaseStatus ProgressReleaseOnly(u64 rendererProgressEpoch, bool frameTickDispatched,
+                                                                 RenderingReleaseFailure* failure = nullptr) noexcept;
+        /// Device-loss terminalization for an already-open release-only transaction.
+        /// GPU publication/retirement safety has been abandoned by RenderingService;
+        /// this settles the remaining CPU RenderScene proxy/executor ownership without
+        /// inventing renderer epochs or running the normal frame path.
+        [[nodiscard]] RenderingReleaseStatus AbandonDeviceReleaseOnly(RenderingReleaseFailure* failure = nullptr) noexcept;
 
         /// Immediate destruction is reserved for admission rollback and teardown fallback.
         /// Normal visual-component removal uses RetireProxy().
@@ -131,6 +189,8 @@ namespace vanguard::entities
         [[nodiscard]] bool ConsumeProxyLifecycleFailure(rendering::RenderSceneFailure& failure) noexcept;
 
         /// Idempotent scene release used by world teardown and rollback.
+        /// In release-only mode this refuses outstanding world-owned work; an external scene
+        /// is detached from the runtime but never destroyed.
         [[nodiscard]] bool ReleaseScene(rendering::RenderSceneFailure* failure = nullptr) noexcept;
         [[nodiscard]] RenderingRuntimeStats GetStats() const noexcept;
 
@@ -155,7 +215,7 @@ namespace vanguard::entities
         rendering::RenderSceneManager* m_scenes = nullptr;
         rendering::MeshResidencyManager* m_meshResidency = nullptr;
         rendering::RenderCommandSystem* m_commands = nullptr;
-        const rendering::RenderPhaseRegistry* m_renderPhases = nullptr;
+        rendering::RenderPhaseSet m_defaultCameraPhases;
         const world::WorldFile* m_streamingWorld = nullptr;
         world::WorldStreamingExecutor* m_streamingExecutor = nullptr;
         RenderingRuntimeConfig m_config;

@@ -4,6 +4,8 @@
 #include <vanguard/containers/containers.hpp>
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/profiling/profiling.hpp>
+#include <vanguard/system/time.hpp>
 
 namespace
 {
@@ -94,10 +96,20 @@ namespace vanguard::application
                     bool platformPumpAvailable = true;
                     bool shutdownRequested = false;
                     u32 shutdownTicks = 0;
+                    const bool diagnosticLoopTiming = settings.commandLine.HasArgument("--render-diagnostics");
+                    const u64 diagnosticFrequency = diagnosticLoopTiming ? system::GetMonotonicFrequency() : 0;
+                    u64 diagnosticPumpTicks = 0;
+                    u64 diagnosticTickTicks = 0;
+                    u64 diagnosticLoopTicks = 0;
+                    u32 diagnosticLoopSamples = 0;
                     while (states.GetPhase() != StateMachinePhase::Stopped && states.GetPhase() != StateMachinePhase::Failed)
                     {
+                        VG_PROFILE_ZONE_NAMED("Application/Frame");
+                        const u64 diagnosticLoopBegin = diagnosticFrequency != 0 ? system::GetMonotonicTicks() : 0;
+                        const u64 diagnosticPumpBegin = diagnosticLoopBegin;
                         if (platformPumpAvailable)
                         {
+                            VG_PROFILE_ZONE_NAMED("Application/PumpEvents");
                             const PlatformPumpResult pump = platform.PumpEvents();
                             if (pump.action == PlatformPumpAction::ExitRequested)
                             {
@@ -115,9 +127,40 @@ namespace vanguard::application
                                 platformPumpAvailable = false;
                             }
                         }
+                        const u64 diagnosticPumpEnd = diagnosticFrequency != 0 ? system::GetMonotonicTicks() : 0;
 
                         StateMachineFailure tickFailure;
-                        const StateMachineTickResult tick = states.Tick(services, platform, &tickFailure);
+                        const u64 diagnosticTickBegin = diagnosticPumpEnd;
+                        StateMachineTickResult tick;
+                        {
+                            VG_PROFILE_ZONE_NAMED("Application/StateTick");
+                            tick = states.Tick(services, platform, &tickFailure);
+                        }
+                        const u64 diagnosticTickEnd = diagnosticFrequency != 0 ? system::GetMonotonicTicks() : 0;
+                        if (diagnosticFrequency != 0)
+                        {
+                            diagnosticPumpTicks += diagnosticPumpEnd - diagnosticPumpBegin;
+                            diagnosticTickTicks += diagnosticTickEnd - diagnosticTickBegin;
+                            diagnosticLoopTicks += diagnosticTickEnd - diagnosticLoopBegin;
+                            ++diagnosticLoopSamples;
+                            if (diagnosticLoopSamples == 240u)
+                            {
+                                const double millisecondsPerTick = 1000.0 / static_cast<double>(diagnosticFrequency);
+                                VG_LOG_INFO(diagnostics::Category::Engine,
+                                            "application loop CPU: samples=%u loopMs=%.3f pumpMs=%.3f stateTickMs=%.3f otherMs=%.3f",
+                                            diagnosticLoopSamples,
+                                            static_cast<double>(diagnosticLoopTicks) * millisecondsPerTick / diagnosticLoopSamples,
+                                            static_cast<double>(diagnosticPumpTicks) * millisecondsPerTick / diagnosticLoopSamples,
+                                            static_cast<double>(diagnosticTickTicks) * millisecondsPerTick / diagnosticLoopSamples,
+                                            static_cast<double>(diagnosticLoopTicks - diagnosticPumpTicks - diagnosticTickTicks) * millisecondsPerTick /
+                                                diagnosticLoopSamples);
+                                diagnosticPumpTicks = 0;
+                                diagnosticTickTicks = 0;
+                                diagnosticLoopTicks = 0;
+                                diagnosticLoopSamples = 0;
+                            }
+                        }
+                        VG_PROFILE_FRAME_MARK();
                         if (tick == StateMachineTickResult::Failure)
                         {
                             if (result.failure == RunnerFailureCode::None)

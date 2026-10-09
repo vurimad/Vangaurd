@@ -1,5 +1,7 @@
 #include <vanguard/nanovanguard/command_line.hpp>
 
+#include <vanguard/containers/containers.hpp>
+
 namespace
 {
     [[nodiscard]] vanguard::u32 Length(const char* const text) noexcept
@@ -74,12 +76,104 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool WriteUsageError(vanguard::nanovanguard::Output& output, const char* const message, const char* const detail = nullptr) noexcept
+    [[nodiscard]] bool IsExactOption(const char* const argument, const char* const option) noexcept
     {
+        return Equal(argument, option);
+    }
+
+    [[nodiscard]] vanguard::nanovanguard::OutputFormat PreselectUsageFormat(
+        const vanguard::i32 argumentCount, const char* const* const arguments) noexcept
+    {
+        using namespace vanguard::nanovanguard;
+        if (argumentCount <= 1 || arguments == nullptr)
+            return OutputFormat::Human;
+
+        bool sawFormat = false;
+        bool jsonLines = false;
+        for (vanguard::i32 index = 1; index < argumentCount; ++index)
+        {
+            const char* const argument = arguments[index];
+            if (argument == nullptr)
+                return OutputFormat::Human;
+            const char* value = nullptr;
+            if (IsExactOption(argument, "--format"))
+            {
+                if (index + 1 >= argumentCount || arguments[index + 1] == nullptr || arguments[index + 1][0] == '\0')
+                    return OutputFormat::Human;
+                value = arguments[++index];
+            }
+            else
+            {
+                constexpr char prefix[] = "--format=";
+                bool matches = true;
+                for (vanguard::u32 character = 0; character < sizeof(prefix) - 1u; ++character)
+                    if (argument[character] == '\0' || argument[character] != prefix[character])
+                    {
+                        matches = false;
+                        break;
+                    }
+                if (!matches)
+                    continue;
+                value = argument + sizeof(prefix) - 1u;
+                if (value[0] == '\0')
+                    return OutputFormat::Human;
+            }
+            if (sawFormat)
+                return OutputFormat::Human;
+            sawFormat = true;
+            if (Equal(value, "jsonl"))
+                jsonLines = true;
+            else if (!Equal(value, "human"))
+                return OutputFormat::Human;
+        }
+        return sawFormat && jsonLines ? OutputFormat::JsonLines : OutputFormat::Human;
+    }
+
+    [[nodiscard]] bool WriteUsageError(vanguard::nanovanguard::Output& output,
+                                       const vanguard::nanovanguard::OutputFormat format,
+                                       const char* const operation, const char* const message,
+                                       const char* const detail = nullptr) noexcept
+    {
+        using namespace vanguard::nanovanguard;
+        if (format == OutputFormat::JsonLines)
+        {
+            SemanticEvent event;
+            event.event = SemanticEventKind::UsageError;
+            event.operation = operation != nullptr && operation[0] != '\0' ? operation : "command-line";
+            if (!event.AddString("code", "usage-error") || !event.AddString("message", message) ||
+                (detail != nullptr && !event.AddString("detail", detail)))
+                return false;
+            return WriteSemanticEvent(output, format, event);
+        }
         bool written = output.Write("nanovanguard: ") && output.Write(message);
         if (detail != nullptr)
             written = written && output.Write(": ") && output.Write(detail);
         return written && output.Write("\nTry 'nanovanguard help' for usage.\n");
+    }
+
+    [[nodiscard]] vanguard::nanovanguard::ExitCode UsageFailure(
+        vanguard::nanovanguard::Output& output, const vanguard::nanovanguard::OutputFormat format,
+        const char* const message, const char* const detail = nullptr,
+        const char* const operation = "command-line") noexcept
+    {
+        return WriteUsageError(output, format, operation, message, detail) ? vanguard::nanovanguard::ExitCode::UsageError
+                                                                           : vanguard::nanovanguard::ExitCode::InternalFailure;
+    }
+
+    [[nodiscard]] bool MakeOperationToken(const char* const commandPath, char* const destination,
+                                          const vanguard::u32 capacity) noexcept
+    {
+        if (commandPath == nullptr || destination == nullptr || capacity == 0u)
+            return false;
+        vanguard::u32 written = 0u;
+        for (; commandPath[written] != '\0'; ++written)
+        {
+            if (written + 1u >= capacity)
+                return false;
+            destination[written] = commandPath[written] == ' ' ? '-' : commandPath[written];
+        }
+        destination[written] = '\0';
+        return written != 0u;
     }
 } // namespace
 
@@ -100,6 +194,137 @@ namespace vanguard::nanovanguard
             return true;
         m_good = m_callback(text, length, m_userData);
         return m_good;
+    }
+
+    bool SemanticEvent::AddString(const char* const name, const char* const value) noexcept
+    {
+        if (fieldCount >= MaximumSemanticEventFields || name == nullptr || name[0] == '\0' || value == nullptr)
+            return false;
+        fields[fieldCount++] = {name, SemanticFieldKind::String, value, 0u, false};
+        return true;
+    }
+
+    bool SemanticEvent::AddUnsigned(const char* const name, const u64 value) noexcept
+    {
+        if (fieldCount >= MaximumSemanticEventFields || name == nullptr || name[0] == '\0')
+            return false;
+        fields[fieldCount++] = {name, SemanticFieldKind::Unsigned, nullptr, value, false};
+        return true;
+    }
+
+    bool SemanticEvent::AddBoolean(const char* const name, const bool value) noexcept
+    {
+        if (fieldCount >= MaximumSemanticEventFields || name == nullptr || name[0] == '\0')
+            return false;
+        fields[fieldCount++] = {name, SemanticFieldKind::Boolean, nullptr, 0u, value};
+        return true;
+    }
+
+    const char* SemanticEventToken(const SemanticEventKind event) noexcept
+    {
+        switch (event)
+        {
+        case SemanticEventKind::Status:
+            return "status";
+        case SemanticEventKind::Progress:
+            return "progress";
+        case SemanticEventKind::Diagnostic:
+            return "diagnostic";
+        case SemanticEventKind::Completed:
+            return "completed";
+        case SemanticEventKind::Failed:
+            return "failed";
+        case SemanticEventKind::Cancelled:
+            return "cancelled";
+        case SemanticEventKind::UsageError:
+            return "usage-error";
+        }
+        return "unknown";
+    }
+
+    namespace
+    {
+        void AppendJsonString(containers::String& destination, const char* const value) noexcept
+        {
+            destination.Append('"');
+            for (const char* cursor = value; cursor != nullptr && *cursor != '\0'; ++cursor)
+            {
+                const char character = *cursor;
+                if (character == '"' || character == '\\')
+                {
+                    destination.Append('\\');
+                    destination.Append(character);
+                }
+                else if (character == '\n')
+                    destination.Append("\\n", 2u);
+                else if (character == '\r')
+                    destination.Append("\\r", 2u);
+                else if (character == '\t')
+                    destination.Append("\\t", 2u);
+                else if (static_cast<u8>(character) >= 0x20u)
+                    destination.Append(character);
+            }
+            destination.Append('"');
+        }
+    } // namespace
+
+    bool WriteSemanticEvent(Output& output, const OutputFormat format, const SemanticEvent& event) noexcept
+    {
+        if (event.operation == nullptr || event.operation[0] == '\0' || event.fieldCount > MaximumSemanticEventFields)
+            return false;
+        const char* const eventToken = SemanticEventToken(event.event);
+        if (format == OutputFormat::JsonLines)
+        {
+            containers::String line;
+            line.Append("{\"schema\":1,\"event\":", 20u);
+            AppendJsonString(line, eventToken);
+            line.Append(",\"operation\":", 13u);
+            AppendJsonString(line, event.operation);
+            for (u32 index = 0; index < event.fieldCount; ++index)
+            {
+                const SemanticField& field = event.fields[index];
+                if (field.name == nullptr || field.name[0] == '\0')
+                    return false;
+                line.Append(',');
+                AppendJsonString(line, field.name);
+                line.Append(':');
+                if (field.kind == SemanticFieldKind::String)
+                {
+                    if (field.stringValue == nullptr)
+                        return false;
+                    AppendJsonString(line, field.stringValue);
+                }
+                else if (field.kind == SemanticFieldKind::Unsigned)
+                    line.Append(containers::String::Printf("%llu", static_cast<unsigned long long>(field.unsignedValue)));
+                else
+                    line.Append(containers::StringView(field.booleanValue ? "true" : "false"));
+            }
+            line.Append("}\n", 2u);
+            return output.Write(line.AsChar(), line.Length());
+        }
+
+        containers::String line;
+        line.Append('[').Append(containers::StringView(event.operation)).Append(containers::StringView("] "))
+            .Append(containers::StringView(eventToken));
+        for (u32 index = 0; index < event.fieldCount; ++index)
+        {
+            const SemanticField& field = event.fields[index];
+            if (field.name == nullptr || field.name[0] == '\0')
+                return false;
+            line.Append(' ').Append(containers::StringView(field.name)).Append('=');
+            if (field.kind == SemanticFieldKind::String)
+            {
+                if (field.stringValue == nullptr)
+                    return false;
+                line.Append(containers::StringView(field.stringValue));
+            }
+            else if (field.kind == SemanticFieldKind::Unsigned)
+                line.Append(containers::String::Printf("%llu", static_cast<unsigned long long>(field.unsignedValue)));
+            else
+                line.Append(containers::StringView(field.booleanValue ? "true" : "false"));
+        }
+        line.Append('\n');
+        return output.Write(line.AsChar(), line.Length());
     }
 
     bool Invocation::HasOption(const char* const longName) const noexcept
@@ -209,6 +434,7 @@ namespace vanguard::nanovanguard
     ExitCode CommandRegistry::Dispatch(const i32 argumentCount, const char* const* const arguments, Output& output) noexcept
     {
         m_sealed = true;
+        const OutputFormat usageFormat = PreselectUsageFormat(argumentCount, arguments);
         if (argumentCount <= 1 || arguments == nullptr)
             return PrintRootHelp(output) ? ExitCode::Success : ExitCode::InternalFailure;
         if (Equal(arguments[1], "help") || Equal(arguments[1], "--help") || Equal(arguments[1], "-h"))
@@ -221,10 +447,7 @@ namespace vanguard::nanovanguard
             {
                 const u32 length = Length(arguments[index]);
                 if (length == 0 || arguments[index][0] == '-' || written + length + (written != 0 ? 1u : 0u) >= sizeof(path))
-                {
-                    static_cast<void>(WriteUsageError(output, "invalid help command path"));
-                    return ExitCode::UsageError;
-                }
+                    return UsageFailure(output, usageFormat, "invalid help command path");
                 if (written != 0)
                     path[written++] = ' ';
                 for (u32 character = 0; character < length; ++character)
@@ -232,10 +455,7 @@ namespace vanguard::nanovanguard
                 path[written] = '\0';
             }
             if (!PrintHelp(path, output))
-            {
-                static_cast<void>(WriteUsageError(output, "unknown command", path));
-                return ExitCode::UsageError;
-            }
+                return UsageFailure(output, usageFormat, "unknown command", path);
             return ExitCode::Success;
         }
 
@@ -254,17 +474,14 @@ namespace vanguard::nanovanguard
             ++cursor;
         }
         if (command == nullptr)
-        {
-            static_cast<void>(WriteUsageError(output, "unknown command", arguments[1]));
-            return ExitCode::UsageError;
-        }
+            return UsageFailure(output, usageFormat, "unknown command", arguments[1]);
+        char usageOperation[128]{};
+        if (!MakeOperationToken(command->path, usageOperation, sizeof(usageOperation)))
+            return ExitCode::InternalFailure;
         if (command->descriptor.handler == nullptr)
         {
             if (cursor < argumentCount && !Equal(arguments[cursor], "--help") && !Equal(arguments[cursor], "-h"))
-            {
-                static_cast<void>(WriteUsageError(output, "unknown subcommand", arguments[cursor]));
-                return ExitCode::UsageError;
-            }
+                return UsageFailure(output, usageFormat, "unknown subcommand", arguments[cursor], usageOperation);
             return PrintCommandHelp(*command, output) ? ExitCode::Success : ExitCode::InternalFailure;
         }
 
@@ -273,10 +490,7 @@ namespace vanguard::nanovanguard
         {
             const char* const argument = arguments[cursor];
             if (argument == nullptr)
-            {
-                static_cast<void>(WriteUsageError(output, "null command-line argument"));
-                return ExitCode::UsageError;
-            }
+                return UsageFailure(output, usageFormat, "null command-line argument", nullptr, usageOperation);
             if (Equal(argument, "--help") || Equal(argument, "-h"))
                 return PrintCommandHelp(*command, output) ? ExitCode::Success : ExitCode::InternalFailure;
             if (argument[0] == '-' && argument[1] != '\0')
@@ -296,53 +510,32 @@ namespace vanguard::nanovanguard
                 else if (argument[2] == '\0')
                     option = FindOption(*command, argument[1]);
                 if (option == nullptr)
-                {
-                    static_cast<void>(WriteUsageError(output, "unknown option", argument));
-                    return ExitCode::UsageError;
-                }
+                    return UsageFailure(output, usageFormat, "unknown option", argument, usageOperation);
                 if (!option->repeatable && invocation.OptionCount(option->longName) != 0)
-                {
-                    static_cast<void>(WriteUsageError(output, "duplicate option", option->longName));
-                    return ExitCode::UsageError;
-                }
+                    return UsageFailure(output, usageFormat, "duplicate option", option->longName, usageOperation);
                 if (option->value == OptionValue::Required)
                 {
                     if (value == nullptr && cursor + 1 < argumentCount)
                         value = arguments[++cursor];
                     if (value == nullptr || value[0] == '\0')
-                    {
-                        static_cast<void>(WriteUsageError(output, "missing option value", option->longName));
-                        return ExitCode::UsageError;
-                    }
+                        return UsageFailure(output, usageFormat, "missing option value", option->longName, usageOperation);
                 }
                 else if (value != nullptr)
-                {
-                    static_cast<void>(WriteUsageError(output, "option does not accept a value", option->longName));
-                    return ExitCode::UsageError;
-                }
+                    return UsageFailure(output, usageFormat, "option does not accept a value", option->longName, usageOperation);
                 if (invocation.m_optionCount == MaximumParsedOptions)
-                {
-                    static_cast<void>(WriteUsageError(output, "too many options"));
-                    return ExitCode::UsageError;
-                }
+                    return UsageFailure(output, usageFormat, "too many options", nullptr, usageOperation);
                 invocation.m_options[invocation.m_optionCount++] = {option, value};
             }
             else
             {
                 if (invocation.m_positionalCount == MaximumPositionals)
-                {
-                    static_cast<void>(WriteUsageError(output, "too many positional arguments"));
-                    return ExitCode::UsageError;
-                }
+                    return UsageFailure(output, usageFormat, "too many positional arguments", nullptr, usageOperation);
                 invocation.m_positionals[invocation.m_positionalCount++] = argument;
             }
             ++cursor;
         }
         if (invocation.m_positionalCount < command->descriptor.minimumPositionals || invocation.m_positionalCount > command->descriptor.maximumPositionals)
-        {
-            static_cast<void>(WriteUsageError(output, "incorrect number of positional arguments", command->path));
-            return ExitCode::UsageError;
-        }
+            return UsageFailure(output, usageFormat, "incorrect number of positional arguments", command->path, usageOperation);
         const char* const format = invocation.Option("format");
         if (format != nullptr)
         {
@@ -351,10 +544,7 @@ namespace vanguard::nanovanguard
             else if (Equal(format, "jsonl"))
                 invocation.m_format = OutputFormat::JsonLines;
             else
-            {
-                static_cast<void>(WriteUsageError(output, "unsupported output format", format));
-                return ExitCode::UsageError;
-            }
+                return UsageFailure(output, usageFormat, "unsupported output format", format, usageOperation);
         }
         return command->descriptor.handler(invocation, output);
     }

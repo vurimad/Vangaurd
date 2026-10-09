@@ -80,5 +80,10 @@ namespace vanguard::entities
 
     void Component::OnEnabled(const ComponentContext&, const bool) noexcept {}
 
+    ComponentReleaseResult Component::OnPrepareDetach(const ComponentContext&) noexcept
+    {
+        return ComponentReleaseResult::Complete;
+    }
+
     void Component::OnDetach(const ComponentContext&) noexcept {}
 } // namespace vanguard::entities

@@ -15,7 +15,8 @@ namespace vanguard::rendering
         {
             None,
             Open,
-            Submitting
+            Submitting,
+            Submitted
         };
 
         struct PlannedRequest
@@ -222,6 +223,14 @@ namespace vanguard::rendering
             return true;
         if (!concurrency::IsMainThread())
             return Fail(failure, GpuSceneUploadFailureCode::WrongThread, "GPU Scene uploader must shutdown on the main thread");
+
+        bool submittedInitialPublicationsPending = false;
+        {
+            concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
+            submittedInitialPublicationsPending = m_impl->batchState == BatchState::Submitted;
+        }
+        if (submittedInitialPublicationsPending && !ResolveSubmittedInitialPublications(failure))
+            return false;
 
         Impl* const impl = m_impl;
         {
@@ -541,9 +550,9 @@ namespace vanguard::rendering
         }
 
         const rhi::GpuFence completion = receipt.completion;
-        result.workSubmitted = true;
-        result.completion = completion;
-        if (!m_impl->initialPublications.Empty())
+        result = {completion, m_impl->requestedUpdateCount, m_impl->updates.Size(), m_impl->copies.Size(), m_impl->affectedPages.Size(), m_impl->payloadBytes, m_impl->supersededBytes, true};
+        const bool hasInitialPublications = !m_impl->initialPublications.Empty();
+        if (hasInitialPublications && concurrency::IsMainThread())
         {
             GpuSceneLifetimeFailure lifetimeFailure;
             if (!m_impl->lifetime->CommitInitialPublications({m_impl->initialPublications.TypedData(), m_impl->initialPublications.Size()}, &lifetimeFailure))
@@ -557,7 +566,6 @@ namespace vanguard::rendering
             }
         }
 
-        result = {completion, m_impl->requestedUpdateCount, m_impl->updates.Size(), m_impl->copies.Size(), m_impl->affectedPages.Size(), m_impl->payloadBytes, m_impl->supersededBytes, true};
         {
             concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
             m_impl->segments[m_impl->currentSegment].completion = completion;
@@ -568,8 +576,43 @@ namespace vanguard::rendering
             m_impl->stats.copiesRecorded += result.copyCount;
             m_impl->stats.bytesUploaded += result.uploadedBytes;
             m_impl->stats.bytesSuperseded += result.supersededBytes;
-            m_impl->ResetBatch();
+            if (hasInitialPublications && !concurrency::IsMainThread())
+                m_impl->batchState = BatchState::Submitted;
+            else
+                m_impl->ResetBatch();
         }
+        return true;
+    }
+
+    bool GpuSceneUploader::ResolveSubmittedInitialPublications(GpuSceneUploadFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return Fail(failure, GpuSceneUploadFailureCode::NotInitialized, "GPU Scene uploader is not initialized");
+        if (!concurrency::IsMainThread())
+            return Fail(failure, GpuSceneUploadFailureCode::WrongThread, "submitted GPU Scene initial publications must resolve on the main thread");
+
+        concurrency::ScopedLock<concurrency::RWLock> guard(m_impl->batchLock);
+        if (m_impl->submittedFailure)
+            return Fail(failure, GpuSceneUploadFailureCode::RhiFailure, "submitted GPU Scene failure requires device abandonment");
+        if (m_impl->batchState == BatchState::None)
+            return true;
+        if (m_impl->batchState != BatchState::Submitted)
+            return Fail(failure, GpuSceneUploadFailureCode::BatchNotReady, "GPU Scene upload batch has not reached its submitted resolution boundary");
+        if (m_impl->initialPublications.Empty())
+        {
+            m_impl->ResetBatch();
+            return true;
+        }
+
+        GpuSceneLifetimeFailure lifetimeFailure;
+        if (!m_impl->lifetime->CommitInitialPublications({m_impl->initialPublications.TypedData(), m_impl->initialPublications.Size()}, &lifetimeFailure))
+        {
+            ++m_impl->stats.rejectedOperations;
+            m_impl->submittedFailure = true;
+            return Fail(failure, GpuSceneUploadFailureCode::LifetimeFailure, "GPU Scene submitted initial publication commit failed", 0xffffffffu, {}, lifetimeFailure);
+        }
+        m_impl->ResetBatch();
         return true;
     }
 

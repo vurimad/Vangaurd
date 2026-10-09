@@ -3,10 +3,14 @@
 #include <vanguard/application/application.hpp>
 #include <vanguard/engine/rendering_service.hpp>
 #include <vanguard/engine/resource_streaming_service.hpp>
+#include <vanguard/engine/window_service.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 
 namespace vanguard::runtime
 {
+    inline constexpr application::StateId RuntimeStartupSessionStateId = 0x7374617274736501ull;
+    inline constexpr application::StateId RuntimeRunningStateId = 0x72756e6e696e6701ull;
+
     class StartupSessionState final : public application::ApplicationState
     {
     protected:
@@ -46,6 +50,7 @@ namespace vanguard::runtime
         filesystem::Config m_filesystemConfig;
         engine::RenderingServiceConfig m_renderingConfig;
         engine::ResourceStreamingServiceConfig m_streamingConfig;
+        engine::WindowServiceConfig m_windowConfig;
         StartupSessionState m_startupSessionState;
         RunningState m_runningState;
     };

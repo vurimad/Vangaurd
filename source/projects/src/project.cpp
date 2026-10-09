@@ -1,10 +1,12 @@
 #include <vanguard/projects/project.hpp>
+#include <vanguard/serialization/serialization.hpp>
 
 namespace
 {
     using namespace vanguard;
     namespace project = vanguard::projects;
     namespace ctr = vanguard::containers;
+    namespace ser = vanguard::serialization;
 
     enum Field : u32
     {
@@ -48,35 +50,6 @@ namespace
         return true;
     }
 
-    bool ParseId(ctr::StringView s, project::ProjectId& id) noexcept
-    {
-        if (s.Length() != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-')
-            return false;
-        u8 bytes[16]{};
-        u32 out = 0;
-        for (u32 i = 0; i < s.Length();)
-        {
-            if (s[i] == '-')
-            {
-                ++i;
-                continue;
-            }
-            if (i + 1 >= s.Length() || out == 16)
-                return false;
-            u8 high, low;
-            if (!Hex(s[i], high) || !Hex(s[i + 1], low))
-                return false;
-            bytes[out++] = static_cast<u8>((high << 4u) | low);
-            i += 2;
-        }
-        if (out != 16)
-            return false;
-        for (u32 p = 0; p < 4; ++p)
-            id.parts[p] = (static_cast<u32>(bytes[p * 4]) << 24u) | (static_cast<u32>(bytes[p * 4 + 1]) << 16u) | (static_cast<u32>(bytes[p * 4 + 2]) << 8u) |
-                          bytes[p * 4 + 3];
-        return id.IsValid();
-    }
-
     bool ParseU16(ctr::StringView s, u16& value) noexcept
     {
         if (s.Empty())
@@ -109,49 +82,6 @@ namespace
         return wildcard || ParseU16(tail, patch);
     }
 
-    bool ValidUtf8(ctr::StringView s) noexcept
-    {
-        for (u32 i = 0; i < s.Length();)
-        {
-            const u8 first = static_cast<u8>(s[i++]);
-            if (first < 0x80)
-                continue;
-            u32 count = 0, code = 0, minimum = 0;
-            if ((first & 0xE0) == 0xC0)
-            {
-                count = 1;
-                code = first & 0x1F;
-                minimum = 0x80;
-            }
-            else if ((first & 0xF0) == 0xE0)
-            {
-                count = 2;
-                code = first & 0x0F;
-                minimum = 0x800;
-            }
-            else if ((first & 0xF8) == 0xF0)
-            {
-                count = 3;
-                code = first & 0x07;
-                minimum = 0x10000;
-            }
-            else
-                return false;
-            if (i + count > s.Length())
-                return false;
-            while (count--)
-            {
-                const u8 next = static_cast<u8>(s[i++]);
-                if ((next & 0xC0) != 0x80)
-                    return false;
-                code = (code << 6) | (next & 0x3F);
-            }
-            if (code < minimum || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
-                return false;
-        }
-        return true;
-    }
-
     u32 Utf8ScalarCount(ctr::StringView text) noexcept
     {
         u32 count = 0;
@@ -161,100 +91,6 @@ namespace
                 ++count;
         }
         return count;
-    }
-
-    bool AppendCodepoint(ctr::String& out, u32 code) noexcept
-    {
-        if (code <= 0x7F)
-            return out.Append(static_cast<char>(code)), true;
-        char bytes[4];
-        u32 count;
-        if (code <= 0x7FF)
-        {
-            bytes[0] = static_cast<char>(0xC0 | (code >> 6));
-            bytes[1] = static_cast<char>(0x80 | (code & 0x3F));
-            count = 2;
-        }
-        else if (code <= 0xFFFF)
-        {
-            bytes[0] = static_cast<char>(0xE0 | (code >> 12));
-            bytes[1] = static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-            bytes[2] = static_cast<char>(0x80 | (code & 0x3F));
-            count = 3;
-        }
-        else
-        {
-            bytes[0] = static_cast<char>(0xF0 | (code >> 18));
-            bytes[1] = static_cast<char>(0x80 | ((code >> 12) & 0x3F));
-            bytes[2] = static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-            bytes[3] = static_cast<char>(0x80 | (code & 0x3F));
-            count = 4;
-        }
-        out.Append(bytes, count);
-        return true;
-    }
-
-    bool DecodeString(ctr::StringView source, ctr::String& output) noexcept
-    {
-        output.Clear();
-        for (u32 i = 0; i < source.Length(); ++i)
-        {
-            char c = source[i];
-            if (c != '\\')
-            {
-                if (static_cast<u8>(c) < 0x20u)
-                    return false;
-                output.Append(c);
-                continue;
-            }
-            if (++i >= source.Length())
-                return false;
-            c = source[i];
-            if (c == '"' || c == '\\')
-                output.Append(c);
-            else if (c == 'n')
-                output.Append('\n');
-            else if (c == 'r')
-                output.Append('\r');
-            else if (c == 't')
-                output.Append('\t');
-            else if (c == 'u')
-            {
-                if (i + 4 >= source.Length())
-                    return false;
-                u32 code = 0;
-                for (u32 n = 0; n < 4; ++n)
-                {
-                    u8 v;
-                    if (!Hex(source[++i], v))
-                        return false;
-                    code = (code << 4) | v;
-                }
-                if (code >= 0xD800 && code <= 0xDBFF)
-                {
-                    if (i + 6 >= source.Length() || source[i + 1] != '\\' || source[i + 2] != 'u')
-                        return false;
-                    i += 2;
-                    u32 low = 0;
-                    for (u32 n = 0; n < 4; ++n)
-                    {
-                        u8 v;
-                        if (!Hex(source[++i], v))
-                            return false;
-                        low = (low << 4) | v;
-                    }
-                    if (low < 0xDC00 || low > 0xDFFF)
-                        return false;
-                    code = 0x10000u + ((code - 0xD800u) << 10u) + (low - 0xDC00u);
-                }
-                else if (code >= 0xDC00 && code <= 0xDFFF)
-                    return false;
-                AppendCodepoint(output, code);
-            }
-            else
-                return false;
-        }
-        return ValidUtf8(output);
     }
 
     bool SafeRelative(ctr::StringView s) noexcept
@@ -276,26 +112,11 @@ namespace
         return true;
     }
 
-    bool IsTechnicalName(ctr::StringView s) noexcept
-    {
-        if (s.Empty() || s.Length() > 64 || s.Front() == '-' || s.Back() == '-')
-            return false;
-        bool lastDash = false;
-        for (char c : s)
-        {
-            const bool valid = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
-            if (!valid || (c == '-' && lastDash))
-                return false;
-            lastDash = c == '-';
-        }
-        return true;
-    }
-
     bool ResourceIdentity(ctr::StringView identity) noexcept
     {
         if (identity.Empty())
             return true;
-        if (identity.Length() > 1024 || !ValidUtf8(identity))
+        if (identity.Length() > 1024 || !ser::IsValidUtf8(identity))
             return false;
         for (char c : identity)
         {
@@ -388,35 +209,78 @@ namespace
         }
     }
 
-    void Escape(ctr::String& out, ctr::StringView s) noexcept
-    {
-        for (char c : s)
-        {
-            if (c == '"' || c == '\\')
-            {
-                out.Append('\\');
-                out.Append(c);
-            }
-            else if (c == '\n')
-                out.Append("\\n", 2);
-            else if (c == '\r')
-                out.Append("\\r", 2);
-            else if (c == '\t')
-                out.Append("\\t", 2);
-            else
-                out.Append(c);
-        }
-    }
-    void Line(ctr::String& out, const char* key, ctr::StringView value) noexcept
-    {
-        out.Append(key, static_cast<u32>(ctr::StringView(key).Length())).Append(" = \"", 4);
-        Escape(out, value);
-        out.Append("\"\n", 2);
-    }
 } // namespace
 
 namespace vanguard::projects
 {
+    bool ParseProjectId(const containers::StringView text, ProjectId& projectId) noexcept
+    {
+        if (text.Length() != ProjectIdTextLength || text[8] != '-' || text[13] != '-' || text[18] != '-' || text[23] != '-')
+            return false;
+        u8 bytes[16]{};
+        u32 output = 0;
+        for (u32 index = 0; index < text.Length();)
+        {
+            if (text[index] == '-')
+            {
+                ++index;
+                continue;
+            }
+            if (index + 1u >= text.Length() || output == 16u)
+                return false;
+            u8 high = 0;
+            u8 low = 0;
+            if (!Hex(text[index], high) || !Hex(text[index + 1u], low))
+                return false;
+            bytes[output++] = static_cast<u8>((high << 4u) | low);
+            index += 2u;
+        }
+        if (output != 16u)
+            return false;
+        ProjectId parsed;
+        for (u32 part = 0; part < 4; ++part)
+            parsed.parts[part] = (static_cast<u32>(bytes[part * 4u]) << 24u) |
+                                 (static_cast<u32>(bytes[part * 4u + 1u]) << 16u) |
+                                 (static_cast<u32>(bytes[part * 4u + 2u]) << 8u) |
+                                 bytes[part * 4u + 3u];
+        if (!parsed.IsValid())
+            return false;
+        projectId = parsed;
+        return true;
+    }
+
+    bool FormatProjectId(const ProjectId& projectId, char* const destination, const u32 capacity) noexcept
+    {
+        if (!projectId.IsValid() || destination == nullptr || capacity < ProjectIdTextBufferSize)
+            return false;
+        constexpr char hex[] = "0123456789abcdef";
+        u32 at = 0;
+        for (u32 part = 0; part < 4; ++part)
+            for (i32 shift = 28; shift >= 0; shift -= 4)
+            {
+                destination[at++] = hex[(projectId.parts[part] >> shift) & 15u];
+                if (at == 8u || at == 13u || at == 18u || at == 23u)
+                    destination[at++] = '-';
+            }
+        destination[ProjectIdTextLength] = '\0';
+        return at == ProjectIdTextLength;
+    }
+
+    bool IsTechnicalName(const containers::StringView name) noexcept
+    {
+        if (name.Empty() || name.Length() > MaximumTechnicalNameBytes || name.Front() == '-' || name.Back() == '-')
+            return false;
+        bool lastDash = false;
+        for (const char c : name)
+        {
+            const bool valid = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+            if (!valid || (c == '-' && lastDash))
+                return false;
+            lastDash = c == '-';
+        }
+        return true;
+    }
+
     bool ProjectId::IsValid() const noexcept
     {
         return parts[0] || parts[1] || parts[2] || parts[3];
@@ -431,7 +295,7 @@ namespace vanguard::projects
             Fail(d, Result::InvalidValue, 0, 0, "project.id", "project identity is zero");
             return Result::InvalidValue;
         }
-        if (p.name.Empty() || !ValidUtf8(p.name) || Utf8ScalarCount(p.name) > 128)
+        if (p.name.Empty() || !ser::IsValidUtf8(p.name) || Utf8ScalarCount(p.name) > 128)
         {
             Fail(d, Result::InvalidValue, 0, 0, "project.name", "project display name must contain 1-128 Unicode scalar values");
             return Result::InvalidValue;
@@ -526,99 +390,71 @@ namespace vanguard::projects
             Fail(d, Result::FileTooLarge, 0, 0, nullptr, "project document exceeds size limit");
             return Result::FileTooLarge;
         }
-        if (!ValidUtf8(text))
+        ser::TextDocumentReader reader(text);
+        if (!reader.IsUtf8Valid())
         {
             Fail(d, Result::InvalidUtf8, 0, 0, nullptr, "document is not valid UTF-8");
             return Result::InvalidUtf8;
         }
-        ProjectDescriptor candidate;
-        u32 mask = 0, lineNo = 0, offset = 0;
-        bool header = false;
-        while (offset < text.Length())
+
+        ser::TextDocumentHeader documentHeader;
+        ser::TextFailure textFailure;
+        const ser::Result headerResult = reader.ReadHeader(documentHeader, &textFailure);
+        if (headerResult == ser::Result::EndOfStream)
         {
-            u32 end = offset;
-            while (end < text.Length() && text[end] != '\n')
-                ++end;
-            ctr::StringView line = text.Slice(offset, end);
-            if (!line.Empty() && line.Back() == '\r')
-                line.TrimBack(1);
-            offset = end + 1;
-            ++lineNo;
-            while (!line.Empty() && (line.Front() == ' ' || line.Front() == '\t'))
-                line.TrimFront(1);
-            while (!line.Empty() && (line.Back() == ' ' || line.Back() == '\t'))
-                line.TrimBack(1);
-            if (line.Empty() || line.Front() == '#')
-                continue;
-            if (!header)
+            Fail(d, Result::MissingField, 1, 1, nullptr, "missing project header");
+            return Result::MissingField;
+        }
+        if (headerResult != ser::Result::Success || documentHeader.kind != "vproject" ||
+            documentHeader.version.major != ProjectSchemaMajor || documentHeader.version.minor != ProjectSchemaMinor)
+        {
+            const u32 line = headerResult == ser::Result::Success ? documentHeader.line : textFailure.line;
+            Fail(d, Result::UnsupportedVersion, line != 0 ? line : 1, 1, nullptr, "expected vproject 1.0 header");
+            return Result::UnsupportedVersion;
+        }
+
+        ProjectDescriptor candidate;
+        u32 mask = 0;
+        ctr::String decoded;
+        for (;;)
+        {
+            ser::TextAssignment assignment;
+            const ser::Result assignmentResult = reader.ReadAssignment(assignment, decoded, &textFailure);
+            if (assignmentResult == ser::Result::EndOfStream)
+                break;
+            if (assignmentResult != ser::Result::Success)
             {
-                const u32 comment = line.Find('#');
-                if (comment != ctr::StringView::npos)
+                if (assignmentResult == ser::Result::LimitExceeded ||
+                    textFailure.code == ser::TextErrorCode::AllocationFailed)
                 {
-                    line = line.Slice(0, comment);
-                    while (!line.Empty() && (line.Back() == ' ' || line.Back() == '\t'))
-                        line.TrimBack(1);
+                    Fail(d, Result::LimitExceeded, textFailure.line, textFailure.column, nullptr,
+                         "project string allocation failed");
+                    return Result::LimitExceeded;
                 }
-                if (line != "vproject 1.0")
+                const char* message = "expected field assignment";
+                switch (textFailure.code)
                 {
-                    Fail(d, Result::UnsupportedVersion, lineNo, 1, nullptr, "expected vproject 1.0 header");
-                    return Result::UnsupportedVersion;
-                }
-                header = true;
-                continue;
-            }
-            const u32 equal = line.Find('=');
-            if (equal == ctr::StringView::npos)
-            {
-                Fail(d, Result::InvalidSyntax, lineNo, 1, nullptr, "expected field assignment");
-                return Result::InvalidSyntax;
-            }
-            ctr::StringView key = line.Slice(0, equal);
-            while (!key.Empty() && (key.Back() == ' ' || key.Back() == '\t'))
-                key.TrimBack(1);
-            ctr::StringView value = line.SubView(equal + 1);
-            while (!value.Empty() && (value.Front() == ' ' || value.Front() == '\t'))
-                value.TrimFront(1);
-            if (value.Empty() || value.Front() != '"')
-            {
-                Fail(d, Result::InvalidSyntax, lineNo, equal + 2, nullptr, "field value must be quoted");
-                return Result::InvalidSyntax;
-            }
-            u32 closing = ctr::StringView::npos;
-            bool escaped = false;
-            for (u32 index = 1; index < value.Length(); ++index)
-            {
-                const char c = value[index];
-                if (c == '"' && !escaped)
-                {
-                    closing = index;
+                case ser::TextErrorCode::ExpectedQuotedValue:
+                    message = "field value must be quoted";
+                    break;
+                case ser::TextErrorCode::UnterminatedQuotedValue:
+                    message = "unterminated quoted value";
+                    break;
+                case ser::TextErrorCode::UnexpectedTrailingText:
+                    message = "unexpected text after field value";
+                    break;
+                case ser::TextErrorCode::InvalidEscape:
+                    message = "invalid string escape";
+                    break;
+                default:
                     break;
                 }
-                if (c == '\\' && !escaped)
-                    escaped = true;
-                else
-                    escaped = false;
-            }
-            if (closing == ctr::StringView::npos)
-            {
-                Fail(d, Result::InvalidSyntax, lineNo, equal + 2, nullptr, "unterminated quoted value");
+                Fail(d, Result::InvalidSyntax, textFailure.line, textFailure.column, nullptr, message);
                 return Result::InvalidSyntax;
             }
-            ctr::StringView trailing = value.SubView(closing + 1);
-            while (!trailing.Empty() && (trailing.Front() == ' ' || trailing.Front() == '\t'))
-                trailing.TrimFront(1);
-            if (!trailing.Empty() && trailing.Front() != '#')
-            {
-                Fail(d, Result::InvalidSyntax, lineNo, equal + closing + 2, nullptr, "unexpected text after field value");
-                return Result::InvalidSyntax;
-            }
-            value = value.Slice(1, closing);
-            ctr::String decoded;
-            if (!DecodeString(value, decoded))
-            {
-                Fail(d, Result::InvalidSyntax, lineNo, equal + 2, nullptr, "invalid string escape");
-                return Result::InvalidSyntax;
-            }
+            const ctr::StringView key = assignment.key;
+            const u32 lineNo = assignment.line;
+            const u32 valueColumn = assignment.valueColumn;
             if (key == "target")
             {
                 if (candidate.targets.Size() == MaximumTargets)
@@ -656,9 +492,9 @@ namespace vanguard::projects
             bool wild = false;
             if (field == Id)
             {
-                if (!ParseId(decoded, candidate.id))
+                if (!ParseProjectId(decoded, candidate.id))
                 {
-                    Fail(d, Result::InvalidValue, lineNo, equal + 2, fieldName, "invalid UUID");
+                    Fail(d, Result::InvalidValue, lineNo, valueColumn, fieldName, "invalid UUID");
                     return Result::InvalidValue;
                 }
             }
@@ -666,7 +502,7 @@ namespace vanguard::projects
             {
                 if (!ParseVersion(decoded, candidate.engine.minimumMajor, candidate.engine.minimumMinor, candidate.engine.minimumPatch, false, wild))
                 {
-                    Fail(d, Result::InvalidValue, lineNo, equal + 2, fieldName, "invalid semantic version");
+                    Fail(d, Result::InvalidValue, lineNo, valueColumn, fieldName, "invalid semantic version");
                     return Result::InvalidValue;
                 }
             }
@@ -675,17 +511,12 @@ namespace vanguard::projects
                 if (!ParseVersion(decoded, candidate.engine.maximumMajor, candidate.engine.maximumMinor, candidate.engine.maximumPatch, true,
                                   candidate.engine.maximumPatchWildcard))
                 {
-                    Fail(d, Result::InvalidValue, lineNo, equal + 2, fieldName, "invalid semantic version range");
+                    Fail(d, Result::InvalidValue, lineNo, valueColumn, fieldName, "invalid semantic version range");
                     return Result::InvalidValue;
                 }
             }
             else
                 Assign(candidate, field, static_cast<ctr::String&&>(decoded));
-        }
-        if (!header)
-        {
-            Fail(d, Result::MissingField, 1, 1, nullptr, "missing project header");
-            return Result::MissingField;
         }
         if (mask != RequiredMask)
         {
@@ -740,47 +571,67 @@ namespace vanguard::projects
         const Result valid = Validate(p, d);
         if (valid != Result::Success)
             return valid;
-        ctr::String text("vproject 1.0\n\n");
-        char id[37];
-        constexpr char hex[] = "0123456789abcdef";
-        u32 at = 0;
-        for (u32 part = 0; part < 4; ++part)
-            for (i32 shift = 28; shift >= 0; shift -= 4)
-            {
-                id[at++] = hex[(p.id.parts[part] >> shift) & 15];
-                if (at == 8 || at == 13 || at == 18 || at == 23)
-                    id[at++] = '-';
-            }
-        id[36] = '\0';
-        Line(text, "project.id", id);
-        Line(text, "project.name", p.name);
-        Line(text, "project.technicalName", p.technicalName);
-        text.Append('\n');
+        ctr::String text;
+        const auto appendBlankLine = [&]() noexcept {
+            if (!text.Reserve(text.Length() + 1u))
+                return false;
+            text.Append('\n');
+            return true;
+        };
+        const auto appendField = [&](const ctr::StringView key, const ctr::StringView value) noexcept {
+            return ser::AppendTextAssignment(text, key, value) == ser::Result::Success;
+        };
+        if (ser::AppendTextDocumentHeader(text, "vproject", {ProjectSchemaMajor, ProjectSchemaMinor}) !=
+                ser::Result::Success ||
+            !appendBlankLine())
+        {
+            Fail(d, Result::LimitExceeded, 0, 0, nullptr, "canonical project buffer allocation failed");
+            return Result::LimitExceeded;
+        }
+        char id[ProjectIdTextBufferSize]{};
+        if (!FormatProjectId(p.id, id, ProjectIdTextBufferSize))
+        {
+            Fail(d, Result::InvalidValue, 0, 0, "project.id", "project identity is zero");
+            return Result::InvalidValue;
+        }
+        if (!appendField("project.id", id) || !appendField("project.name", p.name) ||
+            !appendField("project.technicalName", p.technicalName) || !appendBlankLine())
+        {
+            Fail(d, Result::LimitExceeded, 0, 0, nullptr, "canonical project buffer allocation failed");
+            return Result::LimitExceeded;
+        }
         ctr::String min = ctr::String::Printf("%u.%u.%u", p.engine.minimumMajor, p.engine.minimumMinor, p.engine.minimumPatch);
         ctr::String max = p.engine.maximumPatchWildcard ? ctr::String::Printf("%u.%u.x", p.engine.maximumMajor, p.engine.maximumMinor)
                                                         : ctr::String::Printf("%u.%u.%u", p.engine.maximumMajor, p.engine.maximumMinor, p.engine.maximumPatch);
-        Line(text, "engine.minimum", min);
-        Line(text, "engine.maximum", max);
-        text.Append('\n');
-        Line(text, "paths.assets", p.assets);
-        Line(text, "paths.derivedData", p.derivedData);
-        Line(text, "paths.intermediate", p.intermediate);
-        Line(text, "paths.saved", p.saved);
-        Line(text, "paths.builds", p.builds);
-        Line(text, "paths.config", p.config);
-        Line(text, "paths.plugins", p.pluginsRoot);
-        text.Append('\n');
+        if (!appendField("engine.minimum", min) || !appendField("engine.maximum", max) || !appendBlankLine() ||
+            !appendField("paths.assets", p.assets) || !appendField("paths.derivedData", p.derivedData) ||
+            !appendField("paths.intermediate", p.intermediate) || !appendField("paths.saved", p.saved) ||
+            !appendField("paths.builds", p.builds) || !appendField("paths.config", p.config) ||
+            !appendField("paths.plugins", p.pluginsRoot) || !appendBlankLine())
+        {
+            Fail(d, Result::LimitExceeded, 0, 0, nullptr, "canonical project buffer allocation failed");
+            return Result::LimitExceeded;
+        }
         for (const ctr::String& target : p.targets)
-            Line(text, "target", target);
+            if (!appendField("target", target))
+            {
+                Fail(d, Result::LimitExceeded, 0, 0, nullptr, "canonical project buffer allocation failed");
+                return Result::LimitExceeded;
+            }
         for (const ctr::String& plugin : p.plugins)
-            Line(text, "plugin", plugin);
-        text.Append('\n');
-        Line(text, "policy.cooking", p.cookingPolicy);
-        Line(text, "policy.packaging", p.packagingPolicy);
-        text.Append('\n');
-        Line(text, "startup.editorWorld", p.editorWorld);
-        Line(text, "startup.runtimeWorld", p.runtimeWorld);
-        Line(text, "startup.input", p.input);
+            if (!appendField("plugin", plugin))
+            {
+                Fail(d, Result::LimitExceeded, 0, 0, nullptr, "canonical project buffer allocation failed");
+                return Result::LimitExceeded;
+            }
+        if (!appendBlankLine() || !appendField("policy.cooking", p.cookingPolicy) ||
+            !appendField("policy.packaging", p.packagingPolicy) || !appendBlankLine() ||
+            !appendField("startup.editorWorld", p.editorWorld) || !appendField("startup.runtimeWorld", p.runtimeWorld) ||
+            !appendField("startup.input", p.input))
+        {
+            Fail(d, Result::LimitExceeded, 0, 0, nullptr, "canonical project buffer allocation failed");
+            return Result::LimitExceeded;
+        }
         if (text.Length() > MaximumProjectFileBytes)
         {
             Fail(d, Result::FileTooLarge, 0, 0, nullptr, "canonical project document exceeds size limit");

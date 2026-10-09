@@ -27,6 +27,8 @@ namespace vanguard::window
         // Whole-window opacity, from transparent (0) to opaque (1); owner-thread only.
         [[nodiscard]] bool SetOpacity(WindowHandle window, f32 opacity, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool RequestFocus(WindowHandle window, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RequestAction(WindowHandle window, WindowAction action, Failure* failure = nullptr) noexcept;
+        [[nodiscard]] bool SetHitTest(WindowHandle window, const WindowHitTestConfig& config, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool SetCursor(CursorShape shape, bool visible, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool ReadClipboardText(char* destination, u32 capacity, u32& requiredCapacity, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool WriteClipboardText(const char* text, Failure* failure = nullptr) noexcept;

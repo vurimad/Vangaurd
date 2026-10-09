@@ -552,7 +552,7 @@ namespace vanguard::entities
                 ObjectComponent& object = objects[index - 1u];
                 if (!object.instance.IsValid())
                     continue;
-                if (!DestroyObject(object))
+                if (DestroyObject(object) != Result::Success)
                     rollbackSucceeded = false;
             }
             return rollbackSucceeded ? failureResult : Result::InvalidState;
@@ -588,21 +588,49 @@ namespace vanguard::entities
             return true;
         }
 
-        [[nodiscard]] bool DestroyObject(ObjectComponent& object) noexcept
+        [[nodiscard]] Result DestroyObject(ObjectComponent& object, MaterializerReleaseFailure* const releaseFailure = nullptr) noexcept
         {
             if (!object.instance.IsValid())
-                return !object.transformBinding.IsValid();
+                return !object.transformBinding.IsValid() ? Result::Success : Result::InvalidState;
             if (object.component == nullptr)
-                return false;
-            if (object.component->IsAttached() && !componentDirectory->DetachComponent(object.instance))
-                return false;
-            if (object.component->IsInitialized() && !componentDirectory->UninitializeComponent(object.instance))
-                return false;
-            if (!DetachObjectTransform(object) || !componentDirectory->Destroy(object.instance))
-                return false;
+                return Result::InvalidState;
+            if (object.component->IsAttached())
+            {
+                ComponentDirectoryFailure failure;
+                if (!componentDirectory->DetachComponent(object.instance, &failure))
+                {
+                    if (failure.code != ComponentDirectoryFailureCode::Busy && releaseFailure != nullptr)
+                        *releaseFailure = {Result::InvalidState, failure,
+                                           failure.message != nullptr ? failure.message : "component detach failed during materializer release"};
+                    return failure.code == ComponentDirectoryFailureCode::Busy ? Result::NotReady : Result::InvalidState;
+                }
+            }
+            if (object.component->IsInitialized())
+            {
+                ComponentDirectoryFailure failure;
+                if (!componentDirectory->UninitializeComponent(object.instance, &failure))
+                {
+                    if (releaseFailure != nullptr)
+                        *releaseFailure = {Result::InvalidState, failure,
+                                           failure.message != nullptr ? failure.message
+                                                                      : "component uninitialization failed during materializer release"};
+                    return Result::InvalidState;
+                }
+            }
+            if (!DetachObjectTransform(object))
+                return Result::InvalidState;
+            ComponentDirectoryFailure destroyFailure;
+            if (!componentDirectory->Destroy(object.instance, &destroyFailure))
+            {
+                if (releaseFailure != nullptr)
+                    *releaseFailure = {Result::InvalidState, destroyFailure,
+                                       destroyFailure.message != nullptr ? destroyFailure.message
+                                                                         : "component directory destruction failed during materializer release"};
+                return Result::InvalidState;
+            }
             object.instance = {};
             object.component = nullptr;
-            return true;
+            return Result::Success;
         }
 
         [[nodiscard]] static Component* ResolveSibling(const ecs::EntityId entity, const u64 stableId, void* const userData) noexcept
@@ -762,7 +790,8 @@ namespace vanguard::entities
         }
 
         [[nodiscard]] Result DiscardObjectAssembly(containers::DynamicArray<ObjectComponent>& objects, jobs::Counter& completion,
-                                                   ObjectAssemblyState& state) noexcept
+                                                   ObjectAssemblyState& state,
+                                                   MaterializerReleaseFailure* const releaseFailure = nullptr) noexcept
         {
             if (state == ObjectAssemblyState::Initializing)
             {
@@ -775,14 +804,12 @@ namespace vanguard::entities
                     static_cast<void>(componentDirectory->CompleteInitialization(object.initialization, &failure));
                 }
                 state = ObjectAssemblyState::Failed;
-                if (!DestroyObjects(objects))
-                    return Result::InvalidState;
-                return Result::Success;
+                return DestroyObjects(objects, releaseFailure);
             }
             if (state == ObjectAssemblyState::Attached || state == ObjectAssemblyState::Failed)
             {
                 state = ObjectAssemblyState::Failed;
-                return DestroyObjects(objects) ? Result::Success : Result::InvalidState;
+                return DestroyObjects(objects, releaseFailure);
             }
             return Result::Success;
         }
@@ -801,19 +828,27 @@ namespace vanguard::entities
             return true;
         }
 
-        [[nodiscard]] bool DestroyObjects(containers::DynamicArray<ObjectComponent>& objects) noexcept
+        [[nodiscard]] Result DestroyObjects(containers::DynamicArray<ObjectComponent>& objects,
+                                            MaterializerReleaseFailure* const releaseFailure = nullptr) noexcept
         {
             if (!ValidateObjects(objects))
-                return false;
+                return Result::InvalidState;
+            bool pending = false;
             for (u32 index = objects.Size(); index > 0; --index)
             {
                 ObjectComponent& object = objects[index - 1u];
                 if (!object.instance.IsValid())
                     continue;
-                if (!DestroyObject(object))
-                    return false;
+                const Result result = DestroyObject(object, releaseFailure);
+                if (result == Result::NotReady)
+                {
+                    pending = true;
+                    continue;
+                }
+                if (result != Result::Success)
+                    return result;
             }
-            return true;
+            return pending ? Result::NotReady : Result::Success;
         }
 
         ComponentRegistry* components = nullptr;
@@ -832,6 +867,11 @@ namespace vanguard::entities
         u64 queuedEntities = 0;
         u64 activatedEntities = 0;
         u64 releasedEntities = 0;
+        u64 dependencyClosurePlacementsVisited = 0;
+        u64 dependencyClosureReferencesVisited = 0;
+        u64 activationClosureGroupsVisited = 0;
+        u64 activationClosurePlacementsVisited = 0;
+        u64 activationClosureReferencesVisited = 0;
         jobs::JobName componentInitializationJobName{"CellMaterializer/InitializeComponents"};
         u64 cancelledCells = 0;
     };
@@ -922,8 +962,10 @@ namespace vanguard::entities
         containers::DynamicArray<Impl::PlannedComponent> plannedComponents(memory::pools::World::GetInstance());
         containers::DynamicArray<Impl::ExpectedComponent> expected(memory::pools::World::GetInstance());
         containers::HashMap<ecs::EntityId, u8> selectedPlacements(memory::pools::World::GetInstance());
+        containers::DynamicArray<ecs::EntityId> selectionWork(memory::pools::World::GetInstance());
         plannedEntities.Reserve(cell.GetPlacements().Size());
         selectedPlacements.Reserve(cell.GetPlacements().Size());
+        selectionWork.Reserve(cell.GetPlacements().Size());
 
         MaterializationReport report;
         report.cellId = cell.GetCellId();
@@ -933,39 +975,45 @@ namespace vanguard::entities
         {
             if (IsEligiblePlacement(cell, placement, m_impl->config.includeEditorData) &&
                 IsInitiallyActive(cell, placement, m_impl->config.includeEditorData, m_impl->config.includeInactiveActivationGroups))
+            {
                 static_cast<void>(selectedPlacements.Insert(placement.entityId, 1));
+                selectionWork.PushBack(placement.entityId);
+            }
         }
-        bool selectionChanged = true;
-        while (selectionChanged)
+        for (u32 workIndex = 0; workIndex < selectionWork.Size(); ++workIndex)
         {
-            selectionChanged = false;
-            for (const world::EntityReferenceRecord& reference : cell.GetEntityReferences())
+            ++m_impl->dependencyClosurePlacementsVisited;
+            const world::PlacementRecord* const placement = cell.FindPlacement(selectionWork[workIndex]);
+            if (placement == nullptr)
+                return Result::InvalidReference;
+            const containers::ArraySpan<const world::EntityReferenceRecord> placementReferences = cell.GetReferencesFor(*placement);
+            m_impl->dependencyClosureReferencesVisited += placementReferences.Size();
+            for (const world::EntityReferenceRecord& reference : placementReferences)
             {
                 u8 selected = 0;
-                if (reference.kind != world::EntityReferenceKind::RequiredLocal || !selectedPlacements.Find(reference.sourceEntityId, selected) ||
-                    selectedPlacements.Find(reference.targetEntityId, selected))
+                if (reference.kind != world::EntityReferenceKind::RequiredLocal || selectedPlacements.Find(reference.targetEntityId, selected))
                     continue;
                 const world::PlacementRecord* const target = cell.FindPlacement(reference.targetEntityId);
                 if (target == nullptr || !IsEligiblePlacement(cell, *target, m_impl->config.includeEditorData))
                     return Result::InvalidReference;
                 if (!selectedPlacements.Insert(reference.targetEntityId, 1).IsSuccessful())
                     return Result::OutOfMemory;
-                selectionChanged = true;
+                selectionWork.PushBack(reference.targetEntityId);
             }
-            for (const world::PlacementRecord& placement : cell.GetPlacements())
+            u8 selected = 0;
+            if (placement->parentEntityId != ecs::InvalidEntityId && !selectedPlacements.Find(placement->parentEntityId, selected))
             {
-                u8 selected = 0;
-                if (placement.parentEntityId == ecs::InvalidEntityId || !selectedPlacements.Find(placement.entityId, selected) ||
-                    selectedPlacements.Find(placement.parentEntityId, selected))
-                    continue;
-                const world::PlacementRecord* const parent = cell.FindPlacement(placement.parentEntityId);
-                if (parent == nullptr)
-                    continue;
-                if (!IsEligiblePlacement(cell, *parent, m_impl->config.includeEditorData))
-                    return Result::InvalidReference;
-                if (!selectedPlacements.Insert(parent->entityId, 1).IsSuccessful())
-                    return Result::OutOfMemory;
-                selectionChanged = true;
+                const world::PlacementRecord* const parent = cell.FindPlacement(placement->parentEntityId);
+                // An absent optional parent does not block materialization, while an
+                // ineligible authored parent remains an invalid dependency.
+                if (parent != nullptr)
+                {
+                    if (!IsEligiblePlacement(cell, *parent, m_impl->config.includeEditorData))
+                        return Result::InvalidReference;
+                    if (!selectedPlacements.Insert(parent->entityId, 1).IsSuccessful())
+                        return Result::OutOfMemory;
+                    selectionWork.PushBack(parent->entityId);
+                }
             }
         }
 
@@ -1239,48 +1287,146 @@ namespace vanguard::entities
         return Result::Success;
     }
 
-    Result CellMaterializer::QueueRelease(const u64 cellId, const u32 generation) noexcept
+    Result CellMaterializer::QueueRelease(const u64 cellId, const u32 generation, MaterializerReleaseFailure* const failure) noexcept
     {
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr || cellId == 0 || generation == 0)
             return Result::InvalidArgument;
         Impl::CellRecord* const record = m_impl->Find(cellId);
-        if (record == nullptr || (record->state != CellState::Active && record->state != CellState::PendingReferences && record->state != CellState::Failed))
+        if (record == nullptr || (record->state != CellState::Active && record->state != CellState::PendingReferences &&
+                                  record->state != CellState::PendingRelease && record->state != CellState::Failed))
             return Result::InvalidState;
         if (record->generation != generation)
             return Result::StaleGeneration;
-        for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
+
+        if (record->state != CellState::PendingRelease)
         {
-            Impl::GroupRecord* const group = iterator.Value();
-            if (group->state == ActivationGroupState::PendingRelease)
+            for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
+                if (!m_impl->ValidateObjects(iterator.Value()->objects))
+                    return Result::InvalidState;
+            if (!m_impl->ValidateObjects(record->objects))
                 return Result::InvalidState;
-            if (group->state != ActivationGroupState::PendingActivation)
-                continue;
-            if (group->objectAssembly == Impl::ObjectAssemblyState::Initializing ||
-                group->objectAssembly == Impl::ObjectAssemblyState::Attached || group->objectAssembly == Impl::ObjectAssemblyState::Failed)
+
+            // Commit the release cutover before any retryable operation. Re-entry can
+            // only continue release and can never publish this cell again.
+            record->state = CellState::PendingRelease;
+        }
+
+        if (record->referencesPublished)
+        {
+            if (m_impl->references->UnregisterCell(cellId, generation) != ReferenceResult::Success)
+                return Result::InvalidReference;
+            record->referencesPublished = false;
+            for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
+                iterator.Value()->referencesPublished = false;
+        }
+        else
+        {
+            for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
             {
-                const Result discardResult = m_impl->DiscardObjectAssembly(group->objects, group->initialization, group->objectAssembly);
-                if (discardResult != Result::Success)
-                    return discardResult;
+                Impl::GroupRecord* const group = iterator.Value();
+                if (!group->referencesPublished)
+                    continue;
+                if (m_impl->references->UnregisterPartition(cellId, generation, group->groupId) != ReferenceResult::Success)
+                    return Result::InvalidReference;
+                group->referencesPublished = false;
             }
-            else
+        }
+
+        {
+            containers::DynamicArray<u64> completedGroupReleases(memory::pools::World::GetInstance());
+            for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
             {
+                Impl::GroupRecord* const group = iterator.Value();
+                if (group->state != ActivationGroupState::PendingRelease)
+                    continue;
+                if (!group->commandBatch)
+                {
+                    const Result objectResult = m_impl->DestroyObjects(group->objects, failure);
+                    if (objectResult != Result::Success)
+                        return objectResult;
+                    // Whole-cell release subsumes a group transaction that had reached
+                    // component cutover but had not yet queued its entity batch.
+                    group->state = ActivationGroupState::Failed;
+                    continue;
+                }
                 const ecs::CommandBatchStatus status = m_impl->world->GetCommandBatchStatus(group->commandBatch);
                 if (status == ecs::CommandBatchStatus::Open || status == ecs::CommandBatchStatus::Pending)
-                {
-                    if (!m_impl->world->CancelCommandBatch(group->commandBatch))
-                        return Result::NotReady;
-                }
-                else if (status == ecs::CommandBatchStatus::Succeeded || status == ecs::CommandBatchStatus::Failed)
-                {
-                    if (!m_impl->world->RetireCommandBatch(group->commandBatch))
-                        return Result::InvalidState;
-                }
-                else
+                    return Result::NotReady;
+                if (status != ecs::CommandBatchStatus::Succeeded)
+                    return Result::QueueFailure;
+                for (const ecs::EntityId identity : group->entities)
+                    if (m_impl->world->Resolve(identity))
+                        return Result::QueueFailure;
+                if (!m_impl->world->RetireCommandBatch(group->commandBatch))
                     return Result::InvalidState;
                 group->commandBatch = {};
+                m_impl->releasedEntities += group->entities.Size();
+                m_impl->ReleaseReservations(*group);
+                completedGroupReleases.PushBack(group->groupId);
             }
-            group->state = ActivationGroupState::Failed;
+            for (const u64 groupId : completedGroupReleases)
+            {
+                Impl::GroupRecord* const group = m_impl->FindGroup(*record, groupId);
+                static_cast<void>(record->groups.Remove(groupId));
+                DeleteMaterializerObject(group);
+            }
+
+            for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
+            {
+                Impl::GroupRecord* const group = iterator.Value();
+                if (group->state != ActivationGroupState::PendingActivation)
+                    continue;
+                if (group->objectAssembly == Impl::ObjectAssemblyState::Initializing ||
+                    group->objectAssembly == Impl::ObjectAssemblyState::Attached || group->objectAssembly == Impl::ObjectAssemblyState::Failed)
+                {
+                    const Result discardResult =
+                        m_impl->DiscardObjectAssembly(group->objects, group->initialization, group->objectAssembly, failure);
+                    if (discardResult != Result::Success)
+                        return discardResult;
+                }
+                else
+                {
+                    const ecs::CommandBatchStatus status = m_impl->world->GetCommandBatchStatus(group->commandBatch);
+                    if (status == ecs::CommandBatchStatus::Open || status == ecs::CommandBatchStatus::Pending)
+                    {
+                        if (!m_impl->world->CancelCommandBatch(group->commandBatch))
+                            return Result::NotReady;
+                    }
+                    else if (status == ecs::CommandBatchStatus::Succeeded || status == ecs::CommandBatchStatus::Failed)
+                    {
+                        if (!m_impl->world->RetireCommandBatch(group->commandBatch))
+                            return Result::InvalidState;
+                    }
+                    else
+                        return Result::InvalidState;
+                    group->commandBatch = {};
+                }
+                group->state = ActivationGroupState::Failed;
+            }
         }
+
+        bool pendingComponents = false;
+        for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
+        {
+            const Result result = m_impl->DestroyObjects(iterator.Value()->objects, failure);
+            if (result == Result::NotReady)
+                pendingComponents = true;
+            else if (result != Result::Success)
+                return result;
+        }
+        const Result baseObjects = m_impl->DestroyObjects(record->objects, failure);
+        if (baseObjects == Result::NotReady)
+            pendingComponents = true;
+        else if (baseObjects != Result::Success)
+            return baseObjects;
+        if (pendingComponents)
+            return Result::NotReady;
+
+        if (record->commandBatch)
+            return Result::Success;
+
         const ecs::CommandBatch commandBatch = m_impl->world->BeginCommandBatch();
         if (!commandBatch)
             return Result::OutOfMemory;
@@ -1288,14 +1434,16 @@ namespace vanguard::entities
         {
             Impl::GroupRecord* const group = iterator.Value();
             for (u32 index = group->entities.Size(); index > 0; --index)
-                if (m_impl->world->Resolve(group->entities[index - 1u]) && !m_impl->world->QueueDestroy(commandBatch, group->entities[index - 1u]))
+                if (m_impl->world->Resolve(group->entities[index - 1u]) &&
+                    !m_impl->world->QueueDestroy(commandBatch, group->entities[index - 1u]))
                 {
                     static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
                     return Result::QueueFailure;
                 }
         }
         for (u32 index = record->entities.Size(); index > 0; --index)
-            if (m_impl->world->Resolve(record->entities[index - 1u]) && !m_impl->world->QueueDestroy(commandBatch, record->entities[index - 1u]))
+            if (m_impl->world->Resolve(record->entities[index - 1u]) &&
+                !m_impl->world->QueueDestroy(commandBatch, record->entities[index - 1u]))
             {
                 static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
                 return Result::QueueFailure;
@@ -1305,44 +1453,14 @@ namespace vanguard::entities
             static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
             return Result::QueueFailure;
         }
-        for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
-            if (!m_impl->ValidateObjects(iterator.Value()->objects))
-            {
-                static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
-                return Result::InvalidState;
-            }
-        if (!m_impl->ValidateObjects(record->objects))
-        {
-            static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
-            return Result::InvalidState;
-        }
-        if (record->referencesPublished)
-        {
-            if (m_impl->references->UnregisterCell(cellId, generation) != ReferenceResult::Success)
-            {
-                static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
-                return Result::InvalidReference;
-            }
-            record->referencesPublished = false;
-        }
-        for (auto iterator = record->groups.Begin(), end = record->groups.End(); iterator != end; ++iterator)
-            if (!m_impl->DestroyObjects(iterator.Value()->objects))
-            {
-                static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
-                return Result::InvalidState;
-            }
-        if (!m_impl->DestroyObjects(record->objects))
-        {
-            static_cast<void>(m_impl->world->CancelCommandBatch(commandBatch));
-            return Result::InvalidState;
-        }
         record->commandBatch = commandBatch;
-        record->state = CellState::PendingRelease;
         return Result::Success;
     }
 
-    Result CellMaterializer::CompleteRelease(const u64 cellId, const u32 generation) noexcept
+    Result CellMaterializer::CompleteRelease(const u64 cellId, const u32 generation, MaterializerReleaseFailure* const failure) noexcept
     {
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr || cellId == 0 || generation == 0)
             return Result::InvalidArgument;
         Impl::CellRecord* const record = m_impl->Find(cellId);
@@ -1350,6 +1468,8 @@ namespace vanguard::entities
             return Result::InvalidState;
         if (record->generation != generation)
             return Result::StaleGeneration;
+        if (!record->commandBatch)
+            return Result::NotReady;
         const ecs::CommandBatchStatus batchStatus = m_impl->world->GetCommandBatchStatus(record->commandBatch);
         if (batchStatus == ecs::CommandBatchStatus::Open || batchStatus == ecs::CommandBatchStatus::Pending)
             return Result::NotReady;
@@ -1391,8 +1511,10 @@ namespace vanguard::entities
         return Result::Success;
     }
 
-    Result CellMaterializer::Cancel(const u64 cellId, const u32 generation) noexcept
+    Result CellMaterializer::Cancel(const u64 cellId, const u32 generation, MaterializerReleaseFailure* const failure) noexcept
     {
+        if (failure != nullptr)
+            *failure = {};
         if (m_impl == nullptr || cellId == 0 || generation == 0)
             return Result::InvalidArgument;
         Impl::CellRecord* const record = m_impl->Find(cellId);
@@ -1403,17 +1525,18 @@ namespace vanguard::entities
         if (record->state == CellState::PendingReferences)
         {
             ++m_impl->cancelledCells;
-            return QueueRelease(cellId, generation);
+            return QueueRelease(cellId, generation, failure);
         }
         if (record->objectAssembly == Impl::ObjectAssemblyState::Initializing ||
             record->objectAssembly == Impl::ObjectAssemblyState::Attached || record->objectAssembly == Impl::ObjectAssemblyState::Failed)
         {
-            const Result discardResult = m_impl->DiscardObjectAssembly(record->objects, record->initialization, record->objectAssembly);
+            const Result discardResult =
+                m_impl->DiscardObjectAssembly(record->objects, record->initialization, record->objectAssembly, failure);
             if (discardResult != Result::Success)
                 return discardResult;
             ++m_impl->cancelledCells;
             record->state = CellState::Failed;
-            return QueueRelease(cellId, generation);
+            return QueueRelease(cellId, generation, failure);
         }
         if (!m_impl->world->CancelCommandBatch(record->commandBatch))
             return Result::InvalidState;
@@ -1425,7 +1548,7 @@ namespace vanguard::entities
         if (anyLive)
         {
             record->state = CellState::Failed;
-            return QueueRelease(cellId, generation);
+            return QueueRelease(cellId, generation, failure);
         }
         static_cast<void>(m_impl->lookup.Remove(cellId));
         m_impl->ReleaseReservations(*record);
@@ -1450,57 +1573,70 @@ namespace vanguard::entities
             return Result::OutOfMemory;
         lease->requestedGroup = groupId;
         lease->owner = ownerId;
+        lease->groups.Reserve(cell.GetActivationGroups().Size());
         lease->groups.PushBack(groupId);
-        bool changed = true;
-        while (changed)
+        containers::HashMap<u64, u8> selectedGroups(memory::pools::World::GetInstance());
+        selectedGroups.Reserve(cell.GetActivationGroups().Size());
+        if (!selectedGroups.Insert(groupId, 1).IsSuccessful())
         {
-            changed = false;
-            for (const world::EntityReferenceRecord& reference : cell.GetEntityReferences())
+            DeleteMaterializerObject(lease);
+            return Result::OutOfMemory;
+        }
+        for (u32 workIndex = 0; workIndex < lease->groups.Size(); ++workIndex)
+        {
+            ++m_impl->activationClosureGroupsVisited;
+            const world::ActivationGroupRecord* const selectedGroup = cell.FindActivationGroup(lease->groups[workIndex]);
+            if (selectedGroup == nullptr)
             {
-                if (reference.kind != world::EntityReferenceKind::RequiredLocal)
-                    continue;
-                const world::PlacementRecord* const source = cell.FindPlacement(reference.sourceEntityId);
-                const world::PlacementRecord* const target = cell.FindPlacement(reference.targetEntityId);
-                if (source == nullptr || target == nullptr)
-                {
-                    DeleteMaterializerObject(lease);
-                    return Result::InvalidReference;
-                }
-                bool sourceSelected = false;
-                bool targetSelected = false;
-                for (const u64 selectedGroup : lease->groups)
-                {
-                    sourceSelected |= selectedGroup == source->activationGroup;
-                    targetSelected |= selectedGroup == target->activationGroup;
-                }
-                if (!sourceSelected || targetSelected)
-                    continue;
-                if (!IsEligiblePlacement(cell, *target, m_impl->config.includeEditorData))
-                {
-                    DeleteMaterializerObject(lease);
-                    return Result::InvalidReference;
-                }
-                lease->groups.PushBack(target->activationGroup);
-                changed = true;
+                DeleteMaterializerObject(lease);
+                return Result::InvalidReference;
             }
-            for (const world::PlacementRecord& placement : cell.GetPlacements())
+            const containers::ArraySpan<const world::PlacementRecord> groupPlacements = cell.GetPlacementsInGroup(*selectedGroup);
+            m_impl->activationClosurePlacementsVisited += groupPlacements.Size();
+            for (const world::PlacementRecord& placement : groupPlacements)
             {
-                bool sourceGroupSelected = false;
-                for (const u64 selectedGroup : lease->groups)
-                    sourceGroupSelected |= selectedGroup == placement.activationGroup;
-                if (!sourceGroupSelected || placement.parentEntityId == ecs::InvalidEntityId)
+                const containers::ArraySpan<const world::EntityReferenceRecord> placementReferences = cell.GetReferencesFor(placement);
+                m_impl->activationClosureReferencesVisited += placementReferences.Size();
+                for (const world::EntityReferenceRecord& reference : placementReferences)
+                {
+                    if (reference.kind != world::EntityReferenceKind::RequiredLocal)
+                        continue;
+                    const world::PlacementRecord* const target = cell.FindPlacement(reference.targetEntityId);
+                    if (target == nullptr)
+                    {
+                        DeleteMaterializerObject(lease);
+                        return Result::InvalidReference;
+                    }
+                    u8 selected = 0;
+                    if (selectedGroups.Find(target->activationGroup, selected))
+                        continue;
+                    if (!IsEligiblePlacement(cell, *target, m_impl->config.includeEditorData))
+                    {
+                        DeleteMaterializerObject(lease);
+                        return Result::InvalidReference;
+                    }
+                    if (!selectedGroups.Insert(target->activationGroup, 1).IsSuccessful())
+                    {
+                        DeleteMaterializerObject(lease);
+                        return Result::OutOfMemory;
+                    }
+                    lease->groups.PushBack(target->activationGroup);
+                }
+
+                if (placement.parentEntityId == ecs::InvalidEntityId)
                     continue;
                 const world::PlacementRecord* const parent = cell.FindPlacement(placement.parentEntityId);
                 if (parent == nullptr)
                     continue;
-                bool alreadySelected = false;
-                for (const u64 selectedGroup : lease->groups)
-                    alreadySelected |= selectedGroup == parent->activationGroup;
-                if (!alreadySelected)
+                u8 selected = 0;
+                if (selectedGroups.Find(parent->activationGroup, selected))
+                    continue;
+                if (!selectedGroups.Insert(parent->activationGroup, 1).IsSuccessful())
                 {
-                    lease->groups.PushBack(parent->activationGroup);
-                    changed = true;
+                    DeleteMaterializerObject(lease);
+                    return Result::OutOfMemory;
                 }
+                lease->groups.PushBack(parent->activationGroup);
             }
         }
 
@@ -1782,7 +1918,7 @@ namespace vanguard::entities
         if (lease == nullptr)
             return Result::InvalidState;
 
-        containers::DynamicArray<u64> removeImmediately(memory::pools::World::GetInstance());
+        bool pendingRelease = false;
         for (const u64 dependencyGroup : lease->groups)
         {
             Impl::GroupRecord* const group = m_impl->FindGroup(*record, dependencyGroup);
@@ -1794,23 +1930,54 @@ namespace vanguard::entities
                     group->objectAssembly == Impl::ObjectAssemblyState::Attached || group->objectAssembly == Impl::ObjectAssemblyState::Failed)
                 {
                     const Result discardResult = m_impl->DiscardObjectAssembly(group->objects, group->initialization, group->objectAssembly);
+                    if (discardResult == Result::NotReady)
+                    {
+                        pendingRelease = true;
+                        continue;
+                    }
                     if (discardResult != Result::Success)
                         return discardResult;
                     group->state = ActivationGroupState::Failed;
                 }
                 else
                 {
-                if (!m_impl->world->CancelCommandBatch(group->commandBatch))
-                    return Result::InvalidState;
-                group->commandBatch = {};
-                m_impl->ReleaseReservations(*group);
-                removeImmediately.PushBack(dependencyGroup);
-                continue;
+                    if (!m_impl->world->CancelCommandBatch(group->commandBatch))
+                        return Result::InvalidState;
+                    group->commandBatch = {};
+                    m_impl->ReleaseReservations(*group);
+                    static_cast<void>(record->groups.Remove(dependencyGroup));
+                    DeleteMaterializerObject(group);
+                    continue;
                 }
             }
-            if (group->state != ActivationGroupState::Active && group->state != ActivationGroupState::PendingReferences &&
-                group->state != ActivationGroupState::Failed)
+            if (group->state == ActivationGroupState::Active || group->state == ActivationGroupState::PendingReferences ||
+                group->state == ActivationGroupState::Failed)
+            {
+                if (!m_impl->ValidateObjects(group->objects))
+                    return Result::InvalidState;
+                // The release state is committed before external publication or component
+                // ownership changes so retries cannot masquerade as an active group.
+                group->state = ActivationGroupState::PendingRelease;
+            }
+            else if (group->state != ActivationGroupState::PendingRelease)
                 return Result::InvalidState;
+
+            if (group->referencesPublished && m_impl->references->UnregisterPartition(cellId, generation, group->groupId) != ReferenceResult::Success)
+                return Result::InvalidReference;
+            group->referencesPublished = false;
+
+            if (group->commandBatch)
+                continue;
+
+            const Result objectResult = m_impl->DestroyObjects(group->objects);
+            if (objectResult == Result::NotReady)
+            {
+                pendingRelease = true;
+                continue;
+            }
+            if (objectResult != Result::Success)
+                return objectResult;
+
             const ecs::CommandBatch batch = m_impl->world->BeginCommandBatch();
             if (!batch)
                 return Result::OutOfMemory;
@@ -1826,36 +1993,16 @@ namespace vanguard::entities
                 static_cast<void>(m_impl->world->CancelCommandBatch(batch));
                 return Result::QueueFailure;
             }
-            if (!m_impl->ValidateObjects(group->objects))
-            {
-                static_cast<void>(m_impl->world->CancelCommandBatch(batch));
-                return Result::InvalidState;
-            }
-            if (group->referencesPublished && m_impl->references->UnregisterPartition(cellId, generation, group->groupId) != ReferenceResult::Success)
-            {
-                static_cast<void>(m_impl->world->CancelCommandBatch(batch));
-                return Result::InvalidReference;
-            }
-            group->referencesPublished = false;
-            if (!m_impl->DestroyObjects(group->objects))
-            {
-                static_cast<void>(m_impl->world->CancelCommandBatch(batch));
-                return Result::InvalidState;
-            }
             group->commandBatch = batch;
-            group->state = ActivationGroupState::PendingRelease;
         }
+        if (pendingRelease)
+            return Result::NotReady;
+
         for (const u64 dependencyGroup : lease->groups)
         {
             Impl::GroupRecord* const group = m_impl->FindGroup(*record, dependencyGroup);
             if (group != nullptr && group->retainCount > 0)
                 --group->retainCount;
-        }
-        for (const u64 removedGroup : removeImmediately)
-        {
-            Impl::GroupRecord* const group = m_impl->FindGroup(*record, removedGroup);
-            static_cast<void>(record->groups.Remove(removedGroup));
-            DeleteMaterializerObject(group);
         }
         for (u32 index = 0; index < record->leases.Size(); ++index)
         {
@@ -1930,6 +2077,11 @@ namespace vanguard::entities
         stats.activatedEntities = m_impl->activatedEntities;
         stats.releasedEntities = m_impl->releasedEntities;
         stats.cancelledCells = m_impl->cancelledCells;
+        stats.dependencyClosurePlacementsVisited = m_impl->dependencyClosurePlacementsVisited;
+        stats.dependencyClosureReferencesVisited = m_impl->dependencyClosureReferencesVisited;
+        stats.activationClosureGroupsVisited = m_impl->activationClosureGroupsVisited;
+        stats.activationClosurePlacementsVisited = m_impl->activationClosurePlacementsVisited;
+        stats.activationClosureReferencesVisited = m_impl->activationClosureReferencesVisited;
         for (auto iterator = m_impl->lookup.Begin(), end = m_impl->lookup.End(); iterator != end; ++iterator)
         {
             const Impl::CellRecord* const record = iterator.Value();

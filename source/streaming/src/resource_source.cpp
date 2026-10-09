@@ -21,6 +21,7 @@ namespace vanguard::streaming
 
             concurrency::Atomic<u32> references{1};
             concurrency::RWLock lock;
+            u32 liveSources = 0;
             u32 activeReads = 0;
             u64 stagingBudgetBytes = 0;
             u64 stagingBytesInUse = 0;
@@ -35,6 +36,35 @@ namespace vanguard::streaming
             filesystem::AbsolutePath physicalPath;
             packages::PackageReader package;
             io::FileHandle pinnedFile = io::InvalidFileHandle;
+        };
+
+        struct ManagedLooseRoot;
+
+        struct ManagedLooseGeneration
+        {
+            ManagedLooseRoot* owner = nullptr;
+            filesystem::AbsolutePath path;
+            u32 descriptors = 0;
+            u32 sources = 0;
+            u32 objects = 0;
+            bool retiring = false;
+        };
+
+        struct ManagedLooseRoot
+        {
+            explicit ManagedLooseRoot(const u32 maximum) noexcept
+                : generations(memory::pools::Streaming::GetInstance()), maximumGenerations(maximum)
+            {
+            }
+
+            filesystem::AbsolutePath root;
+            containers::DynamicArray<ManagedLooseGeneration*> generations;
+            u32 maximumGenerations = 0;
+            u32 participants = 0;
+            u32 descriptorLeases = 0;
+            u32 sourceLeases = 0;
+            u32 objectLeases = 0;
+            u32 retiringGenerations = 0;
         };
     } // namespace detail
 
@@ -187,6 +217,252 @@ namespace vanguard::streaming
             u64 m_bytesRead = 0;
             bool m_failed = false;
         };
+
+        struct ManagedLooseRegistry final
+        {
+            ManagedLooseRegistry() noexcept : roots(memory::pools::Streaming::GetInstance()) {}
+
+            concurrency::Mutex lock;
+            containers::DynamicArray<detail::ManagedLooseRoot*> roots;
+        };
+
+        constexpr u32 MaximumProcessManagedLooseRoots = 64u;
+
+        [[nodiscard]] ManagedLooseRegistry& LooseRegistry() noexcept
+        {
+            static ManagedLooseRegistry registry;
+            return registry;
+        }
+
+        [[nodiscard]] char FoldPathChar(char value) noexcept
+        {
+#if defined(_WIN32)
+            if (value == '/')
+                value = '\\';
+            if (value >= 'A' && value <= 'Z')
+                value = static_cast<char>(value - 'A' + 'a');
+#endif
+            return value;
+        }
+
+        [[nodiscard]] bool LexicallyContains(const filesystem::AbsolutePath& root,
+                                             const filesystem::AbsolutePath& path) noexcept
+        {
+            if (!root.IsDirectoryPath() || !path.IsFilePath())
+                return false;
+            const containers::StringView rootView = root.AsStringView();
+            const containers::StringView pathView = path.AsStringView();
+            if (rootView.Empty() || pathView.Length() <= rootView.Length())
+                return false;
+            for (u32 index = 0; index < rootView.Length(); ++index)
+                if (FoldPathChar(rootView[index]) != FoldPathChar(pathView[index]))
+                    return false;
+            const char tail = rootView[rootView.Length() - 1u];
+            if (tail == '/' || tail == '\\')
+                return true;
+            const char boundary = pathView[rootView.Length()];
+            return boundary == '/' || boundary == '\\';
+        }
+
+        [[nodiscard]] u32 FindManagedRoot(const ManagedLooseRegistry& registry,
+                                          const detail::ManagedLooseRoot* root) noexcept
+        {
+            for (u32 index = 0; index < registry.roots.Size(); ++index)
+                if (registry.roots[index] == root)
+                    return index;
+            return registry.roots.Size();
+        }
+
+        [[nodiscard]] detail::ManagedLooseRoot* FindManagedRootForPath(const ManagedLooseRegistry& registry,
+                                                                       const filesystem::AbsolutePath& path) noexcept
+        {
+            detail::ManagedLooseRoot* selected = nullptr;
+            u32 selectedLength = 0u;
+            for (detail::ManagedLooseRoot* const root : registry.roots)
+            {
+                if (!LexicallyContains(root->root, path))
+                    continue;
+                const u32 length = root->root.AsStringView().Length();
+                if (selected == nullptr || length > selectedLength)
+                {
+                    selected = root;
+                    selectedLength = length;
+                }
+            }
+            return selected;
+        }
+
+        [[nodiscard]] u32 FindManagedGeneration(const detail::ManagedLooseRoot& root,
+                                                const filesystem::AbsolutePath& path) noexcept
+        {
+            for (u32 index = 0; index < root.generations.Size(); ++index)
+                if (root.generations[index]->path == path)
+                    return index;
+            return root.generations.Size();
+        }
+
+        [[nodiscard]] detail::ManagedLooseGeneration* EnsureManagedGeneration(detail::ManagedLooseRoot& root,
+                                                                               const filesystem::AbsolutePath& path) noexcept
+        {
+            const u32 found = FindManagedGeneration(root, path);
+            if (found < root.generations.Size())
+                return root.generations[found];
+            if (root.generations.Size() >= root.maximumGenerations)
+                return nullptr;
+            detail::ManagedLooseGeneration* const generation = AllocateSourceObject<detail::ManagedLooseGeneration>();
+            if (generation == nullptr)
+                return nullptr;
+            generation->owner = &root;
+            generation->path = path;
+            const u32 previous = root.generations.Size();
+            root.generations.PushBack(generation);
+            if (root.generations.Size() != previous + 1u)
+            {
+                DeleteSourceObject(generation);
+                return nullptr;
+            }
+            return generation;
+        }
+
+        void RemoveManagedGenerationIfUnused(detail::ManagedLooseGeneration* const generation) noexcept
+        {
+            if (generation == nullptr || generation->owner == nullptr || generation->retiring || generation->descriptors != 0u ||
+                generation->sources != 0u || generation->objects != 0u)
+                return;
+            detail::ManagedLooseRoot& root = *generation->owner;
+            const u32 index = FindManagedGeneration(root, generation->path);
+            if (index < root.generations.Size() && root.generations[index] == generation)
+            {
+                static_cast<void>(root.generations.RemoveAtReorder(index));
+                DeleteSourceObject(generation);
+            }
+        }
+
+        void DestroyManagedRootIfUnused(ManagedLooseRegistry& registry, detail::ManagedLooseRoot* const root) noexcept
+        {
+            if (root == nullptr || root->participants != 0u || !root->generations.Empty())
+                return;
+            const u32 index = FindManagedRoot(registry, root);
+            if (index >= registry.roots.Size())
+                return;
+            static_cast<void>(registry.roots.RemoveAtReorder(index));
+            DeleteSourceObject(root);
+        }
+
+        enum class ManagedLeaseKind : u8
+        {
+            Descriptor,
+            Source,
+            Object
+        };
+
+        [[nodiscard]] bool AcquireManagedLease(const filesystem::AbsolutePath& path, const ManagedLeaseKind kind,
+                                               detail::ManagedLooseGeneration*& generation) noexcept
+        {
+            generation = nullptr;
+            ManagedLooseRegistry& registry = LooseRegistry();
+            filesystem::AbsolutePath rootPath;
+            registry.lock.Acquire();
+            detail::ManagedLooseRoot* root = FindManagedRootForPath(registry, path);
+            if (root == nullptr)
+            {
+                registry.lock.Release();
+                return true;
+            }
+            // Once the last owner unregisters a root, existing leases remain
+            // governed until they drain but no new path may enter that retiring
+            // authority window.
+            if (root->participants == 0u)
+            {
+                registry.lock.Release();
+                return false;
+            }
+            rootPath = root->root;
+            registry.lock.Release();
+
+            // Managed exact generations must not be reachable through a lexical
+            // alias/reparse traversal. Validate outside authority bookkeeping so
+            // the registry mutex is never held over filesystem queries.
+            if (filesystem::ValidateMutationPath(rootPath, path) != filesystem::MutationPathResult::Success)
+                return false;
+
+            registry.lock.Acquire();
+            root = FindManagedRootForPath(registry, path);
+            if (root == nullptr || root->root != rootPath || root->participants == 0u)
+            {
+                registry.lock.Release();
+                return false;
+            }
+            detail::ManagedLooseGeneration* const owned = EnsureManagedGeneration(*root, path);
+            if (owned == nullptr || owned->retiring)
+            {
+                registry.lock.Release();
+                return false;
+            }
+            if (kind == ManagedLeaseKind::Descriptor)
+            {
+                if (owned->descriptors == ~u32{0})
+                {
+                    registry.lock.Release();
+                    return false;
+                }
+                ++owned->descriptors;
+                ++root->descriptorLeases;
+            }
+            else if (kind == ManagedLeaseKind::Source)
+            {
+                if (owned->sources == ~u32{0})
+                {
+                    registry.lock.Release();
+                    return false;
+                }
+                ++owned->sources;
+                ++root->sourceLeases;
+            }
+            else
+            {
+                if (owned->objects == ~u32{0})
+                {
+                    registry.lock.Release();
+                    return false;
+                }
+                ++owned->objects;
+                ++root->objectLeases;
+            }
+            generation = owned;
+            registry.lock.Release();
+            return true;
+        }
+
+        void ReleaseManagedLease(detail::ManagedLooseGeneration*& generation, const ManagedLeaseKind kind) noexcept
+        {
+            if (generation == nullptr)
+                return;
+            ManagedLooseRegistry& registry = LooseRegistry();
+            concurrency::ScopedLock guard(registry.lock);
+            detail::ManagedLooseGeneration* const owned = generation;
+            generation = nullptr;
+            detail::ManagedLooseRoot* const root = owned->owner;
+            if (root == nullptr)
+                return;
+            if (kind == ManagedLeaseKind::Descriptor && owned->descriptors != 0u)
+            {
+                --owned->descriptors;
+                --root->descriptorLeases;
+            }
+            else if (kind == ManagedLeaseKind::Source && owned->sources != 0u)
+            {
+                --owned->sources;
+                --root->sourceLeases;
+            }
+            else if (kind == ManagedLeaseKind::Object && owned->objects != 0u)
+            {
+                --owned->objects;
+                --root->objectLeases;
+            }
+            RemoveManagedGenerationIfUnused(owned);
+            DestroyManagedRootIfUnused(registry, root);
+        }
     } // namespace
 
     detail::ResourceSourceAccounting* detail::CreateResourceSourceAccounting(const u64 stagingBudgetBytes) noexcept
@@ -205,6 +481,29 @@ namespace vanguard::streaming
         if (accounting != nullptr && accounting->references.Decrement() == 0)
             DeleteSourceObject(accounting);
     }
+
+    namespace
+    {
+        void RetainGovernedSource(detail::ResourceSourceAccounting* const accounting) noexcept
+        {
+            if (accounting == nullptr)
+                return;
+            detail::RetainResourceSourceAccounting(accounting);
+            accounting->lock.Acquire();
+            ++accounting->liveSources;
+            accounting->lock.Release();
+        }
+
+        void ReleaseGovernedSource(detail::ResourceSourceAccounting* const accounting) noexcept
+        {
+            if (accounting == nullptr)
+                return;
+            accounting->lock.Acquire();
+            --accounting->liveSources;
+            accounting->lock.Release();
+            detail::ReleaseResourceSourceAccounting(accounting);
+        }
+    } // namespace
 
     bool detail::ReserveResourceSourceStaging(ResourceSourceAccounting* const accounting, const u64 bytes) noexcept
     {
@@ -240,6 +539,7 @@ namespace vanguard::streaming
             return stats;
         auto& mutableAccounting = *const_cast<ResourceSourceAccounting*>(accounting);
         VG_SCOPE_SHARED_LOCK(mutableAccounting.lock);
+        stats.liveSources = accounting->liveSources;
         stats.activeReads = accounting->activeReads;
         stats.stagingBudgetBytes = accounting->stagingBudgetBytes;
         stats.stagingBytesInUse = accounting->stagingBytesInUse;
@@ -296,6 +596,202 @@ namespace vanguard::streaming
         return generation != nullptr ? &generation->package : nullptr;
     }
 
+    bool detail::RegisterManagedLooseRoot(const filesystem::AbsolutePath& root, const u32 maximumGenerations,
+                                          ManagedLooseRoot*& authority) noexcept
+    {
+        authority = nullptr;
+        if (!root.IsDirectoryPath() || maximumGenerations == 0u ||
+            filesystem::ValidateMutationRoot(root) != filesystem::MutationPathResult::Success)
+            return false;
+
+        ManagedLooseRegistry& registry = LooseRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        for (ManagedLooseRoot* const existing : registry.roots)
+        {
+            if (existing->root == root)
+            {
+                if (existing->maximumGenerations != maximumGenerations || existing->participants == ~u32{0})
+                    return false;
+                ++existing->participants;
+                authority = existing;
+                return true;
+            }
+            // Overlapping authorities make a direct path ambiguous. Keep exact
+            // generation ownership singular rather than selecting by call order.
+            if (LexicallyContains(existing->root, root.AddFilePath("managed-root-probe")) ||
+                LexicallyContains(root, existing->root.AddFilePath("managed-root-probe")))
+                return false;
+        }
+        if (registry.roots.Size() >= MaximumProcessManagedLooseRoots)
+            return false;
+        ManagedLooseRoot* const created = AllocateSourceObject<ManagedLooseRoot>(maximumGenerations);
+        if (created == nullptr)
+            return false;
+        created->root = root;
+        created->participants = 1u;
+        const u32 previous = registry.roots.Size();
+        registry.roots.PushBack(created);
+        if (registry.roots.Size() != previous + 1u)
+        {
+            DeleteSourceObject(created);
+            return false;
+        }
+        authority = created;
+        return true;
+    }
+
+    bool detail::CanReleaseManagedLooseRoot(const ManagedLooseRoot* const authority, const bool allowDescriptorLeases) noexcept
+    {
+        if (authority == nullptr)
+            return false;
+        ManagedLooseRegistry& registry = LooseRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (FindManagedRoot(registry, authority) >= registry.roots.Size() || authority->participants == 0u ||
+            authority->sourceLeases != 0u || authority->objectLeases != 0u || authority->retiringGenerations != 0u)
+            return false;
+        return allowDescriptorLeases || authority->descriptorLeases == 0u;
+    }
+
+    bool detail::ReleaseManagedLooseRoot(ManagedLooseRoot*& authority) noexcept
+    {
+        if (authority == nullptr)
+            return false;
+        ManagedLooseRegistry& registry = LooseRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        ManagedLooseRoot* const leaving = authority;
+        if (FindManagedRoot(registry, leaving) >= registry.roots.Size() || leaving->participants == 0u ||
+            leaving->descriptorLeases != 0u || leaving->sourceLeases != 0u || leaving->objectLeases != 0u ||
+            leaving->retiringGenerations != 0u)
+            return false;
+        authority = nullptr;
+        --leaving->participants;
+        DestroyManagedRootIfUnused(registry, leaving);
+        return true;
+    }
+
+    bool detail::ManagedLooseRootContains(const ManagedLooseRoot* const authority, const filesystem::AbsolutePath& path) noexcept
+    {
+        if (authority == nullptr)
+            return false;
+        ManagedLooseRegistry& registry = LooseRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        return FindManagedRoot(registry, authority) < registry.roots.Size() && LexicallyContains(authority->root, path);
+    }
+
+    detail::ManagedLooseRootStats detail::GetManagedLooseRootStats(const ManagedLooseRoot* const authority) noexcept
+    {
+        ManagedLooseRootStats stats;
+        if (authority == nullptr)
+            return stats;
+        ManagedLooseRegistry& registry = LooseRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        if (FindManagedRoot(registry, authority) >= registry.roots.Size())
+            return stats;
+        stats.generations = authority->generations.Size();
+        stats.descriptorLeases = authority->descriptorLeases;
+        stats.sourceLeases = authority->sourceLeases;
+        stats.objectLeases = authority->objectLeases;
+        stats.retiring = authority->retiringGenerations != 0u;
+        return stats;
+    }
+
+    bool detail::AcquireManagedLooseDescriptor(const filesystem::AbsolutePath& path,
+                                               ManagedLooseGeneration*& generation) noexcept
+    {
+        return path.IsFilePath() && AcquireManagedLease(path, ManagedLeaseKind::Descriptor, generation);
+    }
+
+    void detail::ReleaseManagedLooseDescriptor(ManagedLooseGeneration*& generation) noexcept
+    {
+        ReleaseManagedLease(generation, ManagedLeaseKind::Descriptor);
+    }
+
+    bool detail::AcquireManagedLooseSource(const filesystem::AbsolutePath& path,
+                                           ManagedLooseGeneration*& generation) noexcept
+    {
+        return path.IsFilePath() && AcquireManagedLease(path, ManagedLeaseKind::Source, generation);
+    }
+
+    void detail::ReleaseManagedLooseSource(ManagedLooseGeneration*& generation) noexcept
+    {
+        ReleaseManagedLease(generation, ManagedLeaseKind::Source);
+    }
+
+    bool detail::AcquireManagedLooseObject(ManagedLooseGeneration* const generation) noexcept
+    {
+        if (generation == nullptr)
+            return true;
+        ManagedLooseRegistry& registry = LooseRegistry();
+        concurrency::ScopedLock guard(registry.lock);
+        ManagedLooseRoot* const root = generation->owner;
+        if (root == nullptr || FindManagedRoot(registry, root) >= registry.roots.Size() || generation->retiring ||
+            root->participants == 0u || generation->objects == ~u32{0})
+            return false;
+        ++generation->objects;
+        ++root->objectLeases;
+        return true;
+    }
+
+    void detail::ReleaseManagedLooseObject(ManagedLooseGeneration* generation) noexcept
+    {
+        ReleaseManagedLease(generation, ManagedLeaseKind::Object);
+    }
+
+    detail::ManagedLooseRetireResult detail::RetireManagedLooseGeneration(ManagedLooseRoot* const authority,
+                                                                          const filesystem::AbsolutePath& path) noexcept
+    {
+        if (authority == nullptr || !path.IsFilePath())
+            return ManagedLooseRetireResult::InvalidPath;
+
+        ManagedLooseRegistry& registry = LooseRegistry();
+        registry.lock.Acquire();
+        if (FindManagedRoot(registry, authority) >= registry.roots.Size() || authority->participants == 0u ||
+            !LexicallyContains(authority->root, path))
+        {
+            registry.lock.Release();
+            return ManagedLooseRetireResult::NotManaged;
+        }
+        ManagedLooseGeneration* const generation = EnsureManagedGeneration(*authority, path);
+        if (generation == nullptr)
+        {
+            registry.lock.Release();
+            return ManagedLooseRetireResult::LimitExceeded;
+        }
+        if (generation->retiring)
+        {
+            registry.lock.Release();
+            return ManagedLooseRetireResult::Busy;
+        }
+        if (generation->descriptors != 0u)
+        {
+            registry.lock.Release();
+            return ManagedLooseRetireResult::Current;
+        }
+        if (generation->sources != 0u || generation->objects != 0u)
+        {
+            registry.lock.Release();
+            return ManagedLooseRetireResult::Busy;
+        }
+        generation->retiring = true;
+        ++authority->retiringGenerations;
+        registry.lock.Release();
+
+        const filesystem::MutationPathResult validation = filesystem::ValidateMutationPath(authority->root, path);
+        filesystem::Manager& manager = filesystem::GetManager();
+        const bool removed = validation == filesystem::MutationPathResult::Success &&
+                             (!manager.FileExist(path) || manager.DeleteFile(path));
+
+        registry.lock.Acquire();
+        generation->retiring = false;
+        --authority->retiringGenerations;
+        RemoveManagedGenerationIfUnused(generation);
+        registry.lock.Release();
+
+        if (validation != filesystem::MutationPathResult::Success)
+            return ManagedLooseRetireResult::InvalidPath;
+        return removed ? ManagedLooseRetireResult::Removed : ManagedLooseRetireResult::IoFailure;
+    }
+
     struct ResourceSource::Impl
     {
         concurrency::Atomic<u32> references{1};
@@ -303,6 +799,7 @@ namespace vanguard::streaming
         packages::PackageReader package;
         detail::ResourceSourceAccounting* accounting = nullptr;
         detail::ResourceSourcePackageGeneration* packageGeneration = nullptr;
+        detail::ManagedLooseGeneration* looseGeneration = nullptr;
         const packages::Resource* packagedResource = nullptr;
         io::FileHandle pinnedFile = io::InvalidFileHandle;
         resources::ResourceId resource = resources::InvalidResourceId;
@@ -334,7 +831,8 @@ namespace vanguard::streaming
                 return;
             source->package.Close();
             detail::ReleaseResourceSourcePackageGeneration(source->packageGeneration);
-            detail::ReleaseResourceSourceAccounting(source->accounting);
+            detail::ReleaseManagedLooseSource(source->looseGeneration);
+            ReleaseGovernedSource(source->accounting);
             if (source->pinnedFile != io::InvalidFileHandle && io::IsInitialized())
                 io::GetSystem().ReleaseFile(source->pinnedFile);
             DeleteSourceObject(source);
@@ -607,23 +1105,36 @@ namespace vanguard::streaming
     {
         if (m_impl != nullptr || !physicalPath.IsFilePath() || !io::IsInitialized())
             return m_impl != nullptr ? ResourceSourceResult::InvalidState : ResourceSourceResult::InvalidArgument;
+        detail::ManagedLooseGeneration* generation = nullptr;
+        if (!detail::AcquireManagedLooseSource(physicalPath, generation))
+            return ResourceSourceResult::LimitExceeded;
         const io::FileHandle file = io::GetSystem().OpenFile(physicalPath.AsChar());
         if (file == io::InvalidFileHandle)
+        {
+            detail::ReleaseManagedLooseSource(generation);
             return ResourceSourceResult::NotFound;
+        }
         Impl* const impl = AllocateSourceObject<Impl>();
         if (impl == nullptr)
         {
             io::GetSystem().ReleaseFile(file);
+            detail::ReleaseManagedLooseSource(generation);
             return ResourceSourceResult::LimitExceeded;
         }
         impl->physicalPath = physicalPath;
         impl->pinnedFile = file;
+        impl->looseGeneration = generation;
         impl->resource = resource;
         impl->type = type;
         impl->logicalSize = io::GetSystem().GetFileSize(file);
         impl->kind = ResourceSourceKind::LooseFile;
         m_impl = impl;
         return ResourceSourceResult::Success;
+    }
+
+    detail::ManagedLooseGeneration* detail::GetManagedLooseGeneration(const ResourceSource& source) noexcept
+    {
+        return source.m_impl != nullptr && source.m_impl->kind == ResourceSourceKind::LooseFile ? source.m_impl->looseGeneration : nullptr;
     }
 
     ResourceSourceResult ResourceSource::OpenPackage(const filesystem::AbsolutePath& physicalPath, const resources::ResourceId resource,
@@ -899,8 +1410,8 @@ namespace vanguard::streaming
     {
         if (m_impl == nullptr || m_impl->accounting == accounting)
             return;
-        detail::RetainResourceSourceAccounting(accounting);
-        detail::ReleaseResourceSourceAccounting(m_impl->accounting);
+        RetainGovernedSource(accounting);
+        ReleaseGovernedSource(m_impl->accounting);
         m_impl->accounting = accounting;
     }
 
@@ -1326,7 +1837,12 @@ namespace vanguard::streaming
         for (CoalescedResourceReadRequest::Impl* const existing : m_impl->operations)
         {
             const bool sameVerification = expectedDigest == nullptr ? !existing->verifyDigest : existing->verifyDigest && existing->expectedDigest == *expectedDigest;
-            if (existing->offset == offset && existing->size == size && sameVerification && !existing->finished.GetValue())
+            // Once the last interest reaches zero, cancellation of the underlying
+            // source request is irrevocable even though its completion callback may
+            // not have removed this operation from the coalescing table yet. Never
+            // resurrect that cancellation window by attaching a new reader to it.
+            if (existing->offset == offset && existing->size == size && sameVerification &&
+                existing->interests.GetValue() != 0 && !existing->finished.GetValue())
             {
                 static_cast<void>(existing->references.Increment());
                 static_cast<void>(existing->interests.Increment());

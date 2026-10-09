@@ -13,6 +13,22 @@
 
 namespace job { namespace prv {
 
+struct DispatcherQueuePushProfile
+{
+	Uint64 queuePushTicks{ 0 };
+	Uint64 semaphoreReleaseTicks{ 0 };
+	Int32 numThreadsWoken{ 0 };
+};
+
+struct DispatcherQueuePopProfile
+{
+	Uint64 semaphoreAcquireTicks{ 0 };
+	Uint64 semaphoreAcquireEndTicks{ 0 };
+	Uint64 queueScanTicks{ 0 };
+	Uint32 scanPasses{ 0 };
+	Bool usedKernelWait{ false };
+};
+
 struct DispatcherQueueSetup
 {
 	Uint32 numLowPriorityJobs = 0;
@@ -40,10 +56,11 @@ public:
 	void Initialize( const DispatcherQueueSetup& setup );
     void Shutdown( Uint32 numResourceThrottlerThreads );
 
-	RED_NODISCARD Bool TryPush( const TEntry& entry, Priority priority, Affinity affinity, Uint32 spinCount = c_dispatcherQueuePushSpinCount);
-	void Pop( TEntry& outEntry, Priority& outPriority );
+	RED_NODISCARD Bool TryPush( const TEntry& entry, Priority priority, Affinity affinity, Uint32 spinCount = c_dispatcherQueuePushSpinCount, DispatcherQueuePushProfile* optProfile = nullptr );
+	RED_NODISCARD Bool TryPushNonBlocking( const TEntry& entry, Priority priority, Affinity affinity, DispatcherQueuePushProfile* optProfile = nullptr );
+	void Pop( TEntry& outEntry, Priority& outPriority, DispatcherQueuePopProfile* optProfile = nullptr );
 	void Pop( TEntry& outEntry, Priority& outPriority, Affinity affinity );
-	Bool TryPop( TEntry& outEntry, Priority& outPriority );
+	Bool TryPop( TEntry& outEntry, Priority& outPriority, DispatcherQueuePopProfile* optProfile = nullptr );
 	Uint32 GetApproximateDepth( Priority priority ) const;
 
 private:

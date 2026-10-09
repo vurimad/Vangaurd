@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/packages/packages.hpp>
 
@@ -254,7 +255,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "packagesTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("packages_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
 
     ByteArray packageBytes(memory::pools::Resources::GetInstance());

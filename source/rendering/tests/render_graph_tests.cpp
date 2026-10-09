@@ -1,8 +1,10 @@
 #include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/jobs/jobs.hpp>
+#include <vanguard/rendering/frame_renderer.hpp>
 #include <vanguard/rendering/render_graph_cache.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
+#include <vanguard/rendering/geometry_graph_nodes.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/rendering/render_node_job.hpp>
 #include <vanguard/rendering/viewport.hpp>
@@ -18,6 +20,73 @@ namespace
     using vanguard::u64;
 
     using CheckFunction = void (*)(bool condition, const char* message) noexcept;
+
+    void CheckCameraOutputResolveSelection(CheckFunction check)
+    {
+        rendering::CameraOutputResolveKind resolve = rendering::CameraOutputResolveKind::DisplaySrgb;
+        check(rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture, rendering::RenderOutputColorEncoding::SceneLinear,
+                                                   vanguard::rhi::Format::R16G16B16A16Float, resolve) &&
+                  resolve == rendering::CameraOutputResolveKind::SceneLinearCopy,
+              "scene-linear texture output preserves the existing raw-copy resolve path");
+        check(!rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Presentation, rendering::RenderOutputColorEncoding::SceneLinear,
+                                                    vanguard::rhi::Format::B8G8R8A8UNorm, resolve),
+              "presentation without an explicit supported display transfer fails closed");
+        check(!rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture, rendering::RenderOutputColorEncoding::SceneLinear,
+                                                    vanguard::rhi::Format::R8G8B8A8UNormSrgb, resolve) &&
+                  !rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture, rendering::RenderOutputColorEncoding::SceneLinear,
+                                                        vanguard::rhi::Format::B8G8R8A8UNormSrgb, resolve),
+              "scene-linear output rejects sRGB render targets whose hardware transfer would contradict the declared encoding");
+        check(rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture, rendering::RenderOutputColorEncoding::DisplaySrgb,
+                                                   vanguard::rhi::Format::R8G8B8A8UNorm, resolve) &&
+                  resolve == rendering::CameraOutputResolveKind::DisplaySrgb,
+              "editor R8 UNorm DisplaySrgb output selects explicit SDR transfer");
+        check(rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Presentation, rendering::RenderOutputColorEncoding::DisplaySrgb,
+                                                   vanguard::rhi::Format::B8G8R8A8UNorm, resolve) &&
+                  resolve == rendering::CameraOutputResolveKind::DisplaySrgb,
+              "runtime B8 UNorm DisplaySrgb output selects explicit SDR transfer");
+        check(!rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture, rendering::RenderOutputColorEncoding::DisplaySrgb,
+                                                    vanguard::rhi::Format::R16G16B16A16Float, resolve) &&
+                  !rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Presentation, rendering::RenderOutputColorEncoding::DisplaySrgb,
+                                                        vanguard::rhi::Format::R10G10B10A2UNorm, resolve) &&
+                  !rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture, rendering::RenderOutputColorEncoding::DisplaySrgb,
+                                                        vanguard::rhi::Format::R8G8B8A8UNormSrgb, resolve) &&
+                  !rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Presentation, rendering::RenderOutputColorEncoding::DisplaySrgb,
+                                                        vanguard::rhi::Format::B8G8R8A8UNormSrgb, resolve) &&
+                  !rendering::SelectCameraOutputResolve(rendering::RenderViewportOutputKind::Texture,
+                                                        static_cast<rendering::RenderOutputColorEncoding>(0xffu),
+                                                        vanguard::rhi::Format::R8G8B8A8UNorm, resolve),
+              "unsupported DisplaySrgb/HDR, already-sRGB, or unknown encoding-format pairs fail closed instead of double-encoding");
+    }
+
+    void CheckRetainedOutputFinalizationSelection(CheckFunction check)
+    {
+        using Action = rendering::detail::RetainedOutputFinalizationAction;
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(false, rendering::RenderViewportOutputKind::Presentation,
+                                                                        false, true, false, true) == Action::None,
+              "frames without an acquired output have no terminal output action");
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Presentation,
+                                                                        true, true, false, true) == Action::DeviceLost,
+              "device loss owns presentation output terminalization before any Present attempt");
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Presentation,
+                                                                        false, false, false, true) == Action::Abandon &&
+                  rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Presentation,
+                                                                            false, true, true, true) == Action::Abandon &&
+                  rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Presentation,
+                                                                            false, true, false, false) == Action::Abandon,
+              "allocator, frame, or terminal-node failure abandons retained output instead of presenting it");
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Texture,
+                                                                        false, true, true, true) == Action::Abandon,
+              "failed Texture producer abandons its acquired epoch instead of publishing terminal output");
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Texture,
+                                                                        false, true, false, true) == Action::CompleteTexture,
+              "successful retained Texture output completes its exact producer publication");
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Presentation,
+                                                                        false, true, false, true) == Action::Present,
+              "successful retained Presentation output selects Present only after its terminal graph node");
+        check(rendering::detail::SelectRetainedOutputFinalizationAction(true, rendering::RenderViewportOutputKind::Headless,
+                                                                        false, true, false, true) == Action::Abandon,
+              "an impossible acquired Headless output fails closed instead of selecting Present");
+    }
 
     class InvalidImportNode final : public rendering::RenderNodeImpl
     {
@@ -48,6 +117,22 @@ namespace
 
     private:
         concurrency::Atomic<u32>* m_declarations = nullptr;
+    };
+
+    class UsageTestNode final : public rendering::RenderNodeImpl
+    {
+    public:
+        explicit UsageTestNode(const rendering::RenderNodeCommandListUsage usage) noexcept : m_usage(usage) {}
+
+        [[nodiscard]] bool DeclareResources(const rendering::RenderNodeImplContext&, rendering::RenderFlowResourceFailure*) const noexcept override
+        {
+            return true;
+        }
+        void Execute(const rendering::RenderNodeImplContext&, jobs::Builder*) const override {}
+        [[nodiscard]] rendering::RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return m_usage; }
+
+    private:
+        rendering::RenderNodeCommandListUsage m_usage = rendering::RenderNodeCommandListUsage::None;
     };
 
     class UnbalancedOccurrenceNode final : public rendering::RenderNodeImpl
@@ -147,6 +232,59 @@ namespace
                   groupedGraph.GetNodeContext(groupMemberB).m_renderFlowGroups[static_cast<u32>(rendering::RenderNodeDependencyType::Cpu)] <
                       groupedGraph.GetNodeContext(afterGroup).m_renderFlowGroups[static_cast<u32>(rendering::RenderNodeDependencyType::Cpu)],
               "factory group boundaries order existing and subsequently registered members");
+    }
+
+    void CheckCpuBridgeTopology(CheckFunction check)
+    {
+        rendering::NodesContainer nodes;
+        rendering::RenderNodeGraph graph;
+        rendering::RenderNodeGraph::ItemId start = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId workA = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId workB = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId endRender = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId finalFlush = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId present = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId cleanup = rendering::RenderNodeGraph::InvalidItemId;
+        rendering::RenderNodeGraph::ItemId endFrame = rendering::RenderNodeGraph::InvalidItemId;
+        {
+            rendering::NodeGraphFactory factory(&graph, &nodes);
+            const auto add = [&](const rendering::RenderNodeCommandListUsage usage)
+            {
+                return factory.Create<UsageTestNode>(rendering::NodeGroupId::None, rendering::RenderNodeType::Stage,
+                                                     rendering::RenderNodeSubtype(0), usage);
+            };
+            start = add(rendering::RenderNodeCommandListUsage::Require);
+            workA = add(rendering::RenderNodeCommandListUsage::Require);
+            workB = add(rendering::RenderNodeCommandListUsage::Require);
+            endRender = add(rendering::RenderNodeCommandListUsage::Require);
+            finalFlush = add(rendering::RenderNodeCommandListUsage::Sync);
+            present = add(rendering::RenderNodeCommandListUsage::None);
+            cleanup = add(rendering::RenderNodeCommandListUsage::None);
+            endFrame = add(rendering::RenderNodeCommandListUsage::None);
+
+            factory.LinkGpu();
+            factory.LinkCpuToNextGpu(start);
+            factory.LinkCpuToPreviousGpu(endRender);
+            factory.LinkCpuToPreviousGpu(finalFlush);
+            factory.Link(finalFlush, present, rendering::RenderNodeDependencyType::Cpu);
+            factory.Link(present, cleanup, rendering::RenderNodeDependencyType::Cpu);
+            factory.Link(cleanup, endFrame, rendering::RenderNodeDependencyType::Cpu);
+        }
+
+        check(graph.HasDependency(workA, workB, rendering::RenderNodeDependencyType::Gpu) &&
+                  !graph.HasDependency(workA, workB, rendering::RenderNodeDependencyType::Cpu),
+              "GPU declaration order does not manufacture serial CPU recording between independent command-list nodes");
+        check(graph.HasDependency(start, workA, rendering::RenderNodeDependencyType::Cpu) &&
+                  graph.HasDependency(start, workB, rendering::RenderNodeDependencyType::Cpu) &&
+                  graph.HasDependency(workA, endRender, rendering::RenderNodeDependencyType::Cpu) &&
+                  graph.HasDependency(workB, endRender, rendering::RenderNodeDependencyType::Cpu),
+              "start and end CPU-to-GPU bridges form a recording fan-out and fan-in");
+        check(graph.HasDependency(endRender, finalFlush, rendering::RenderNodeDependencyType::Cpu) &&
+                  graph.HasDependency(finalFlush, present, rendering::RenderNodeDependencyType::Cpu) &&
+                  graph.HasDependency(present, cleanup, rendering::RenderNodeDependencyType::Cpu) &&
+                  graph.HasDependency(cleanup, endFrame, rendering::RenderNodeDependencyType::Cpu),
+              "final submission and lifecycle tail retain explicit terminal ordering");
+        graph.BuildRenderFlowGroups();
     }
 
     void CheckGraphComposition(CheckFunction check)
@@ -366,6 +504,61 @@ namespace
               "pre-scheduling capacity failure cancels without publishing execution state");
     }
 
+    void CheckPlanningGroupStorageContraction(CheckFunction check)
+    {
+        rendering::NodesContainer wideNodes;
+        rendering::RenderNodeGraph wideGraph;
+        {
+            rendering::NodeGraphFactory factory(&wideGraph, &wideNodes);
+            for (u32 index = 0; index < 8; ++index)
+                static_cast<void>(factory.Create<UsageTestNode>(rendering::NodeGroupId::None, rendering::RenderNodeType::Stage, rendering::RenderNodeSubtype(index),
+                                                                rendering::RenderNodeCommandListUsage::Require));
+        }
+        wideGraph.BuildRenderFlowGroups();
+
+        rendering::NodesContainer narrowNodes;
+        rendering::RenderNodeGraph narrowGraph;
+        {
+            rendering::NodeGraphFactory factory(&narrowGraph, &narrowNodes);
+            static_cast<void>(factory.Create<UsageTestNode>(rendering::NodeGroupId::None, rendering::RenderNodeType::Stage, rendering::RenderNodeSubtype(0),
+                                                            rendering::RenderNodeCommandListUsage::Require));
+        }
+        narrowGraph.BuildRenderFlowGroups();
+
+        rendering::RenderFlowResourceAllocatorConfig config;
+        config.maximumPlanningWriters = 8;
+        config.allowLogicalOnlyValidation = true;
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceFailure failure;
+        check(allocator.Initialize(config, &failure), "planning-group contraction initializes an eight-group allocator");
+        if (!allocator.IsInitialized())
+            return;
+
+        rendering::RenderFrameInfo frame;
+        rendering::RenderNodeImplContext context;
+        rendering::RenderNodeImplContext::InitData initData(0);
+        initData.frame = &frame;
+        context.Init(initData);
+
+        const auto prepareFrame = [&](rendering::RenderNodeGraph& graph, const u64 frameSerial) noexcept
+        {
+            rendering::RenderNodeResourceBindings bindings;
+            rendering::RenderNodeResourcePreparationFailures failures;
+            if (!allocator.BeginFrame(frameSerial, {}, &failure) || !graph.PrepareResourceBindings(bindings, failures))
+                return false;
+            jobs::Builder builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker});
+            graph.PrepareResourcesParallel(context, allocator, bindings, failures, builder);
+            const bool prepared = builder.WaitForCompletion() && !failures.HasFailure();
+            allocator.CancelBeforePublication();
+            return prepared && allocator.GetState() == rendering::RenderFlowResourceSessionState::Idle;
+        };
+
+        check(prepareFrame(wideGraph, 149), "planning-group storage establishes a wide eight-group reservation high-water mark");
+        check(prepareFrame(narrowGraph, 150), "planning-group storage contracts to the current one-group graph without historical-tail work");
+        check(prepareFrame(wideGraph, 151), "planning-group storage regrows after contraction without stale writer/request state");
+        check(allocator.Shutdown(&failure), "planning-group contraction/regrowth leaves allocator shutdown-safe");
+    }
+
 } // namespace
 
 int RunRenderGraphFatalCase(const char* name) noexcept
@@ -477,11 +670,15 @@ int RunRenderGraphFatalCase(const char* name) noexcept
 
 void RunRenderGraphTests(void (*check)(bool condition, const char* message) noexcept) noexcept
 {
+    CheckCameraOutputResolveSelection(check);
+    CheckRetainedOutputFinalizationSelection(check);
     CheckGraphAndFactory(check);
+    CheckCpuBridgeTopology(check);
     CheckGraphComposition(check);
     CheckGraphCache(check);
     CheckDeclarationPermutation(1021, check);
     CheckDeclarationPermutation(2042, check);
     CheckPreSchedulingCapacityFailure(check);
+    CheckPlanningGroupStorageContraction(check);
     CheckInvalidImportDeclaration(check);
 }

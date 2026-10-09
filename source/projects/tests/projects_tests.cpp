@@ -88,6 +88,11 @@ int main()
     projects::ProjectDescriptor source = MakeProject();
     projects::Diagnostic diagnostic;
     Check(projects::Validate(source, &diagnostic) == projects::Result::Success, "valid descriptor accepted");
+    Check(projects::IsTechnicalName("asset-browser"), "canonical technical-name helper accepts project grammar");
+    Check(!projects::IsTechnicalName("Asset-Browser") && !projects::IsTechnicalName("asset--browser") && !projects::IsTechnicalName("-asset"),
+          "canonical technical-name helper rejects non-canonical forms");
+    Check(!projects::IsTechnicalName("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+          "canonical technical-name helper enforces the 64-byte bound");
 
     containers::DynamicArray<vanguard::u8> firstBytes(memory::pools::Filesystem::GetInstance());
     {

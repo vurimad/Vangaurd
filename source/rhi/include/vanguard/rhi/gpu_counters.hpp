@@ -145,6 +145,9 @@ namespace vanguard::rhi
 
         [[nodiscard]] bool Initialize(const GpuCounterConfig& config = {}, Failure* failure = nullptr) noexcept;
         [[nodiscard]] bool Shutdown(Failure* failure = nullptr) noexcept;
+        /// Device-loss teardown after CPU recording/submission work is joined. Drops
+        /// pending query ownership without requiring fences from the lost device.
+        void AbandonDevice() noexcept;
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         [[nodiscard]] bool RegisterScope(GpuCounterScopeId scope, const char* name, Failure* failure = nullptr) noexcept;
@@ -169,6 +172,7 @@ namespace vanguard::rhi
 
     private:
         struct Impl;
+        void DestroyImpl() noexcept;
         Impl* m_impl = nullptr;
     };
 } // namespace vanguard::rhi

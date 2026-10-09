@@ -306,6 +306,11 @@ namespace vanguard::rhi
         CopyAsync,
         Compute
     };
+    enum class CommandListRetentionPolicy : u8
+    {
+        Default,
+        BoundedUploadReuse
+    };
     enum class CommandListSyncType : u8
     {
         None,
@@ -1656,6 +1661,8 @@ namespace vanguard::rhi
         u64 acquisitions = 0;
         u64 abandonedAcquisitions = 0;
         u64 presentedFrames = 0;
+        u64 presentNanoseconds = 0;
+        u64 longestPresentNanoseconds = 0;
         u64 acquireWaits = 0;
         u64 acquireWaitNanoseconds = 0;
         u64 longestAcquireWaitNanoseconds = 0;

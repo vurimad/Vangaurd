@@ -135,7 +135,8 @@ namespace vanguard::rhi
         static_cast<void>(SafeRelease(old));
     }
 
-    [[nodiscard]] CommandListRef CreateCommandList(CommandListType type, u64 debugHash = 0, Failure* failure = nullptr) noexcept;
+    [[nodiscard]] CommandListRef CreateCommandList(CommandListType type, u64 debugHash = 0, Failure* failure = nullptr,
+                                                   CommandListRetentionPolicy retentionPolicy = CommandListRetentionPolicy::Default) noexcept;
     void DiscardCommandList(CommandListRef& commandList) noexcept;
     [[nodiscard]] bool BindCommandList(CommandListRef commandList, Failure* failure = nullptr) noexcept;
     void UnbindCommandList() noexcept;

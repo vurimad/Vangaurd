@@ -105,6 +105,9 @@ namespace vanguard::window
         SafeAreaChanged,
         OcclusionChanged,
         HdrStateChanged,
+        FileDropBegin,
+        FileDropped,
+        FileDropComplete,
         Failure
     };
 
@@ -115,6 +118,10 @@ namespace vanguard::window
         BackendWindowState state;
         u64 timestampNanoseconds = 0;
         i32 backendCode = 0;
+        WindowPoint dropPosition;
+        // Borrowed native-event lifetime path. FileDropped consumers must copy
+        // before ProcessWindowEvent returns. Never retain this in WindowManager.
+        const char* dropPath = nullptr;
     };
 
     struct BackendStatus
@@ -181,6 +188,14 @@ namespace vanguard::window
         [[nodiscard]] virtual BackendStatus RequestWindowFocus(BackendWindowId) noexcept
         {
             return BackendStatus::Failure(-1, "window focus requests are unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus RequestWindowAction(BackendWindowId, WindowAction) noexcept
+        {
+            return BackendStatus::Failure(-1, "window actions are unsupported by this backend");
+        }
+        [[nodiscard]] virtual BackendStatus SetWindowHitTest(BackendWindowId, const WindowHitTestConfig&) noexcept
+        {
+            return BackendStatus::Failure(-1, "window hit testing is unsupported by this backend");
         }
         [[nodiscard]] virtual BackendStatus SetCursor(CursorShape, bool) noexcept
         {

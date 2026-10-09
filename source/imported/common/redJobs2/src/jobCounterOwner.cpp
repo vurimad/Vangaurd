@@ -57,7 +57,7 @@ namespace helper
 	static void RunWaitOnCounterJob(const prv::CounterEntry* waitForZeroCounterEntry, prv::CounterEntry* accumulateCounterEntry)
 	{
 		JobDecl jobDecl;
-		prv::gDispatcher->InitWithEmptyJob(jobDecl);
+		prv::gDispatcher->InitWithDependencyRelayJob(jobDecl);
 		prv::gDispatcher->RunJob(jobDecl, waitForZeroCounterEntry, accumulateCounterEntry);
 	}
 }

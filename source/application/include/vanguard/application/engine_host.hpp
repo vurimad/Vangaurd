@@ -57,7 +57,8 @@ namespace vanguard::application
         QuiesceFailure,
         DrainFailure,
         StopFailure,
-        ShutdownFailure
+        ShutdownFailure,
+        WrongThread
     };
 
     struct HostFailure

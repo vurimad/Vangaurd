@@ -2,6 +2,7 @@
 
 #include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/synchronization.hpp>
+#include <vanguard/rhi/backend/command_list_retention.hpp>
 #include <vanguard/rhi/backend/resource_lifetime.hpp>
 #include <vanguard/rhi/rhi_backend.hpp>
 #include <nvrhi/nvrhi.h>
@@ -91,10 +92,14 @@ namespace vanguard::rhi::backend
         void AddRef(ResourceRef) noexcept;
         [[nodiscard]] bool TryAddRef(ResourceRef) noexcept;
         [[nodiscard]] i32 Release(ResourceRef) noexcept;
+        // Swap-chain resize helper. The caller must be the sole owner. Waits only
+        // for this texture's recorded queue use before dropping its native handle;
+        // the lifetime record itself is still retired through the normal path.
+        [[nodiscard]] BackendStatus ReleaseNativeTextureHandleAfterGpuUse(TextureRef) noexcept;
         [[nodiscard]] ResourceLifetimeStats GetResourceLifetimeStats() const noexcept;
         void DrainRetiredResourcesAfterGpuIdle() noexcept;
 
-        [[nodiscard]] CommandListRef CreateCommandList(CommandListType, u64) noexcept;
+        [[nodiscard]] CommandListRef CreateCommandList(CommandListType, u64, CommandListRetentionPolicy) noexcept;
         void DiscardCommandList(CommandListRef) noexcept;
         [[nodiscard]] CommandListType GetCommandListType(CommandListRef) const noexcept;
         [[nodiscard]] BackendStatus CloseCommandList(CommandListRef) noexcept;
@@ -171,6 +176,9 @@ namespace vanguard::rhi::backend
         void SetResourceDebugName(CommandListRef, const char*) noexcept;
 
     private:
+        struct CommandListArenaSlot;
+        struct CommandListArenaState;
+
         struct BindingLayoutCacheEntry
         {
             u64 hash = 0;
@@ -188,22 +196,56 @@ namespace vanguard::rhi::backend
         struct RecycledCommandList
         {
             nvrhi::CommandListHandle native;
+            GpuFence completion{};
             u64 role = 0;
-            u64 stamp = 0;
+            u64 lastUsedMaintenanceEpoch = 0;
+            u32 previousClass = InvalidReferenceIndex;
+            u32 nextClass = InvalidReferenceIndex;
+            u32 previousAge = InvalidReferenceIndex;
+            u32 nextAge = InvalidReferenceIndex;
+            u32 nextFree = InvalidReferenceIndex;
             CommandListType type = CommandListType::None;
+            CommandListReuseClass reuseClass = CommandListReuseClass::Clean;
         };
 
-        static constexpr u32 MaximumRecycledCommandLists = 16;
-        static constexpr u32 MaximumRecycledCommandListsPerRole = 2;
+        static constexpr u32 MaximumRetainedCommandListContexts = ResourceLifetimeConfig{}.commandListCapacity;
+        static constexpr u32 CommandListPoolHashBucketCount = 4096;
+        static constexpr u32 CommandListTypeSlotCount = static_cast<u32>(CommandListType::Compute) + 1u;
 
-        [[nodiscard]] nvrhi::CommandListHandle AcquireNativeCommandList(CommandListType type, u64 role) noexcept;
-        void RecycleNativeCommandList(nvrhi::CommandListHandle&& native, CommandListType type, u64 role) noexcept;
+        [[nodiscard]] nvrhi::CommandListHandle AcquireNativeCommandList(CommandListType type, u64 role, CommandListRetentionPolicy retentionPolicy,
+                                                                       CommandListReuseClass& reuseClass, u64& reuseRole, GpuFence& priorCompletion) noexcept;
+        void RecycleNativeCommandList(nvrhi::CommandListHandle&& native, CommandListType type, CommandListReuseClass reuseClass, u64 reuseRole,
+                                      GpuFence completion) noexcept;
+        void RetireNativeCommandListContext(nvrhi::CommandListHandle&& native, GpuFence completion) noexcept;
+        void WaitForGpuFenceCompletionNoAllocation(GpuFence completion) const noexcept;
+        void MaintainRecycledCommandLists() noexcept;
         void ClearRecycledCommandLists() noexcept;
+        void DrainUnsignaledCommandListRetirementsAfterGpuIdle() noexcept;
+        [[nodiscard]] u32 AllocateRecycledCommandListSlotLocked() noexcept;
+        void ReleaseRecycledCommandListSlotLocked(u32 index) noexcept;
+        void LinkRecycledCommandListLocked(u32 index) noexcept;
+        void UnlinkRecycledCommandListLocked(u32 index) noexcept;
+        [[nodiscard]] bool InitializeCommandListArena() noexcept;
+        void ShutdownCommandListArena() noexcept;
+        [[nodiscard]] CommandListRef AcquireCommandListLease(nvrhi::CommandListHandle&& native, CommandListType type, u64 role,
+                                                             CommandListRetentionPolicy retentionPolicy, CommandListReuseClass reuseClass,
+                                                             u64 reuseRole, GpuFence priorCompletion) noexcept;
+        void RetireCommandListLease(CommandListRef commandList, GpuFence completion = {}, bool allowImmediateReuse = false,
+                                    bool submittedWithoutCompletion = false) noexcept;
+        void CompleteCommandListRetirement(CommandListArenaSlot* slot) noexcept;
+        [[nodiscard]] bool HasLiveCommandListLeases() const noexcept;
+        [[nodiscard]] bool IsCommandListArenaDrained() const noexcept;
+        void ForceDrainCommandListArena() noexcept;
+        [[nodiscard]] CommandListArenaSlot* GetCommandListSlot(CommandListRef commandList) noexcept;
+        [[nodiscard]] const CommandListArenaSlot* GetCommandListSlot(CommandListRef commandList) const noexcept;
+        [[nodiscard]] void* GetCommandListPayload(CommandListRef commandList) noexcept;
+        [[nodiscard]] const void* GetCommandListPayload(CommandListRef commandList) const noexcept;
 
         void message(nvrhi::MessageSeverity severity, const char* text) override;
 
         nvrhi::DeviceHandle m_device;
         ResourceLifetimeManager m_lifetime;
+        CommandListArenaState* m_commandListArena = nullptr;
         concurrency::Atomic<u64> m_submittedFences[3];
         // Guarded by m_submissionLock; excludes failed signal attempts.
         u64 m_signaledFences[3]{};
@@ -230,9 +272,14 @@ namespace vanguard::rhi::backend
         concurrency::SpinLock m_descriptorDomainListLock;
         containers::DynamicArray<DescriptorDomainRef> m_descriptorDomains;
         concurrency::SpinLock m_commandListPoolLock;
-        RecycledCommandList m_recycledCommandLists[MaximumRecycledCommandLists];
+        RecycledCommandList m_recycledCommandLists[MaximumRetainedCommandListContexts];
+        u32 m_cleanCommandListHeads[CommandListTypeSlotCount]{};
+        u32 m_boundedCommandListBuckets[CommandListPoolHashBucketCount]{};
+        u32 m_commandListPoolFreeHead = InvalidReferenceIndex;
+        u32 m_commandListPoolOldest = InvalidReferenceIndex;
+        u32 m_commandListPoolNewest = InvalidReferenceIndex;
         u32 m_recycledCommandListCount = 0;
-        u64 m_commandListRecycleStamp = 0;
+        u64 m_commandListMaintenanceEpoch = 0;
     };
 #if defined(_MSC_VER)
 #pragma warning(pop)

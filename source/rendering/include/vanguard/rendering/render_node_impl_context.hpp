@@ -24,7 +24,7 @@ namespace vanguard::rendering
         LogicalResourceId resource;
         FrameResourceKind kind = FrameResourceKind::Invalid;
 
-        [[nodiscard]] bool IsValid() const noexcept { return key.flowSpace.IsValid() && !key.name.Empty(); }
+        [[nodiscard]] bool IsValid() const noexcept { return key.GetFlowSpace().IsValid() && !key.GetName().Empty(); }
     };
 
     struct RenderNodeResourceUseBinding
@@ -33,8 +33,22 @@ namespace vanguard::rendering
 
         FlowSpaceId flowSpace;
         containers::String name;
+        u32 lookupHash = 0;
         ResourceUseId use;
         FrameResourceKind kind = FrameResourceKind::Invalid;
+        u32 nextDuplicate = InvalidRenderFlowResourceIndex;
+        u32 resolvedIndex = InvalidRenderFlowResourceIndex;
+    };
+
+    struct RenderNodeResourceLookupGroup
+    {
+        u32 lookupHash = 0;
+        u32 firstUse = InvalidRenderFlowResourceIndex;
+        u32 lastUse = InvalidRenderFlowResourceIndex;
+        // Per-occurrence execution cursor. Lookup groups are built while the
+        // declaration is already walking this child and execute exactly once.
+        u32 runtimeNextUse = InvalidRenderFlowResourceIndex;
+        u32 nextBucketGroup = InvalidRenderFlowResourceIndex;
     };
 
     struct RenderNodeResourceDecisionBinding
@@ -48,6 +62,11 @@ namespace vanguard::rendering
         u32 useCount = 0;
         u32 firstDecision = 0;
         u32 decisionCount = 0;
+        u32 lookupBucketOffset = 0;
+        u32 lookupBucketCount = 0;
+        u32 lookupGroupOffset = 0;
+        u32 lookupGroupCount = 0;
+        CompiledExecutionRange execution;
     };
 
     // One frame-owned record per composed graph occurrence. A command-list
@@ -62,8 +81,13 @@ namespace vanguard::rendering
         containers::DynamicArray<RenderNodeResourceUseBinding> m_uses;
         containers::DynamicArray<RenderNodeResourceDecisionBinding> m_decisions;
         containers::DynamicArray<RenderNodeResourceRange> m_ranges;
+        containers::DynamicArray<u32> m_lookupBuckets;
+        containers::DynamicArray<RenderNodeResourceLookupGroup> m_lookupGroups;
+        containers::DynamicArray<ResolvedTextureUse> m_resolvedTextures;
+        containers::DynamicArray<ResolvedBufferUse> m_resolvedBuffers;
 
         friend struct RenderNodeImplContext;
+        friend class RenderNodeGraph;
     };
 
     class RenderNodeResourceBindings final
@@ -140,6 +164,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool HasFrameOutput() const noexcept;
         [[nodiscard]] rhi::TextureRef GetFrameOutputTexture() const noexcept;
         void RTImportFrameOutput() const noexcept;
+        void RTExportFrameOutput() const noexcept;
         [[nodiscard]] i32 GetCameraIndex() const noexcept { return m_cameraIndex; }
         [[nodiscard]] RenderFlowGroup GetRenderFlowGroup() const noexcept { return m_renderFlowGroup; }
         [[nodiscard]] RenderFlowSpace GetRenderFlowSpace() const noexcept { return m_renderFlowSpace; }
@@ -150,38 +175,38 @@ namespace vanguard::rendering
         [[nodiscard]] CommandScopeId GetCommandScope() const noexcept;
         [[nodiscard]] bool HasCommandList() const noexcept;
         [[nodiscard]] bool SubmitCommandLists(const char* scopeName, rhi::CommandListSyncType sync, jobs::Builder& builder) const noexcept;
-        [[nodiscard]] RenderFlowNameTag RTNameTag(containers::StringView name) const noexcept;
-        [[nodiscard]] static RenderFlowNameTag RTSharedNameTag(containers::StringView name) noexcept;
+        [[nodiscard]] RenderFlowNameTag RTNameTag(LogicalResourceName name) const noexcept;
+        [[nodiscard]] static RenderFlowNameTag RTSharedNameTag(LogicalResourceName name) noexcept;
         /// Compact prepared-family view index, never a persistent camera slot.
-        [[nodiscard]] static RenderFlowNameTag RTCameraNameTag(u32 viewIndex, containers::StringView name) noexcept;
-        [[nodiscard]] RenderFlowNameTag RTAlloc(containers::StringView name, const FrameTextureDesc& desc) const noexcept;
-        [[nodiscard]] RenderFlowNameTag RTAlloc(containers::StringView name, const FrameBufferDesc& desc) const noexcept;
-        [[nodiscard]] RenderFlowNameTag RTAlloc(containers::StringView name, const RenderFlowNameTag& desc) const noexcept;
-        [[nodiscard]] RenderFlowNameTag RTSharedAlloc(containers::StringView name, const FrameTextureDesc& desc) const noexcept;
-        [[nodiscard]] RenderFlowNameTag RTSharedAlloc(containers::StringView name, const FrameBufferDesc& desc) const noexcept;
+        [[nodiscard]] static RenderFlowNameTag RTCameraNameTag(u32 viewIndex, LogicalResourceName name) noexcept;
+        [[nodiscard]] RenderFlowNameTag RTAlloc(LogicalResourceName name, const FrameTextureDesc& desc) const noexcept;
+        [[nodiscard]] RenderFlowNameTag RTAlloc(LogicalResourceName name, const FrameBufferDesc& desc) const noexcept;
+        [[nodiscard]] RenderFlowNameTag RTAlloc(LogicalResourceName name, const RenderFlowNameTag& desc) const noexcept;
+        [[nodiscard]] RenderFlowNameTag RTSharedAlloc(LogicalResourceName name, const FrameTextureDesc& desc) const noexcept;
+        [[nodiscard]] RenderFlowNameTag RTSharedAlloc(LogicalResourceName name, const FrameBufferDesc& desc) const noexcept;
         [[nodiscard]] RenderFlowNameTag RTTempAlloc(containers::StringView name, const FrameTextureDesc& desc) const noexcept;
         [[nodiscard]] RenderFlowNameTag RTTempAlloc(containers::StringView name, const FrameBufferDesc& desc) const noexcept;
         [[nodiscard]] RenderFlowNameTag RTTempAlloc(containers::StringView name, const RenderFlowNameTag& desc) const noexcept;
         void RTImportPresentationOutput() const noexcept;
         // The frame coordinator registers the retained texture before declarations run.
-        [[nodiscard]] RenderFlowNameTag RTInject(containers::StringView name, ImportedResourceId imported) const noexcept;
-        [[nodiscard]] RenderFlowNameTag RTSharedInjectBuffer(containers::StringView name, ImportedResourceId imported) const noexcept;
+        [[nodiscard]] RenderFlowNameTag RTInject(LogicalResourceName name, ImportedResourceId imported) const noexcept;
+        [[nodiscard]] RenderFlowNameTag RTSharedInjectBuffer(LogicalResourceName name, ImportedResourceId imported) const noexcept;
         void RTUsePresentationOutput() const noexcept;
         [[nodiscard]] const ResolvedTextureUse& RTPresentationOutput() const noexcept;
         void RTUseBegin(const RenderFlowNameTag& tag, const TextureUseDesc& desc) const noexcept;
-        void RTUseBegin(containers::StringView name, const TextureUseDesc& desc) const noexcept { RTUseBegin(RTNameTag(name), desc); }
+        void RTUseBegin(LogicalResourceName name, const TextureUseDesc& desc) const noexcept { RTUseBegin(RTNameTag(name), desc); }
         void RTUseBegin(const RenderFlowNameTag& tag, const BufferUseDesc& desc) const noexcept;
-        void RTUseBegin(containers::StringView name, const BufferUseDesc& desc) const noexcept { RTUseBegin(RTNameTag(name), desc); }
+        void RTUseBegin(LogicalResourceName name, const BufferUseDesc& desc) const noexcept { RTUseBegin(RTNameTag(name), desc); }
         void RTUseEnd(const RenderFlowNameTag& tag) const noexcept;
-        void RTUseEnd(containers::StringView name) const noexcept { RTUseEnd(RTNameTag(name)); }
+        void RTUseEnd(LogicalResourceName name) const noexcept { RTUseEnd(RTNameTag(name)); }
         void RTSwap(const RenderFlowNameTag& left, const RenderFlowNameTag& right) const noexcept;
         [[nodiscard]] bool RTDecision(bool value) const noexcept;
         // Returned witnesses remain allocated for this occurrence, but become
         // invalid as soon as the concrete node's Process() call ends.
         [[nodiscard]] const ResolvedTextureUse& RTTexture(const RenderFlowNameTag& tag) const noexcept;
-        [[nodiscard]] const ResolvedTextureUse& RTTexture(containers::StringView name) const noexcept { return RTTexture(RTNameTag(name)); }
+        [[nodiscard]] const ResolvedTextureUse& RTTexture(LogicalResourceName name) const noexcept { return RTTexture(RTNameTag(name)); }
         [[nodiscard]] const ResolvedBufferUse& RTBuffer(const RenderFlowNameTag& tag) const noexcept;
-        [[nodiscard]] const ResolvedBufferUse& RTBuffer(containers::StringView name) const noexcept { return RTBuffer(RTNameTag(name)); }
+        [[nodiscard]] const ResolvedBufferUse& RTBuffer(LogicalResourceName name) const noexcept { return RTBuffer(RTNameTag(name)); }
     private:
         enum class Operation : u8
         {
@@ -227,15 +252,9 @@ namespace vanguard::rendering
         RenderNodeResources* m_nodeResources = nullptr;
         mutable u32 m_resourceRange = InvalidRenderFlowResourceIndex;
         mutable u32 m_nextResourceRange = 0;
-        mutable u32 m_nextResourceUse = 0;
         mutable u32 m_nextResourceDecision = 0;
         CompiledExecutionPacketView* m_executionPacket = nullptr;
         ExecutionPacketCursor* m_resourceCursor = nullptr;
-        mutable containers::DynamicArray<ResolvedTextureUse> m_resolvedTextures{memory::pools::Rendering::GetInstance()};
-        mutable containers::DynamicArray<ResolvedBufferUse> m_resolvedBuffers{memory::pools::Rendering::GetInstance()};
-        mutable containers::DynamicArray<ResourceUseId> m_resolvedUseOrder{memory::pools::Rendering::GetInstance()};
-        mutable containers::DynamicArray<u32> m_resolvedResourceIndices{memory::pools::Rendering::GetInstance()};
-        mutable containers::DynamicArray<u8> m_resourceLookups{memory::pools::Rendering::GetInstance()};
         Operation m_operation = Operation::None;
         friend class RenderNodeGraph;
         friend class RenderCameraStorage;

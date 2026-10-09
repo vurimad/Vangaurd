@@ -3,7 +3,7 @@
 ## Current scope status
 
 Geometry-rendering continuation: see the source-backed
-[RED batcher and phase study](../../../docs/development/geometry-rendering-study.md).
+[RED batcher and phase study](../../../docs/development/studies/geometry-rendering-study.md).
 The production surface/pass/vertex shader bridge belongs to 9B; existing material
 codegen, GPU Scene material accessors, runtime residency and pipeline caching are
 reused. Phase 10 supplies the actual mesh graph passes and scene-on-screen proof.

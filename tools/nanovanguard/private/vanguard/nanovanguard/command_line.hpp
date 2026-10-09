@@ -25,6 +25,47 @@ namespace vanguard::nanovanguard
         JsonLines
     };
 
+    enum class SemanticEventKind : u8
+    {
+        Status,
+        Progress,
+        Diagnostic,
+        Completed,
+        Failed,
+        Cancelled,
+        UsageError
+    };
+
+    enum class SemanticFieldKind : u8
+    {
+        String,
+        Unsigned,
+        Boolean
+    };
+
+    struct SemanticField
+    {
+        const char* name = nullptr;
+        SemanticFieldKind kind = SemanticFieldKind::String;
+        const char* stringValue = nullptr;
+        u64 unsignedValue = 0;
+        bool booleanValue = false;
+    };
+
+    inline constexpr u32 MaximumSemanticEventFields = 16;
+
+    struct SemanticEvent
+    {
+        SemanticEventKind event = SemanticEventKind::Status;
+        const char* operation = nullptr;
+        SemanticField fields[MaximumSemanticEventFields]{};
+        u32 fieldCount = 0;
+
+        [[nodiscard]] bool AddString(const char* name, const char* value) noexcept;
+        [[nodiscard]] bool AddUnsigned(const char* name, u64 value) noexcept;
+        [[nodiscard]] bool AddBoolean(const char* name, bool value) noexcept;
+    };
+
     enum class OptionValue : u8
     {
         None,
@@ -50,6 +91,9 @@ namespace vanguard::nanovanguard
         void* m_userData = nullptr;
         bool m_good = true;
     };
+
+    [[nodiscard]] const char* SemanticEventToken(SemanticEventKind event) noexcept;
+    [[nodiscard]] bool WriteSemanticEvent(Output& output, OutputFormat format, const SemanticEvent& event) noexcept;
 
     struct OptionDescriptor
     {

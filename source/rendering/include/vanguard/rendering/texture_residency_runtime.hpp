@@ -11,17 +11,18 @@ namespace vanguard::rendering
     {
         u32 index = InvalidTextureDemandIndex;
         u32 generation = 0;
+        u32 session = 0;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return index != InvalidTextureDemandIndex && generation != 0;
+            return index != InvalidTextureDemandIndex && generation != 0 && session != 0;
         }
     };
 
     class TextureResidencyRuntime;
 
-    /// One caller's move-only demand for the guaranteed mip tail of an exact loaded texture generation.
-    /// Destruction releases only this demand; equal callers remain coalesced on the same GPU residency identity.
+    /// One caller's move-only residency/quality demand for an exact loaded texture generation. Destruction releases
+    /// only this demand; equal callers remain coalesced on the same stable GPU residency identity.
     class TextureDemandHandle final
     {
     public:
@@ -58,6 +59,40 @@ namespace vanguard::rendering
         Retiring
     };
 
+    enum class TextureReplacementState : u8
+    {
+        None,
+        Uploading,
+        InstallationPending,
+        Failed
+    };
+
+    enum class TextureQualityState : u8
+    {
+        Stable,
+        Uploading,
+        Cancelling,
+        InstallationPending,
+        Failed
+    };
+
+    enum class TextureDemandPriority : u8
+    {
+        Background,
+        Streaming,
+        Interactive,
+        Focused,
+        Count
+    };
+
+    struct TextureDemandDesc
+    {
+        /// 0xffffffff requests the generation's guaranteed mip tail. Explicit mip values are clamped so the
+        /// guaranteed tail is always resident.
+        u32 firstResidentMip = 0xffffffffu;
+        TextureDemandPriority priority = TextureDemandPriority::Streaming;
+    };
+
     struct TextureRuntimeInfo
     {
         GpuTextureResidencyHandle residency;
@@ -66,6 +101,32 @@ namespace vanguard::rendering
         u32 demandCount = 0;
         TextureRuntimeState state = TextureRuntimeState::Invalid;
         TextureUploadFailure uploadFailure;
+        u32 currentFirstResidentMip = 0xffffffffu;
+        u32 desiredFirstResidentMip = 0xffffffffu;
+        u32 qualityTargetFirstResidentMip = 0xffffffffu;
+        TextureDemandPriority demandPriority = TextureDemandPriority::Streaming;
+        TextureQualityState qualityState = TextureQualityState::Stable;
+        bool qualitySatisfied = false;
+        bool qualityRetryRequired = false;
+        TextureUploadFailure qualityFailure;
+        u64 committedGpuBytes = 0;
+        u32 replacementResourceGeneration = 0;
+        TextureReplacementState replacementState = TextureReplacementState::None;
+        bool replacementRetryRequired = false;
+        TextureUploadFailure replacementFailure;
+    };
+
+    enum class TextureResidentLookupResult : u8
+    {
+        NotFound,
+        Found,
+        Ambiguous
+    };
+
+    struct TextureResidentResource
+    {
+        GpuTextureResidencyHandle residency;
+        u32 resourceGeneration = 0;
     };
 
     struct TextureResidencyRuntimeConfig
@@ -79,6 +140,18 @@ namespace vanguard::rendering
         u32 maximumTableInstallationsPerFrame = 64;
         /// Bounds runtime state/cancellation polling independently from the uploader's internal caps.
         u32 maximumStateChecksPerTick = 256;
+        /// Bounds new same-generation mip transition starts independently from initial texture delivery.
+        u32 maximumMipTransitionsPerTick = 16;
+        /// Number of residency-runtime ticks that a lower-quality aggregate target must remain stable before a
+        /// copy-only demotion is admitted. Promotions are never delayed by this hysteresis.
+        u32 mipDemotionHysteresisTicks = 8;
+        /// Soft logical budget for current committed texture installations. Initial availability and generation
+        /// replacement remain forward-progress operations; quality promotions are deferred while their projected
+        /// committed footprint would exceed this budget.
+        u64 maximumCommittedTextureGpuBytes = 4ull * 1024ull * 1024ull * 1024ull;
+        /// Aggregate physical GPU bytes retained by failed replacement candidates after ownership leaves
+        /// TextureUploader. Retained candidates are retried without a second upload while they fit this budget.
+        u64 maximumRetainedReplacementCandidateGpuBytes = 512ull * 1024ull * 1024ull;
     };
 
     enum class TextureResidencyRuntimeFailureCode : u8
@@ -91,6 +164,8 @@ namespace vanguard::rendering
         InvalidConfiguration,
         InvalidArgument,
         CapacityExceeded,
+        ReplacementBusy,
+        ReplacementRetryRequired,
         StaleDemand,
         LiveResidencyRemains,
         ResidencyFailure,
@@ -117,6 +192,14 @@ namespace vanguard::rendering
         u64 demandsCoalesced = 0;
         u64 demandsReleased = 0;
         u64 failedResidencies = 0;
+        u64 qualityTransitionsStarted = 0;
+        u64 qualityTransitionFailures = 0;
+        u64 qualityTransitionAdmissionDeferrals = 0;
+        u64 qualityPromotionBudgetDeferrals = 0;
+        u64 committedTextureGpuBytes = 0;
+        u64 reservedQualityPromotionGpuBytes = 0;
+        u64 peakCommittedTextureGpuBytes = 0;
+        u64 retainedReplacementCandidateGpuBytes = 0;
     };
 
     /// Renderer-global composition owner for stable texture identities and bounded physical upload work.
@@ -138,8 +221,27 @@ namespace vanguard::rendering
         [[nodiscard]] bool IsInitialized() const noexcept;
 
         /// Main-thread. Returns the real stable GPU residency identity immediately and coalesces only an
-        /// identical resource path and generation. The first demand queues the guaranteed mip-tail upload.
+        /// identical resource path and generation. The first demand queues the current aggregate quality target
+        /// directly; the generation's guaranteed mip tail remains the default when no explicit target is supplied.
         [[nodiscard]] bool RequestTexture(const resources::ResourceHandle& resource, TextureDemandHandle& demand, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// Main-thread explicit quality/urgency request. Quality and priority aggregate independently across all
+        /// live demands sharing the exact resource generation.
+        [[nodiscard]] bool RequestTexture(const resources::ResourceHandle& resource, const TextureDemandDesc& desc, TextureDemandHandle& demand,
+                                          TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// Main-thread atomic update of one live demand's quality and scheduling urgency.
+        [[nodiscard]] bool UpdateDemand(TextureDemandHandle& demand, const TextureDemandDesc& desc, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// Main-thread convenience update preserving the demand's existing scheduling urgency.
+        [[nodiscard]] bool SetDemandFirstResidentMip(TextureDemandHandle& demand, u32 firstResidentMip, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// Replaces the source generation behind an existing stable GPU texture
+        /// identity. The old CPU/GPU generation remains authoritative until the
+        /// renderer accepts the candidate's shared GPU Scene table update.
+        [[nodiscard]] bool ReplaceTexture(const resources::ResourceHandle& resource, GpuTextureResidencyHandle residency,
+                                          TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// Explicitly retries a failed same-generation replacement without
+        /// reloading the ResourceHandle. If upload already completed, the retained
+        /// candidate is re-admitted directly instead of re-uploading.
+        [[nodiscard]] bool RetryTextureReplacement(GpuTextureResidencyHandle residency,
+                                                   TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         /// Thread-safe explicit counterpart to TextureDemandHandle::Reset/destruction.
         [[nodiscard]] bool CancelDemand(TextureDemandHandle& demand, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
 
@@ -152,11 +254,28 @@ namespace vanguard::rendering
         }
 
         /// Main-thread immediately before renderer FrameTick dispatch. Freezes a bounded pending table batch
-        /// and stages it into the one shared GPU Scene transaction.
-        [[nodiscard]] bool StageGpuSceneContribution(GpuSceneRuntime& gpuScene, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// and stages it into the one shared GPU Scene transaction. The staged output is true only when this call
+        /// transferred a contribution into that transaction.
+        [[nodiscard]] bool StageGpuSceneContribution(GpuSceneRuntime& gpuScene, bool& staged, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool StageGpuSceneContribution(GpuSceneRuntime& gpuScene, TextureResidencyRuntimeFailure* failure = nullptr) noexcept
+        {
+            bool staged = false;
+            return StageGpuSceneContribution(gpuScene, staged, failure);
+        }
 
         [[nodiscard]] bool SealRetirements(const rhi::ResidencyFenceSet& safeAfter, TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] u32 CollectRetirements(TextureResidencyRuntimeFailure* failure = nullptr) noexcept;
+        /// Read-only lookup for an actively demanded bindless-ready generation of one texture path. Multiple live
+        /// generations are reported as ambiguous rather than selecting an arbitrary stable GPU identity.
+        [[nodiscard]] TextureResidentLookupResult FindResidentResource(resources::ResourcePath path, TextureResidentResource& output) const noexcept;
+        /// Read-only lookup for any actively demanded runtime record of one texture path, including loading and
+        /// replacement states. Multiple live records are ambiguous. This is the admission-safe counterpart to
+        /// FindResidentResource for callers that must not create a parallel same-path generation while one is loading.
+        [[nodiscard]] TextureResidentLookupResult FindDemandedResource(resources::ResourcePath path, TextureRuntimeInfo& output) const noexcept;
+        /// Read-only physical observation for a residency identity owned by this runtime. Runtime ownership is
+        /// validated before and after the lower residency-manager query so callers do not bypass QoS ownership.
+        [[nodiscard]] bool GetResidencyInfo(GpuTextureResidencyHandle residency, TextureResidencyInfo& info,
+                                            TextureResidencyRuntimeFailure* failure = nullptr) const noexcept;
         [[nodiscard]] bool GetInfo(GpuTextureResidencyHandle residency, TextureRuntimeInfo& info, TextureResidencyRuntimeFailure* failure = nullptr) const noexcept;
         [[nodiscard]] TextureResidencyRuntimeStats GetStats() const noexcept;
 
@@ -172,6 +291,7 @@ namespace vanguard::rendering
         TextureResidencyManager m_residency;
         TextureUploader m_uploader;
         Impl* m_impl = nullptr;
+        u32 m_session = 0;
 
         friend class TextureDemandHandle;
     };

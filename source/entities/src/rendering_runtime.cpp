@@ -95,6 +95,7 @@ namespace vanguard::entities
         {
             rendering::RenderProxyHandle proxy;
             u32 remainingFrames = 0;
+            u64 acceptedProgressEpoch = 0;
         };
 
         enum class DistantProxyPhase : u8
@@ -117,8 +118,7 @@ namespace vanguard::entities
 
         explicit Impl(const RenderingRuntimeConfig& config) noexcept
             : processingAdmissions(memory::pools::Rendering::GetInstance()),
-              pendingRetirements(memory::pools::Rendering::GetInstance()), distantProxies(memory::pools::Rendering::GetInstance()),
-              meshDrawPhases(memory::pools::Rendering::GetInstance())
+              pendingRetirements(memory::pools::Rendering::GetInstance()), distantProxies(memory::pools::Rendering::GetInstance())
         {
             admissionStorage = memory::Allocate(memory::PoolId::Rendering,
                                                 static_cast<usize>(config.maximumPendingProxyAdmissions) * sizeof(AdmissionSlot), alignof(AdmissionSlot));
@@ -133,9 +133,6 @@ namespace vanguard::entities
             for (u32 index = 0; index < admissionCapacity; ++index)
                 admissionSlots[index].nextFree = index + 1u < admissionCapacity ? index + 1u : ~0u;
             firstFreeAdmission = 0u;
-            meshDrawPhases.Reserve(config.meshDrawPhases.Count());
-            for (const auto& phase : config.meshDrawPhases)
-                meshDrawPhases.PushBack(phase);
         }
 
         ~Impl()
@@ -247,7 +244,6 @@ namespace vanguard::entities
         containers::DynamicArray<u32> processingAdmissions;
         containers::DynamicArray<PendingRetirement> pendingRetirements;
         containers::DynamicArray<DistantProxyInstance> distantProxies;
-        containers::DynamicArray<rendering::MeshDrawPhaseContext> meshDrawPhases;
         StaticMeshComponent* firstPendingMesh = nullptr;
         StaticMeshComponent* lastPendingMesh = nullptr;
         u32 pendingMeshCount = 0;
@@ -268,6 +264,8 @@ namespace vanguard::entities
         concurrency::Atomic<bool> relinkFailureClaimed{false};
         concurrency::Atomic<u64> relinkFailures{0};
         VisualRelinkFailure firstRelinkFailure;
+        u64 lastRetirementProgressEpoch = 0;
+        bool releaseOnly = false;
         bool ownsScene = false;
     };
 
@@ -280,7 +278,8 @@ namespace vanguard::entities
     {
         if (m_impl != nullptr)
         {
-            static_cast<void>(ReleaseScene());
+            if (m_impl->scene.IsValid())
+                VG_FATAL("RenderingRuntime destroyed before RenderScene release");
             VANGUARD_DELETE(m_impl);
             m_impl = nullptr;
         }
@@ -296,12 +295,27 @@ namespace vanguard::entities
 
     rendering::MeshResidencyManager* RenderingRuntime::GetMeshResidency() noexcept { return m_meshResidency; }
 
-    bool RenderingRuntime::BindCommands(rendering::RenderCommandSystem& commands, const rendering::RenderPhaseRegistry& phases) noexcept
+    bool RenderingRuntime::BindCommands(rendering::RenderCommandSystem& commands, const rendering::RenderPhaseRegistry& phases,
+                                        const rendering::RenderPhaseSet defaultCameraPhases) noexcept
     {
         if (m_impl != nullptr || !concurrency::IsMainThread())
             return false;
+        if (!defaultCameraPhases.Empty())
+        {
+            if (!phases.IsSealed())
+                return false;
+            const u64 bits = defaultCameraPhases.Bits();
+            for (u32 index = 0; index < rendering::MaximumRenderPhases; ++index)
+            {
+                if ((bits & (u64{1} << index)) == 0)
+                    continue;
+                rendering::RenderPhaseDefinition definition;
+                if (!phases.Get({static_cast<u8>(index)}, definition))
+                    return false;
+            }
+        }
         m_commands = &commands;
-        m_renderPhases = &phases;
+        m_defaultCameraPhases = defaultCameraPhases;
         return true;
     }
 
@@ -384,15 +398,9 @@ namespace vanguard::entities
         return succeeded;
     }
 
-    containers::ArraySpan<const rendering::MeshDrawPhaseContext> RenderingRuntime::GetMeshDrawPhases() const noexcept
-    {
-        return m_impl != nullptr ? containers::ArraySpan<const rendering::MeshDrawPhaseContext>{m_impl->meshDrawPhases.TypedData(), m_impl->meshDrawPhases.Size()}
-                                 : containers::ArraySpan<const rendering::MeshDrawPhaseContext>{};
-    }
-
     bool RenderingRuntime::QueueMeshPreparation(StaticMeshComponent& component) noexcept
     {
-        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || component.m_rendering != this)
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || m_impl->releaseOnly || component.m_rendering != this)
             return false;
         if (component.m_pending)
             return true;
@@ -472,33 +480,57 @@ namespace vanguard::entities
         return true;
     }
 
-    bool RenderingRuntime::HandleStreamingEvent(const world::StreamingResourceEvent& event) noexcept
+    bool RenderingRuntime::HandleStreamingEvent(const world::StreamingResourceEvent& event,
+                                                DistantProxyStreamingFailure* const failure) noexcept
     {
+        if (failure != nullptr)
+            *failure = {};
         if (!concurrency::IsMainThread() || event.key.kind != world::StreamingNodeKind::DistantProxy || m_impl == nullptr ||
             m_streamingWorld == nullptr || m_streamingExecutor == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {DistantProxyStreamingFailureCode::InvalidState, event.key, resources::Failure::None, {},
+                            "distant proxy streaming event has no active runtime owner"};
             return false;
+        }
         const world::DistantProxyRecord* const record = m_streamingWorld->FindDistantProxy(event.key.id);
         if (record == nullptr)
+        {
+            if (failure != nullptr)
+                *failure = {DistantProxyStreamingFailureCode::InvalidState, event.key, resources::Failure::None, {},
+                            "distant proxy streaming event references an unknown proxy"};
             return false;
+        }
         const u32 recordIndex = static_cast<u32>(record - m_streamingWorld->GetDistantProxies().Data());
         if (recordIndex >= m_impl->distantProxies.Size())
+        {
+            if (failure != nullptr)
+                *failure = {DistantProxyStreamingFailureCode::InvalidState, event.key, resources::Failure::None, {},
+                            "distant proxy streaming state is unavailable"};
             return false;
+        }
         Impl::DistantProxyInstance& instance = m_impl->distantProxies[recordIndex];
 
         if (event.type == world::StreamingResourceEventType::ResourceAvailable)
         {
+            if (m_impl->releaseOnly)
+                return true;
             const resources::ResourceHandle* const resource = m_streamingExecutor->GetResource(event.key);
             if (instance.phase != Impl::DistantProxyPhase::Inactive || resource == nullptr || !resource->IsValid() ||
                 resource->GetType() != meshes::MeshResourceType)
             {
                 static_cast<void>(m_streamingExecutor->FailResident(event.key, resources::Failure::InternalError));
                 ++m_impl->failedDistantProxies;
+                if (failure != nullptr)
+                    *failure = {DistantProxyStreamingFailureCode::Resource, event.key, resources::Failure::InternalError, {},
+                                "distant proxy resource publication is invalid"};
                 return false;
             }
 
             rendering::MeshProxyDesc desc;
             desc.proxy.producerId = record->proxyId;
             desc.proxy.producerGeneration = 1;
+            desc.proxy.debugName = "Distant proxy";
             desc.proxy.spatialMode = rendering::RenderProxySpatialMode::Bounds;
             desc.proxy.visibility = rendering::RenderProxyVisibilityFlags::Visible;
             const f64* const origin = m_streamingWorld->GetOrigin();
@@ -510,6 +542,9 @@ namespace vanguard::entities
                 {
                     static_cast<void>(m_streamingExecutor->FailResident(event.key, resources::Failure::DeserializationFailure));
                     ++m_impl->failedDistantProxies;
+                    if (failure != nullptr)
+                        *failure = {DistantProxyStreamingFailureCode::Resource, event.key, resources::Failure::DeserializationFailure, {},
+                                    "distant proxy bounds are invalid"};
                     return false;
                 }
             }
@@ -520,6 +555,9 @@ namespace vanguard::entities
             {
                 static_cast<void>(m_streamingExecutor->FailResident(event.key, resources::Failure::OutOfMemory));
                 ++m_impl->failedDistantProxies;
+                if (failure != nullptr)
+                    *failure = {DistantProxyStreamingFailureCode::Admission, event.key, resources::Failure::OutOfMemory, {},
+                                "distant proxy admission could not be queued"};
                 return false;
             }
             instance.resource = *resource;
@@ -530,25 +568,79 @@ namespace vanguard::entities
 
         if (event.type == world::StreamingResourceEventType::ReleaseRequested)
         {
+            if (m_impl->releaseOnly)
+            {
+                if (instance.phase == Impl::DistantProxyPhase::AdmissionPending)
+                {
+                    if (!CancelProxyAdmission(instance.admission))
+                    {
+                        if (failure != nullptr)
+                            *failure = {DistantProxyStreamingFailureCode::Admission, event.key, resources::Failure::None, {},
+                                        "distant proxy admission could not be cancelled during release"};
+                        return false;
+                    }
+                    instance.admission = {};
+                    instance.resource.Reset();
+                    instance.phase = Impl::DistantProxyPhase::Inactive;
+                }
+                if (instance.phase == Impl::DistantProxyPhase::Resident)
+                {
+                    instance.phase = Impl::DistantProxyPhase::ReleasePending;
+                    return true;
+                }
+                if (instance.phase == Impl::DistantProxyPhase::ReleasePending)
+                    return true;
+                if (instance.phase != Impl::DistantProxyPhase::Inactive || !m_streamingExecutor->CompleteRelease(event.key))
+                {
+                    if (failure != nullptr)
+                        *failure = {DistantProxyStreamingFailureCode::ReleaseAcknowledgement, event.key, resources::Failure::None, {},
+                                    "distant proxy release acknowledgement failed"};
+                    return false;
+                }
+                ++m_impl->releasedDistantProxies;
+                return true;
+            }
             if (instance.phase == Impl::DistantProxyPhase::AdmissionPending)
             {
                 if (!CancelProxyAdmission(instance.admission))
+                {
+                    if (failure != nullptr)
+                        *failure = {DistantProxyStreamingFailureCode::Admission, event.key, resources::Failure::None, {},
+                                    "distant proxy admission could not be cancelled"};
                     return false;
+                }
                 instance.admission = {};
             }
             else if (instance.phase == Impl::DistantProxyPhase::Resident)
             {
-                rendering::RenderSceneFailure failure;
-                if (!RetireProxy(instance.proxy, &failure))
+                rendering::RenderSceneFailure retirementFailure;
+                if (!RetireProxy(instance.proxy, &retirementFailure))
+                {
+                    if (failure != nullptr)
+                        *failure = {DistantProxyStreamingFailureCode::Retirement, event.key, resources::Failure::None,
+                                    retirementFailure,
+                                    retirementFailure.message != nullptr ? retirementFailure.message
+                                                                         : "distant proxy retirement could not be accepted"};
                     return false;
+                }
                 instance.proxy = {};
             }
             else
+            {
+                if (failure != nullptr)
+                    *failure = {DistantProxyStreamingFailureCode::InvalidState, event.key, resources::Failure::None, {},
+                                "distant proxy release request has no admitted ownership"};
                 return false;
+            }
 
             instance.phase = Impl::DistantProxyPhase::ReleasePending;
             if (!m_streamingExecutor->CompleteRelease(event.key))
+            {
+                if (failure != nullptr)
+                    *failure = {DistantProxyStreamingFailureCode::ReleaseAcknowledgement, event.key, resources::Failure::None, {},
+                                "distant proxy release acknowledgement failed"};
                 return false;
+            }
             instance.resource.Reset();
             instance.phase = Impl::DistantProxyPhase::Inactive;
             ++m_impl->releasedDistantProxies;
@@ -558,9 +650,280 @@ namespace vanguard::entities
         if (event.type == world::StreamingResourceEventType::ResourceFailed)
         {
             ++m_impl->failedDistantProxies;
-            return instance.phase == Impl::DistantProxyPhase::Inactive;
+            if (instance.phase == Impl::DistantProxyPhase::Inactive)
+                return true;
+            if (failure != nullptr)
+                *failure = {DistantProxyStreamingFailureCode::Resource, event.key, event.failure, {},
+                            "distant proxy resource failed after ownership was admitted"};
+            return false;
         }
-        return event.type == world::StreamingResourceEventType::RequestCancelled && instance.phase == Impl::DistantProxyPhase::Inactive;
+        if (event.type == world::StreamingResourceEventType::RequestCancelled && instance.phase == Impl::DistantProxyPhase::Inactive)
+            return true;
+        if (failure != nullptr)
+            *failure = {DistantProxyStreamingFailureCode::InvalidState, event.key, resources::Failure::None, {},
+                        "unexpected distant proxy streaming event state"};
+        return false;
+    }
+
+    bool RenderingRuntime::BeginReleaseOnly(RenderingReleaseFailure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid())
+        {
+            rendering::RenderSceneFailure sceneFailure;
+            static_cast<void>(Fail(&sceneFailure, rendering::RenderSceneFailureCode::InvalidState,
+                                   "RenderingRuntime release cutover requires an active scene on the owner thread",
+                                   m_impl != nullptr ? m_impl->scene : rendering::RenderSceneHandle{}));
+            if (failure != nullptr)
+                *failure = {RenderingReleaseFailureCode::Scene, sceneFailure, {}, sceneFailure.message};
+            return false;
+        }
+        m_impl->releaseOnly = true;
+
+        // Distant-proxy admissions are runtime-owned and can be cancelled here. Component
+        // admissions remain component-owned so their transactional detach observes the cutover.
+        for (Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+        {
+            if (instance.phase != Impl::DistantProxyPhase::AdmissionPending)
+                continue;
+            if (!CancelProxyAdmission(instance.admission))
+            {
+                const world::DistantProxyRecord& record = m_streamingWorld->GetDistantProxies()[instance.recordIndex];
+                DistantProxyStreamingFailure distantFailure{
+                    DistantProxyStreamingFailureCode::Admission,
+                    {record.proxyId, world::StreamingNodeKind::DistantProxy},
+                    resources::Failure::None,
+                    {},
+                    "distant proxy admission could not be cancelled at release cutover"};
+                if (failure != nullptr)
+                    *failure = {RenderingReleaseFailureCode::DistantProxy, {}, distantFailure, distantFailure.message};
+                return false;
+            }
+            instance.admission = {};
+            instance.resource.Reset();
+            instance.phase = Impl::DistantProxyPhase::Inactive;
+        }
+        return true;
+    }
+
+    bool RenderingRuntime::RequiresReleaseFrameTick() const noexcept
+    {
+        if (m_impl == nullptr || !m_impl->releaseOnly)
+            return false;
+        if (!m_impl->pendingRetirements.Empty())
+            return true;
+        for (const Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+            if (instance.phase == Impl::DistantProxyPhase::ReleasePending && instance.proxy.IsValid())
+                return true;
+        return false;
+    }
+
+    RenderingReleaseStatus RenderingRuntime::ProgressReleaseOnly(const u64 rendererProgressEpoch, const bool frameTickDispatched,
+                                                                 RenderingReleaseFailure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || !m_impl->releaseOnly)
+        {
+            rendering::RenderSceneFailure sceneFailure;
+            static_cast<void>(Fail(&sceneFailure, rendering::RenderSceneFailureCode::InvalidState,
+                                   "RenderingRuntime release progression requires an active release-only scene",
+                                   m_impl != nullptr ? m_impl->scene : rendering::RenderSceneHandle{}));
+            if (failure != nullptr)
+                *failure = {RenderingReleaseFailureCode::Scene, sceneFailure, {}, sceneFailure.message};
+            return RenderingReleaseStatus::Failed;
+        }
+
+        bool advanceRetirementEpoch = false;
+        if (frameTickDispatched)
+        {
+            if (rendererProgressEpoch == 0 || rendererProgressEpoch <= m_impl->lastRetirementProgressEpoch)
+            {
+                rendering::RenderSceneFailure sceneFailure;
+                static_cast<void>(Fail(&sceneFailure, rendering::RenderSceneFailureCode::InvalidState,
+                                       "renderer retirement progression received a non-monotonic progress epoch", m_impl->scene));
+                if (failure != nullptr)
+                    *failure = {RenderingReleaseFailureCode::Scene, sceneFailure, {}, sceneFailure.message};
+                return RenderingReleaseStatus::Failed;
+            }
+            m_impl->lastRetirementProgressEpoch = rendererProgressEpoch;
+            advanceRetirementEpoch = true;
+        }
+
+        bool stagedSceneMutation = false;
+        for (Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+        {
+            if (instance.phase != Impl::DistantProxyPhase::ReleasePending)
+                continue;
+            if (instance.proxy.IsValid())
+            {
+                rendering::RenderSceneFailure retirementFailure;
+                if (!RetireProxy(instance.proxy, &retirementFailure))
+                {
+                    if (retirementFailure.code == rendering::RenderSceneFailureCode::Busy ||
+                        retirementFailure.code == rendering::RenderSceneFailureCode::PendingDestroy)
+                        continue;
+                    const world::DistantProxyRecord& record = m_streamingWorld->GetDistantProxies()[instance.recordIndex];
+                    DistantProxyStreamingFailure distantFailure{DistantProxyStreamingFailureCode::Retirement,
+                                                                {record.proxyId, world::StreamingNodeKind::DistantProxy},
+                                                                resources::Failure::None, retirementFailure,
+                                                                retirementFailure.message};
+                    if (failure != nullptr)
+                        *failure = {RenderingReleaseFailureCode::DistantProxy, {}, distantFailure, distantFailure.message};
+                    return RenderingReleaseStatus::Failed;
+                }
+                instance.proxy = {};
+            }
+            const world::DistantProxyRecord& record = m_streamingWorld->GetDistantProxies()[instance.recordIndex];
+            const world::StreamingNodeKey key{record.proxyId, world::StreamingNodeKind::DistantProxy};
+            if (!m_streamingExecutor->CompleteRelease(key))
+            {
+                DistantProxyStreamingFailure distantFailure{DistantProxyStreamingFailureCode::ReleaseAcknowledgement, key,
+                                                            resources::Failure::None, {},
+                                                            "distant proxy release acknowledgement failed"};
+                if (failure != nullptr)
+                    *failure = {RenderingReleaseFailureCode::DistantProxy, {}, distantFailure, distantFailure.message};
+                return RenderingReleaseStatus::Failed;
+            }
+            instance.resource.Reset();
+            instance.phase = Impl::DistantProxyPhase::Inactive;
+            ++m_impl->releasedDistantProxies;
+        }
+
+        for (u32 index = m_impl->pendingRetirements.Size(); index > 0; --index)
+        {
+            Impl::PendingRetirement& retirement = m_impl->pendingRetirements[index - 1u];
+            if (advanceRetirementEpoch && retirement.remainingFrames != 0 &&
+                retirement.acceptedProgressEpoch < rendererProgressEpoch)
+                --retirement.remainingFrames;
+            if (retirement.remainingFrames != 0)
+                continue;
+
+            rendering::RenderSceneFailure destroyFailure;
+            if (!m_scenes->DestroyProxy(retirement.proxy, &destroyFailure))
+            {
+                if (destroyFailure.code == rendering::RenderSceneFailureCode::Busy ||
+                    destroyFailure.code == rendering::RenderSceneFailureCode::PendingDestroy)
+                    continue;
+                if (failure != nullptr)
+                    *failure = {RenderingReleaseFailureCode::Scene, destroyFailure, {}, destroyFailure.message};
+                return RenderingReleaseStatus::Failed;
+            }
+            const u32 last = m_impl->pendingRetirements.Size() - 1u;
+            if (index - 1u != last)
+                m_impl->pendingRetirements[index - 1u] = m_impl->pendingRetirements[last];
+            static_cast<void>(m_impl->pendingRetirements.PopBack());
+            ++m_impl->retiredProxies;
+            stagedSceneMutation = true;
+        }
+
+        bool distantPending = false;
+        for (const Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+            distantPending |= instance.phase != Impl::DistantProxyPhase::Inactive;
+        return stagedSceneMutation || !m_impl->pendingRetirements.Empty() || distantPending || m_impl->queuedAdmissionCount != 0 ||
+                       m_impl->pendingMeshCount != 0 || m_impl->dirtyCameraCount.GetValue() != 0
+                   ? RenderingReleaseStatus::Pending
+                   : RenderingReleaseStatus::Complete;
+    }
+
+    RenderingReleaseStatus RenderingRuntime::AbandonDeviceReleaseOnly(RenderingReleaseFailure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || !m_impl->releaseOnly)
+        {
+            rendering::RenderSceneFailure sceneFailure;
+            static_cast<void>(Fail(&sceneFailure, rendering::RenderSceneFailureCode::InvalidState,
+                                   "device-loss release terminalization requires an active release-only scene",
+                                   m_impl != nullptr ? m_impl->scene : rendering::RenderSceneHandle{}));
+            if (failure != nullptr)
+                *failure = {RenderingReleaseFailureCode::Scene, sceneFailure, {}, sceneFailure.message};
+            return RenderingReleaseStatus::Failed;
+        }
+
+        // These queues belong to still-live component owners and must already have
+        // been consumed by the terminal Component/Transform synchronization boundary.
+        // Device loss removes GPU waits; it does not authorize dropping CPU owners.
+        if (m_impl->pendingMeshCount != 0 || m_impl->dirtyCameraCount.GetValue() != 0 || m_impl->queuedAdmissionCount != 0)
+        {
+            rendering::RenderSceneFailure sceneFailure;
+            static_cast<void>(Fail(&sceneFailure, rendering::RenderSceneFailureCode::InvalidState,
+                                   "device-loss release reached renderer terminalization with live component-owned work", m_impl->scene));
+            if (failure != nullptr)
+                *failure = {RenderingReleaseFailureCode::Scene, sceneFailure, {}, sceneFailure.message};
+            return RenderingReleaseStatus::Failed;
+        }
+
+        bool pending = false;
+        for (Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+        {
+            if (instance.phase != Impl::DistantProxyPhase::ReleasePending)
+                continue;
+            if (instance.proxy.IsValid())
+            {
+                rendering::RenderSceneFailure destroyFailure;
+                if (!m_scenes->DestroyProxy(instance.proxy, &destroyFailure))
+                {
+                    if (destroyFailure.code == rendering::RenderSceneFailureCode::Busy ||
+                        destroyFailure.code == rendering::RenderSceneFailureCode::PendingDestroy)
+                    {
+                        pending = true;
+                        continue;
+                    }
+                    const world::DistantProxyRecord& record = m_streamingWorld->GetDistantProxies()[instance.recordIndex];
+                    DistantProxyStreamingFailure distantFailure{DistantProxyStreamingFailureCode::Retirement,
+                                                                {record.proxyId, world::StreamingNodeKind::DistantProxy},
+                                                                resources::Failure::None, destroyFailure, destroyFailure.message};
+                    if (failure != nullptr)
+                        *failure = {RenderingReleaseFailureCode::DistantProxy, {}, distantFailure, distantFailure.message};
+                    return RenderingReleaseStatus::Failed;
+                }
+                instance.proxy = {};
+                ++m_impl->retiredProxies;
+            }
+            const world::DistantProxyRecord& record = m_streamingWorld->GetDistantProxies()[instance.recordIndex];
+            const world::StreamingNodeKey key{record.proxyId, world::StreamingNodeKind::DistantProxy};
+            if (!m_streamingExecutor->CompleteRelease(key))
+            {
+                DistantProxyStreamingFailure distantFailure{DistantProxyStreamingFailureCode::ReleaseAcknowledgement, key,
+                                                            resources::Failure::None, {},
+                                                            "device-loss distant proxy release acknowledgement failed"};
+                if (failure != nullptr)
+                    *failure = {RenderingReleaseFailureCode::DistantProxy, {}, distantFailure, distantFailure.message};
+                return RenderingReleaseStatus::Failed;
+            }
+            instance.resource.Reset();
+            instance.phase = Impl::DistantProxyPhase::Inactive;
+            ++m_impl->releasedDistantProxies;
+        }
+
+        for (u32 index = m_impl->pendingRetirements.Size(); index > 0; --index)
+        {
+            const rendering::RenderProxyHandle proxy = m_impl->pendingRetirements[index - 1u].proxy;
+            rendering::RenderSceneFailure destroyFailure;
+            if (!m_scenes->DestroyProxy(proxy, &destroyFailure))
+            {
+                if (destroyFailure.code == rendering::RenderSceneFailureCode::Busy ||
+                    destroyFailure.code == rendering::RenderSceneFailureCode::PendingDestroy)
+                {
+                    pending = true;
+                    continue;
+                }
+                if (failure != nullptr)
+                    *failure = {RenderingReleaseFailureCode::Scene, destroyFailure, {}, destroyFailure.message};
+                return RenderingReleaseStatus::Failed;
+            }
+            const u32 last = m_impl->pendingRetirements.Size() - 1u;
+            if (index - 1u != last)
+                m_impl->pendingRetirements[index - 1u] = m_impl->pendingRetirements[last];
+            static_cast<void>(m_impl->pendingRetirements.PopBack());
+            ++m_impl->retiredProxies;
+        }
+
+        for (const Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+            pending |= instance.phase != Impl::DistantProxyPhase::Inactive;
+        return pending || !m_impl->pendingRetirements.Empty() ? RenderingReleaseStatus::Pending : RenderingReleaseStatus::Complete;
     }
 
     bool RenderingRuntime::DestroyProxy(const rendering::RenderProxyHandle proxy, rendering::RenderSceneFailure* const failure) noexcept
@@ -576,7 +939,7 @@ namespace vanguard::entities
     bool RenderingRuntime::QueueProxyAdmission(rendering::RenderProxyDesc desc, const ProxyAdmissionSink& sink,
                                                 ProxyAdmissionHandle& admission) noexcept
     {
-        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() ||
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || m_impl->releaseOnly ||
             !m_impl->AllocateAdmission(Impl::AdmissionKind::Proxy, sink, admission))
             return false;
         desc.scene = m_impl->scene;
@@ -587,7 +950,7 @@ namespace vanguard::entities
     bool RenderingRuntime::QueueProxyAdmission(rendering::MeshProxyDesc desc, const ProxyAdmissionSink& sink,
                                                 ProxyAdmissionHandle& admission) noexcept
     {
-        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() ||
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || m_impl->releaseOnly ||
             !m_impl->AllocateAdmission(Impl::AdmissionKind::Mesh, sink, admission))
             return false;
         desc.proxy.scene = m_impl->scene;
@@ -598,7 +961,7 @@ namespace vanguard::entities
     bool RenderingRuntime::QueueProxyAdmission(rendering::LightProxyDesc desc, const ProxyAdmissionSink& sink,
                                                 ProxyAdmissionHandle& admission) noexcept
     {
-        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() ||
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || m_impl->releaseOnly ||
             !m_impl->AllocateAdmission(Impl::AdmissionKind::Light, sink, admission))
             return false;
         desc.proxy.scene = m_impl->scene;
@@ -609,7 +972,7 @@ namespace vanguard::entities
     bool RenderingRuntime::QueueProxyAdmission(rendering::DecalProxyDesc desc, const ProxyAdmissionSink& sink,
                                                 ProxyAdmissionHandle& admission) noexcept
     {
-        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() ||
+        if (!concurrency::IsMainThread() || m_impl == nullptr || !m_impl->scene.IsValid() || m_impl->releaseOnly ||
             !m_impl->AllocateAdmission(Impl::AdmissionKind::Decal, sink, admission))
             return false;
         desc.proxy.scene = m_impl->scene;
@@ -642,7 +1005,7 @@ namespace vanguard::entities
                         proxy);
         if (!m_scenes->BeginProxyRetirement(proxy, failure))
             return false;
-        m_impl->pendingRetirements.PushBack({proxy, m_config.proxyRetirementDelayFrames});
+        m_impl->pendingRetirements.PushBack({proxy, m_config.proxyRetirementDelayFrames, m_impl->lastRetirementProgressEpoch});
         return true;
     }
 
@@ -694,6 +1057,32 @@ namespace vanguard::entities
         ClearFailure(failure);
         if (m_impl == nullptr || !m_impl->scene.IsValid())
             return true;
+        if (m_impl->releaseOnly)
+        {
+            if (m_impl->pendingMeshCount != 0 || m_impl->dirtyCameraCount.GetValue() != 0 || m_impl->queuedAdmissionCount != 0 ||
+                !m_impl->pendingRetirements.Empty())
+                return Fail(failure, rendering::RenderSceneFailureCode::Busy,
+                            "RenderingRuntime scene release is waiting for world-owned renderer work", m_impl->scene);
+            for (const Impl::DistantProxyInstance& instance : m_impl->distantProxies)
+                if (instance.phase != Impl::DistantProxyPhase::Inactive)
+                    return Fail(failure, rendering::RenderSceneFailureCode::ProxiesRemainAlive,
+                                "RenderingRuntime scene release is waiting for distant proxy release", m_impl->scene, instance.proxy);
+            if (m_impl->relinkFailureClaimed.GetValue())
+                return Fail(failure, rendering::RenderSceneFailureCode::InvalidState,
+                            "RenderingRuntime has an unconsumed transform-worker relink failure", m_impl->scene);
+            if (m_impl->ownsScene && !m_scenes->DestroyScene(m_impl->scene, failure))
+                return false;
+            m_impl->scene = {};
+            m_impl->transforms = nullptr;
+            m_impl->ownsScene = false;
+            m_impl->releaseOnly = false;
+            m_impl->lastRetirementProgressEpoch = 0;
+            m_impl->admissionFailureClaimed = false;
+            m_impl->firstAdmissionFailure = {};
+            m_impl->retirementFailureClaimed = false;
+            m_impl->firstRetirementFailure = {};
+            return true;
+        }
         // Components must cancel their borrowed queue nodes before scene teardown.
         if (m_impl->pendingMeshCount != 0 || m_impl->dirtyCameraCount.GetValue() != 0)
             return Fail(failure, rendering::RenderSceneFailureCode::InvalidState,
@@ -779,22 +1168,10 @@ namespace vanguard::entities
         if (m_config.maximumPendingProxyAdmissions == 0 || m_config.maximumProxyAdmissionsPerFrame == 0 ||
             m_config.maximumProxyAdmissionsPerFrame > m_config.maximumPendingProxyAdmissions || m_config.maximumPendingProxyRetirements == 0 ||
             m_config.maximumPendingCameraTransforms == 0 || m_config.maximumPendingMeshPreparations == 0 || m_config.maximumMeshPreparationsPerFrame == 0 ||
-            m_config.maximumMeshPreparationsPerFrame > m_config.maximumPendingMeshPreparations ||
-            (!m_config.meshDrawPhases.Empty() && (m_config.meshDrawPhases.Data() == nullptr || m_meshResidency == nullptr)))
+            m_config.maximumMeshPreparationsPerFrame > m_config.maximumPendingMeshPreparations)
             return false;
-        if (m_config.meshDrawPhases.Count() > rendering::MaximumRenderPhases)
-            return false;
-        for (u32 index = 0; index < m_config.meshDrawPhases.Count(); ++index)
-        {
-            const auto phase = m_config.meshDrawPhases[index].phase;
-            if (!phase.IsValid() || (m_renderPhases != nullptr && !m_renderPhases->Find(phase).IsValid()))
-                return false;
-            for (u32 previous = 0; previous < index; ++previous)
-                if (m_config.meshDrawPhases[previous].phase == phase)
-                    return false;
-        }
         m_impl = VANGUARD_NEW(Impl)(m_config);
-        if (m_impl == nullptr || !m_impl->HasAdmissionStorage() || m_impl->meshDrawPhases.Size() != m_config.meshDrawPhases.Count())
+        if (m_impl == nullptr || !m_impl->HasAdmissionStorage())
         {
             if (m_impl != nullptr)
                 VANGUARD_DELETE(m_impl);
@@ -835,9 +1212,18 @@ namespace vanguard::entities
         return true;
     }
 
-    void RenderingRuntime::OnUninitialize(game::GameWorld&) noexcept
+    void RenderingRuntime::OnUninitialize(game::GameWorld& world) noexcept
     {
-        static_cast<void>(ReleaseScene());
+        if (m_impl == nullptr || !m_impl->scene.IsValid())
+            return;
+        if (!world.IsInitialized())
+        {
+            rendering::RenderSceneFailure failure;
+            if (!ReleaseScene(&failure))
+                VG_FATAL("RenderingRuntime initialization rollback failed to release its RenderScene");
+            return;
+        }
+        VG_FATAL("RenderingRuntime uninitialized before RenderScene release");
     }
 
     void RenderingRuntime::OnBeginFrame(game::GameWorld&, const f32) noexcept

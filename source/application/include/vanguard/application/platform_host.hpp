@@ -93,6 +93,30 @@ namespace vanguard::application
         const char* message = nullptr;
     };
 
+    enum class PlatformFileDialogOutcome : u8
+    {
+        Selected,
+        Cancelled,
+        Error
+    };
+
+    struct PlatformFileDialogResultView
+    {
+        PlatformFileDialogOutcome outcome = PlatformFileDialogOutcome::Cancelled;
+        const char* const* paths = nullptr;
+        u32 pathCount = 0;
+        // Borrowed callback-lifetime diagnostic text. Consumers that need it
+        // after the callback returns must copy it before returning.
+        const char* error = nullptr;
+    };
+
+    struct PlatformOpenFileDialogRequest
+    {
+        bool allowMultiple = false;
+    };
+
+    using PlatformFileDialogCallback = void (*)(void* userData, const PlatformFileDialogResultView& result) noexcept;
+
     class IPlatformHost
     {
     public:
@@ -102,6 +126,10 @@ namespace vanguard::application
         IPlatformHost& operator=(const IPlatformHost&) = delete;
 
         [[nodiscard]] virtual const char* GetName() const noexcept = 0;
+        // Stable UTF-8 process image path for the active platform host. Products may
+        // derive immutable application-owned resource roots from this path; they must
+        // not use the process current-working-directory for executable-relative data.
+        [[nodiscard]] virtual const char* GetExecutablePath() const noexcept { return nullptr; }
         [[nodiscard]] virtual PlatformStatus Initialize(const PlatformStartupInfo& startup) noexcept = 0;
         [[nodiscard]] virtual PlatformPumpResult PumpEvents() noexcept = 0;
         [[nodiscard]] virtual input::IInputBackend* GetInputBackend() noexcept
@@ -111,6 +139,26 @@ namespace vanguard::application
         [[nodiscard]] virtual window::IWindowBackend* GetWindowBackend() noexcept
         {
             return nullptr;
+        }
+        // Portable asynchronous native-file-dialog submission. The platform owns
+        // native UI and may invoke the callback on any thread. Every pointer in
+        // PlatformFileDialogResultView is borrowed only for the callback duration.
+        // Product/editor layers must copy selected paths before returning. A
+        // successful submission owns exactly one future callback (which may be
+        // synchronous); a failed submission owns no callback and the caller may
+        // reclaim callback userData immediately.
+        [[nodiscard]] virtual PlatformStatus ShowOpenFileDialog(const PlatformOpenFileDialogRequest&,
+                                                                PlatformFileDialogCallback,
+                                                                void*) noexcept
+        {
+            return PlatformStatus::Failure("native open-file dialogs are unsupported by this platform");
+        }
+        // Reveals one existing UTF-8 file in the platform's native file manager.
+        // Product/editor callers retain ownership of the path. Implementations may
+        // require the platform/main thread because this is user-visible native UI.
+        [[nodiscard]] virtual PlatformStatus RevealFileLocation(const char*) noexcept
+        {
+            return PlatformStatus::Failure("revealing file locations is unsupported by this platform");
         }
         [[nodiscard]] virtual bool AttachWindowEventSink(window::IWindowEventSink*) noexcept
         {

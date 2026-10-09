@@ -52,6 +52,70 @@ namespace vanguard::serialization
         }
     };
 
+    enum class TextErrorCode : u8
+    {
+        None,
+        InvalidUtf8,
+        InvalidHeader,
+        ExpectedAssignment,
+        ExpectedQuotedValue,
+        UnterminatedQuotedValue,
+        UnexpectedTrailingText,
+        InvalidEscape,
+        AllocationFailed
+    };
+
+    struct TextFailure
+    {
+        TextErrorCode code = TextErrorCode::None;
+        u32 line = 0;
+        u32 column = 0;
+    };
+
+    struct TextDocumentHeader
+    {
+        containers::StringView kind;
+        Version version;
+        u32 line = 0;
+    };
+
+    struct TextAssignment
+    {
+        containers::StringView key;
+        containers::StringView encodedValue;
+        u32 line = 0;
+        u32 valueColumn = 0;
+    };
+
+    [[nodiscard]] bool IsValidUtf8(containers::StringView text) noexcept;
+    [[nodiscard]] bool IsValidTextKey(containers::StringView key) noexcept;
+
+    class TextDocumentReader final
+    {
+    public:
+        explicit TextDocumentReader(containers::StringView source) noexcept;
+
+        [[nodiscard]] bool IsUtf8Valid() const noexcept;
+        [[nodiscard]] Result ReadHeader(TextDocumentHeader& header, TextFailure* failure = nullptr) noexcept;
+        [[nodiscard]] Result ReadAssignment(TextAssignment& assignment, containers::String& decodedValue,
+                                            TextFailure* failure = nullptr) noexcept;
+
+    private:
+        [[nodiscard]] bool NextContentLine(containers::StringView& line, u32& lineNumber) noexcept;
+
+        containers::StringView m_source;
+        u32 m_offset = 0;
+        u32 m_line = 0;
+        bool m_utf8Valid = false;
+        bool m_headerRead = false;
+    };
+
+    [[nodiscard]] Result DecodeTextString(containers::StringView encoded, containers::String& decoded) noexcept;
+    [[nodiscard]] Result AppendTextDocumentHeader(containers::String& destination, containers::StringView kind,
+                                                  Version version) noexcept;
+    [[nodiscard]] Result AppendTextAssignment(containers::String& destination, containers::StringView key,
+                                              containers::StringView value) noexcept;
+
     class BinaryReader final
     {
     public:

@@ -813,6 +813,13 @@ namespace vanguard::rendering
         return m_impl != nullptr ? m_impl->GetState(allocation) : GpuSceneAllocationState::Invalid;
     }
 
+    u32 GpuSceneLifetime::GetTraversalExtent(const GpuSceneTableKind table) const noexcept
+    {
+        if (m_impl == nullptr || !IsValidTable(table) || !UsesIndividualSlots(table))
+            return 0;
+        return m_impl->GetTable(table).nextUnusedSlot;
+    }
+
     GpuSceneTableLifetimeStats GpuSceneLifetime::GetTableStats(const GpuSceneTableKind table) const noexcept
     {
         return m_impl != nullptr && IsValidTable(table) ? m_impl->GetTable(table).stats : GpuSceneTableLifetimeStats{};

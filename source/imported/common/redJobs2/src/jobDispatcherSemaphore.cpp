@@ -35,8 +35,12 @@ void DispatcherSemaphore::SetSpinCount( Int32 spinCount )
 	m_spinCount = spinCount;
 }
 
-void DispatcherSemaphore::Acquire()
+void DispatcherSemaphore::Acquire( Bool* optUsedKernelWait )
 {
+	if ( optUsedKernelWait )
+	{
+		*optUsedKernelWait = false;
+	}
 	red::profiler::SyncPrepare( this );
 
 	Int32 spinCount = m_spinCount;
@@ -55,6 +59,10 @@ void DispatcherSemaphore::Acquire()
 	if ( curVal < 0 )
 	{
 		// Slow path
+		if ( optUsedKernelWait )
+		{
+			*optUsedKernelWait = true;
+		}
 		m_numThreadsWaiting.Acquire();
 	}
 
@@ -75,8 +83,12 @@ Bool DispatcherSemaphore::TryAcquire()
 	return false;
 }
 
-void DispatcherSemaphore::Release( Int32 releaseCount /*= 1 */ )
+void DispatcherSemaphore::Release( Int32 releaseCount /*= 1 */, Int32* optNumThreadsWoken )
 {
+	if ( optNumThreadsWoken )
+	{
+		*optNumThreadsWoken = 0;
+	}
 	red::profiler::SyncReleasing( this );
 
 	// Any releaseCount has to first be used for waking threads trying to Acquire() the kernel-semaphore, since once they wake they won't check the count again
@@ -88,6 +100,10 @@ void DispatcherSemaphore::Release( Int32 releaseCount /*= 1 */ )
 	{
 		const Int32 numWaitingThreads = -oldVal;
 		const Int32 numThreadsToWake = std::min< Int32 >( releaseCount, numWaitingThreads );
+		if ( optNumThreadsWoken )
+		{
+			*optNumThreadsWoken = numThreadsToWake;
+		}
 		m_numThreadsWaiting.Release( numThreadsToWake );
 	}
 }

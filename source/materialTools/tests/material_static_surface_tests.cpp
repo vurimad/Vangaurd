@@ -88,13 +88,14 @@ namespace vanguard::material_tools::tests
             description.shaders = {&reference, 1};
             description.vertexStreams = streams;
             description.vertexAttributes = attributes;
-            description.graphics.blend.attachmentCount = depth ? 0 : 3;
-            description.graphics.attachmentPolicy = pipelines::AttachmentPolicy::Exact;
-            description.graphics.exactAttachments.colorCount = depth ? 0 : 3;
-            for (u32 index = 0; index < description.graphics.exactAttachments.colorCount; ++index)
-                description.graphics.exactAttachments.colors[index] = {pipelines::Format::R16G16B16A16Float, shaders::NumericClass::FloatingPoint};
-            description.graphics.exactAttachments.depthStencilFormat = pipelines::Format::D32Float;
-            description.graphics.exactAttachments.depthStencilClass = pipelines::DepthStencilClass::Depth;
+            // MaterialTools owns a portable VPPL fixture, not renderer target/depth policy.
+            // Keep concrete formats and depth convention renderer-owned; the native
+            // engine proof supplies the selected renderer's canonical attachments.
+            const u32 fragmentOutputCount = shader.GetFragmentOutputs().Size();
+            if ((depth && fragmentOutputCount != 0) || (!depth && fragmentOutputCount == 0))
+                return false;
+            description.graphics.blend.attachmentCount = fragmentOutputCount;
+            description.graphics.attachmentPolicy = pipelines::AttachmentPolicy::Deferred;
             filesystem::MemoryFileWriter pipelineWriter(pipelineBytes);
             const auto writeResult = pipelines::WritePipeline(pipelineWriter, description);
             if (writeResult != pipelines::Result::Success)

@@ -9,7 +9,7 @@ namespace
     using namespace vanguard;
     namespace mt = vanguard::material_tools;
 
-    constexpr u32 MaterialIrSchemaVersion = 3;
+    constexpr u32 MaterialIrSchemaVersion = 4;
 
     [[nodiscard]] bool IsNumeric(const mt::MaterialIrType& type) noexcept
     {
@@ -939,7 +939,12 @@ namespace vanguard::material_tools
     MaterialIrResult MaterialIrBuilder::AddValue(const MaterialIrValueBuildDescription& description, MaterialIrValueId& id) noexcept
     {
         id = InvalidMaterialIrValue;
+        const u8 resourceFlags = static_cast<u8>(description.resourceFlags);
+        constexpr u8 knownResourceFlags = static_cast<u8>(shaders::MaterialResourceFlags::Required);
+        const bool resourceParameter = description.kind == MaterialIrValueKind::DynamicParameter &&
+                                       description.type.kind >= MaterialIrTypeKind::Texture && description.type.kind <= MaterialIrTypeKind::AccelerationStructure;
         if (description.legalStages == 0 || description.kind > MaterialIrValueKind::DomainInput || description.opcode > MaterialIrOpcode::TextureSample ||
+            (resourceFlags & ~knownResourceFlags) != 0 || (description.resourceFlags != shaders::MaterialResourceFlags::None && !resourceParameter) ||
             (!description.data.Empty() && description.data.Data() == nullptr) || m_operands.Size() > 0xffffffffu - description.operands.Size() || m_data.Size() > 0xffffffffu - description.data.Size())
             return MaterialIrResult::InvalidArgument;
 
@@ -949,6 +954,7 @@ namespace vanguard::material_tools
         value.type = description.type;
         value.legalStages = description.legalStages;
         value.semantic = description.semantic;
+        value.resourceFlags = description.resourceFlags;
         value.sourceNode = description.sourceNode;
         value.sourcePin = description.sourcePin;
         value.firstOperand = m_operands.Size();
@@ -1125,7 +1131,8 @@ namespace vanguard::material_tools
             const MaterialIrValue& current = m_values[parameters[index]];
             if (previous.semantic != current.semantic)
                 continue;
-            bool identical = previous.kind == current.kind && previous.type == current.type && previous.legalStages == current.legalStages && previous.dataSize == current.dataSize;
+            bool identical = previous.kind == current.kind && previous.type == current.type && previous.legalStages == current.legalStages &&
+                             previous.resourceFlags == current.resourceFlags && previous.dataSize == current.dataSize;
             for (u32 byte = 0; identical && byte < current.dataSize; ++byte)
                 identical = m_data[previous.dataOffset + byte] == m_data[current.dataOffset + byte];
             if (!identical)
@@ -1279,6 +1286,7 @@ namespace vanguard::material_tools
             UpdateType(builder, value.type);
             UpdateU32(builder, value.legalStages);
             UpdateU64(builder, value.semantic);
+            UpdateU8(builder, static_cast<u8>(value.resourceFlags));
             UpdateU32(builder, value.operandCount);
             for (u32 operandIndex = 0; operandIndex < value.operandCount; ++operandIndex)
             {
@@ -1339,7 +1347,8 @@ namespace vanguard::material_tools
             {
                 const MaterialIrValue& candidate = module.m_values[candidateId];
                 if (candidate.structuralFingerprint != source.structuralFingerprint || candidate.kind != source.kind || candidate.opcode != source.opcode || !(candidate.type == source.type) ||
-                    candidate.legalStages != source.legalStages || candidate.semantic != source.semantic || candidate.operandCount != compactOperands.Size() || candidate.dataSize != source.dataSize)
+                    candidate.legalStages != source.legalStages || candidate.semantic != source.semantic || candidate.resourceFlags != source.resourceFlags ||
+                    candidate.operandCount != compactOperands.Size() || candidate.dataSize != source.dataSize)
                 {
                     collisionTail = candidateId;
                     candidateId = structuralNext[candidateId];

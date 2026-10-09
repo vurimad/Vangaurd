@@ -2,7 +2,11 @@
 
 `.vworld` is the immutable global index for a cooked world. It deliberately contains no component payloads, Flecs entity IDs, renderer objects or source-asset paths. Those belong to `.vcell`, `.vprefab`, the renderer and the editor asset database respectively.
 
-The document uses Vanguard's deterministic section envelope, CRC64 storage validation and SHA-256 logical-content fingerprint. Version 1.0 contains one `WRLD` section with four canonical tables: cells sorted by stable cell ID, distant proxies sorted by stable proxy ID, replacement children sorted by `(proxy ID, kind, child ID)`, and typed soft dependencies sorted by resource key. Input ordering therefore cannot change cooked bytes.
+The document uses Vanguard's deterministic section envelope, CRC64 storage validation and SHA-256 logical-content fingerprint. Version 2.0 contains one `WRLD` section with an optional durable startup-camera locator plus four canonical tables: cells sorted by stable cell ID, distant proxies sorted by stable proxy ID, replacement children sorted by `(proxy ID, kind, child ID)`, and typed soft dependencies sorted by resource key. Input ordering therefore cannot change cooked bytes. Version 1.0/body 1 is intentionally unsupported after this pre-shipping format advance and must be recooked; there is no migration interpretation that silently treats an old world as camera-less.
+
+## Startup camera locator
+
+The optional startup camera is stored only in `.vworld` as `(cellId, entityId, componentStableId)`. The all-zero tuple is the sole absent representation. A present locator requires all three values to be nonzero, the named cell to exist in the cooked world, and that cell to carry `AlwaysLoaded`. Runtime `ComponentHandle`, `RenderCameraHandle`, pointers, renderer slots and viewport IDs are never serialized. The world format does not scan component payloads or duplicate the locator into package metadata or `.vproject`; cross-resource validation that the named entity/component is authored for initial/default activation belongs to the world build recipe and is revalidated against live materialization by the engine.
 
 ## Cell hierarchy
 

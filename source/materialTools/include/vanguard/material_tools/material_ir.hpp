@@ -212,6 +212,7 @@ namespace vanguard::material_tools
         MaterialIrType type;
         shaders::StageMask legalStages = 0;
         u64 semantic = 0;
+        shaders::MaterialResourceFlags resourceFlags = shaders::MaterialResourceFlags::None;
         u64 sourceNode = 0;
         u32 sourcePin = 0;
         containers::ArraySpan<const MaterialIrValueId> operands;
@@ -234,6 +235,7 @@ namespace vanguard::material_tools
         shaders::StageMask legalStages = 0;
         shaders::StageMask requiredStages = 0;
         u64 semantic = 0;
+        shaders::MaterialResourceFlags resourceFlags = shaders::MaterialResourceFlags::None;
         u64 sourceNode = 0;
         u32 sourcePin = 0;
         u32 firstOperand = 0;

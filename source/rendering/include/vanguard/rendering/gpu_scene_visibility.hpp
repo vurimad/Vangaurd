@@ -9,7 +9,6 @@ namespace vanguard::rendering
 {
     inline constexpr u32 GpuVisibilityThreadsPerGroup = 128;
     inline constexpr u32 MaximumGpuVisibilityViews = MaximumRenderViews;
-    inline constexpr u32 GpuGeometryWorkMirrored = 1u << 0u;
     using GpuGeometryIndirectArguments = rhi::IndirectDrawIndexedArguments;
 
     /// One compute workgroup consumes one range. candidateCount never exceeds
@@ -54,28 +53,8 @@ namespace vanguard::rendering
         u32 placementRevision = 0;
     };
 
-    /// One bounded expansion group consumes at most GpuVisibilityThreadsPerGroup
-    /// entries from one view-owned visible partition.
-    struct alignas(16) GpuGeometryExpansionWorkRange
-    {
-        u32 visibleOrdinal = 0;
-        u32 visibleCount = 0;
-        u32 resultIndex = InvalidGpuSceneIndex;
-        u32 prefixBlockIndex = InvalidGpuSceneIndex;
-    };
-
-    /// Count writes the first two lanes. The block-prefix stages assign the
-    /// final two lanes, giving scatter a disjoint range with no append atomic.
-    struct alignas(16) GpuGeometryExpansionItem
-    {
-        u32 validWorkCount = 0;
-        u32 rejectedWorkCount = 0;
-        u32 outputOffset = 0;
-        u32 outputCapacity = 0;
-    };
-
-    /// Validated primitive/phase work. Binning consumes shell/bin and writes
-    /// instance/primitive/geometry/material to MeshDrawInstance.
+    /// Validated primitive/phase work. Sparse expansion appends only actual
+    /// work and records the bin-local ordinal needed by the final scatter.
     struct alignas(16) GpuGeometryWork
     {
         u32 instance = InvalidGpuSceneIndex;
@@ -86,7 +65,7 @@ namespace vanguard::rendering
         u32 phase = InvalidGpuSceneIndex;
         u32 shell = InvalidGpuSceneIndex;
         u32 bin = InvalidGpuSceneIndex;
-        u32 flags = 0;
+        u32 binOrdinal = InvalidGpuSceneIndex;
     };
 
     /// One CPU-reserved partition per view. Bin ordinals are direct GeometryBin
@@ -103,10 +82,10 @@ namespace vanguard::rendering
         u32 argumentOffset = 0;
         u32 argumentCapacity = 0;
 
-        u32 expansionBlockOffset = 0;
-        u32 expansionBlockCount = 0;
-        u32 binBlockOffset = 0;
-        u32 binBlockCount = 0;
+        u32 activeBinOffset = 0;
+        u32 activeBinCapacity = 0;
+        u32 reserved0 = 0;
+        u32 reserved1 = 0;
     };
 
     /// Requested values retain the full GPU count. Emitted values are clamped
@@ -136,93 +115,29 @@ namespace vanguard::rendering
         u32 instanceCapacity = 0;
     };
 
-    /// Capacity-derived work over one view partition. It is shared by bin count
-    /// and instance scatter, both of which clamp to emittedWorkCount.
-    struct alignas(16) GpuGeometryWorkRange
+    /// Sparse expansion consumes the compact visible partitions directly. All
+    /// views use one capacity policy, so no CPU-authored expansion ranges exist.
+    struct alignas(16) GpuGeometryExpandConstants
     {
-        u32 workOrdinal = 0;
-        u32 workCount = 0;
-        u32 resultIndex = InvalidGpuSceneIndex;
-        u32 reserved = 0;
-    };
-
-    struct alignas(16) GpuGeometryPrefixWorkRange
-    {
-        u32 itemOrdinal = 0;
-        u32 itemCount = 0;
-        u32 resultIndex = InvalidGpuSceneIndex;
-        u32 prefixBlockIndex = InvalidGpuSceneIndex;
-    };
-
-    struct alignas(16) GpuGeometryPrefixBlock
-    {
-        u32 requestedCount = 0;
-        u32 rejectedCount = 0;
-        u32 outputOffset = 0;
-        u32 outputCapacity = 0;
-    };
-
-    struct alignas(16) GpuGeometryPrefixConstants
-    {
+        u32 tableDirectoryDescriptor = InvalidGpuDescriptorIndex;
+        u32 pageDirectoryDescriptor = InvalidGpuDescriptorIndex;
+        u32 visibleDescriptor = InvalidGpuDescriptorIndex;
         u32 visibilityResultDescriptor = InvalidGpuDescriptorIndex;
+
         u32 visibilityCounterDescriptor = InvalidGpuDescriptorIndex;
-        u32 itemDescriptor = InvalidGpuDescriptorIndex;
-        u32 resultDescriptor = InvalidGpuDescriptorIndex;
-
-        u32 counterDescriptor = InvalidGpuDescriptorIndex;
-        u32 expansionRangeDescriptor = InvalidGpuDescriptorIndex;
-        u32 binRangeDescriptor = InvalidGpuDescriptorIndex;
-        u32 binItemDescriptor = InvalidGpuDescriptorIndex;
-
-        u32 prefixBlockDescriptor = InvalidGpuDescriptorIndex;
-        u32 expansionRangeCount = 0;
-        u32 binRangeCount = 0;
-        u32 resultCount = 0;
-
-        u32 layoutVersion = GpuSceneLayoutVersion;
-        u32 reserved0 = 0;
-        u32 reserved1 = 0;
-        u32 reserved2 = 0;
-
-        [[nodiscard]] constexpr bool IsValid() const noexcept
-        {
-            return visibilityResultDescriptor != InvalidGpuDescriptorIndex &&
-                   visibilityCounterDescriptor != InvalidGpuDescriptorIndex && itemDescriptor != InvalidGpuDescriptorIndex &&
-                   resultDescriptor != InvalidGpuDescriptorIndex && counterDescriptor != InvalidGpuDescriptorIndex && resultCount != 0 &&
-                   expansionRangeDescriptor != InvalidGpuDescriptorIndex && binRangeDescriptor != InvalidGpuDescriptorIndex &&
-                   binItemDescriptor != InvalidGpuDescriptorIndex && prefixBlockDescriptor != InvalidGpuDescriptorIndex &&
-                   expansionRangeCount != 0 && binRangeCount != 0 &&
-                   layoutVersion == GpuSceneLayoutVersion;
-        }
-    };
-
-    /// Shared contract for bin count and instance scatter. All offsets are
-    /// resolved through per-view results; indirect generation has its own inputs.
-    struct alignas(16) GpuGeometryBinningConstants
-    {
+        u32 viewDescriptor = InvalidGpuDescriptorIndex;
         u32 workDescriptor = InvalidGpuDescriptorIndex;
-        u32 workRangeDescriptor = InvalidGpuDescriptorIndex;
         u32 resultDescriptor = InvalidGpuDescriptorIndex;
-        u32 counterDescriptor = InvalidGpuDescriptorIndex;
 
+        u32 counterDescriptor = InvalidGpuDescriptorIndex;
         u32 binItemDescriptor = InvalidGpuDescriptorIndex;
-        u32 instanceDescriptor = InvalidGpuDescriptorIndex;
-        u32 workRangeCount = 0;
+        u32 activeBinDescriptor = InvalidGpuDescriptorIndex;
         u32 resultCount = 0;
 
+        u32 visibleCapacityPerResult = 0;
         u32 layoutVersion = GpuSceneLayoutVersion;
         u32 reserved0 = 0;
         u32 reserved1 = 0;
-        u32 reserved2 = 0;
-
-        [[nodiscard]] constexpr bool IsValid() const noexcept
-        {
-            return workDescriptor != InvalidGpuDescriptorIndex && workRangeDescriptor != InvalidGpuDescriptorIndex &&
-                   resultDescriptor != InvalidGpuDescriptorIndex && counterDescriptor != InvalidGpuDescriptorIndex &&
-                   binItemDescriptor != InvalidGpuDescriptorIndex && instanceDescriptor != InvalidGpuDescriptorIndex &&
-                   workRangeCount != 0 && resultCount != 0 &&
-                   layoutVersion == GpuSceneLayoutVersion;
-        }
     };
 
     /// Frame addresses only. The batcher retains pipeline/arena ownership.
@@ -248,73 +163,64 @@ namespace vanguard::rendering
         u32 reserved1 = 0;
     };
 
-    struct alignas(16) GpuGeometryIndirectConstants
+    struct alignas(16) GpuGeometryInitializeConstants
     {
-        u32 tableDirectoryDescriptor = InvalidGpuDescriptorIndex;
-        u32 pageDirectoryDescriptor = InvalidGpuDescriptorIndex;
-        u32 resultDescriptor = InvalidGpuDescriptorIndex;
-        u32 binItemDescriptor = InvalidGpuDescriptorIndex;
         u32 shellPlanDescriptor = InvalidGpuDescriptorIndex;
         u32 shellRangeDescriptor = InvalidGpuDescriptorIndex;
         u32 shellCounterDescriptor = InvalidGpuDescriptorIndex;
-        u32 argumentDescriptor = InvalidGpuDescriptorIndex;
-        u32 binRangeDescriptor = InvalidGpuDescriptorIndex;
-        u32 binRangeCount = 0;
+        u32 counterDescriptor = InvalidGpuDescriptorIndex;
+
         u32 shellPlanCount = 0;
         u32 shellCapacity = 0;
-        u32 counterDescriptor = InvalidGpuDescriptorIndex;
         u32 resultCount = 0;
         u32 layoutVersion = GpuSceneLayoutVersion;
-        u32 reserved = 0;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return tableDirectoryDescriptor != InvalidGpuDescriptorIndex && pageDirectoryDescriptor != InvalidGpuDescriptorIndex &&
-                   resultDescriptor != InvalidGpuDescriptorIndex && binItemDescriptor != InvalidGpuDescriptorIndex &&
-                   shellPlanDescriptor != InvalidGpuDescriptorIndex && shellRangeDescriptor != InvalidGpuDescriptorIndex &&
-                   shellCounterDescriptor != InvalidGpuDescriptorIndex && argumentDescriptor != InvalidGpuDescriptorIndex &&
-                   binRangeDescriptor != InvalidGpuDescriptorIndex && counterDescriptor != InvalidGpuDescriptorIndex &&
-                   resultCount != 0 && binRangeCount != 0 && shellCapacity != 0 &&
+            return shellPlanDescriptor != InvalidGpuDescriptorIndex && shellRangeDescriptor != InvalidGpuDescriptorIndex &&
+                   shellCounterDescriptor != InvalidGpuDescriptorIndex && counterDescriptor != InvalidGpuDescriptorIndex &&
+                   resultCount != 0 && shellCapacity != 0 &&
                    static_cast<u64>(resultCount) * shellCapacity < InvalidGpuSceneIndex &&
                    static_cast<u64>(shellPlanCount) * sizeof(GpuGeometryShellCounters) <= 0xffffffffull &&
                    layoutVersion == GpuSceneLayoutVersion;
         }
     };
 
-    /// Shared descriptor contract for the count and scatter expansion entries.
-    /// Dispatch ranges are capacity-derived on the CPU; each shader thread still
-    /// clamps itself to the GPU-produced visible count for its result partition.
-    struct alignas(16) GpuGeometryExpansionConstants
+    /// Active-bin allocation visits only bins touched by sparse expansion and
+    /// emits one counted-indirect argument per valid nonempty bin.
+    struct alignas(16) GpuGeometryAllocateConstants
     {
         u32 tableDirectoryDescriptor = InvalidGpuDescriptorIndex;
         u32 pageDirectoryDescriptor = InvalidGpuDescriptorIndex;
-        u32 visibleDescriptor = InvalidGpuDescriptorIndex;
-        u32 visibilityResultDescriptor = InvalidGpuDescriptorIndex;
+        u32 resultDescriptor = InvalidGpuDescriptorIndex;
+        u32 counterDescriptor = InvalidGpuDescriptorIndex;
 
-        u32 visibilityCounterDescriptor = InvalidGpuDescriptorIndex;
-        u32 workRangeDescriptor = InvalidGpuDescriptorIndex;
-        u32 itemDescriptor = InvalidGpuDescriptorIndex;
-        u32 workDescriptor = InvalidGpuDescriptorIndex;
+        u32 binItemDescriptor = InvalidGpuDescriptorIndex;
+        u32 activeBinDescriptor = InvalidGpuDescriptorIndex;
+        u32 shellRangeDescriptor = InvalidGpuDescriptorIndex;
+        u32 shellCounterDescriptor = InvalidGpuDescriptorIndex;
 
-        u32 viewDescriptor = InvalidGpuDescriptorIndex;
-        u32 workRangeCount = 0;
+        u32 argumentDescriptor = InvalidGpuDescriptorIndex;
+        u32 resultCount = 0;
+        u32 shellCapacity = 0;
+        u32 shellPlanCount = 0;
+
         u32 layoutVersion = GpuSceneLayoutVersion;
         u32 reserved0 = 0;
-
         u32 reserved1 = 0;
         u32 reserved2 = 0;
-        u32 reserved3 = 0;
-        u32 reserved4 = 0;
+    };
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept
-        {
-            return tableDirectoryDescriptor != InvalidGpuDescriptorIndex && pageDirectoryDescriptor != InvalidGpuDescriptorIndex &&
-                   visibleDescriptor != InvalidGpuDescriptorIndex && visibilityResultDescriptor != InvalidGpuDescriptorIndex &&
-                   visibilityCounterDescriptor != InvalidGpuDescriptorIndex && workRangeDescriptor != InvalidGpuDescriptorIndex &&
-                   itemDescriptor != InvalidGpuDescriptorIndex && workDescriptor != InvalidGpuDescriptorIndex &&
-                   viewDescriptor != InvalidGpuDescriptorIndex && workRangeCount != 0 &&
-                   layoutVersion == GpuSceneLayoutVersion;
-        }
+    struct alignas(16) GpuGeometryScatterConstants
+    {
+        u32 workDescriptor = InvalidGpuDescriptorIndex;
+        u32 resultDescriptor = InvalidGpuDescriptorIndex;
+        u32 counterDescriptor = InvalidGpuDescriptorIndex;
+        u32 binItemDescriptor = InvalidGpuDescriptorIndex;
+        u32 instanceDescriptor = InvalidGpuDescriptorIndex;
+        u32 resultCount = 0;
+        u32 workCapacityPerResult = 0;
+        u32 layoutVersion = GpuSceneLayoutVersion;
     };
 
     /// The GPU-visibility service supplies these descriptor indices as push constants when its graph
@@ -323,30 +229,30 @@ namespace vanguard::rendering
     {
         u32 tableDirectoryDescriptor = InvalidGpuDescriptorIndex;
         u32 pageDirectoryDescriptor = InvalidGpuDescriptorIndex;
-        u32 candidateDescriptor = InvalidGpuDescriptorIndex;
-        u32 workRangeDescriptor = InvalidGpuDescriptorIndex;
-
         u32 viewDescriptor = InvalidGpuDescriptorIndex;
         u32 resultRangeDescriptor = InvalidGpuDescriptorIndex;
+
         u32 visibleDescriptor = InvalidGpuDescriptorIndex;
         u32 counterDescriptor = InvalidGpuDescriptorIndex;
+        u32 sceneIndex = InvalidGpuSceneIndex;
+        u32 sceneGeneration = 0;
 
-        u32 workRangeCount = 0;
+        u32 instanceTraversalExtent = 0;
+        u32 viewCount = 0;
         u32 instanceTable = 0;
         u32 renderableTable = 2;
-        u32 layoutVersion = GpuSceneLayoutVersion;
 
+        u32 layoutVersion = GpuSceneLayoutVersion;
         f32 worldCellSize = 0.0f;
         u32 reserved0 = 0;
         u32 reserved1 = 0;
-        u32 reserved2 = 0;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
             return tableDirectoryDescriptor != InvalidGpuDescriptorIndex && pageDirectoryDescriptor != InvalidGpuDescriptorIndex &&
-                   candidateDescriptor != InvalidGpuDescriptorIndex && workRangeDescriptor != InvalidGpuDescriptorIndex &&
                    viewDescriptor != InvalidGpuDescriptorIndex && resultRangeDescriptor != InvalidGpuDescriptorIndex &&
-                   visibleDescriptor != InvalidGpuDescriptorIndex && counterDescriptor != InvalidGpuDescriptorIndex && workRangeCount != 0 &&
+                   visibleDescriptor != InvalidGpuDescriptorIndex && counterDescriptor != InvalidGpuDescriptorIndex &&
+                   sceneIndex != InvalidGpuSceneIndex && sceneGeneration != 0 && viewCount != 0 &&
                    layoutVersion == GpuSceneLayoutVersion && worldCellSize > 0.0f;
         }
     };
@@ -390,10 +296,15 @@ namespace vanguard::rendering
         containers::ArraySpan<const GpuVisibilityResultRange> results;
         u32 visibleCapacity = 0;
         u32 counterCount = 0;
+        u32 sceneIndex = InvalidGpuSceneIndex;
+        u32 sceneGeneration = 0;
+        u32 instanceTraversalExtent = 0;
 
         [[nodiscard]] constexpr bool IsValid() const noexcept
         {
-            return frameSerial != 0 && views.Size() == results.Size() && counterCount == results.Size() && (!workRanges.Empty() || candidates.Empty());
+            const bool directInstanceTraversal = sceneIndex != InvalidGpuSceneIndex && sceneGeneration != 0;
+            return frameSerial != 0 && views.Size() == results.Size() && counterCount == results.Size() &&
+                   (directInstanceTraversal || !workRanges.Empty() || candidates.Empty());
         }
     };
 
@@ -461,21 +372,16 @@ namespace vanguard::rendering
     static_assert(sizeof(GpuVisibilityResultRange) == 16);
     static_assert(sizeof(GpuVisibilityCounters) == 16);
     static_assert(sizeof(GpuVisibleInstance) == 16);
-    static_assert(sizeof(GpuGeometryExpansionWorkRange) == 16);
-    static_assert(sizeof(GpuGeometryExpansionItem) == 16);
     static_assert(sizeof(GpuGeometryWork) == 32);
     static_assert(sizeof(GpuGeometryResultRange) == 48);
     static_assert(sizeof(GpuGeometryCounters) == 32);
     static_assert(sizeof(GpuGeometryBinItem) == 16);
-    static_assert(sizeof(GpuGeometryWorkRange) == 16);
-    static_assert(sizeof(GpuGeometryPrefixWorkRange) == 16);
-    static_assert(sizeof(GpuGeometryPrefixBlock) == 16);
-    static_assert(sizeof(GpuGeometryPrefixConstants) == 64);
-    static_assert(sizeof(GpuGeometryBinningConstants) == 48);
+    static_assert(sizeof(GpuGeometryExpandConstants) == 64);
     static_assert(sizeof(GpuGeometryIndirectArguments) == 20);
     static_assert(sizeof(GpuGeometryShellRange) == 32);
     static_assert(sizeof(GpuGeometryShellCounters) == 16);
-    static_assert(sizeof(GpuGeometryIndirectConstants) == 64);
-    static_assert(sizeof(GpuGeometryExpansionConstants) == 64);
+    static_assert(sizeof(GpuGeometryInitializeConstants) == 32);
+    static_assert(sizeof(GpuGeometryAllocateConstants) == 64);
+    static_assert(sizeof(GpuGeometryScatterConstants) == 32);
     static_assert(sizeof(GpuVisibilityConstants) == 64);
 } // namespace vanguard::rendering

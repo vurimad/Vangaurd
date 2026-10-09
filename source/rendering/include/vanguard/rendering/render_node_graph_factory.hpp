@@ -47,7 +47,8 @@ namespace vanguard::rendering
         // that group rather than adding graph occurrences. Only one group may
         // be open at a time; nesting is rejected.
         RenderNodeGraph::ItemId BeginCommandListGroup(NodeGroupId groupId, RenderNodeType type, RenderNodeSubtype subtype, const char* name,
-                                                       rhi::CommandListType commandListType = rhi::CommandListType::Default);
+                                                       rhi::CommandListType commandListType = rhi::CommandListType::Default, u64 commandListRole = 0,
+                                                       rhi::CommandListRetentionPolicy retentionPolicy = rhi::CommandListRetentionPolicy::Default);
         void EndCommandListGroup();
 
         void Link(RenderNodeGraph::ItemId parent, RenderNodeGraph::ItemId child, RenderNodeDependencyType dependencyType);
@@ -120,6 +121,7 @@ namespace vanguard::rendering
 #define RENDER_COMMAND_LIST(groupId, name) factory.BeginCommandListGroup(groupId, ::vanguard::rendering::RenderNodeType::Stage, ::vanguard::rendering::RenderNodeSubtype(0), name); if (auto scopedCommandList = ::vanguard::rendering::ScopedCloseCommandList(factory))
 #define COMPUTE_COMMAND_LIST(groupId, name) factory.BeginCommandListGroup(groupId, ::vanguard::rendering::RenderNodeType::Stage, ::vanguard::rendering::RenderNodeSubtype(0), name, ::vanguard::rhi::CommandListType::Compute); if (auto scopedCommandList = ::vanguard::rendering::ScopedCloseCommandList(factory))
 #define RENDER_UNIQUE_COMMAND_LIST(groupId, subtype, name) factory.BeginCommandListGroup(groupId, ::vanguard::rendering::RenderNodeType::Unique, ::vanguard::rendering::RenderNodeSubtype(subtype), name); if (auto scopedCommandList = ::vanguard::rendering::ScopedCloseCommandList(factory))
+#define RENDER_UNIQUE_BOUNDED_UPLOAD_COMMAND_LIST(groupId, subtype, name, role) factory.BeginCommandListGroup(groupId, ::vanguard::rendering::RenderNodeType::Unique, ::vanguard::rendering::RenderNodeSubtype(subtype), name, ::vanguard::rhi::CommandListType::Default, role, ::vanguard::rhi::CommandListRetentionPolicy::BoundedUploadReuse); if (auto scopedCommandList = ::vanguard::rendering::ScopedCloseCommandList(factory))
 #define ADD_SUBNODE(name, impl, ...) scopedCommandList.factory.Create<impl>(::vanguard::rendering::NodeGroupId::None, ::vanguard::rendering::RenderNodeType::Stage, ::vanguard::rendering::RenderNodeSubtype(0), ##__VA_ARGS__)
 
 #define RENDER_SIMPLE_COMMAND_LIST(groupId, name, impl, ...) RENDER_COMMAND_LIST(groupId, name) { ADD_SUBNODE(name, impl, ##__VA_ARGS__); }

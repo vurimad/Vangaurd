@@ -3,6 +3,7 @@
 #include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/jobs/jobs.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/profiling/profiling.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/system/assert.hpp>
 
@@ -22,7 +23,8 @@ namespace vanguard::rendering
                 Reset();
             }
 
-            [[nodiscard]] bool Initialize(const u32 count) noexcept
+            template <typename DebugUserDataProvider>
+            [[nodiscard]] bool Initialize(const u32 count, DebugUserDataProvider&& debugUserDataProvider) noexcept
             {
                 if (count == 0)
                     return true;
@@ -32,7 +34,8 @@ namespace vanguard::rendering
                 m_builders = static_cast<jobs::Builder*>(m_block.address);
                 for (; m_count < count; ++m_count)
                 {
-                    jobs::Builder* const builder = new (m_builders + m_count) jobs::Builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker});
+                    jobs::Builder* const builder = new (m_builders + m_count)
+                        jobs::Builder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker}, debugUserDataProvider(m_count));
                     if (!builder->IsValid())
                     {
                         ++m_count;
@@ -99,6 +102,7 @@ namespace vanguard::rendering
                                           const jobs::JobContext& setupContext, jobs::Task&& completion,
                                           RenderFlowResourceFailure* const failure) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("RenderGraph/ScheduleNodes");
         if (failure != nullptr)
             *failure = {};
         const u32 nodeCount = graph.m_nodes.GetNumItems();
@@ -192,6 +196,7 @@ namespace vanguard::rendering
                 RenderNodeImpl* const impl = node->m_renderNodeParameters.m_impl;
                 if (impl == nullptr)
                     return;
+                VG_PROFILE_ZONE_DYNAMIC_VALUE(impl->GetName(), reinterpret_cast<std::uintptr_t>(entryPointer));
                 // Setup failures are published before kickoff; no recording has begun for this occurrence.
                 if (entryPointer->executionFailure.code != RenderFlowResourceFailureCode::None)
                     return;
@@ -224,7 +229,11 @@ namespace vanguard::rendering
 
         RenderNodeBuilderStorage nodeBuilders;
         jobs::Builder finishBuilder(setupContext);
-        if (!nodeBuilders.Initialize(nodeCount) || !finishBuilder.IsValid())
+        if (!nodeBuilders.Initialize(nodeCount, [&](const u32 index) noexcept -> const void*
+            {
+                return &resourceBindings.m_entries[index];
+            }) ||
+            !finishBuilder.IsValid())
         {
             if (failure != nullptr)
             {

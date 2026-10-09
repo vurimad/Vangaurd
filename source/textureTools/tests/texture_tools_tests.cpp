@@ -1,3 +1,4 @@
+#include "../../../tests/support/scratch_directory.hpp"
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/jobs/jobs.hpp>
@@ -159,7 +160,7 @@ int main()
     Check(diagnostics::Initialize(diagnostics::Mode::Synchronous, "textureToolsTests"), "diagnostics initialization");
     Check(containers::Initialize(), "containers initialization");
     Check(io::Initialize(), "I/O initialization");
-    const filesystem::AbsolutePath root = filesystem::paths::GetCurrentWorkingDirectory();
+    const filesystem::AbsolutePath root = vanguard::tests::ScratchDirectory("texture_tools_tests");
     Check(filesystem::Initialize({root, root, root}), "filesystem initialization");
     Check(tt::Initialize(), "texture tools initialization");
     const tt::TextureCookingProfile bc2Profile{
@@ -445,7 +446,7 @@ int main()
 
     ByteArray jpegEncoded(memory::pools::Assets::GetInstance());
     const filesystem::AbsolutePath jpegFixture =
-        root.AddDirPath("source").AddDirPath("textureTools").AddDirPath("tests").AddDirPath("data").AddFilePath("libjpeg_rgb.jpg");
+        filesystem::paths::GetCurrentWorkingDirectory().AddDirPath("source").AddDirPath("textureTools").AddDirPath("tests").AddDirPath("data").AddFilePath("libjpeg_rgb.jpg");
     Check(filesystem::LoadFileToBuffer(jpegFixture, jpegEncoded), "load JPEG conformance fixture through Vanguard filesystem");
     tt::ImportedTexture jpegImported;
     tt::TextureImportReport jpegReport;
@@ -678,6 +679,52 @@ int main()
     vanguard::jobs::Config jobsConfig = vanguard::jobs::ToolConfig();
     jobsConfig.maxWorkers = 4;
     Check(vanguard::jobs::Initialize(jobsConfig), "Jobs initialization for parallel texture cooking");
+
+    // BuildGraph executes asset compilers from dispatcher work. The texture compiler must therefore keep its internal
+    // block cooking serial: RED Jobs forbids a dispatcher job from synchronously waiting on child jobs. Use a real
+    // multi-block Color/JPEG build so the old Automatic path would enter EncodeImage's parallel wait and assert.
+    {
+        vanguard::assets::BuildSystem dispatcherTextureBuildSystem;
+        tt::TextureAssetCompiler dispatcherTextureCompiler;
+        Check(dispatcherTextureBuildSystem.Initialize() && dispatcherTextureCompiler.Initialize() &&
+                  dispatcherTextureCompiler.Register(dispatcherTextureBuildSystem) == vanguard::assets::Result::Success,
+              "initialize dispatcher-context texture compiler regression");
+
+        const vanguard::resources::ResourceReference dispatcherTextureSource(
+            vanguard::resources::ResourcePath::FromString("tests/textures/dispatcher-color.vtsr"), tt::TextureSourceResourceType);
+        const vanguard::resources::ResourceReference dispatcherTextureOutput(
+            vanguard::resources::ResourcePath::FromString("tests/textures/dispatcher-color.vtex"), textures::TextureResourceType);
+        const vanguard::assets::BuildRequest dispatcherTextureRequest{
+            {dispatcherTextureSource, {jpegEncoded.TypedData(), jpegEncoded.Size()}, {}}, dispatcherTextureOutput,
+            vanguard::assets::TargetPlatform::WindowsD3D12, colorBuildSettings};
+        vanguard::assets::BuildPlan dispatcherTexturePlan;
+        Check(dispatcherTextureBuildSystem.Prepare(dispatcherTextureRequest, dispatcherTexturePlan) == vanguard::assets::Result::Success,
+              "prepare dispatcher-context multi-block texture build");
+
+        vanguard::assets::Result dispatcherTextureResult = vanguard::assets::Result::InvalidState;
+        vanguard::assets::BuildOutput dispatcherTextureBuildOutput;
+        {
+            vanguard::jobs::Builder dispatcherTextureBuilder;
+            vanguard::jobs::JobName dispatcherTextureName{"Vanguard.TextureTools.Tests.CompilerFromJob"};
+            vanguard::jobs::Task dispatcherTextureTask = vanguard::jobs::Task::Create(
+                [&](const vanguard::jobs::JobContext&) noexcept
+                {
+                    dispatcherTextureResult = dispatcherTextureBuildSystem.Execute(
+                        dispatcherTextureRequest, dispatcherTexturePlan, dispatcherTextureBuildOutput);
+                });
+            Check(dispatcherTextureBuilder.IsValid() && dispatcherTextureTask &&
+                      dispatcherTextureBuilder.Dispatch(dispatcherTextureName, static_cast<vanguard::jobs::Task&&>(dispatcherTextureTask)),
+                  "dispatch texture compiler through Vanguard Jobs");
+            vanguard::jobs::Counter dispatcherTextureCounter = dispatcherTextureBuilder.ExtractCounter();
+            Check(dispatcherTextureCounter.IsValid() && dispatcherTextureCounter.WaitOnProcessFrame(),
+                  "dispatcher-context texture compiler completes without nested counter wait");
+        }
+        Check(dispatcherTextureResult == vanguard::assets::Result::Success && !dispatcherTextureBuildOutput.artifacts.Empty(),
+              "dispatcher-context texture compiler produces cooked artifacts");
+        Check(dispatcherTextureCompiler.Shutdown() && dispatcherTextureBuildSystem.Shutdown(),
+              "shutdown dispatcher-context texture compiler regression cleanly");
+    }
+
     const vanguard::jobs::SchedulerStats schedulerBefore = vanguard::jobs::GetSchedulerStats();
     tt::CookSettings jobsSettings;
     jobsSettings.profile = tt::profiles::ColorAlpha;

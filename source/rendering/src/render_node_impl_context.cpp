@@ -10,13 +10,34 @@
 
 namespace vanguard::rendering
 {
+    namespace
+    {
+        [[nodiscard]] constexpr u32 ResourceLookupHash(const FlowSpaceId flowSpace, const containers::StringView name, const FrameResourceKind kind) noexcept
+        {
+            const LogicalResourceKey key(flowSpace, LogicalResourceName(name));
+            u32 result = key.CalcHash() ^ ((static_cast<u32>(kind) + 1u) * 0x9e3779b9u);
+            result ^= result >> 16u;
+            result *= 0x7feb352du;
+            result ^= result >> 15u;
+            result *= 0x846ca68bu;
+            result ^= result >> 16u;
+            return result;
+        }
+    } // namespace
+
     RenderNodeResources::RenderNodeResources() noexcept
-        : m_uses(memory::pools::Rendering::GetInstance()), m_decisions(memory::pools::Rendering::GetInstance()), m_ranges(memory::pools::Rendering::GetInstance())
+        : m_uses(memory::pools::Rendering::GetInstance()), m_decisions(memory::pools::Rendering::GetInstance()), m_ranges(memory::pools::Rendering::GetInstance()),
+          m_lookupBuckets(memory::pools::Rendering::GetInstance()), m_lookupGroups(memory::pools::Rendering::GetInstance()),
+          m_resolvedTextures(memory::pools::Rendering::GetInstance()), m_resolvedBuffers(memory::pools::Rendering::GetInstance())
     {
     }
 
     void RenderNodeResources::Reset() noexcept
     {
+        m_resolvedTextures.Clear();
+        m_resolvedBuffers.Clear();
+        m_lookupBuckets.Clear();
+        m_lookupGroups.Clear();
         m_uses.Clear();
         m_decisions.Clear();
         m_ranges.Clear();
@@ -200,15 +221,9 @@ namespace vanguard::rendering
         m_resourceCursor = &cursor;
         m_resourceRange = InvalidRenderFlowResourceIndex;
         m_nextResourceRange = 0;
-        m_nextResourceUse = 0;
         m_nextResourceDecision = 0;
-        m_resolvedTextures.Clear();
-        m_resolvedBuffers.Clear();
-        m_resolvedUseOrder.Clear();
-        m_resolvedResourceIndices.Clear();
-        m_resourceLookups.Clear();
-        m_resolvedTextures.Reserve(resources.m_uses.Size());
-        m_resolvedBuffers.Reserve(resources.m_uses.Size());
+        if (packet != nullptr && resources.m_resolvedTextures.Size() + resources.m_resolvedBuffers.Size() != resources.m_uses.Size())
+            VG_FATAL("render-node typed resource slots do not match their declarations");
         m_operation = Operation::Execute;
     }
 
@@ -220,7 +235,9 @@ namespace vanguard::rendering
             return true;
         if (m_resourceCursor->IsValid())
             return true;
-        return m_executionPacket->OpenCursor(m_executionPacket->GetCommandScope(), m_executionPacket->GetQueue(), *m_resourceCursor, m_resourceFailure);
+        const u32 expectedRangeCount = m_nodeResources != nullptr ? m_nodeResources->m_ranges.Size() : 0u;
+        return m_executionPacket->OpenCompiledCursor(m_executionPacket->GetCommandScope(), m_executionPacket->GetQueue(), expectedRangeCount,
+                                                     *m_resourceCursor, m_resourceFailure);
     }
 
     void RenderNodeImplContext::EndResourceExecution() noexcept
@@ -241,11 +258,6 @@ namespace vanguard::rendering
         m_executionPacket = nullptr;
         m_resourceCursor = nullptr;
         m_resourceRange = InvalidRenderFlowResourceIndex;
-        m_resolvedTextures.Clear();
-        m_resolvedBuffers.Clear();
-        m_resolvedUseOrder.Clear();
-        m_resolvedResourceIndices.Clear();
-        m_resourceLookups.Clear();
         m_operation = Operation::None;
     }
 
@@ -272,40 +284,10 @@ namespace vanguard::rendering
             }
             m_resourceRange = m_nextResourceRange++;
             const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
-            m_nextResourceUse = range.firstUse;
             m_nextResourceDecision = range.firstDecision;
-            m_resolvedResourceIndices.Clear();
-            m_resourceLookups.Clear();
-            m_resourceLookups.Resize(range.useCount);
-            for (u8& lookedUp : m_resourceLookups)
-                lookedUp = 0;
-            for (u32 index = 0; index < range.useCount; ++index)
-            {
-                const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + index];
-                if (binding.kind == FrameResourceKind::Texture)
-                {
-                    ResolvedTextureUse resolved;
-                    if (!m_resourceCursor->BeginTextureUse(binding.use, resolved, m_resourceFailure))
-                        VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "required texture-use setup failed");
-                    m_resolvedResourceIndices.PushBack(m_resolvedTextures.Size());
-                    m_resolvedTextures.PushBack(static_cast<ResolvedTextureUse&&>(resolved));
-                }
-                else if (binding.kind == FrameResourceKind::Buffer)
-                {
-                    ResolvedBufferUse resolved;
-                    if (!m_resourceCursor->BeginBufferUse(binding.use, resolved, m_resourceFailure))
-                        VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "required buffer-use setup failed");
-                    m_resolvedResourceIndices.PushBack(m_resolvedBuffers.Size());
-                    m_resolvedBuffers.PushBack(static_cast<ResolvedBufferUse&&>(resolved));
-                }
-                else
-                {
-                    FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render-node occurrence contains an invalid resource binding kind");
-                    break;
-                }
-                m_resolvedUseOrder.PushBack(binding.use);
-                ++m_nextResourceUse;
-            }
+            if (m_executionPacket != nullptr && m_resourceFailure->code == RenderFlowResourceFailureCode::None &&
+                !m_resourceCursor->BeginRange(range.execution, m_resourceRange + 1u, m_resourceFailure))
+                VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node compiled resource range begin failed");
         }
     }
 
@@ -327,23 +309,114 @@ namespace vanguard::rendering
         {
             range.useCount = m_nodeResources->m_uses.Size() - range.firstUse;
             range.decisionCount = m_nodeResources->m_decisions.Size() - range.firstDecision;
+            range.lookupBucketOffset = m_nodeResources->m_lookupBuckets.Size();
+            range.lookupBucketCount = 0;
+            range.lookupGroupOffset = m_nodeResources->m_lookupGroups.Size();
+            range.lookupGroupCount = 0;
+            if (m_resourceFailure->code == RenderFlowResourceFailureCode::None && range.useCount != 0)
+            {
+                if (range.useCount > 0x40000000u)
+                {
+                    FailResourceOperation(RenderFlowResourceFailureCode::CapacityExceeded, "render-node resource lookup image exceeds addressable capacity");
+                }
+                else
+                {
+                    const u32 desiredBuckets = range.useCount * 2u;
+                    u32 bucketCount = 1u;
+                    while (bucketCount < desiredBuckets)
+                        bucketCount <<= 1u;
+                    if (bucketCount > InvalidRenderFlowResourceIndex - m_nodeResources->m_lookupBuckets.Size() ||
+                        range.useCount > InvalidRenderFlowResourceIndex - m_nodeResources->m_lookupGroups.Size())
+                    {
+                        FailResourceOperation(RenderFlowResourceFailureCode::CapacityExceeded, "render-node resource lookup storage exceeds addressable capacity");
+                    }
+                    else
+                    {
+                        range.lookupBucketCount = bucketCount;
+                        m_nodeResources->m_lookupBuckets.Resize(range.lookupBucketOffset + bucketCount, InvalidRenderFlowResourceIndex);
+                        m_nodeResources->m_lookupGroups.Reserve(m_nodeResources->m_lookupGroups.Size() + range.useCount);
+                    }
+                }
+            }
             if (m_resourceWriter != nullptr && m_resourceFailure->code == RenderFlowResourceFailureCode::None)
+            {
                 for (u32 index = range.useCount; index > 0; --index)
-                    if (!m_resourceWriter->EndUse(m_nodeResources->m_uses[range.firstUse + index - 1].use, m_resourceFailure))
+                {
+                    const u32 localIndex = index - 1u;
+                    RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + localIndex];
+                    if (!binding.use.IsValid() || binding.use.ordinal != range.firstUse + localIndex)
+                    {
+                        FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning, "render-node declaration does not match the dense resource-use order");
                         break;
+                    }
+
+                    const u32 bucket = range.lookupBucketOffset + (binding.lookupHash & (range.lookupBucketCount - 1u));
+                    u32 groupIndex = m_nodeResources->m_lookupBuckets[bucket];
+                    u32 matchingGroup = InvalidRenderFlowResourceIndex;
+                    while (groupIndex != InvalidRenderFlowResourceIndex)
+                    {
+                        if (groupIndex < range.lookupGroupOffset || groupIndex >= m_nodeResources->m_lookupGroups.Size())
+                        {
+                            FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning, "render-node declaration lookup bucket is malformed");
+                            break;
+                        }
+                        const RenderNodeResourceLookupGroup& candidate = m_nodeResources->m_lookupGroups[groupIndex];
+                        if (candidate.firstUse >= range.useCount || range.firstUse + candidate.firstUse >= m_nodeResources->m_uses.Size())
+                        {
+                            FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning, "render-node declaration lookup group is malformed");
+                            break;
+                        }
+                        const RenderNodeResourceUseBinding& firstBinding = m_nodeResources->m_uses[range.firstUse + candidate.firstUse];
+                        if (candidate.lookupHash == binding.lookupHash && firstBinding.kind == binding.kind &&
+                            firstBinding.flowSpace == binding.flowSpace && containers::StringView(firstBinding.name) == containers::StringView(binding.name))
+                        {
+                            matchingGroup = groupIndex;
+                            break;
+                        }
+                        groupIndex = candidate.nextBucketGroup;
+                    }
+                    if (m_resourceFailure->code != RenderFlowResourceFailureCode::None)
+                        break;
+
+                    binding.nextDuplicate = InvalidRenderFlowResourceIndex;
+                    if (matchingGroup == InvalidRenderFlowResourceIndex)
+                    {
+                        RenderNodeResourceLookupGroup group;
+                        group.lookupHash = binding.lookupHash;
+                        group.firstUse = localIndex;
+                        group.lastUse = localIndex;
+                        group.runtimeNextUse = localIndex;
+                        group.nextBucketGroup = m_nodeResources->m_lookupBuckets[bucket];
+                        m_nodeResources->m_lookupGroups.PushBack(group);
+                        m_nodeResources->m_lookupBuckets[bucket] = m_nodeResources->m_lookupGroups.Size() - 1u;
+                    }
+                    else
+                    {
+                        RenderNodeResourceLookupGroup& group = m_nodeResources->m_lookupGroups[matchingGroup];
+                        if (group.firstUse <= localIndex || group.lastUse < group.firstUse)
+                        {
+                            FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning, "render-node duplicate resource lookup group is malformed");
+                            break;
+                        }
+                        binding.nextDuplicate = group.firstUse;
+                        group.firstUse = localIndex;
+                        group.runtimeNextUse = localIndex;
+                    }
+
+                    if (!m_resourceWriter->EndUse(binding.use, m_resourceFailure))
+                        break;
+                }
+            }
+            range.lookupGroupCount = m_nodeResources->m_lookupGroups.Size() - range.lookupGroupOffset;
         }
         else if (m_operation == Operation::Execute)
         {
             if (m_resourceFailure->code != RenderFlowResourceFailureCode::None)
                 VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node recording failed");
-            if (m_nextResourceUse != range.firstUse + range.useCount || m_nextResourceDecision != range.firstDecision + range.decisionCount)
-                FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render node did not consume its declared resource bindings");
-            for (u32 index = m_resolvedUseOrder.Size(); index > 0; --index)
-                if (!m_resourceCursor->EndUse(m_resolvedUseOrder[index - 1], m_resourceFailure))
-                    VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "required resource-use completion failed");
-            m_resolvedUseOrder.Clear();
-            m_resolvedResourceIndices.Clear();
-            m_resourceLookups.Clear();
+            if (m_nextResourceDecision != range.firstDecision + range.decisionCount)
+                FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render node did not consume its declared resource decisions");
+            if (m_executionPacket != nullptr && !m_resourceCursor->EndRange(range.execution, m_resourceRange + 1u, m_resourceFailure))
+                VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node compiled resource range end failed");
         }
         m_resourceRange = InvalidRenderFlowResourceIndex;
     }
@@ -353,19 +426,19 @@ namespace vanguard::rendering
         return m_executionPacket != nullptr ? m_executionPacket->GetCommandScope() : CommandScopeId{};
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTNameTag(const containers::StringView name) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTNameTag(const LogicalResourceName name) const noexcept
     {
         const LogicalResourceKey key{{m_renderFlowSpace}, name};
         return {key, {}, FrameResourceKind::Invalid};
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTSharedNameTag(const containers::StringView name) noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTSharedNameTag(const LogicalResourceName name) noexcept
     {
         const LogicalResourceKey key{{0}, name};
         return {key, {}, FrameResourceKind::Invalid};
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTCameraNameTag(const u32 viewIndex, const containers::StringView name) noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTCameraNameTag(const u32 viewIndex, const LogicalResourceName name) noexcept
     {
         VG_ASSERT(viewIndex < MaximumRenderViewsPerFamily);
         const LogicalResourceKey key{{viewIndex + 1u}, name};
@@ -418,11 +491,13 @@ namespace vanguard::rendering
 
     RenderFlowNameTag RenderNodeImplContext::MakeTemporaryTag(const containers::StringView name, const LogicalResourceId resource, const FrameResourceKind kind) const noexcept
     {
-        LogicalResourceKey key{{m_renderFlowSpace}, name};
+        // Temporary identities never participate in the named-resource index.
+        // Avoid paying the named hash cost merely to retain the diagnostic name.
+        const LogicalResourceKey key = LogicalResourceKey::Temporary({m_renderFlowSpace}, name);
         return {key, resource, kind};
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTAlloc(const containers::StringView name, const FrameTextureDesc& desc) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTAlloc(const LogicalResourceName name, const FrameTextureDesc& desc) const noexcept
     {
         RenderFlowNameTag tag = RTNameTag(name);
         tag.kind = FrameResourceKind::Texture;
@@ -431,7 +506,7 @@ namespace vanguard::rendering
         return tag;
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTAlloc(const containers::StringView name, const FrameBufferDesc& desc) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTAlloc(const LogicalResourceName name, const FrameBufferDesc& desc) const noexcept
     {
         RenderFlowNameTag tag = RTNameTag(name);
         tag.kind = FrameResourceKind::Buffer;
@@ -440,7 +515,7 @@ namespace vanguard::rendering
         return tag;
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTAlloc(const containers::StringView name, const RenderFlowNameTag& desc) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTAlloc(const LogicalResourceName name, const RenderFlowNameTag& desc) const noexcept
     {
         const RenderFlowNameTag source = ResolveNamedTag(desc);
         RenderFlowNameTag tag = RTNameTag(name);
@@ -450,7 +525,7 @@ namespace vanguard::rendering
         return tag;
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTSharedAlloc(const containers::StringView name, const FrameTextureDesc& desc) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTSharedAlloc(const LogicalResourceName name, const FrameTextureDesc& desc) const noexcept
     {
         RenderFlowNameTag tag = RTSharedNameTag(name);
         tag.kind = FrameResourceKind::Texture;
@@ -459,7 +534,7 @@ namespace vanguard::rendering
         return tag;
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTSharedAlloc(const containers::StringView name, const FrameBufferDesc& desc) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTSharedAlloc(const LogicalResourceName name, const FrameBufferDesc& desc) const noexcept
     {
         RenderFlowNameTag tag = RTSharedNameTag(name);
         tag.kind = FrameResourceKind::Buffer;
@@ -493,7 +568,7 @@ namespace vanguard::rendering
         return MakeTemporaryTag(name, resource, source.kind);
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTInject(const containers::StringView name, const ImportedResourceId imported) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTInject(const LogicalResourceName name, const ImportedResourceId imported) const noexcept
     {
         RenderFlowNameTag tag = RTNameTag(name);
         tag.kind = FrameResourceKind::Texture;
@@ -502,7 +577,7 @@ namespace vanguard::rendering
         return tag;
     }
 
-    RenderFlowNameTag RenderNodeImplContext::RTSharedInjectBuffer(const containers::StringView name, const ImportedResourceId imported) const noexcept
+    RenderFlowNameTag RenderNodeImplContext::RTSharedInjectBuffer(const LogicalResourceName name, const ImportedResourceId imported) const noexcept
     {
         RenderFlowNameTag tag = RTSharedNameTag(name);
         tag.kind = FrameResourceKind::Buffer;
@@ -525,18 +600,54 @@ namespace vanguard::rendering
     {
         if (!HasFrameOutput())
             return;
-        RenderFlowNameTag tag = RTSharedNameTag("FrameOutput");
+        RenderFlowNameTag tag = RTSharedNameTag(VG_RENDER_FLOW_NAME("FrameOutput"));
         tag.kind = FrameResourceKind::Texture;
         const ImportedResourceId imported{m_outputTransaction->m_resourceImportIndex, m_outputTransaction->m_resourceImportGeneration};
         if (CanRecordResourceOperation() && !GetResourceWriter().ImportTexture(tag.key, imported, tag.resource, m_resourceFailure))
             tag.resource = {};
     }
 
+    void RenderNodeImplContext::RTExportFrameOutput() const noexcept
+    {
+        if (!HasFrameOutput() || m_outputTransaction->GetKind() != RenderViewportOutputKind::Texture)
+            return;
+        const ExportSlotId slot{m_outputTransaction->m_resourceExportIndex, m_outputTransaction->m_resourceExportGeneration};
+        if (!slot.IsValid())
+        {
+            FailResourceOperation(RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                  "texture frame output has no reserved terminal export slot");
+            return;
+        }
+        RenderFlowNameTag tag = ResolveNamedTag(RTSharedNameTag(VG_RENDER_FLOW_NAME("FrameOutput")));
+        if (!tag.resource.IsValid())
+            return;
+        const RenderTextureOutputContract& contract = m_outputTransaction->m_viewport->GetTextureOutputContract();
+        // EndRender is the frame-output terminal owner. Model the final producer-side
+        // endpoint as a preserving render-target write, then let RequestExport author
+        // the transition from that executable endpoint into the declared resting state.
+        // This keeps Common and other compatible resting states truthful instead of
+        // pretending that the resting state itself is necessarily readable.
+        TextureUseDesc terminalUse;
+        terminalUse.requiredState = rhi::ResourceState::RenderTarget;
+        terminalUse.access = LogicalAccessIntent::Write;
+        terminalUse.content = ResourceContentIntent::Preserve;
+        RTUseBegin(tag, terminalUse);
+        RTUseEnd(tag);
+        TerminalResourceExportDesc desc;
+        desc.terminalState = contract.restingState;
+        desc.terminalQueue = contract.restingQueue;
+        desc.readiness = contract.publicationReadiness == RenderOutputPublicationReadinessKind::SameQueueContinuation
+                             ? ExportReadinessKind::SameQueueContinuation
+                             : ExportReadinessKind::ExplicitFenceSignal;
+        if (CanRecordResourceOperation() && !GetResourceWriter().RequestExport(tag.resource, slot, desc, m_resourceFailure))
+            return;
+    }
+
     void RenderNodeImplContext::RTImportPresentationOutput() const noexcept
     {
         if (!HasPresentationOutput())
             return;
-        RenderFlowNameTag tag = RTSharedNameTag("FrameOutput");
+        RenderFlowNameTag tag = RTSharedNameTag(VG_RENDER_FLOW_NAME("FrameOutput"));
         tag.kind = FrameResourceKind::Texture;
         const ImportedResourceId imported{m_outputTransaction->m_resourceImportIndex, m_outputTransaction->m_resourceImportGeneration};
         if (CanRecordResourceOperation() && !GetResourceWriter().ImportTexture(tag.key, imported, tag.resource, m_resourceFailure))
@@ -551,7 +662,7 @@ namespace vanguard::rendering
         use.requiredState = rhi::ResourceState::RenderTarget;
         use.access = LogicalAccessIntent::Write;
         use.content = ResourceContentIntent::Preserve;
-        const RenderFlowNameTag tag = RTSharedNameTag("FrameOutput");
+        const RenderFlowNameTag tag = RTSharedNameTag(VG_RENDER_FLOW_NAME("FrameOutput"));
         RTUseBegin(tag, use);
         RTUseEnd(tag);
     }
@@ -559,7 +670,7 @@ namespace vanguard::rendering
     const ResolvedTextureUse& RenderNodeImplContext::RTPresentationOutput() const noexcept
     {
         static const ResolvedTextureUse invalid;
-        return HasPresentationOutput() ? RTTexture(RTSharedNameTag("FrameOutput")) : invalid;
+        return HasPresentationOutput() ? RTTexture(RTSharedNameTag(VG_RENDER_FLOW_NAME("FrameOutput"))) : invalid;
     }
 
     void RenderNodeImplContext::RTUseBegin(const RenderFlowNameTag& input, const TextureUseDesc& desc) const noexcept
@@ -571,10 +682,13 @@ namespace vanguard::rendering
         if (!GetResourceWriter().OpenResourceScope(tag.resource, m_resourceFailure) || !GetResourceWriter().BeginTextureUse(tag.resource, desc, use, m_resourceFailure))
             return;
         RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses.EmplaceBack();
-        binding.flowSpace = tag.key.flowSpace;
-        binding.name.Set(tag.key.name);
+        binding.flowSpace = tag.key.GetFlowSpace();
+        binding.name.Set(tag.key.GetName());
+        binding.lookupHash = ResourceLookupHash(tag.key.GetFlowSpace(), tag.key.GetName(), FrameResourceKind::Texture);
         binding.use = use;
         binding.kind = FrameResourceKind::Texture;
+        binding.resolvedIndex = m_nodeResources->m_resolvedTextures.Size();
+        m_nodeResources->m_resolvedTextures.EmplaceBack();
     }
 
     void RenderNodeImplContext::RTUseBegin(const RenderFlowNameTag& input, const BufferUseDesc& desc) const noexcept
@@ -586,10 +700,13 @@ namespace vanguard::rendering
         if (!GetResourceWriter().OpenResourceScope(tag.resource, m_resourceFailure) || !GetResourceWriter().BeginBufferUse(tag.resource, desc, use, m_resourceFailure))
             return;
         RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses.EmplaceBack();
-        binding.flowSpace = tag.key.flowSpace;
-        binding.name.Set(tag.key.name);
+        binding.flowSpace = tag.key.GetFlowSpace();
+        binding.name.Set(tag.key.GetName());
+        binding.lookupHash = ResourceLookupHash(tag.key.GetFlowSpace(), tag.key.GetName(), FrameResourceKind::Buffer);
         binding.use = use;
         binding.kind = FrameResourceKind::Buffer;
+        binding.resolvedIndex = m_nodeResources->m_resolvedBuffers.Size();
+        m_nodeResources->m_resolvedBuffers.EmplaceBack();
     }
 
     void RenderNodeImplContext::RTUseEnd(const RenderFlowNameTag& tag) const noexcept
@@ -640,22 +757,44 @@ namespace vanguard::rendering
         if (!CanResolveResourceOperation())
             return invalid;
         const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
-        for (u32 index = 0; index < range.useCount; ++index)
+        if (range.lookupBucketCount != 0 && range.lookupBucketOffset <= m_nodeResources->m_lookupBuckets.Size() &&
+            range.lookupBucketCount <= m_nodeResources->m_lookupBuckets.Size() - range.lookupBucketOffset &&
+            range.lookupGroupOffset <= m_nodeResources->m_lookupGroups.Size() &&
+            range.lookupGroupCount <= m_nodeResources->m_lookupGroups.Size() - range.lookupGroupOffset)
         {
-            const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + index];
-            if (m_resourceLookups[index] != 0 || binding.kind != FrameResourceKind::Texture || binding.flowSpace != tag.key.flowSpace || containers::StringView(binding.name) != tag.key.name)
-                continue;
-            if (index >= m_resolvedResourceIndices.Size() || m_resolvedResourceIndices[index] >= m_resolvedTextures.Size())
-                break;
-            m_resourceLookups[index] = 1;
-            return m_resolvedTextures[m_resolvedResourceIndices[index]];
-        }
-        for (u32 index = 0; index < range.useCount; ++index)
-        {
-            const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + index];
-            if (binding.kind == FrameResourceKind::Texture && binding.flowSpace == tag.key.flowSpace && containers::StringView(binding.name) == tag.key.name &&
-                index < m_resolvedResourceIndices.Size() && m_resolvedResourceIndices[index] < m_resolvedTextures.Size())
-                return m_resolvedTextures[m_resolvedResourceIndices[index]];
+            const u32 lookupHash = ResourceLookupHash(tag.key.GetFlowSpace(), tag.key.GetName(), FrameResourceKind::Texture);
+            const u32 bucket = range.lookupBucketOffset + (lookupHash & (range.lookupBucketCount - 1u));
+            u32 groupIndex = m_nodeResources->m_lookupBuckets[bucket];
+            while (groupIndex != InvalidRenderFlowResourceIndex)
+            {
+                if (groupIndex < range.lookupGroupOffset || groupIndex >= range.lookupGroupOffset + range.lookupGroupCount)
+                    break;
+                RenderNodeResourceLookupGroup& group = m_nodeResources->m_lookupGroups[groupIndex];
+                if (group.firstUse >= range.useCount || range.firstUse + group.firstUse >= m_nodeResources->m_uses.Size())
+                    break;
+                const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + group.firstUse];
+                if (group.lookupHash == lookupHash && binding.kind == FrameResourceKind::Texture && binding.flowSpace == tag.key.GetFlowSpace() &&
+                    containers::StringView(binding.name) == tag.key.GetName())
+                {
+                    const u32 localIndex = group.runtimeNextUse;
+                    const u32 selected = localIndex != InvalidRenderFlowResourceIndex ? localIndex : group.firstUse;
+                    if (selected >= range.useCount || range.firstUse + selected >= m_nodeResources->m_uses.Size())
+                        break;
+                    const RenderNodeResourceUseBinding& selectedBinding = m_nodeResources->m_uses[range.firstUse + selected];
+                    if (selectedBinding.kind == FrameResourceKind::Texture && selectedBinding.resolvedIndex < m_nodeResources->m_resolvedTextures.Size())
+                    {
+                        ResolvedTextureUse& resolved = m_nodeResources->m_resolvedTextures[selectedBinding.resolvedIndex];
+                        if (!resolved.IsValid() &&
+                            (m_executionPacket == nullptr || !m_executionPacket->ResolveTextureUseBinding(selectedBinding.use, m_resourceRange + 1u, resolved, m_resourceFailure)))
+                            VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node texture binding resolution failed");
+                        if (localIndex != InvalidRenderFlowResourceIndex)
+                            group.runtimeNextUse = selectedBinding.nextDuplicate;
+                        return resolved;
+                    }
+                    break;
+                }
+                groupIndex = group.nextBucketGroup;
+            }
         }
         FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render node requested a texture that was not declared for this occurrence");
         return invalid;
@@ -667,22 +806,44 @@ namespace vanguard::rendering
         if (!CanResolveResourceOperation())
             return invalid;
         const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
-        for (u32 index = 0; index < range.useCount; ++index)
+        if (range.lookupBucketCount != 0 && range.lookupBucketOffset <= m_nodeResources->m_lookupBuckets.Size() &&
+            range.lookupBucketCount <= m_nodeResources->m_lookupBuckets.Size() - range.lookupBucketOffset &&
+            range.lookupGroupOffset <= m_nodeResources->m_lookupGroups.Size() &&
+            range.lookupGroupCount <= m_nodeResources->m_lookupGroups.Size() - range.lookupGroupOffset)
         {
-            const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + index];
-            if (m_resourceLookups[index] != 0 || binding.kind != FrameResourceKind::Buffer || binding.flowSpace != tag.key.flowSpace || containers::StringView(binding.name) != tag.key.name)
-                continue;
-            if (index >= m_resolvedResourceIndices.Size() || m_resolvedResourceIndices[index] >= m_resolvedBuffers.Size())
-                break;
-            m_resourceLookups[index] = 1;
-            return m_resolvedBuffers[m_resolvedResourceIndices[index]];
-        }
-        for (u32 index = 0; index < range.useCount; ++index)
-        {
-            const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + index];
-            if (binding.kind == FrameResourceKind::Buffer && binding.flowSpace == tag.key.flowSpace && containers::StringView(binding.name) == tag.key.name &&
-                index < m_resolvedResourceIndices.Size() && m_resolvedResourceIndices[index] < m_resolvedBuffers.Size())
-                return m_resolvedBuffers[m_resolvedResourceIndices[index]];
+            const u32 lookupHash = ResourceLookupHash(tag.key.GetFlowSpace(), tag.key.GetName(), FrameResourceKind::Buffer);
+            const u32 bucket = range.lookupBucketOffset + (lookupHash & (range.lookupBucketCount - 1u));
+            u32 groupIndex = m_nodeResources->m_lookupBuckets[bucket];
+            while (groupIndex != InvalidRenderFlowResourceIndex)
+            {
+                if (groupIndex < range.lookupGroupOffset || groupIndex >= range.lookupGroupOffset + range.lookupGroupCount)
+                    break;
+                RenderNodeResourceLookupGroup& group = m_nodeResources->m_lookupGroups[groupIndex];
+                if (group.firstUse >= range.useCount || range.firstUse + group.firstUse >= m_nodeResources->m_uses.Size())
+                    break;
+                const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + group.firstUse];
+                if (group.lookupHash == lookupHash && binding.kind == FrameResourceKind::Buffer && binding.flowSpace == tag.key.GetFlowSpace() &&
+                    containers::StringView(binding.name) == tag.key.GetName())
+                {
+                    const u32 localIndex = group.runtimeNextUse;
+                    const u32 selected = localIndex != InvalidRenderFlowResourceIndex ? localIndex : group.firstUse;
+                    if (selected >= range.useCount || range.firstUse + selected >= m_nodeResources->m_uses.Size())
+                        break;
+                    const RenderNodeResourceUseBinding& selectedBinding = m_nodeResources->m_uses[range.firstUse + selected];
+                    if (selectedBinding.kind == FrameResourceKind::Buffer && selectedBinding.resolvedIndex < m_nodeResources->m_resolvedBuffers.Size())
+                    {
+                        ResolvedBufferUse& resolved = m_nodeResources->m_resolvedBuffers[selectedBinding.resolvedIndex];
+                        if (!resolved.IsValid() &&
+                            (m_executionPacket == nullptr || !m_executionPacket->ResolveBufferUseBinding(selectedBinding.use, m_resourceRange + 1u, resolved, m_resourceFailure)))
+                            VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node buffer binding resolution failed");
+                        if (localIndex != InvalidRenderFlowResourceIndex)
+                            group.runtimeNextUse = selectedBinding.nextDuplicate;
+                        return resolved;
+                    }
+                    break;
+                }
+                groupIndex = group.nextBucketGroup;
+            }
         }
         FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render node requested a buffer that was not declared for this occurrence");
         return invalid;

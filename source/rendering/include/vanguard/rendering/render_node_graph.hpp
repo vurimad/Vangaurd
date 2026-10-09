@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vanguard/concurrency/synchronization.hpp>
+#include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/rendering/render_flow_resource_allocator.hpp>
 #include <vanguard/rendering/render_node_graph_array.hpp>
@@ -14,6 +15,13 @@ namespace vanguard::jobs
 
 namespace vanguard::rendering
 {
+    struct RenderNodeGraphExclusiveUpdateStats
+    {
+        u64 acquisitions = 0;
+        u64 lastWaitNanoseconds = 0;
+        u64 totalWaitNanoseconds = 0;
+    };
+
     class NodeGraphFactory;
     class RenderFrameCommandLists;
     class RenderFlowResourceAllocator;
@@ -258,6 +266,7 @@ namespace vanguard::rendering
 
         void AcquireExclusiveUpdateFlag();
         void ReleaseExclusiveUpdateFlag();
+        [[nodiscard]] RenderNodeGraphExclusiveUpdateStats GetExclusiveUpdateStats() const noexcept;
 
         void CopyDependencies(ItemId sourceNodeId, ItemId targetNodeId, RelationType relation, RenderNodeDependencyType dependencyType);
         void CopyDependencies(ItemId sourceNodeId, ItemId targetNodeId, RelationType relation);
@@ -278,10 +287,12 @@ namespace vanguard::rendering
 
     private:
         void MergeNodes(u32 numOriginalUsedNodeIndices);
-        void CalculateNodeLevelInRenderFlowGroupRecursive(RenderNodeDependencyType dependencyType, ItemId nodeItemId, containers::DynamicArray<u32>& levelNodeCounts);
         void BuildFlattenedNodesArray(containers::DynamicArray<ItemId>& nodes, RenderNodeDependencyType dependencyType) const;
 
         concurrency::SpinLock m_updateFlag;
+        concurrency::Atomic<u64> m_updateAcquisitions{0};
+        concurrency::Atomic<u64> m_lastUpdateWaitNanoseconds{0};
+        concurrency::Atomic<u64> m_totalUpdateWaitNanoseconds{0};
         NodesArray m_nodes;
         DependenciesArray m_dependencies;
         bool m_isBuilt = false;

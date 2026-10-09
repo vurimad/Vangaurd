@@ -12,6 +12,7 @@ project "rendering"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
+    useVanguardProfiling()
     files { "include/**.hpp", "private/**.hpp", "src/**.cpp", "shaders/**.hlsli", "shaders/**.vsl", "README.md", "docs/**.md" }
     includedirs {
         "include", "private", "../rhi/include", "../pipelineCache/include", "../pipelines/include", "../shaders/include",
@@ -41,9 +42,9 @@ project "renderingTests"
     files { "tests/**.cpp" }
     removefiles { "tests/geometry_allocator_tests.cpp", "tests/material_residency_runtime_tests.cpp", "tests/material_resource_resolver_tests.cpp", "tests/mesh_draw_layout_tests.cpp" }
     includedirs {
-        "include", "../rhi/include", "../resources/include", "../filesystem/include", "../io/include", "../jobs/include",
+        "include", "../rhi/include", "../pipelineCache/include", "../pipelines/include", "../resources/include", "../filesystem/include", "../io/include", "../jobs/include",
         "../window/include", "../system/include", "../memory/include", "../containers/include", "../concurrency/include", "../crypto/include",
-        "../serialization/include", "../packages/include", "../schemas/include", "../reflection/include", "../meshes/include", "../textures/include", "../streaming/include"
+        "../serialization/include", "../packages/include", "../schemas/include", "../reflection/include", "../meshes/include", "../textures/include", "../streaming/include", "../shaders/include", "../materials/include"
     }
     libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
     links {
@@ -65,6 +66,7 @@ project "geometryAllocatorTests"
     disablewarnings { "4324" }
     targetdir(output_root)
     objdir(object_root)
+    enableVanguardD3D12Agility(true)
     files { "tests/geometry_allocator_tests.cpp", "tests/material_residency_runtime_tests.cpp", "tests/material_resource_resolver_tests.cpp", "tests/mesh_draw_layout_tests.cpp" }
     includedirs {
         "include", "private", "../rhi/include", "../rhi/nvrhi/include", "../rhi/nvrhi/private", "../pipelineCache/include", "../jobs/include",

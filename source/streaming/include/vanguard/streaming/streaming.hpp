@@ -23,6 +23,20 @@ namespace vanguard::streaming
         u64 maximumResourceBytes = 2ull * 1024ull * 1024ull * 1024ull;
         u32 maximumDependenciesPerResource = 4096;
         u32 maximumSegmentsPerResource = 16384;
+        u32 maximumManagedLooseRoots = 8;
+        u32 maximumManagedLooseGenerations = 262144;
+        u32 maximumTrackedLooseResourceOrigins = 262144;
+    };
+
+    enum class LooseGenerationRetireResult : u8
+    {
+        Removed,
+        NotManaged,
+        Current,
+        Busy,
+        InvalidPath,
+        LimitExceeded,
+        IoFailure
     };
 
     struct DependencyDescriptor
@@ -48,6 +62,26 @@ namespace vanguard::streaming
         {
             return reference.IsValid() && reference.IsTyped() && physicalPath.IsFilePath();
         }
+    };
+
+    class PreparedLooseBatch final
+    {
+    public:
+        struct Impl;
+
+        PreparedLooseBatch() noexcept = default;
+        ~PreparedLooseBatch();
+        PreparedLooseBatch(const PreparedLooseBatch&) = delete;
+        PreparedLooseBatch& operator=(const PreparedLooseBatch&) = delete;
+        PreparedLooseBatch(PreparedLooseBatch&& other) noexcept;
+        PreparedLooseBatch& operator=(PreparedLooseBatch&& other) noexcept;
+
+        void Reset() noexcept;
+        [[nodiscard]] bool IsValid() const noexcept;
+
+    private:
+        Impl* m_impl = nullptr;
+        friend class ResourceStreamer;
     };
 
     using DecodeResourceFunction = resources::ResourceObject* (*)(resources::ResourceReference reference, const void* data, usize size,
@@ -105,6 +139,10 @@ namespace vanguard::streaming
         u32 looseResources = 0;
         u32 mountedPackages = 0;
         u32 activeLoads = 0;
+        u32 liveSources = 0;
+        u32 managedLooseRoots = 0;
+        u32 managedLooseGenerations = 0;
+        u32 trackedLooseResourceOrigins = 0;
         u32 activeReads = 0;
         u64 stagingBudgetBytes = 0;
         u64 stagingBytesInUse = 0;
@@ -169,7 +207,38 @@ namespace vanguard::streaming
         [[nodiscard]] bool UnregisterDecoder(resources::ResourceTypeId type) noexcept;
 
         [[nodiscard]] bool RegisterLoose(const LooseResourceDescriptor& resource) noexcept;
+        // Atomically installs or replaces one immutable loose generation. A
+        // request that already opened the previous file retains that source;
+        // later resolutions observe the new descriptor.
+        [[nodiscard]] bool PublishLoose(const LooseResourceDescriptor& resource) noexcept;
+        // Atomically installs/replaces a bounded descriptor group under one
+        // streamer source lock. Every descriptor is fully constructed and all
+        // required map capacity is reserved before visibility changes; either the
+        // complete group becomes visible or the previous group remains visible.
+        [[nodiscard]] bool PublishLooseBatch(containers::ArraySpan<const LooseResourceDescriptor> resources) noexcept;
+        // Two-step form for callers that must serialize only the short visibility
+        // mutation with an external freshness fence. Prepare performs all entry
+        // allocation and map-capacity reservation. Commit performs no allocation.
+        [[nodiscard]] bool PrepareLooseBatch(containers::ArraySpan<const LooseResourceDescriptor> resources,
+                                             PreparedLooseBatch& batch) noexcept;
+        [[nodiscard]] bool CommitPreparedLooseBatch(PreparedLooseBatch& batch) noexcept;
         [[nodiscard]] bool UnregisterLoose(resources::ResourcePath path) noexcept;
+        // Removes a complete set of loose descriptors under one source lock.
+        // Admission first proves every path exists and has no active stream load;
+        // failure leaves the entire descriptor set unchanged. Already-opened
+        // ResourceSource objects remain independently pinned and are unaffected.
+        [[nodiscard]] bool UnregisterLooseBatch(containers::ArraySpan<const resources::ResourcePath> paths) noexcept;
+
+        // Enables exact-generation lifetime governance for loose files below one
+        // physical root. Direct ResourceSource::OpenLoose calls under a managed
+        // root participate automatically; paths outside managed roots retain the
+        // existing tooling behavior. Root registration is process-local only.
+        [[nodiscard]] bool RegisterManagedLooseRoot(const filesystem::AbsolutePath& root) noexcept;
+        [[nodiscard]] bool UnregisterManagedLooseRoot(const filesystem::AbsolutePath& root) noexcept;
+        // Deletes one non-current physical generation only after the streaming
+        // authority atomically proves no descriptor, source/load, or decoded
+        // ResourceObject still owns it. Busy/current results perform no mutation.
+        [[nodiscard]] LooseGenerationRetireResult RetireLooseGeneration(const filesystem::AbsolutePath& physicalPath) noexcept;
 
         // Reader and package file must remain valid and unchanged until
         // unmounted. Higher priority wins; later mount wins at equal priority.
@@ -187,9 +256,12 @@ namespace vanguard::streaming
         // of building a second source registry or staging the whole resource.
         [[nodiscard]] resources::Failure OpenSource(resources::ResourceReference reference, ResourceSource& source,
                                                     containers::DynamicArray<DependencyDescriptor>& dependencies) noexcept;
+        [[nodiscard]] bool ContainsResourcePath(resources::ResourcePath path) const noexcept;
         [[nodiscard]] bool ReserveStaging(u64 bytes, StagingReservation& reservation) noexcept;
 
         [[nodiscard]] resources::PipelineRequest Request(resources::ResourceReference reference,
+                                                         resources::LoadPriority priority = resources::LoadPriority::Normal) noexcept;
+        [[nodiscard]] resources::PipelineRequest Replace(resources::ResourceReference reference,
                                                          resources::LoadPriority priority = resources::LoadPriority::Normal) noexcept;
         [[nodiscard]] Stats GetStats() const noexcept;
 
