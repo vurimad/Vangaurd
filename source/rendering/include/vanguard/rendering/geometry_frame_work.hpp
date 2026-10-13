@@ -50,6 +50,7 @@ namespace vanguard::rendering
         LogicalResourceId binItems;
         LogicalResourceId activeBins;
         LogicalResourceId drawInstances;
+        LogicalResourceId transparentInstances;
         LogicalResourceId indirectArguments;
         LogicalResourceId shellPlans;
         LogicalResourceId shellRanges;
@@ -111,6 +112,21 @@ namespace vanguard::rendering
         rhi::BufferRef instances;
         rhi::BufferRef arguments;
         rhi::BufferRef counters;
+    };
+
+    struct GeometryTransparentDraw
+    {
+        GeometryBatchId shell;
+        GeometryBatchId bin;
+        MeshDrawInstance instance;
+        f64 sortDepth = 0.0;
+        u64 stableOrder = 0;
+    };
+
+    struct GeometryTransparentDrawRange
+    {
+        u32 firstDraw = 0;
+        u32 drawCount = 0;
     };
 
     struct GeometryExternalBuffer
@@ -196,12 +212,30 @@ namespace vanguard::rendering
             return {m_shellDraws.Data(), m_shellDrawCount};
         }
         [[nodiscard]] u32 GetIndirectArgumentCapacity() const noexcept { return m_indirectArgumentCapacity; }
+        [[nodiscard]] GeometryTransparentDrawRange GetTransparentDrawRange(u32 viewIndex) const noexcept
+        {
+            return viewIndex < MaximumRenderViewsPerFamily ? m_transparentDrawRanges[viewIndex] : GeometryTransparentDrawRange{};
+        }
+        [[nodiscard]] containers::ArraySpan<const MeshDrawInstance> GetTransparentInstances(u32 viewIndex) const noexcept
+        {
+            const GeometryTransparentDrawRange range = GetTransparentDrawRange(viewIndex);
+            return range.firstDraw <= m_transparentInstances.Size() && range.drawCount <= m_transparentInstances.Size() - range.firstDraw
+                       ? containers::ArraySpan<const MeshDrawInstance>{m_transparentInstances.TypedData() + range.firstDraw, range.drawCount}
+                       : containers::ArraySpan<const MeshDrawInstance>{};
+        }
+        [[nodiscard]] containers::ArraySpan<const MeshDrawInstance> GetAllTransparentInstances() const noexcept
+        {
+            return {m_transparentInstances.TypedData(), m_transparentInstances.Size()};
+        }
         // Recording body for a graph phase node. viewIndex is the compact frame
         // view ordinal. The caller declares GPU Scene/arena/stream/indirect uses
         // and establishes targets, viewport/scissor and descriptor domains.
         [[nodiscard]] bool RecordPhase(const RenderGeometryBatcher& batcher, const GeometryAllocator& geometry,
                                       RenderPhaseId phase, const StaticSurfaceDrawContext& drawContext,
                                       const GeometryPhaseDrawBuffers& buffers, rhi::Failure* failure = nullptr) const noexcept;
+        [[nodiscard]] bool RecordTransparentPhase(const RenderGeometryBatcher& batcher, const GeometryAllocator& geometry,
+                                                  RenderPhaseId phase, const StaticSurfaceDrawContext& drawContext,
+                                                  rhi::BufferRef instances, rhi::Failure* failure = nullptr) const noexcept;
         void ClearVisibilityPlan() noexcept
         {
             m_visibilityPlan = {};
@@ -220,6 +254,7 @@ namespace vanguard::rendering
         [[nodiscard]] const containers::DynamicArray<GeometryExternalBuffer>& GetExternalBuffers() const noexcept { return m_externalBuffers; }
 
     private:
+        friend class FrameRenderer;
         memory::MemoryBlock m_storage;
         containers::ArraySpan<GpuView> m_views;
         containers::ArraySpan<GpuDirectionalLightSelection> m_directionalLights;
@@ -235,6 +270,9 @@ namespace vanguard::rendering
         // Import identities only; native ownership belongs to the allocator's
         // retained import records. Prepared once before resource declarations.
         containers::DynamicArray<GeometryExternalBuffer> m_externalBuffers{memory::pools::Rendering::GetInstance()};
+        containers::DynamicArray<GeometryTransparentDraw> m_transparentDraws{memory::pools::Rendering::GetInstance()};
+        containers::DynamicArray<MeshDrawInstance> m_transparentInstances{memory::pools::Rendering::GetInstance()};
+        GeometryTransparentDrawRange m_transparentDrawRanges[MaximumRenderViewsPerFamily]{};
         GeometryFrameWorkCapacity m_capacity;
         u32 m_geometryResultCount = 0;
         u32 m_shellDrawCount = 0;

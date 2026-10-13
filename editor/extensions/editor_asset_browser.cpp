@@ -5,6 +5,7 @@
 #include <vanguard/editor/editor_asset_browser_policy.hpp>
 #include <vanguard/editor/editor_asset_browser_tree.hpp>
 #include <vanguard/editor/editor_file_dialog.hpp>
+#include <vanguard/editor/editor_model_import_frontend.hpp>
 #include <vanguard/editor/editor_shell_service.hpp>
 #include <vanguard/editor/editor_surfaces.hpp>
 #include <vanguard/editor/editor_ui_imgui.hpp>
@@ -13,6 +14,7 @@
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/io/io.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/meshes/meshes.hpp>
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/texture_tools/texture_asset_compiler.hpp>
 #include <vanguard/textures/texture_resource.hpp>
@@ -33,6 +35,7 @@ namespace
     namespace editor = vanguard::editor;
     namespace filesystem = vanguard::filesystem;
     namespace io = vanguard::io;
+    namespace meshes = vanguard::meshes;
     namespace rhi = vanguard::rhi;
     namespace resources = vanguard::resources;
     namespace textureTools = vanguard::texture_tools;
@@ -53,6 +56,7 @@ namespace
     inline constexpr editor::EditorCommandId RefreshAssetBrowserCommandId{0x6534617373627206ull};
     inline constexpr editor::EditorCommandId ImportAssetCommandId{0x6534617373627207ull};
     inline constexpr editor::EditorCommandId ReimportAssetCommandId{0x6534617373627208ull};
+    inline constexpr editor::EditorCommandId ReviewModelRefreshCommandId{0x653461737362721eull};
     inline constexpr editor::EditorCommandId MoveAssetCommandId{0x6534617373627209ull};
     inline constexpr editor::EditorCommandId DuplicateAssetCommandId{0x653461737362720aull};
     inline constexpr editor::EditorCommandId DeleteAssetCommandId{0x653461737362720bull};
@@ -64,6 +68,7 @@ namespace
 
     inline constexpr editor::EditorUiContributionId ImportAssetContextContributionId{0x6534617373627211ull};
     inline constexpr editor::EditorUiContributionId ReimportAssetContextContributionId{0x6534617373627212ull};
+    inline constexpr editor::EditorUiContributionId ReviewModelRefreshContextContributionId{0x653461737362721full};
     inline constexpr editor::EditorUiContributionId MoveAssetContextContributionId{0x6534617373627213ull};
     inline constexpr editor::EditorUiContributionId DuplicateAssetContextContributionId{0x6534617373627214ull};
     inline constexpr editor::EditorUiContributionId DeleteAssetContextContributionId{0x6534617373627215ull};
@@ -104,6 +109,7 @@ namespace
     {
         Pending,
         Success,
+        ReviewPending,
         Cancelled,
         Unsupported,
         AmbiguousImporter,
@@ -675,6 +681,8 @@ namespace
     {
         if (type == textures::TextureResourceType)
             std::snprintf(output, sizeof(output), "Texture");
+        else if (type == meshes::MeshResourceType)
+            std::snprintf(output, sizeof(output), "Mesh (VMSH)");
         else if (type == resources::InvalidResourceTypeId)
             std::snprintf(output, sizeof(output), "Source");
         else
@@ -687,6 +695,7 @@ namespace
         {
         case AssetBrowserExternalImportItemState::Pending: return "Pending";
         case AssetBrowserExternalImportItemState::Success: return "Success";
+        case AssetBrowserExternalImportItemState::ReviewPending: return "Opened model review (not imported)";
         case AssetBrowserExternalImportItemState::Cancelled: return "Cancelled";
         case AssetBrowserExternalImportItemState::Unsupported: return "Unsupported";
         case AssetBrowserExternalImportItemState::AmbiguousImporter: return "Ambiguous importer";
@@ -1093,19 +1102,40 @@ namespace
             }
             else
             {
-                const assetStreaming::ProjectAssetPipelineResult result = state.extension->assets.ImportExternalSource(
-                    state.importRoot, vanguard::containers::StringView(state.importFolder),
-                    vanguard::containers::StringView(capture->fileName),
-                    {capture->byteCount == 0u
-                         ? nullptr
-                         : static_cast<const vanguard::u8*>(capture->memory.Data()) + capture->memoryOffset,
-                     capture->byteCount},
-                    item.importedAsset, &item.failure);
-                if (result == assetStreaming::ProjectAssetPipelineResult::Busy)
-                    return;
-                item.state = ClassifyExternalImportResult(result, item.failure);
-                if (IsCommittedExternalImportResult(result))
-                    state.queryDirty = true;
+                const vanguard::containers::ArraySpan<const vanguard::u8> snapshot{
+                    capture->byteCount == 0u
+                        ? nullptr
+                        : static_cast<const vanguard::u8*>(capture->memory.Data()) + capture->memoryOffset,
+                    capture->byteCount};
+                // Model drops never pass through the ordinary immediately-durable
+                // ImportExternalSource path. The existing bounded browser capture
+                // is handed to a separate reviewed session before any mutation.
+                if (editor::IsEditorModelImportSourcePath(vanguard::containers::StringView(capture->fileName)))
+                {
+                    const filesystem::AbsolutePath source = filesystem::AbsolutePath::ParseFilePath(
+                        state.importPaths[state.importNext]);
+                    const editor::EditorModelImportOfferResult offered = editor::OfferEditorModelImportExternalSnapshot(
+                        source, snapshot, state.importRoot, vanguard::containers::StringView(state.importFolder));
+                    if (offered == editor::EditorModelImportOfferResult::Busy)
+                        return;
+                    item.state = offered == editor::EditorModelImportOfferResult::Accepted
+                                     ? AssetBrowserExternalImportItemState::ReviewPending
+                                     : offered == editor::EditorModelImportOfferResult::Unavailable
+                                           ? AssetBrowserExternalImportItemState::AuthoringUnavailable
+                                           : AssetBrowserExternalImportItemState::Failed;
+                }
+                else
+                {
+                    const assetStreaming::ProjectAssetPipelineResult result = state.extension->assets.ImportExternalSource(
+                        state.importRoot, vanguard::containers::StringView(state.importFolder),
+                        vanguard::containers::StringView(capture->fileName), snapshot,
+                        item.importedAsset, &item.failure);
+                    if (result == assetStreaming::ProjectAssetPipelineResult::Busy)
+                        return;
+                    item.state = ClassifyExternalImportResult(result, item.failure);
+                    if (IsCommittedExternalImportResult(result))
+                        state.queryDirty = true;
+                }
             }
             ReleaseExternalImportCapture(state.importCaptureWork);
             state.importCaptureWork = nullptr;
@@ -2497,8 +2527,14 @@ namespace
 
     void ClearSelectionOnContentBackgroundClick(AssetBrowserPanelState& state) noexcept
     {
-        if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
-            !ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) || ImGui::IsAnyItemHovered())
+        // A context popup can still be open when the user clicks blank content
+        // to dismiss it. Do not let its input-blocking window preserve the old
+        // selection; do not clear when the click lands on any actual UI item.
+        if (!editor::detail::ShouldClearAssetBrowserSelectionOnBackgroundClick(
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left),
+                ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                       ImGuiHoveredFlags_AllowWhenBlockedByPopup),
+                ImGui::IsAnyItemHovered()))
             return;
         ClearSelection(state);
     }
@@ -2789,6 +2825,28 @@ namespace
             const assetStreaming::ProjectAssetCatalogRow* const row = catalog.GetRow(sync.rebindRow);
             if (row == nullptr || row->asset != state.selectedAsset || !RebindSelectedRow(state, sync.rebindRow, *row))
                 ClearSelection(state);
+        }
+
+        // A completed admission may advance the accepted generation while the
+        // source catalog remains unchanged. Rebind the durable selected asset
+        // now instead of requiring a deselect/navigate/reselect cycle to make
+        // its actions available again.
+        if (state.selectedHasAsset && state.selectedAsset.IsValid() && state.extension != nullptr)
+        {
+            vanguard::u64 acceptedGeneration = 0u;
+            const bool resolved = state.extension->assets.GetAcceptedAssetGeneration(
+                state.selectedAsset, acceptedGeneration);
+            if (editor::detail::ShouldRebindAssetBrowserAcceptedSelection(
+                    state.selectedRow.IsValid(),
+                    state.extension->assets.IsSourceGenerationCurrent(state.catalogGeneration),
+                    resolved, state.selectedAcceptedGeneration, acceptedGeneration))
+            {
+                const assetStreaming::ProjectAssetCatalogRow* const row = catalog.GetRow(state.selectedRow);
+                if (row != nullptr && row->hasAssetIdentity && row->asset == state.selectedAsset)
+                    static_cast<void>(SelectRow(state, state.selectedRow, *row));
+                else
+                    ClearSelection(state);
+            }
         }
         return true;
     }
@@ -3100,10 +3158,14 @@ namespace
         ImGui::TableSetColumnIndex(1);
         const bool selected = context.state->selectedRow == id;
         if (ImGui::Selectable(labelBytes == 0u ? "<asset>" : label, selected, ImGuiSelectableFlags_SpanAllColumns))
-            static_cast<void>(SelectRow(*context.state, id, row));
+        {
+            if (!selected)
+                static_cast<void>(SelectRow(*context.state, id, row));
+        }
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
         {
-            static_cast<void>(SelectRow(*context.state, id, row));
+            if (!selected)
+                static_cast<void>(SelectRow(*context.state, id, row));
             if (context.panelContext != nullptr)
             {
                 editor::EditorUiFailure failure;
@@ -3305,12 +3367,7 @@ namespace
         label[labelBytes] = '\0';
         const char* const displayLabel = labelBytes == 0u ? "<asset>" : label;
         char typeLabel[32]{};
-        if (row.primaryOutputType == textures::TextureResourceType)
-            std::snprintf(typeLabel, sizeof(typeLabel), "Texture");
-        else if (row.primaryOutputType == resources::InvalidResourceTypeId)
-            std::snprintf(typeLabel, sizeof(typeLabel), "Source");
-        else
-            std::snprintf(typeLabel, sizeof(typeLabel), "0x%08x", row.primaryOutputType);
+        FormatPrimaryOutputTypeLabel(row.primaryOutputType, typeLabel);
 
         ImGui::PushID("AssetCard");
         ImGui::PushID(static_cast<int>(id.value));
@@ -3324,7 +3381,7 @@ namespace
         const ImVec2 cardMinimum = ImGui::GetItemRectMin();
         const ImVec2 cardMaximum = ImGui::GetItemRectMax();
 
-        if (activated || rightClicked)
+        if ((activated || rightClicked) && !selected)
             static_cast<void>(SelectRow(*context.state, id, row));
         if (rightClicked)
         {
@@ -3841,7 +3898,8 @@ namespace
         ImGui::PopStyleVar();
     }
 
-    void DrawAssetBrowserToolbar(AssetBrowserPanelState& state) noexcept
+    void DrawAssetBrowserToolbar(AssetBrowserPanelState& state,
+                                 const assetStreaming::ProjectAssetCatalogStatus& catalogStatus) noexcept
     {
         PumpExternalImport(state);
         const bool canImportCurrentFolder = state.extension->assets.CanImportExternalSource(
@@ -3853,6 +3911,42 @@ namespace
                 state, state.root, vanguard::containers::StringView(state.folderPath)));
         if (!canImportCurrentFolder)
             ImGui::EndDisabled();
+        ImGui::SameLine();
+
+        // This button occupies the same toolbar space on every frame. Import
+        // progress, failures, cancel and catalog coordination live in its popup
+        // instead of inserting/removing rows above the browser contents.
+        if (ImGui::Button("Activity"))
+            ImGui::OpenPopup("##AssetBrowserActivity");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Import progress, cancel and recent asset operations");
+        if (ImGui::IsPopupOpen("##AssetBrowserActivity"))
+            ImGui::SetNextWindowSizeConstraints(
+                {editor::detail::EditorVisualPx(270.0f), 0.0f},
+                {editor::detail::EditorVisualPx(600.0f),
+                 std::max(editor::detail::EditorVisualPx(160.0f), ImGui::GetMainViewport()->WorkSize.y * 0.65f)});
+        if (ImGui::BeginPopup("##AssetBrowserActivity"))
+        {
+            const bool hasImport = state.importDialog.IsValid() || state.importBatchActive ||
+                                   !state.importPaths.Empty() || !state.importMessage.Empty();
+            const bool hasOperation = state.operation.kind != AssetBrowserOperationKind::None;
+            if (catalogStatus.lastResult != assetStreaming::ProjectAssetCatalogResult::Success)
+                ImGui::TextDisabled("Catalog refresh failed; previous generation remains visible.");
+            else if (catalogStatus.refreshState != assetStreaming::ProjectAssetCatalogRefreshState::Idle)
+                ImGui::TextDisabled("Catalog refresh in progress.");
+            if (state.selectedHasAsset && !state.selectedReadOnly && !state.extension->assets.CanMutateAssets())
+                ImGui::TextWrapped("Asset mutations are paused while project build, observation or publication work finishes.");
+            if (hasImport)
+                DrawExternalImportStatus(state);
+            if (hasOperation)
+                DrawOperationStatus(state);
+            if (!hasImport && !hasOperation &&
+                catalogStatus.lastResult == assetStreaming::ProjectAssetCatalogResult::Success &&
+                catalogStatus.refreshState == assetStreaming::ProjectAssetCatalogRefreshState::Idle &&
+                (state.selectedReadOnly || !state.selectedHasAsset || state.extension->assets.CanMutateAssets()))
+                ImGui::TextDisabled("No recent browser activity.");
+            ImGui::EndPopup();
+        }
         ImGui::SameLine();
 
         const float filterRowWidth = ImGui::GetContentRegionAvail().x;
@@ -4271,14 +4365,7 @@ namespace
             ImGui::TextDisabled("Project asset catalog has no published source generation.");
             return;
         }
-        if (catalogStatus.lastResult != assetStreaming::ProjectAssetCatalogResult::Success)
-            ImGui::TextDisabled("Catalog refresh failed; showing the previous complete generation.");
-        else if (catalogStatus.refreshState != assetStreaming::ProjectAssetCatalogRefreshState::Idle)
-            ImGui::TextDisabled("Catalog refresh in progress; showing the previous complete generation.");
-
-        DrawAssetBrowserToolbar(*state);
-        DrawExternalImportStatus(*state);
-        DrawOperationStatus(*state);
+        DrawAssetBrowserToolbar(*state, catalogStatus);
         DrawTargetedOperationDialog(*state);
         DrawDeleteConfirmationDialog(*state);
 
@@ -4513,6 +4600,32 @@ namespace
         return IsCommittedOperationResult(result);
     }
 
+    [[nodiscard]] editor::EditorCommandState QueryReviewModelRefresh(void* const receiverData, void*) noexcept
+    {
+        const auto* const state = static_cast<const AssetBrowserPanelState*>(receiverData);
+        if (state == nullptr || !state->selectedHasAsset ||
+            state->selectedImporter != assets::HashCompilerName("vanguard.model.importer"))
+            return editor::EditorCommandState::Unsupported();
+        return QueryAdoptedOperation(receiverData, nullptr);
+    }
+
+    bool InvokeReviewModelRefresh(void* const receiverData, void*) noexcept
+    {
+        auto* const state = static_cast<AssetBrowserPanelState*>(receiverData);
+        if (QueryReviewModelRefresh(receiverData, nullptr).kind != editor::EditorCommandStateKind::Enabled)
+            return false;
+        const editor::EditorModelImportOfferResult result = editor::OfferEditorModelReimportFromSource(
+            state->selectedAsset, state->selectedAcceptedGeneration, state->selectedSourceGeneration);
+        if (result == editor::EditorModelImportOfferResult::Accepted)
+        {
+            state->importMessage = vanguard::containers::String("Opened reviewed model source refresh (not committed)");
+            return true;
+        }
+        state->importMessage = vanguard::containers::String(
+            result == editor::EditorModelImportOfferResult::Busy ? "Model review is busy" : "Model review unavailable");
+        return false;
+    }
+
     bool InvokeOpenSourceLocation(void* const receiverData, void*) noexcept
     {
         auto* const state = static_cast<AssetBrowserPanelState*>(receiverData);
@@ -4693,6 +4806,7 @@ namespace
             {RefreshAssetBrowserCommandId, "Refresh Asset Browser Query", QueryRefreshAssetBrowser, InvokeRefreshAssetBrowser},
             {ImportAssetCommandId, "Import Candidate", QueryCandidateMutation, InvokeImportAsset},
             {ReimportAssetCommandId, "Reimport Asset", QueryAdoptedOperation, InvokeReimportAsset},
+            {ReviewModelRefreshCommandId, "Refresh Model From Source (Review)", QueryReviewModelRefresh, InvokeReviewModelRefresh},
             {OpenSourceLocationCommandId, "Open Source Location", QueryOpenSourceLocation, InvokeOpenSourceLocation},
             {MoveAssetCommandId, "Move / Rename Asset", QueryAdoptedMutation, InvokeMoveAsset},
             {DuplicateAssetCommandId, "Duplicate Asset", QueryAdoptedMutation, InvokeDuplicateAsset},
@@ -4733,6 +4847,7 @@ namespace
         const ContributionRegistration contextContributions[]{
             {ImportAssetContextContributionId, ImportAssetCommandId, "Import Candidate", 10},
             {ReimportAssetContextContributionId, ReimportAssetCommandId, "Reimport", 20},
+            {ReviewModelRefreshContextContributionId, ReviewModelRefreshCommandId, "Refresh Model From Source (Review)...", 21},
             {OpenSourceLocationContextContributionId, OpenSourceLocationCommandId, "Open Source Location", 25},
             {MoveAssetContextContributionId, MoveAssetCommandId, "Move / Rename...", 30},
             {DuplicateAssetContextContributionId, DuplicateAssetCommandId, "Duplicate...", 40},

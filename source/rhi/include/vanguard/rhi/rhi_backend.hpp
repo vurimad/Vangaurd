@@ -111,6 +111,14 @@ namespace vanguard::rhi
         [[nodiscard]] virtual bool IsGpuFenceComplete(GpuFence fence) const noexcept = 0;
         [[nodiscard]] virtual BackendStatus WaitForGpuFence(GpuFence fence, u64 timeoutNanoseconds) noexcept = 0;
         [[nodiscard]] virtual BackendStatus AddToResidencyWorkingSet(CommandListRef commandList, ResourceRef resource) noexcept = 0;
+        // Immutable packet/resource-table admission. The table is sorted and unique
+        // by ResourceRef::value. Backends may retain and resolve the complete table
+        // once so subsequent recording operations do not repeat resource-lifetime
+        // and residency deduplication work.
+        [[nodiscard]] virtual BackendStatus AdmitCommandListResources(CommandListRef, containers::ArraySpan<const ResourceRef>) noexcept
+        {
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "backend does not support command-list resource-table admission");
+        }
 
         [[nodiscard]] virtual BackendStatus SetPipeline(CommandListRef commandList, PipelineRef pipeline) noexcept = 0;
         [[nodiscard]] virtual BackendStatus SetupRenderTargets(CommandListRef commandList, const RenderTargetSetup& setup) noexcept = 0;
@@ -171,6 +179,10 @@ namespace vanguard::rhi
         [[nodiscard]] virtual BackendStatus SeedCommandListStates(CommandListRef, containers::ArraySpan<const CommandListEntryState>) noexcept
         {
             return BackendStatus::Failure(FailureCode::Unsupported, 0, "backend does not support explicit command-list entry state");
+        }
+        [[nodiscard]] virtual BackendStatus ExecuteCompiledBarriers(CommandListRef, containers::ArraySpan<const CompiledBarrier>) noexcept
+        {
+            return BackendStatus::Failure(FailureCode::Unsupported, 0, "backend does not support compiler-owned native barrier batches");
         }
         [[nodiscard]] virtual BackendStatus TransitionTexture(CommandListRef commandList, TextureRef texture, ResourceState before, ResourceState after, const SubresourceRange& range) noexcept = 0;
         [[nodiscard]] virtual BackendStatus TransitionBuffer(CommandListRef commandList, BufferRef buffer, ResourceState before, ResourceState after) noexcept = 0;

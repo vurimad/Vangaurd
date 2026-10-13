@@ -4,6 +4,18 @@
 #include <vanguard/assets/source_database.hpp>
 #include <vanguard/projects/project_workspace.hpp>
 
+namespace vanguard::mesh_tools
+{
+    class ModelImportPlan;
+    struct ModelOutputBuildRequestContext;
+    struct ModelImportPlanReport;
+}
+
+namespace vanguard::assets
+{
+    struct OwnedBuildRequest;
+}
+
 namespace vanguard::nanovanguard
 {
     enum class ProjectAssetContextResult : u8
@@ -27,7 +39,11 @@ namespace vanguard::nanovanguard
         Filesystem,
         Jobs,
         TextureTools,
+        MeshTools,
         TextureCompiler,
+        MaterialContext,
+        MaterialCompiler,
+        ModelCompiler,
         SourceScan,
         ProjectDirectories,
         ResourceRegistry,
@@ -45,6 +61,11 @@ namespace vanguard::nanovanguard
         asset_streaming::ProjectAssetPipelineResult pipeline = asset_streaming::ProjectAssetPipelineResult::Success;
         asset_streaming::ProjectAssetPipelineFailure pipelineFailure;
     };
+
+    // Private tool seam shared by the production model compiler and focused integration proofs.
+    // It composes the exact transient VPBI request later consumed by the prefab compiler.
+    [[nodiscard]] bool ComposeModelCompositionBuildRequest(const mesh_tools::ModelOutputBuildRequestContext& context,
+                                                           assets::OwnedBuildRequest& request) noexcept;
 
     // Private command-scoped composition of the existing GPU-free project-asset
     // owners. Project/document resolution and target selection happen before
@@ -71,6 +92,19 @@ namespace vanguard::nanovanguard
         [[nodiscard]] const asset_streaming::ProjectAssetPipelineConfig* GetConfig() const noexcept;
         [[nodiscard]] asset_streaming::ProjectAssetPipeline* GetPipeline() noexcept;
         [[nodiscard]] assets::SourceDatabase* GetSources() noexcept;
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult CommitModelImportPlan(
+            const mesh_tools::ModelImportPlan& plan, containers::ArraySpan<const u8> sourceSnapshot,
+            assets::AssetId& importedAsset, asset_streaming::ProjectAssetRestoreReport* report = nullptr,
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) noexcept;
+        // P5 headless source refresh. This is intentionally distinct from
+        // RequestAssetReimport(), which only recooks the already accepted schema.
+        // Refresh re-inspects current source bytes, reconciles stable identities,
+        // atomically commits the new metadata/output schema, then admits the exact
+        // accepted model generation as one publication cohort.
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult RefreshModelFromSource(
+            assets::AssetId asset, mesh_tools::ModelImportPlanReport* planReport = nullptr,
+            asset_streaming::ProjectAssetRestoreReport* restore = nullptr,
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) noexcept;
         // Pipeline initialization can cross the accepted-state commit boundary
         // and still return CommittedReconciliationPending. The command frontend
         // needs that exact startup truth for lifecycle-aware status and for

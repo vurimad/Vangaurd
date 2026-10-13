@@ -28,7 +28,7 @@ public include and canonical `vanguard::math` types.
 ## Boundary
 
 Runtime and editor modules include `vanguard/math/math.hpp` and name facilities
-through `vanguard::math`. Direct includes from `source/imported/common/redMath`
+through `vanguard::math`. Direct includes from `imported/common/redMath`
 are compatibility-layer implementation details.
 
 This is intentionally a zero-overhead source and namespace adaptation of the

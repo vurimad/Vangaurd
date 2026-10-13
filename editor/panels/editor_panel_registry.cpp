@@ -135,6 +135,8 @@ namespace vanguard::editor::detail
         }
         if (static_cast<u32>(desc.initialPlacement) > static_cast<u32>(EditorPanelInitialPlacement::Floating))
             return Fail(failure, EditorUiFailureCode::InvalidPolicy, "editor panel initial placement is invalid", desc.id);
+        if (!desc.allowDocking && desc.initialPlacement != EditorPanelInitialPlacement::Floating)
+            return Fail(failure, EditorUiFailureCode::InvalidPolicy, "non-dockable editor panels must have floating initial placement", desc.id);
 
         if (FindPhysicalType(desc.id) != nullptr || HasPhysicalPlaceholderForType(desc.id))
             return Fail(failure, EditorUiFailureCode::DuplicateIdentity, "editor panel type identity is already registered", desc.id);
@@ -431,14 +433,14 @@ namespace vanguard::editor::detail
             if (panel.placeholder)
             {
                 visitor({panel.handle, panel.owner, panel.id, panel.type, panel.title.AsChar(), nullptr, nullptr, nullptr, true,
-                         EditorPanelInitialPlacement::Center}, userData);
+                         EditorPanelInitialPlacement::Center, true}, userData);
                 continue;
             }
             PanelTypeRecord* const type = FindType(panel.type);
             if (type == nullptr || type->desc.draw == nullptr)
                 continue;
             visitor({panel.handle, panel.owner, panel.id, panel.type, panel.title.AsChar(), panel.state, type->desc.draw,
-                     type->desc.factoryData, false, type->desc.initialPlacement}, userData);
+                     type->desc.factoryData, false, type->desc.initialPlacement, type->desc.allowDocking}, userData);
         }
     }
 

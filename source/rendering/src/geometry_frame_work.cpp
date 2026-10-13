@@ -50,6 +50,11 @@ namespace vanguard::rendering
             return GeometryFrameWorkResult::AlreadyPrepared;
         if (frameSerial == 0 || !capacity.IsValid())
             return GeometryFrameWorkResult::InvalidDescriptor;
+        m_transparentDraws.Reserve(capacity.geometryWorkItems);
+        m_transparentInstances.Reserve(capacity.geometryWorkItems);
+        if (m_transparentDraws.Capacity() < capacity.geometryWorkItems ||
+            m_transparentInstances.Capacity() < capacity.geometryWorkItems)
+            return GeometryFrameWorkResult::CapacityExceeded;
 
         usize viewsOffset = 0;
         usize resultRangesOffset = 0;
@@ -98,6 +103,10 @@ namespace vanguard::rendering
         m_shellPlanImport = {};
         m_shellPlanBuffer.Reset();
         m_externalBuffers.Clear();
+        m_transparentDraws.Clear();
+        m_transparentInstances.Clear();
+        for (auto& range : m_transparentDrawRanges)
+            range = {};
         m_views = {};
         m_directionalLights = {};
         m_resultRanges = {};
@@ -443,6 +452,92 @@ namespace vanguard::rendering
                 if (!drawRecorded)
                     return false;
             }
+        }
+        return true;
+    }
+
+    bool GeometryFrameWork::RecordTransparentPhase(const RenderGeometryBatcher& batcher, const GeometryAllocator& geometry,
+                                                    const RenderPhaseId phase, const StaticSurfaceDrawContext& drawContext,
+                                                    const rhi::BufferRef instances, rhi::Failure* const failure) const noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        const auto fail = [&](const char* message) noexcept
+        {
+            if (failure != nullptr)
+            {
+                failure->code = rhi::FailureCode::InvalidArgument;
+                u32 index = 0;
+                while (message[index] != '\0' && index + 1u < sizeof(failure->message))
+                {
+                    failure->message[index] = message[index];
+                    ++index;
+                }
+                failure->message[index] = '\0';
+            }
+            return false;
+        };
+        if (!m_shellDrawsPlanned || !phase.IsValid() || drawContext.viewIndex >= m_geometryResultCount ||
+            batcher.GetCatalogStats().revision != m_catalogRevision)
+            return fail("transparent geometry recording requires the joined catalog used for shell planning");
+        const GeometryTransparentDrawRange range = m_transparentDrawRanges[drawContext.viewIndex];
+        if (range.drawCount == 0)
+            return true;
+        if (range.firstDraw > m_transparentDraws.Size() || range.drawCount > m_transparentDraws.Size() - range.firstDraw ||
+            range.firstDraw > m_transparentInstances.Size() || range.drawCount > m_transparentInstances.Size() - range.firstDraw ||
+            drawContext.tableDirectoryDescriptor == InvalidGpuDescriptorIndex || drawContext.pageDirectoryDescriptor == InvalidGpuDescriptorIndex ||
+            drawContext.viewDescriptor == InvalidGpuDescriptorIndex || drawContext.directionalLightSelectionDescriptor == InvalidGpuDescriptorIndex ||
+            !std::isfinite(drawContext.worldCellSize) || !(drawContext.worldCellSize > 0.0f))
+            return fail("transparent geometry draw range or draw context is invalid");
+        rhi::BufferDesc instanceDesc;
+        if (!rhi::GetBufferDesc(instances, instanceDesc, failure))
+            return false;
+        const u64 instanceOffset = static_cast<u64>(range.firstDraw) * sizeof(MeshDrawInstance);
+        const u64 instanceBytes = static_cast<u64>(range.drawCount) * sizeof(MeshDrawInstance);
+        if (instanceOffset > instanceDesc.size || instanceBytes > instanceDesc.size - instanceOffset)
+            return fail("transparent geometry instance buffer does not cover the view draw range");
+
+        const bool reverseDepth = (m_visibilityPlan.views[drawContext.viewIndex].flags & static_cast<u32>(RenderViewFlags::ReverseDepth)) != 0;
+        GeometryBatchId boundShell;
+        for (u32 ordinal = 0; ordinal < range.drawCount; ++ordinal)
+        {
+            const GeometryTransparentDraw& draw = m_transparentDraws[range.firstDraw + ordinal];
+            GeometryShellCatalogEntry shell;
+            GeometryBinCatalogEntry bin;
+            if (!batcher.GetShellCatalogEntry(draw.shell, shell) || !batcher.GetBinCatalogEntry(draw.bin, bin) ||
+                !shell.active || !bin.active || shell.state.phase != phase || bin.shell != shell.id ||
+                bin.geometry.index != draw.instance.geometry || bin.indexCount == 0u || bin.firstVertex > 0x7fffffffu ||
+                shell.state.depthTest != true || shell.state.reverseDepth != reverseDepth)
+                return fail("transparent geometry catalog changed between sorting and recording");
+
+            if (boundShell != shell.id)
+            {
+                GeometryVertexArenaView vertices;
+                GeometryIndexArenaView indices;
+                if (!geometry.GetVertexArena(shell.state.vertexArena, vertices) || !geometry.GetIndexArena(shell.state.indexArena, indices) ||
+                    indices.format != shell.state.indexFormat || vertices.bindingCount == 0 || vertices.bindingCount >= rhi::MaximumVertexBindings)
+                    return fail("transparent geometry shell arenas are unavailable or incompatible");
+                if (!rhi::SetPipeline(shell.state.pipeline, failure) || !rhi::SetPushConstants(&drawContext, sizeof(drawContext), failure))
+                    return false;
+                for (u32 bindingIndex = 0; bindingIndex < vertices.bindingCount; ++bindingIndex)
+                {
+                    const u8 slot = vertices.bindings[bindingIndex].binding;
+                    if (slot >= MeshDrawInstanceBinding)
+                        return fail("transparent geometry vertex arena overlaps the instance binding");
+                    const rhi::VertexBufferBinding binding{vertices.buffers[bindingIndex], 0, slot};
+                    if (!rhi::BindVertexBuffers(slot, {&binding, 1}, failure))
+                        return false;
+                }
+                const rhi::VertexBufferBinding instanceBinding{instances, instanceOffset, static_cast<u8>(MeshDrawInstanceBinding)};
+                if (!rhi::BindVertexBuffers(MeshDrawInstanceBinding, {&instanceBinding, 1}, failure) ||
+                    !rhi::BindIndexBuffer({indices.buffer, 0, indices.format}, failure))
+                    return false;
+                boundShell = shell.id;
+            }
+
+            const rhi::DrawIndexedArguments arguments{bin.indexCount, 1u, bin.firstIndex, static_cast<i32>(bin.firstVertex), ordinal};
+            if (!rhi::DrawIndexedPrimitive(arguments, failure))
+                return false;
         }
         return true;
     }

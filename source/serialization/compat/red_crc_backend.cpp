@@ -1,6 +1,6 @@
 #include <vanguard/serialization/serialization.hpp>
 
-#include "../../imported/common/redSystem/include/crc.h"
+#include "../../../imported/common/redSystem/include/crc.h"
 
 namespace vanguard::serialization
 {

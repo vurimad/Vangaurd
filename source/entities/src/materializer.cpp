@@ -114,12 +114,42 @@ namespace vanguard::entities
             ecs::EntityId entity = ecs::InvalidEntityId;
             u64 stableId = prefabs::InvalidStableId;
             bool enabled = true;
+            bool hasPlacement = false;
+            prefabs::PlacedComponentRecord placement;
+            u32 placementDepth = 0;
             DecodedComponent value;
             ComponentHandle instance;
             Component* component = nullptr;
             ComponentInitialization initialization;
             PlacedComponentBindingHandle transformBinding;
         };
+
+        struct ObjectStableKey
+        {
+            ecs::EntityId entity = ecs::InvalidEntityId;
+            u64 stableId = prefabs::InvalidStableId;
+
+            [[nodiscard]] bool operator==(const ObjectStableKey& other) const noexcept
+            {
+                return entity == other.entity && stableId == other.stableId;
+            }
+        };
+
+        struct ObjectStableKeyHash
+        {
+            [[nodiscard]] static u32 GetHash(const ObjectStableKey& key) noexcept
+            {
+                u64 value = key.entity ^ (key.stableId + 0x9e3779b97f4a7c15ull + (key.entity << 6u) + (key.entity >> 2u));
+                value ^= value >> 30u;
+                value *= 0xbf58476d1ce4e5b9ull;
+                value ^= value >> 27u;
+                value *= 0x94d049bb133111ebull;
+                value ^= value >> 31u;
+                return static_cast<u32>(value ^ (value >> 32u));
+            }
+        };
+
+        using ObjectStableIndex = containers::HashMap<ObjectStableKey, u32, containers::HashPolicyDefaultEqual<ObjectStableKeyHash, ObjectStableKey>>;
 
         struct GroupRecord;
         struct GroupLease;
@@ -195,6 +225,8 @@ namespace vanguard::entities
             ecs::ComponentId runtimeComponent = ecs::InvalidComponentId;
             ComponentStorageKind storageKind = ComponentStorageKind::Value;
             bool enabled = true;
+            bool hasPlacement = false;
+            prefabs::PlacedComponentRecord placement;
             DecodedComponent value;
         };
 
@@ -351,10 +383,17 @@ namespace vanguard::entities
                         planned.entity = identity;
                         planned.stableId = component.stableId;
                         planned.enabled = !HasFlag(component.flags, prefabs::ComponentFlags::DisabledByDefault);
+                        if (const prefabs::PlacedComponentRecord* const componentPlacement = prefab->FindPlacedComponent(component.stableId))
+                        {
+                            planned.hasPlacement = true;
+                            planned.placement = *componentPlacement;
+                        }
                         const Result decoded = components->Decode(schema, schemaVersion, data, planned.value);
                         if (decoded != Result::Success)
                             return decoded;
                         planned.storageKind = planned.value.GetStorageKind();
+                        if (planned.hasPlacement && planned.storageKind != ComponentStorageKind::Object)
+                            return Result::InvalidPrefab;
                         planned.runtimeComponent = components->RuntimeComponent(schema);
                         if (planned.storageKind == ComponentStorageKind::Value && !AddExpected(expected, {identity, planned.runtimeComponent}))
                             return Result::DuplicateIdentifier;
@@ -488,6 +527,8 @@ namespace vanguard::entities
                     object.entity = component.entity;
                     object.stableId = component.stableId;
                     object.enabled = component.enabled;
+                    object.hasPlacement = component.hasPlacement;
+                    object.placement = component.placement;
                     object.value = static_cast<DecodedComponent&&>(component.value);
                     group.objects.PushBack(static_cast<ObjectComponent&&>(object));
                     continue;
@@ -544,16 +585,28 @@ namespace vanguard::entities
         }
 
         [[nodiscard]] Result RollbackObjectAssembly(containers::DynamicArray<ObjectComponent>& objects, const u32 createdCount,
-                                                    const Result failureResult) noexcept
+                                                    ObjectAssemblyState& state, const Result failureResult) noexcept
         {
+            state = ObjectAssemblyState::Failed;
             bool rollbackSucceeded = true;
-            for (u32 index = createdCount; index > 0; --index)
+            u32 maximumDepth = 0;
+            for (u32 index = 0; index < createdCount; ++index)
+                if (objects[index].placementDepth > maximumDepth)
+                    maximumDepth = objects[index].placementDepth;
+            for (u32 depth = maximumDepth + 1u; depth > 0; --depth)
             {
-                ObjectComponent& object = objects[index - 1u];
-                if (!object.instance.IsValid())
-                    continue;
-                if (DestroyObject(object) != Result::Success)
-                    rollbackSucceeded = false;
+                const u32 currentDepth = depth - 1u;
+                for (u32 index = createdCount; index > 0; --index)
+                {
+                    ObjectComponent& object = objects[index - 1u];
+                    if (!object.instance.IsValid() || object.placementDepth != currentDepth)
+                        continue;
+                    const Result result = DestroyObject(object);
+                    if (result == Result::NotReady)
+                        return Result::InvalidState;
+                    if (result != Result::Success)
+                        rollbackSucceeded = false;
+                }
             }
             return rollbackSucceeded ? failureResult : Result::InvalidState;
         }
@@ -644,9 +697,32 @@ namespace vanguard::entities
             return nullptr;
         }
 
+        [[nodiscard]] static ObjectComponent* FindObject(containers::DynamicArray<ObjectComponent>& objects, const ecs::EntityId entity,
+                                                         const u64 stableId) noexcept
+        {
+            for (ObjectComponent& object : objects)
+                if (object.entity == entity && object.stableId == stableId)
+                    return &object;
+            return nullptr;
+        }
+
         [[nodiscard]] Result BeginObjectAssembly(containers::DynamicArray<ObjectComponent>& objects, jobs::Counter& completion,
                                                  ObjectAssemblyState& state) noexcept
         {
+            // Keep tiny prefabs allocation-free; larger same-entity component graphs
+            // resolve authored parents through an immutable assembly-local index.
+            constexpr u32 IndexedAssemblyThreshold = 24u;
+            const bool indexedAssembly = objects.Size() >= IndexedAssemblyThreshold;
+            ObjectStableIndex objectIndex(memory::pools::World::GetInstance());
+            if (indexedAssembly)
+            {
+                objectIndex.Reserve(objects.Size());
+                if (objectIndex.Capacity() < objects.Size())
+                    return RollbackObjectAssembly(objects, 0u, state, Result::OutOfMemory);
+                for (u32 index = 0; index < objects.Size(); ++index)
+                    if (!objectIndex.Insert(ObjectStableKey{objects[index].entity, objects[index].stableId}, index).IsSuccessful())
+                        return RollbackObjectAssembly(objects, 0u, state, Result::InvalidState);
+            }
             // Establish an entity-assembly barrier: every stable sibling must exist in the
             // directory before any sibling is allowed to initialize or attach.
             u32 createdCount = 0;
@@ -656,11 +732,11 @@ namespace vanguard::entities
                 if (!components->CreateObject(*componentDirectory, object.entity, object.stableId, object.value, object.instance, &failure))
                 {
                     const Result result = failure.code == ComponentDirectoryFailureCode::CapacityExceeded ? Result::OutOfMemory : Result::InvalidState;
-                    return RollbackObjectAssembly(objects, createdCount, result);
+                    return RollbackObjectAssembly(objects, createdCount, state, result);
                 }
                 object.component = componentDirectory->Get(object.instance);
                 if (object.component == nullptr)
-                    return RollbackObjectAssembly(objects, createdCount + 1u, Result::InvalidState);
+                    return RollbackObjectAssembly(objects, createdCount + 1u, state, Result::InvalidState);
                 ++createdCount;
             }
 
@@ -670,23 +746,74 @@ namespace vanguard::entities
                 const bool entityEnabled = runtimeEntity && !ecs_has_id(world->GetNative(), runtimeEntity.value, disabledType.id);
                 ComponentDirectoryFailure failure;
                 if (!runtimeEntity || !componentDirectory->SetInitialEnabledState(object.instance, object.enabled, entityEnabled, &failure))
-                    return RollbackObjectAssembly(objects, createdCount, Result::InvalidState);
+                    return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
             }
 
-            // Create the entity transform root and connect every floating placed component before
-            // component initialization. Initialization can therefore resolve the stable transform
-            // relationship while propagation remains owned by the transform CPU stage.
+            // Create the entity transform root and realize the authored same-entity placed graph
+            // before initialization. Every sibling object already exists, so placement references
+            // resolve by stable component identity rather than serialization order.
             TransformRuntime* transforms = nullptr;
+            u32 placedCount = 0;
             for (ObjectComponent& object : objects)
             {
                 IPlacedComponent* const placed = object.component->GetPlacedComponent();
+                if (object.hasPlacement && placed == nullptr)
+                    return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
                 if (placed == nullptr)
+                    continue;
+                ++placedCount;
+                if (object.hasPlacement)
+                    placed->SetInitialPlacement(math::Vector3(object.placement.translation[0], object.placement.translation[1], object.placement.translation[2]),
+                                                math::Quaternion(object.placement.rotation));
+            }
+
+            u32 attachedCount = 0;
+            for (ObjectComponent& object : objects)
+            {
+                IPlacedComponent* const placed = object.component->GetPlacedComponent();
+                if (placed == nullptr ||
+                    (object.hasPlacement && object.placement.parentComponentStableId != prefabs::InvalidStableId))
                     continue;
                 if (transforms == nullptr)
                     transforms = GetTransformRuntime();
                 if (transforms == nullptr ||
                     !transforms->AttachPlacedComponent(object.entity, *placed, object.transformBinding))
-                    return RollbackObjectAssembly(objects, createdCount, Result::InvalidState);
+                    return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
+                object.placementDepth = 0;
+                ++attachedCount;
+            }
+
+            while (attachedCount < placedCount)
+            {
+                bool progressed = false;
+                for (ObjectComponent& object : objects)
+                {
+                    IPlacedComponent* const placed = object.component->GetPlacedComponent();
+                    if (placed == nullptr || object.transformBinding.IsValid() || !object.hasPlacement ||
+                        object.placement.parentComponentStableId == prefabs::InvalidStableId)
+                        continue;
+                    const u32* const parentIndex = indexedAssembly
+                                                       ? objectIndex.FindPtr(ObjectStableKey{object.entity, object.placement.parentComponentStableId})
+                                                       : nullptr;
+                    ObjectComponent* const parent = indexedAssembly
+                                                        ? (parentIndex != nullptr ? &objects[*parentIndex] : nullptr)
+                                                        : FindObject(objects, object.entity, object.placement.parentComponentStableId);
+                    IPlacedComponent* const parentPlaced = parent != nullptr && parent->component != nullptr ? parent->component->GetPlacedComponent() : nullptr;
+                    if (parent == nullptr || parentPlaced == nullptr)
+                        return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
+                    if (!parent->transformBinding.IsValid())
+                        continue;
+                    if (transforms == nullptr)
+                        transforms = GetTransformRuntime();
+                    if (transforms == nullptr ||
+                        !transforms->AttachPlacedComponent(object.entity, *placed, parentPlaced, object.transformBinding))
+                        return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
+                    object.placementDepth = parent->placementDepth + 1u;
+                    ++attachedCount;
+                    progressed = true;
+                }
+                if (!progressed)
+                    return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
             }
 
             u32 begunCount = 0;
@@ -697,7 +824,7 @@ namespace vanguard::entities
                 {
                     for (u32 index = begunCount; index > 0; --index)
                         static_cast<void>(componentDirectory->CancelInitialization(objects[index - 1u].initialization));
-                    return RollbackObjectAssembly(objects, createdCount, Result::InvalidState);
+                    return RollbackObjectAssembly(objects, createdCount, state, Result::InvalidState);
                 }
                 ++begunCount;
             }
@@ -725,7 +852,7 @@ namespace vanguard::entities
             {
                 for (u32 index = begunCount; index > 0; --index)
                     static_cast<void>(componentDirectory->CancelInitialization(objects[index - 1u].initialization));
-                return RollbackObjectAssembly(objects, createdCount, Result::OutOfMemory);
+                return RollbackObjectAssembly(objects, createdCount, state, Result::OutOfMemory);
             }
             completion = builder.ExtractCounter();
             if (!completion.IsValid())
@@ -759,7 +886,7 @@ namespace vanguard::entities
             if (!initialized)
             {
                 state = ObjectAssemblyState::Failed;
-                return RollbackObjectAssembly(objects, objects.Size(), Result::InvalidState);
+                return RollbackObjectAssembly(objects, objects.Size(), state, Result::InvalidState);
             }
 
             // Attachment remains serialized after the full initialization continuation tree.
@@ -769,7 +896,7 @@ namespace vanguard::entities
                 if (!componentDirectory->AttachComponent(object.instance, &failure))
                 {
                     state = ObjectAssemblyState::Failed;
-                    return RollbackObjectAssembly(objects, objects.Size(), Result::InvalidState);
+                    return RollbackObjectAssembly(objects, objects.Size(), state, Result::InvalidState);
                 }
             }
             // Attachment uses two distinct sibling-wide passes. PostAttach may safely resolve
@@ -780,7 +907,7 @@ namespace vanguard::entities
                 if (!componentDirectory->PostAttachComponent(object.instance, &failure))
                 {
                     state = ObjectAssemblyState::Failed;
-                    return RollbackObjectAssembly(objects, objects.Size(), Result::InvalidState);
+                    return RollbackObjectAssembly(objects, objects.Size(), state, Result::InvalidState);
                 }
             }
             for (ObjectComponent& object : objects)
@@ -833,22 +960,34 @@ namespace vanguard::entities
         {
             if (!ValidateObjects(objects))
                 return Result::InvalidState;
-            bool pending = false;
-            for (u32 index = objects.Size(); index > 0; --index)
+            u32 maximumDepth = 0;
+            for (const ObjectComponent& object : objects)
+                if (object.instance.IsValid() && object.placementDepth > maximumDepth)
+                    maximumDepth = object.placementDepth;
+            for (u32 depth = maximumDepth + 1u; depth > 0; --depth)
             {
-                ObjectComponent& object = objects[index - 1u];
-                if (!object.instance.IsValid())
-                    continue;
-                const Result result = DestroyObject(object, releaseFailure);
-                if (result == Result::NotReady)
+                bool pending = false;
+                const u32 currentDepth = depth - 1u;
+                for (u32 index = objects.Size(); index > 0; --index)
                 {
-                    pending = true;
-                    continue;
+                    ObjectComponent& object = objects[index - 1u];
+                    if (!object.instance.IsValid() || object.placementDepth != currentDepth)
+                        continue;
+                    const Result result = DestroyObject(object, releaseFailure);
+                    if (result == Result::NotReady)
+                    {
+                        pending = true;
+                        continue;
+                    }
+                    if (result != Result::Success)
+                        return result;
                 }
-                if (result != Result::Success)
-                    return result;
+                // Never tear down a parent while any child at a deeper hierarchy level is
+                // still waiting on its component release cutover.
+                if (pending)
+                    return Result::NotReady;
             }
-            return pending ? Result::NotReady : Result::Success;
+            return Result::Success;
         }
 
         ComponentRegistry* components = nullptr;
@@ -1137,6 +1276,8 @@ namespace vanguard::entities
             object.entity = component.entity;
             object.stableId = component.stableId;
             object.enabled = component.enabled;
+            object.hasPlacement = component.hasPlacement;
+            object.placement = component.placement;
             object.value = static_cast<DecodedComponent&&>(component.value);
             record->objects.PushBack(static_cast<Impl::ObjectComponent&&>(object));
         }

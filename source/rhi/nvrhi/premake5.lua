@@ -50,7 +50,7 @@ project "rhiNvrhiTests"
         "../../concurrency/include", "../../diagnostics/include", "../../jobs/include", "../../rendering/include",
         "../../pipelineCache/include", "../../pipelines/include", "../../shaders/include", "../../crypto/include",
         "../../serialization/include", "../../resources/include", "../../materials/include", "../../meshes/include", "../../filesystem/include", "../../io/include",
-        "../../window/include"
+        "../../window/include", path.join(nvrhi_root, "include")
     }
     links {
         "rendering", "pipelineCache", "pipelines", "shaders", "materials", "meshes", "crypto", "serialization", "resources", "filesystem", "io", "window",

@@ -8,8 +8,12 @@ struct DirectionalDiffuseConstants
     uint viewIndex;
     uint baseColorDescriptor;
     uint normalDescriptor;
+    uint emissiveMetallicDescriptor;
+    uint specularColorDescriptor;
+    uint viewDirectionDescriptor;
     uint visibilityMask;
-    uint reserved;
+    uint reserved0;
+    uint reserved1;
 };
 [[push_constant]] ConstantBuffer<DirectionalDiffuseConstants> diffuse;
 
@@ -17,6 +21,53 @@ struct DirectionalDiffuseVertex
 {
     float4 position : SV_Position;
 };
+
+static const float DirectionalPi = 3.14159265358979323846;
+
+float3 DirectionalFresnel(float cosine, float3 f0)
+{
+    float factor = pow(1.0 - saturate(cosine), 5.0);
+    return f0 + (1.0 - f0) * factor;
+}
+
+float DirectionalDistribution(float nDotH, float roughness)
+{
+    float alpha = max(roughness * roughness, 0.0025);
+    float alphaSquared = alpha * alpha;
+    float denominator = nDotH * nDotH * (alphaSquared - 1.0) + 1.0;
+    return alphaSquared / max(DirectionalPi * denominator * denominator, 1.0e-6);
+}
+
+float DirectionalGeometry(float nDotV, float nDotL, float roughness)
+{
+    float k = roughness + 1.0;
+    k = (k * k) * 0.125;
+    float view = nDotV / max(nDotV * (1.0 - k) + k, 1.0e-6);
+    float light = nDotL / max(nDotL * (1.0 - k) + k, 1.0e-6);
+    return view * light;
+}
+
+float3 EvaluateDirectionalBrdf(float3 baseColor, float roughness, float metallic, float3 dielectricF0,
+                               float3 normal, float3 viewDirection, float3 lightDirection)
+{
+    float nDotL = saturate(dot(normal, lightDirection));
+    float nDotV = saturate(dot(normal, viewDirection));
+    if (!(nDotL > 0.0) || !(nDotV > 0.0))
+        return float3(0, 0, 0);
+    float3 halfVector = normalize(viewDirection + lightDirection);
+    float nDotH = saturate(dot(normal, halfVector));
+    float vDotH = saturate(dot(viewDirection, halfVector));
+    float clampedMetallic = saturate(metallic);
+    float clampedRoughness = clamp(roughness, 0.045, 1.0);
+    float3 f0 = lerp(saturate(dielectricF0), saturate(baseColor), clampedMetallic);
+    float3 fresnel = DirectionalFresnel(vDotH, f0);
+    float distribution = DirectionalDistribution(nDotH, clampedRoughness);
+    float geometry = DirectionalGeometry(nDotV, nDotL, clampedRoughness);
+    float3 specular = distribution * geometry * fresnel / max(4.0 * nDotV * nDotL, 1.0e-6);
+    float3 diffuseWeight = (1.0 - fresnel) * (1.0 - clampedMetallic);
+    float3 diffuseTerm = diffuseWeight * saturate(baseColor) * (1.0 / DirectionalPi);
+    return (diffuseTerm + specular) * nDotL;
+}
 
 [shader("vertex")]
 DirectionalDiffuseVertex DirectionalDiffuseVertexMain(uint vertex : SV_VertexID)
@@ -31,8 +82,13 @@ DirectionalDiffuseVertex DirectionalDiffuseVertexMain(uint vertex : SV_VertexID)
 float4 DirectionalDiffuseFragmentMain(DirectionalDiffuseVertex input) : SV_Target0
 {
     Texture2D<float4> normals = ResourceDescriptorHeap[diffuse.normalDescriptor];
+    Texture2D<float4> baseColors = ResourceDescriptorHeap[diffuse.baseColorDescriptor];
+    Texture2D<float4> emissiveMetallicValues = ResourceDescriptorHeap[diffuse.emissiveMetallicDescriptor];
+    Texture2D<float4> specularColors = ResourceDescriptorHeap[diffuse.specularColorDescriptor];
+    Texture2D<float4> viewDirections = ResourceDescriptorHeap[diffuse.viewDirectionDescriptor];
     int2 pixel = int2(input.position.xy);
-    float3 normal = normals.Load(int3(pixel, 0)).xyz;
+    float4 normalRoughness = normals.Load(int3(pixel, 0));
+    float3 normal = normalRoughness.xyz;
     float lengthSquared = dot(normal, normal);
     // GBuffer clears normals to zero; valid surfaces write unit signed normals.
     // Background and masked holes stay black without reading a depth descriptor.
@@ -42,14 +98,19 @@ float4 DirectionalDiffuseFragmentMain(DirectionalDiffuseVertex input) : SV_Targe
 
     StructuredBuffer<GpuDirectionalLightSelection> selections = ResourceDescriptorHeap[diffuse.selectionDescriptor];
     GpuDirectionalLightSelection selection = selections[diffuse.viewIndex];
-    if (selection.count == 0u || selection.count > VG_MAXIMUM_DIRECTIONAL_LIGHTS_PER_VIEW)
-        return float4(0, 0, 0, 1);
     StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[diffuse.tableDirectoryDescriptor];
     StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[diffuse.pageDirectoryDescriptor];
     GpuSceneTableDirectory table = tables[VG_GPU_SCENE_TABLE_LIGHT];
-    float3 illuminance = float3(0, 0, 0);
+    float3 baseColor = baseColors.Load(int3(pixel, 0)).rgb;
+    float4 emissiveMetallic = emissiveMetallicValues.Load(int3(pixel, 0));
+    float3 dielectricF0 = specularColors.Load(int3(pixel, 0)).rgb;
+    float3 viewDirection = viewDirections.Load(int3(pixel, 0)).xyz;
+    float viewLengthSquared = dot(viewDirection, viewDirection);
+    viewDirection = viewLengthSquared > 0.0 ? viewDirection * rsqrt(viewLengthSquared) : float3(0, 0, 1);
+    float3 color = emissiveMetallic.rgb;
     // Bounded selected identities, never a scan of allocated GPU light slots.
-    for (uint index = 0u; index < selection.count; ++index)
+    uint count = min(selection.count, VG_MAXIMUM_DIRECTIONAL_LIGHTS_PER_VIEW);
+    for (uint index = 0u; index < count; ++index)
     {
         uint2 identity = selection.lights[index];
         if (identity.x == VG_GPU_SCENE_INVALID_INDEX || identity.y == 0u)
@@ -64,12 +125,9 @@ float4 DirectionalDiffuseFragmentMain(DirectionalDiffuseVertex input) : SV_Targe
         GpuLight light = lights[address.y];
         if (!IsGpuLightActive(light, identity.y, diffuse.visibilityMask) || light.type != VG_GPU_LIGHT_DIRECTIONAL)
             continue;
-        // Direction follows emitted rays: negate it for surface-to-light.
-        illuminance += light.color * light.intensity * saturate(dot(normal, -light.direction));
+        float3 brdf = EvaluateDirectionalBrdf(baseColor, normalRoughness.a, emissiveMetallic.a, dielectricF0,
+                                              normal, viewDirection, -light.direction);
+        color += brdf * light.color * light.intensity;
     }
-    Texture2D<float4> baseColors = ResourceDescriptorHeap[diffuse.baseColorDescriptor];
-    float3 baseColor = baseColors.Load(int3(pixel, 0)).rgb;
-    // Simple unshadowed Lambert diffuse, in linear light. No emissive, ambient,
-    // specular, exposure or tone mapping is included in this first-light pass.
-    return float4(baseColor * illuminance * (1.0 / 3.14159265358979323846), 1);
+    return float4(color, 1);
 }

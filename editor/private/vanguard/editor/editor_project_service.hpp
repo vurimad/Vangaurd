@@ -12,6 +12,14 @@
 #include <vanguard/asset_streaming/project_asset_pipeline.hpp>
 #include <vanguard/textures/textures.hpp>
 
+namespace vanguard::mesh_tools
+{
+    struct ModelImportManifest;
+    struct ModelImportSettings;
+    struct ModelImportPlanReport;
+    class ModelImportPlan;
+}
+
 namespace vanguard::editor
 {
     inline constexpr engine::FrameParticipantId ProjectAssetFrameParticipantId = 0x6570726a61737401ull;
@@ -212,6 +220,10 @@ namespace vanguard::editor
                                    containers::ArraySpan<assets::AssetReference> output,
                                    u32& available, bool& truncated) const noexcept;
         [[nodiscard]] bool CanMutateAssets() const noexcept;
+        // Cheap, read-only gate for retrying an already reviewed commit after a
+        // transient Busy response. Observation must have settled before the
+        // potentially expensive whole-project commit proof runs again.
+        [[nodiscard]] bool CanRetryReviewedModelCommit(const mesh_tools::ModelImportPlan& plan) const noexcept;
         [[nodiscard]] u32 GetSourceRootCount() const noexcept;
         [[nodiscard]] bool GetSourceRootPresentation(u32 root,
                                                      EditorProjectAssetRootPresentation& presentation) const noexcept;
@@ -228,6 +240,42 @@ namespace vanguard::editor
             containers::StringView sourceFileName, containers::ArraySpan<const u8> sourceBytes,
             assets::AssetId& importedAsset,
             EditorProjectExternalImportFailure* failure = nullptr) const noexcept;
+        // P6 model review is non-durable until CommitModelImportPlan. Plans
+        // capture source/accepted-generation and dependency witnesses from the
+        // single authoritative project pipeline, not an Editor-owned cooker.
+        // plannedAsset is IN/OUT: a review session must reuse its provisional
+        // identity across candidate settings edits; only a zero identity is
+        // generated anew. Commit rechecks identity collisions atomically.
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult PrepareModelImportPlan(
+            const filesystem::AbsolutePath& sourceOrigin, containers::ArraySpan<const u8> sourceSnapshot,
+            u32 destinationRoot, containers::StringView rootRelativeFolder, containers::StringView sourceFileName,
+            assets::AssetId existingAsset, u64 expectedAcceptedGeneration, u64 expectedSourceGeneration,
+            const mesh_tools::ModelImportManifest& manifest, const mesh_tools::ModelImportSettings& settings,
+            mesh_tools::ModelImportPlan& plan, mesh_tools::ModelImportPlanReport* report,
+            assets::AssetId& plannedAsset,
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult CommitModelImportPlan(
+            const mesh_tools::ModelImportPlan& plan, containers::ArraySpan<const u8> sourceSnapshot,
+            assets::AssetId& importedAsset,
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) const noexcept;
+        // Retry only the non-durable cohort handoff after an already committed
+        // model import; never re-inspect or silently commit changed source data.
+        // The reviewed plan, predecessor accepted generation and exact source,
+        // settings and output witnesses must identify the NEW accepted state.
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult ResumeCommittedModelImport(
+            const mesh_tools::ModelImportPlan& reviewedPlan, assets::AssetId asset, u64 previousAcceptedGeneration,
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr, bool validateOnly = false) const noexcept;
+        // Process-local owner progress for a large independent reviewed commit.
+        // This does not initiate cohort admission or modify accepted source truth.
+        [[nodiscard]] asset_streaming::ProjectAssetDeferredPlannedImportStatus GetDeferredModelImportStatus() const noexcept;
+        [[nodiscard]] asset_streaming::ProjectAssetAutomaticRecookStatus GetAutomaticRecookStatus() const noexcept;
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult CancelAutomaticRecook(
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult RetryAutomaticRecook(
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] asset_streaming::ProjectAssetPipelineResult RetryAutomaticPublication(
+            resources::ResourceReference output,
+            asset_streaming::ProjectAssetPipelineFailure* failure = nullptr) const noexcept;
         // Resolves current project-authored source truth for non-mutating shell
         // actions such as Open Source Location. The generation fence prevents a
         // stale browser selection from revealing a replaced/relocated source.

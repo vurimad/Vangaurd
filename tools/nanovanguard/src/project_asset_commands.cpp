@@ -173,6 +173,7 @@ namespace
         case Result::SnapshotSaveFailed: return "snapshot-save-failed";
         case Result::OperationInitializationFailed: return "operation-initialization-failed";
         case Result::OperationFailed: return "operation-failed";
+        case Result::StalePlan: return "stale-plan";
         case Result::IdentityGenerationFailed: return "identity-generation-failed";
         case Result::HistoryLimitExceeded: return "history-limit-exceeded";
         case Result::UndoUnavailable: return "undo-unavailable";

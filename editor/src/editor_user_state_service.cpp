@@ -2904,6 +2904,13 @@ namespace
                 // cleared layout; abandoning this pending reset on teardown is safer than making a
                 // structurally incomplete presentation the next startup state.
                 m_defaultLayoutRebuildPending = false;
+                // Command mutation is only admitted while the command service
+                // is Running. All services drain before OnStop, so release
+                // our named-layout handlers during Quiesce, even on this
+                // intentionally skipped final-layout-persistence branch.
+                if (!UnregisterNamedLayoutCommands())
+                    return LifecycleFailure(editor::EditorUserStateFailureCode::CleanupFailed,
+                                            "editor user state named-layout command cleanup failed");
                 m_status.state = editor::EditorUserStateServiceState::Quiesced;
                 return app::LifecycleStatus::Success();
             }
@@ -2935,6 +2942,12 @@ namespace
                     m_status.failure.code = editor::EditorUserStateFailureCode::ReplaceFailed;
                 }
             }
+            // Final persistence has captured command shortcut/layout state.
+            // Release command callbacks while Command is still Running;
+            // deferring this to Stop violates its earlier Drain invariant.
+            if (!UnregisterNamedLayoutCommands())
+                return LifecycleFailure(editor::EditorUserStateFailureCode::CleanupFailed,
+                                        "editor user state named-layout command cleanup failed");
             m_status.state = editor::EditorUserStateServiceState::Quiesced;
             return app::LifecycleStatus::Success();
         }
@@ -2952,7 +2965,9 @@ namespace
         {
             if (!concurrency::IsMainThread())
                 return LifecycleFailure(editor::EditorUserStateFailureCode::WrongThread, "editor user state stop requires the main thread");
-            UnregisterNamedLayoutCommands();
+            if (!UnregisterNamedLayoutCommands())
+                return LifecycleFailure(editor::EditorUserStateFailureCode::CleanupFailed,
+                                        "editor user state named-layout command cleanup survived quiesce");
             m_status.state = editor::EditorUserStateServiceState::Stopped;
             return app::LifecycleStatus::Success();
         }
@@ -3560,21 +3575,30 @@ namespace
             return true;
         }
 
-        void UnregisterNamedLayoutCommands() noexcept
+        [[nodiscard]] bool UnregisterNamedLayoutCommands() noexcept
         {
-            if (!m_namedLayoutCommandsRegistered || m_commandPersistence == nullptr)
-                return;
+            if (!m_namedLayoutCommandsRegistered)
+                return true;
+            if (m_commandPersistence == nullptr)
+                return false;
+            bool cleaned = true;
             for (u32 index = static_cast<u32>(std::size(m_namedLayoutCommandTokens)); index-- > 0;)
             {
                 if (!m_namedLayoutCommandTokens[index].IsValid() || !m_namedLayoutHandlerTokens[index].IsValid())
                     continue;
                 editor::EditorCommandFailure failure;
-                static_cast<void>(m_commandPersistence->UnregisterCoreWorkspaceCommand(
-                    m_namedLayoutCommandTokens[index], m_namedLayoutHandlerTokens[index], &failure));
+                if (!m_commandPersistence->UnregisterCoreWorkspaceCommand(
+                        m_namedLayoutCommandTokens[index], m_namedLayoutHandlerTokens[index], &failure))
+                {
+                    cleaned = false;
+                    continue;
+                }
                 m_namedLayoutCommandTokens[index] = {};
                 m_namedLayoutHandlerTokens[index] = {};
             }
-            m_namedLayoutCommandsRegistered = false;
+            if (cleaned)
+                m_namedLayoutCommandsRegistered = false;
+            return cleaned;
         }
 
         [[nodiscard]] bool RequestNamedLayoutPrompt(const NamedLayoutOperation operation) noexcept

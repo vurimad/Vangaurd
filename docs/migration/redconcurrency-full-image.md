@@ -3,7 +3,7 @@
 ## Decision
 
 Vanguard reuses the complete, proven RED low-level concurrency implementation
-already retained inside `source/imported/common/redSystem`. The implementation
+already retained inside `imported/common/redSystem`. The implementation
 is compiled once by `redSystemCompat`; it is not duplicated or rewritten
 piecemeal.
 

@@ -940,7 +940,9 @@ namespace vanguard::rendering
         const containers::ArraySpan<const pipelines::ShaderReference> shaderReferences = pipelineObject->GetFile().GetShaders();
         if (shaderDependencies.Size() != shaderReferences.Size())
             return Fail(failure, MaterialResidencyRuntimeFailureCode::InvalidMaterial, "material technique shader closure is inconsistent");
-        const bool standardStaticSurfacePhase = desc.technique == standardRenderPhases::DepthPrepass.value || desc.technique == standardRenderPhases::Opaque.value;
+        const bool standardStaticSurfacePhase = desc.technique == standardRenderPhases::DepthPrepass.value ||
+                                                desc.technique == standardRenderPhases::Opaque.value ||
+                                                desc.technique == standardRenderPhases::Transparent.value;
         const bool staticSurfaceTechnique = standardStaticSurfacePhase && IsStaticSurfaceDrawPipeline(pipelineObject->GetFile());
         const u32 techniqueIndex = m_impl->AllocateTechnique();
         if (techniqueIndex == InvalidMaterialTechniqueIndex)

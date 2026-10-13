@@ -2,6 +2,7 @@
 
 #include <vanguard/memory/memory.hpp>
 
+
 namespace vanguard::asset_streaming
 {
     namespace
@@ -207,7 +208,55 @@ namespace vanguard::asset_streaming
 
         const containers::ArraySpan<const assets::CachedArtifactDescriptor> cached = reader.Artifacts();
         if (cached.Count() != expected.artifacts.Size())
+        {
             return fail(ProjectLoosePublicationResult::MaterializationFailure, assets::IndexResult::Success,
+                        assets::LooseMaterializationResult::DescriptorMismatch);
+        }
+        for (u32 index = 0; index < cached.Count(); ++index)
+        {
+            const assets::CachedArtifactDescriptor& left = cached[index];
+            const assets::IndexedArtifact& right = expected.artifacts[index];
+            if (left.resource != right.resource || left.segment != right.segment || left.flags != right.flags ||
+                left.alignmentLog2 != right.alignmentLog2 || left.byteCount != right.byteCount)
+            {
+                return fail(ProjectLoosePublicationResult::MaterializationFailure, assets::IndexResult::Success,
+                            assets::LooseMaterializationResult::DescriptorMismatch);
+            }
+        }
+        return ProjectLoosePublicationResult::Success;
+    }
+
+    ProjectLoosePublicationResult ProjectLoosePublisher::ValidateRetainedExact(
+        const assets::DependencyRecord& expected, ProjectLoosePublicationFailure* const failure) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        const auto fail = [failure](const ProjectLoosePublicationResult result,
+                                    const assets::LooseMaterializationResult materialization = assets::LooseMaterializationResult::Success) noexcept
+        {
+            if (failure != nullptr)
+                *failure = {result, assets::IndexResult::Success, materialization};
+            return result;
+        };
+        if (m_impl == nullptr)
+            return fail(ProjectLoosePublicationResult::InvalidState);
+        if (!expected.output.IsValid() || !expected.output.IsTyped() || expected.buildFingerprint.IsEmpty() ||
+            expected.contentFingerprint.IsEmpty() || expected.artifacts.Empty())
+            return fail(ProjectLoosePublicationResult::InvalidArgument);
+        if (expected.target != m_impl->config.target)
+            return fail(ProjectLoosePublicationResult::TargetMismatch);
+
+        assets::ArtifactSetReader reader;
+        const assets::DerivedDataArtifactResult opened =
+            m_impl->artifacts.Open({expected.buildFingerprint, expected.contentFingerprint}, reader);
+        if (opened != assets::DerivedDataArtifactResult::Success)
+        {
+            const assets::LooseMaterializationResult materialization = MapArtifactValidation(opened);
+            return fail(MapMaterialization(materialization), materialization);
+        }
+        const containers::ArraySpan<const assets::CachedArtifactDescriptor> cached = reader.Artifacts();
+        if (cached.Count() != expected.artifacts.Size())
+            return fail(ProjectLoosePublicationResult::MaterializationFailure,
                         assets::LooseMaterializationResult::DescriptorMismatch);
         for (u32 index = 0; index < cached.Count(); ++index)
         {
@@ -215,7 +264,7 @@ namespace vanguard::asset_streaming
             const assets::IndexedArtifact& right = expected.artifacts[index];
             if (left.resource != right.resource || left.segment != right.segment || left.flags != right.flags ||
                 left.alignmentLog2 != right.alignmentLog2 || left.byteCount != right.byteCount)
-                return fail(ProjectLoosePublicationResult::MaterializationFailure, assets::IndexResult::Success,
+                return fail(ProjectLoosePublicationResult::MaterializationFailure,
                             assets::LooseMaterializationResult::DescriptorMismatch);
         }
         return ProjectLoosePublicationResult::Success;
@@ -299,8 +348,88 @@ namespace vanguard::asset_streaming
             m_impl->materializer.Materialize(expected, expected.output, m_impl->artifacts, target, temporary,
                                              m_impl->config.materializationLimits, &materialized);
         if (materialization != assets::LooseMaterializationResult::Success)
+        {
             return fail(MapMaterialization(materialization), assets::IndexResult::Success, materialization);
+        }
 
+        expectedContentCrc64 = materialized.contentCrc64;
+        if (publication != nullptr)
+            publication->physicalPath = target;
+        return ProjectLoosePublicationResult::Success;
+    }
+
+    ProjectLoosePublicationResult ProjectLoosePublisher::PrepareRetainedExact(
+        const assets::DependencyRecord& expected, containers::DynamicArray<streaming::DependencyDescriptor>& dependencies,
+        u64& expectedContentCrc64, ProjectLoosePublicationFailure* const failure,
+        ProjectLoosePublicationInfo* const publication) noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        if (publication != nullptr)
+            *publication = {};
+        dependencies.Clear();
+        expectedContentCrc64 = 0u;
+        const auto fail = [failure](const ProjectLoosePublicationResult result,
+                                    const assets::LooseMaterializationResult materialization = assets::LooseMaterializationResult::Success) noexcept
+        {
+            if (failure != nullptr)
+                *failure = {result, assets::IndexResult::Success, materialization};
+            return result;
+        };
+        if (m_impl == nullptr)
+            return fail(ProjectLoosePublicationResult::InvalidState);
+        const ProjectLoosePublicationResult validated = ValidateRetainedExact(expected, failure);
+        if (validated != ProjectLoosePublicationResult::Success)
+            return validated;
+
+        if (publication != nullptr)
+        {
+            publication->buildFingerprint = expected.buildFingerprint;
+            publication->contentFingerprint = expected.contentFingerprint;
+            publication->priority = m_impl->config.priority;
+        }
+        dependencies.Reserve(expected.dependencies.Size());
+        if (dependencies.Capacity() < expected.dependencies.Size())
+            return fail(ProjectLoosePublicationResult::OutOfMemory);
+        for (const assets::BuildDependency& dependency : expected.dependencies)
+        {
+            if (dependency.role != assets::DependencyRole::Generated)
+                continue;
+            if (dependencies.Size() >= m_impl->config.maximumRuntimeDependencies)
+                return fail(ProjectLoosePublicationResult::LimitExceeded);
+            const u32 previous = dependencies.Size();
+            dependencies.PushBack({dependency.identity, RuntimeKind(dependency.requirement)});
+            if (dependencies.Size() != previous + 1u)
+                return fail(ProjectLoosePublicationResult::OutOfMemory);
+        }
+
+        char first[3]{HexDigit(expected.buildFingerprint.bytes[0] >> 4u), HexDigit(expected.buildFingerprint.bytes[0]), '\0'};
+        char second[3]{HexDigit(expected.buildFingerprint.bytes[1] >> 4u), HexDigit(expected.buildFingerprint.bytes[1]), '\0'};
+        const filesystem::AbsolutePath directory = m_impl->config.looseRoot.AddDirPath(first).AddDirPath(second);
+        if (directory.Empty() || !filesystem::GetManager().CreatePath(directory))
+            return fail(ProjectLoosePublicationResult::DirectoryFailure);
+        char name[87]{};
+        WriteHex64(name, expected.output.GetPath().Id());
+        name[16] = '-';
+        WriteFingerprint(name + 17, expected.buildFingerprint);
+        constexpr char suffix[] = ".vres";
+        for (u32 index = 0; index < sizeof(suffix); ++index)
+            name[81u + index] = suffix[index];
+        const filesystem::AbsolutePath target = directory.AddFilePath(name);
+        containers::String temporaryName(name);
+        temporaryName.Append(".tmp", 4);
+        const filesystem::AbsolutePath temporary = directory.AddFilePath(temporaryName);
+        if (target.Empty() || temporary.Empty())
+            return fail(ProjectLoosePublicationResult::InvalidArgument);
+
+        assets::LooseMaterializationInfo materialized;
+        const assets::LooseMaterializationResult materialization =
+            m_impl->materializer.Materialize(expected, expected.output, m_impl->artifacts, target, temporary,
+                                             m_impl->config.materializationLimits, &materialized);
+        if (materialization != assets::LooseMaterializationResult::Success)
+        {
+            return fail(MapMaterialization(materialization), materialization);
+        }
         expectedContentCrc64 = materialized.contentCrc64;
         if (publication != nullptr)
             publication->physicalPath = target;

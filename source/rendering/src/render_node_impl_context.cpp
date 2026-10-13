@@ -2,6 +2,7 @@
 
 #include <vanguard/rendering/render_camera.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
+#include <vanguard/rendering/render_flow_resource_internal.hpp>
 #include <vanguard/rendering/viewport.hpp>
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/system/assert.hpp>
@@ -28,7 +29,8 @@ namespace vanguard::rendering
     RenderNodeResources::RenderNodeResources() noexcept
         : m_uses(memory::pools::Rendering::GetInstance()), m_decisions(memory::pools::Rendering::GetInstance()), m_ranges(memory::pools::Rendering::GetInstance()),
           m_lookupBuckets(memory::pools::Rendering::GetInstance()), m_lookupGroups(memory::pools::Rendering::GetInstance()),
-          m_resolvedTextures(memory::pools::Rendering::GetInstance()), m_resolvedBuffers(memory::pools::Rendering::GetInstance())
+          m_resolvedTextures(memory::pools::Rendering::GetInstance()), m_resolvedBuffers(memory::pools::Rendering::GetInstance()),
+          m_warmRangeExecutions(memory::pools::Rendering::GetInstance()), m_warmLookupRuntimeNextUses(memory::pools::Rendering::GetInstance())
     {
     }
 
@@ -36,11 +38,169 @@ namespace vanguard::rendering
     {
         m_resolvedTextures.Clear();
         m_resolvedBuffers.Clear();
+        ReleaseWarmContractView();
         m_lookupBuckets.Clear();
         m_lookupGroups.Clear();
         m_uses.Clear();
         m_decisions.Clear();
         m_ranges.Clear();
+    }
+
+    void RenderNodeResources::BindWarmContract(const detail::ResourceContractNodeTemplate& source, const u32 generation) noexcept
+    {
+        Reset();
+        m_warmTemplate = &source;
+        m_warmGeneration = generation;
+        m_warmRangeExecutions.Resize(source.ranges.Size());
+        for (CompiledExecutionRange& execution : m_warmRangeExecutions)
+            execution = {};
+        m_warmLookupRuntimeNextUses.Resize(source.lookupGroups.Size());
+        for (u32 index = 0; index < source.lookupGroups.Size(); ++index)
+            m_warmLookupRuntimeNextUses[index] = source.lookupGroups[index].firstUse;
+        m_resolvedTextures.Resize(source.textureBindingCount);
+        m_resolvedBuffers.Resize(source.bufferBindingCount);
+    }
+
+    void RenderNodeResources::ReleaseWarmContractView() noexcept
+    {
+        m_warmTemplate = nullptr;
+        m_warmGeneration = 0;
+        m_warmRangeExecutions.Clear();
+        m_warmLookupRuntimeNextUses.Clear();
+    }
+
+    u32 RenderNodeResources::UseCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->uses.Size() : m_uses.Size();
+    }
+
+    u32 RenderNodeResources::DecisionCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->decisions.Size() : m_decisions.Size();
+    }
+
+    u32 RenderNodeResources::RangeCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->ranges.Size() : m_ranges.Size();
+    }
+
+    u32 RenderNodeResources::LookupBucketCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->lookupBuckets.Size() : m_lookupBuckets.Size();
+    }
+
+    u32 RenderNodeResources::LookupGroupCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->lookupGroups.Size() : m_lookupGroups.Size();
+    }
+
+    u32 RenderNodeResources::TextureBindingCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->textureBindingCount : m_resolvedTextures.Size();
+    }
+
+    u32 RenderNodeResources::BufferBindingCount() const noexcept
+    {
+        return IsWarmContract() ? m_warmTemplate->bufferBindingCount : m_resolvedBuffers.Size();
+    }
+
+    RenderNodeResourceUseView RenderNodeResources::GetUse(const u32 index) const noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmTemplate->uses.Size());
+            const detail::ResourceContractUseTemplate& source = m_warmTemplate->uses[index];
+            return {source.flowSpace, containers::StringView(source.name), source.lookupHash,
+                    {source.flowGroup, source.ordinal, m_warmGeneration}, source.kind, source.nextDuplicate, source.resolvedIndex};
+        }
+        VG_ASSERT(index < m_uses.Size());
+        const RenderNodeResourceUseBinding& source = m_uses[index];
+        return {source.flowSpace, containers::StringView(source.name), source.lookupHash, source.use, source.kind, source.nextDuplicate, source.resolvedIndex};
+    }
+
+    DecisionId RenderNodeResources::GetDecision(const u32 index) const noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmTemplate->decisions.Size());
+            const detail::ResourceContractDecisionTemplate& source = m_warmTemplate->decisions[index];
+            return {source.flowGroup, source.ordinal, m_warmGeneration};
+        }
+        VG_ASSERT(index < m_decisions.Size());
+        return m_decisions[index].decision;
+    }
+
+    RenderNodeResourceRange RenderNodeResources::GetRange(const u32 index) const noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmTemplate->ranges.Size() && index < m_warmRangeExecutions.Size());
+            const detail::ResourceContractRangeTemplate& source = m_warmTemplate->ranges[index];
+            return {source.firstUse, source.useCount, source.firstDecision, source.decisionCount,
+                    source.lookupBucketOffset, source.lookupBucketCount, source.lookupGroupOffset, source.lookupGroupCount,
+                    m_warmRangeExecutions[index]};
+        }
+        VG_ASSERT(index < m_ranges.Size());
+        return m_ranges[index];
+    }
+
+    u32 RenderNodeResources::GetLookupBucket(const u32 index) const noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmTemplate->lookupBuckets.Size());
+            return m_warmTemplate->lookupBuckets[index];
+        }
+        VG_ASSERT(index < m_lookupBuckets.Size());
+        return m_lookupBuckets[index];
+    }
+
+    RenderNodeResourceLookupGroup RenderNodeResources::GetLookupGroup(const u32 index) const noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmTemplate->lookupGroups.Size() && index < m_warmLookupRuntimeNextUses.Size());
+            const detail::ResourceContractLookupGroupTemplate& source = m_warmTemplate->lookupGroups[index];
+            return {source.lookupHash, source.firstUse, source.lastUse, m_warmLookupRuntimeNextUses[index], source.nextBucketGroup};
+        }
+        VG_ASSERT(index < m_lookupGroups.Size());
+        return m_lookupGroups[index];
+    }
+
+    void RenderNodeResources::SetLookupGroupRuntimeNextUse(const u32 index, const u32 nextUse) noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmLookupRuntimeNextUses.Size());
+            m_warmLookupRuntimeNextUses[index] = nextUse;
+            return;
+        }
+        VG_ASSERT(index < m_lookupGroups.Size());
+        m_lookupGroups[index].runtimeNextUse = nextUse;
+    }
+
+    void RenderNodeResources::ClearRangeExecutions() noexcept
+    {
+        if (IsWarmContract())
+        {
+            for (CompiledExecutionRange& execution : m_warmRangeExecutions)
+                execution = {};
+            return;
+        }
+        for (RenderNodeResourceRange& range : m_ranges)
+            range.execution = {};
+    }
+
+    void RenderNodeResources::SetRangeExecution(const u32 index, const CompiledExecutionRange& execution) noexcept
+    {
+        if (IsWarmContract())
+        {
+            VG_ASSERT(index < m_warmRangeExecutions.Size());
+            m_warmRangeExecutions[index] = execution;
+            return;
+        }
+        VG_ASSERT(index < m_ranges.Size());
+        m_ranges[index].execution = execution;
     }
 
     RenderNodeResourceBindings::RenderNodeResourceBindings() noexcept : m_entries(memory::pools::Rendering::GetInstance()) {}
@@ -70,6 +230,12 @@ namespace vanguard::rendering
             m_executionContextStorage = nullptr;
             m_executionContextCount = 0;
         }
+    }
+
+    void RenderNodeResourceBindings::ReleaseWarmContractViews() noexcept
+    {
+        for (Entry& entry : m_entries)
+            entry.resources.ReleaseWarmContractView();
     }
 
     void RenderNodeResourceBindings::BlockExecution(const RenderFlowResourceFailureCode code, const char* const message) noexcept
@@ -210,6 +376,36 @@ namespace vanguard::rendering
         m_operation = Operation::None;
     }
 
+    void RenderNodeImplContext::BeginResourceContractPatch(RenderFlowResourceAllocator& allocator, RenderNodeResources& resources,
+                                                           RenderFlowResourceFailure& failure) noexcept
+    {
+        if (m_operation != Operation::None)
+            VG_FATAL("render-node resource-contract patch requires an unbound context");
+        m_resourceWriter = nullptr;
+        m_resourceAllocator = &allocator;
+        m_resourceFailure = &failure;
+        m_nodeResources = &resources;
+        m_resourceRange = InvalidRenderFlowResourceIndex;
+        m_nextResourceRange = 0;
+        m_nextResourceDecision = 0;
+        m_operation = Operation::PatchResourceContract;
+    }
+
+    void RenderNodeImplContext::EndResourceContractPatch() noexcept
+    {
+        EndNodeResourceUses();
+        if (m_resourceFailure != nullptr && m_resourceFailure->code == RenderFlowResourceFailureCode::None && m_nodeResources != nullptr &&
+            m_nextResourceRange != m_nodeResources->RangeCount())
+            FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning,
+                                  "resource-contract patch did not visit every compiled child range");
+        m_resourceWriter = nullptr;
+        m_resourceAllocator = nullptr;
+        m_resourceFailure = nullptr;
+        m_nodeResources = nullptr;
+        m_resourceRange = InvalidRenderFlowResourceIndex;
+        m_operation = Operation::None;
+    }
+
     void RenderNodeImplContext::BeginResourceExecution(CompiledExecutionPacketView* const packet, ExecutionPacketCursor& cursor, RenderNodeResources& resources,
                                                        RenderFlowResourceFailure& failure) noexcept
     {
@@ -222,7 +418,7 @@ namespace vanguard::rendering
         m_resourceRange = InvalidRenderFlowResourceIndex;
         m_nextResourceRange = 0;
         m_nextResourceDecision = 0;
-        if (packet != nullptr && resources.m_resolvedTextures.Size() + resources.m_resolvedBuffers.Size() != resources.m_uses.Size())
+        if (packet != nullptr && resources.TextureBindingCount() + resources.BufferBindingCount() != resources.UseCount())
             VG_FATAL("render-node typed resource slots do not match their declarations");
         m_operation = Operation::Execute;
     }
@@ -235,7 +431,7 @@ namespace vanguard::rendering
             return true;
         if (m_resourceCursor->IsValid())
             return true;
-        const u32 expectedRangeCount = m_nodeResources != nullptr ? m_nodeResources->m_ranges.Size() : 0u;
+        const u32 expectedRangeCount = m_nodeResources != nullptr ? m_nodeResources->RangeCount() : 0u;
         return m_executionPacket->OpenCompiledCursor(m_executionPacket->GetCommandScope(), m_executionPacket->GetQueue(), expectedRangeCount,
                                                      *m_resourceCursor, m_resourceFailure);
     }
@@ -246,7 +442,7 @@ namespace vanguard::rendering
             VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node recording failed");
         EndNodeResourceUses();
         if (m_resourceFailure != nullptr && m_resourceFailure->code == RenderFlowResourceFailureCode::None && m_nodeResources != nullptr &&
-            m_nextResourceRange != m_nodeResources->m_ranges.Size())
+            m_nextResourceRange != m_nodeResources->RangeCount())
             FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render-node occurrence did not consume every declared child resource range");
         if (m_resourceCursor != nullptr && m_resourceCursor->IsValid())
         {
@@ -277,17 +473,29 @@ namespace vanguard::rendering
         }
         if (m_operation == Operation::Execute)
         {
-            if (m_nextResourceRange >= m_nodeResources->m_ranges.Size())
+            if (m_nextResourceRange >= m_nodeResources->RangeCount())
             {
                 FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render-node execution has no matching declared resource range");
                 return;
             }
             m_resourceRange = m_nextResourceRange++;
-            const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
+            const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
             m_nextResourceDecision = range.firstDecision;
             if (m_executionPacket != nullptr && m_resourceFailure->code == RenderFlowResourceFailureCode::None &&
                 !m_resourceCursor->BeginRange(range.execution, m_resourceRange + 1u, m_resourceFailure))
                 VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node compiled resource range begin failed");
+        }
+        else if (IsPatchingResourceContract())
+        {
+            if (m_nextResourceRange >= m_nodeResources->RangeCount())
+            {
+                FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning,
+                                      "resource-contract patch has no matching compiled child range");
+                return;
+            }
+            m_resourceRange = m_nextResourceRange++;
+            const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
+            m_nextResourceDecision = range.firstDecision;
         }
     }
 
@@ -302,11 +510,11 @@ namespace vanguard::rendering
 
     void RenderNodeImplContext::EndNodeResourceUses() const noexcept
     {
-        if (m_nodeResources == nullptr || m_resourceRange >= m_nodeResources->m_ranges.Size())
+        if (m_nodeResources == nullptr || m_resourceRange >= m_nodeResources->RangeCount())
             return;
-        RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
         if (IsDeclaringResources())
         {
+            RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
             range.useCount = m_nodeResources->m_uses.Size() - range.firstUse;
             range.decisionCount = m_nodeResources->m_decisions.Size() - range.firstDecision;
             range.lookupBucketOffset = m_nodeResources->m_lookupBuckets.Size();
@@ -411,12 +619,21 @@ namespace vanguard::rendering
         }
         else if (m_operation == Operation::Execute)
         {
+            const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
             if (m_resourceFailure->code != RenderFlowResourceFailureCode::None)
                 VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node recording failed");
             if (m_nextResourceDecision != range.firstDecision + range.decisionCount)
                 FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render node did not consume its declared resource decisions");
             if (m_executionPacket != nullptr && !m_resourceCursor->EndRange(range.execution, m_resourceRange + 1u, m_resourceFailure))
                 VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node compiled resource range end failed");
+        }
+        else if (IsPatchingResourceContract())
+        {
+            const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
+            if (m_resourceFailure->code == RenderFlowResourceFailureCode::None &&
+                m_nextResourceDecision != range.firstDecision + range.decisionCount)
+                FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning,
+                                      "resource-contract patch did not provide every dynamic decision in the compiled child range");
         }
         m_resourceRange = InvalidRenderFlowResourceIndex;
     }
@@ -447,6 +664,18 @@ namespace vanguard::rendering
 
     bool RenderNodeImplContext::CanRecordResourceOperation() const noexcept
     {
+        if (IsPatchingResourceContract())
+        {
+            // RF12 warm patching is deliberately decision-only.  A node that
+            // accidentally replays a declaration/resource mutation here must
+            // reject the warm bind and fall back to a cold compile; it must not
+            // turn an otherwise recoverable contract miss into a process fatal.
+            if (m_resourceFailure == nullptr || m_nodeResources == nullptr)
+                VG_FATAL("render-node resource-contract patch has no active resource state");
+            FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning,
+                                  "resource-contract patch attempted to replay a static resource operation");
+            return false;
+        }
         if (!IsDeclaringResources() || m_resourceFailure == nullptr || m_nodeResources == nullptr)
             VG_FATAL("render-node resource operation is available only during resource declaration");
         if (m_resourceFailure->code != RenderFlowResourceFailureCode::None)
@@ -463,7 +692,7 @@ namespace vanguard::rendering
     {
         if (m_operation != Operation::Execute || m_resourceFailure == nullptr || m_nodeResources == nullptr || m_resourceCursor == nullptr)
             VG_FATAL("render-node resource resolution is available only during execution");
-        if (m_resourceFailure->code != RenderFlowResourceFailureCode::None || m_resourceRange >= m_nodeResources->m_ranges.Size())
+        if (m_resourceFailure->code != RenderFlowResourceFailureCode::None || m_resourceRange >= m_nodeResources->RangeCount())
             VG_FATAL("render-node resource lookup requires a valid active resource range");
         return true;
     }
@@ -736,16 +965,38 @@ namespace vanguard::rendering
             m_nodeResources->m_decisions.PushBack({decision});
             return value;
         }
+        if (IsPatchingResourceContract())
+        {
+            if (m_resourceFailure == nullptr || m_resourceAllocator == nullptr || m_nodeResources == nullptr ||
+                m_resourceRange >= m_nodeResources->RangeCount())
+            {
+                FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning,
+                                      "resource-contract decision patch has no active compiled range");
+                return value;
+            }
+            const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
+            if (m_nextResourceDecision >= range.firstDecision + range.decisionCount ||
+                m_nextResourceDecision >= m_nodeResources->DecisionCount())
+            {
+                FailResourceOperation(RenderFlowResourceFailureCode::IncompletePlanning,
+                                      "resource-contract patch produced an undeclared dynamic decision");
+                return value;
+            }
+            const DecisionId decision = m_nodeResources->GetDecision(m_nextResourceDecision++);
+            if (!m_resourceAllocator->PatchResourceContractDecision(decision, value, m_resourceFailure))
+                return value;
+            return value;
+        }
         if (!CanResolveResourceOperation())
             return value;
-        const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
+        const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
         if (m_nextResourceDecision >= range.firstDecision + range.decisionCount)
         {
             FailResourceOperation(RenderFlowResourceFailureCode::IncompleteExecution, "render node requested an undeclared resource decision");
             return value;
         }
         bool captured = value;
-        const DecisionId decision = m_nodeResources->m_decisions[m_nextResourceDecision++].decision;
+        const DecisionId decision = m_nodeResources->GetDecision(m_nextResourceDecision++);
         if (!m_resourceCursor->CapturedDecision(decision, captured, m_resourceFailure))
             VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node decision lookup failed");
         return captured;
@@ -756,31 +1007,31 @@ namespace vanguard::rendering
         static const ResolvedTextureUse invalid;
         if (!CanResolveResourceOperation())
             return invalid;
-        const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
-        if (range.lookupBucketCount != 0 && range.lookupBucketOffset <= m_nodeResources->m_lookupBuckets.Size() &&
-            range.lookupBucketCount <= m_nodeResources->m_lookupBuckets.Size() - range.lookupBucketOffset &&
-            range.lookupGroupOffset <= m_nodeResources->m_lookupGroups.Size() &&
-            range.lookupGroupCount <= m_nodeResources->m_lookupGroups.Size() - range.lookupGroupOffset)
+        const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
+        if (range.lookupBucketCount != 0 && range.lookupBucketOffset <= m_nodeResources->LookupBucketCount() &&
+            range.lookupBucketCount <= m_nodeResources->LookupBucketCount() - range.lookupBucketOffset &&
+            range.lookupGroupOffset <= m_nodeResources->LookupGroupCount() &&
+            range.lookupGroupCount <= m_nodeResources->LookupGroupCount() - range.lookupGroupOffset)
         {
             const u32 lookupHash = ResourceLookupHash(tag.key.GetFlowSpace(), tag.key.GetName(), FrameResourceKind::Texture);
             const u32 bucket = range.lookupBucketOffset + (lookupHash & (range.lookupBucketCount - 1u));
-            u32 groupIndex = m_nodeResources->m_lookupBuckets[bucket];
+            u32 groupIndex = m_nodeResources->GetLookupBucket(bucket);
             while (groupIndex != InvalidRenderFlowResourceIndex)
             {
                 if (groupIndex < range.lookupGroupOffset || groupIndex >= range.lookupGroupOffset + range.lookupGroupCount)
                     break;
-                RenderNodeResourceLookupGroup& group = m_nodeResources->m_lookupGroups[groupIndex];
-                if (group.firstUse >= range.useCount || range.firstUse + group.firstUse >= m_nodeResources->m_uses.Size())
+                const RenderNodeResourceLookupGroup group = m_nodeResources->GetLookupGroup(groupIndex);
+                if (group.firstUse >= range.useCount || range.firstUse + group.firstUse >= m_nodeResources->UseCount())
                     break;
-                const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + group.firstUse];
+                const RenderNodeResourceUseView binding = m_nodeResources->GetUse(range.firstUse + group.firstUse);
                 if (group.lookupHash == lookupHash && binding.kind == FrameResourceKind::Texture && binding.flowSpace == tag.key.GetFlowSpace() &&
-                    containers::StringView(binding.name) == tag.key.GetName())
+                    binding.name == tag.key.GetName())
                 {
                     const u32 localIndex = group.runtimeNextUse;
                     const u32 selected = localIndex != InvalidRenderFlowResourceIndex ? localIndex : group.firstUse;
-                    if (selected >= range.useCount || range.firstUse + selected >= m_nodeResources->m_uses.Size())
+                    if (selected >= range.useCount || range.firstUse + selected >= m_nodeResources->UseCount())
                         break;
-                    const RenderNodeResourceUseBinding& selectedBinding = m_nodeResources->m_uses[range.firstUse + selected];
+                    const RenderNodeResourceUseView selectedBinding = m_nodeResources->GetUse(range.firstUse + selected);
                     if (selectedBinding.kind == FrameResourceKind::Texture && selectedBinding.resolvedIndex < m_nodeResources->m_resolvedTextures.Size())
                     {
                         ResolvedTextureUse& resolved = m_nodeResources->m_resolvedTextures[selectedBinding.resolvedIndex];
@@ -788,7 +1039,7 @@ namespace vanguard::rendering
                             (m_executionPacket == nullptr || !m_executionPacket->ResolveTextureUseBinding(selectedBinding.use, m_resourceRange + 1u, resolved, m_resourceFailure)))
                             VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node texture binding resolution failed");
                         if (localIndex != InvalidRenderFlowResourceIndex)
-                            group.runtimeNextUse = selectedBinding.nextDuplicate;
+                            m_nodeResources->SetLookupGroupRuntimeNextUse(groupIndex, selectedBinding.nextDuplicate);
                         return resolved;
                     }
                     break;
@@ -805,31 +1056,31 @@ namespace vanguard::rendering
         static const ResolvedBufferUse invalid;
         if (!CanResolveResourceOperation())
             return invalid;
-        const RenderNodeResourceRange& range = m_nodeResources->m_ranges[m_resourceRange];
-        if (range.lookupBucketCount != 0 && range.lookupBucketOffset <= m_nodeResources->m_lookupBuckets.Size() &&
-            range.lookupBucketCount <= m_nodeResources->m_lookupBuckets.Size() - range.lookupBucketOffset &&
-            range.lookupGroupOffset <= m_nodeResources->m_lookupGroups.Size() &&
-            range.lookupGroupCount <= m_nodeResources->m_lookupGroups.Size() - range.lookupGroupOffset)
+        const RenderNodeResourceRange range = m_nodeResources->GetRange(m_resourceRange);
+        if (range.lookupBucketCount != 0 && range.lookupBucketOffset <= m_nodeResources->LookupBucketCount() &&
+            range.lookupBucketCount <= m_nodeResources->LookupBucketCount() - range.lookupBucketOffset &&
+            range.lookupGroupOffset <= m_nodeResources->LookupGroupCount() &&
+            range.lookupGroupCount <= m_nodeResources->LookupGroupCount() - range.lookupGroupOffset)
         {
             const u32 lookupHash = ResourceLookupHash(tag.key.GetFlowSpace(), tag.key.GetName(), FrameResourceKind::Buffer);
             const u32 bucket = range.lookupBucketOffset + (lookupHash & (range.lookupBucketCount - 1u));
-            u32 groupIndex = m_nodeResources->m_lookupBuckets[bucket];
+            u32 groupIndex = m_nodeResources->GetLookupBucket(bucket);
             while (groupIndex != InvalidRenderFlowResourceIndex)
             {
                 if (groupIndex < range.lookupGroupOffset || groupIndex >= range.lookupGroupOffset + range.lookupGroupCount)
                     break;
-                RenderNodeResourceLookupGroup& group = m_nodeResources->m_lookupGroups[groupIndex];
-                if (group.firstUse >= range.useCount || range.firstUse + group.firstUse >= m_nodeResources->m_uses.Size())
+                const RenderNodeResourceLookupGroup group = m_nodeResources->GetLookupGroup(groupIndex);
+                if (group.firstUse >= range.useCount || range.firstUse + group.firstUse >= m_nodeResources->UseCount())
                     break;
-                const RenderNodeResourceUseBinding& binding = m_nodeResources->m_uses[range.firstUse + group.firstUse];
+                const RenderNodeResourceUseView binding = m_nodeResources->GetUse(range.firstUse + group.firstUse);
                 if (group.lookupHash == lookupHash && binding.kind == FrameResourceKind::Buffer && binding.flowSpace == tag.key.GetFlowSpace() &&
-                    containers::StringView(binding.name) == tag.key.GetName())
+                    binding.name == tag.key.GetName())
                 {
                     const u32 localIndex = group.runtimeNextUse;
                     const u32 selected = localIndex != InvalidRenderFlowResourceIndex ? localIndex : group.firstUse;
-                    if (selected >= range.useCount || range.firstUse + selected >= m_nodeResources->m_uses.Size())
+                    if (selected >= range.useCount || range.firstUse + selected >= m_nodeResources->UseCount())
                         break;
-                    const RenderNodeResourceUseBinding& selectedBinding = m_nodeResources->m_uses[range.firstUse + selected];
+                    const RenderNodeResourceUseView selectedBinding = m_nodeResources->GetUse(range.firstUse + selected);
                     if (selectedBinding.kind == FrameResourceKind::Buffer && selectedBinding.resolvedIndex < m_nodeResources->m_resolvedBuffers.Size())
                     {
                         ResolvedBufferUse& resolved = m_nodeResources->m_resolvedBuffers[selectedBinding.resolvedIndex];
@@ -837,7 +1088,7 @@ namespace vanguard::rendering
                             (m_executionPacket == nullptr || !m_executionPacket->ResolveBufferUseBinding(selectedBinding.use, m_resourceRange + 1u, resolved, m_resourceFailure)))
                             VG_FATAL(m_resourceFailure->message != nullptr ? m_resourceFailure->message : "render-node buffer binding resolution failed");
                         if (localIndex != InvalidRenderFlowResourceIndex)
-                            group.runtimeNextUse = selectedBinding.nextDuplicate;
+                            m_nodeResources->SetLookupGroupRuntimeNextUse(groupIndex, selectedBinding.nextDuplicate);
                         return resolved;
                     }
                     break;
@@ -917,8 +1168,8 @@ namespace vanguard::rendering
 
     RenderFlowResourceFailure& RenderNodeImplContext::GetResourceFailure() const noexcept
     {
-        if (!IsDeclaringResources() || m_resourceFailure == nullptr)
-            VG_FATAL("render-node resource failure is available only during resource declaration");
+        if ((!IsDeclaringResources() && !IsPatchingResourceContract()) || m_resourceFailure == nullptr)
+            VG_FATAL("render-node resource failure is available only during resource declaration or contract patching");
         return *m_resourceFailure;
     }
 } // namespace vanguard::rendering

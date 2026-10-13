@@ -4,12 +4,14 @@
 
 #include <vanguard/assets/derived_data_artifact_source_internal.hpp>
 
+#include <vanguard/concurrency/atomic.hpp>
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/memory/pool.hpp>
 #include <vanguard/serialization/serialization.hpp>
 
 #include <algorithm>
+#include <cstring>
 
 namespace
 {
@@ -245,6 +247,88 @@ namespace
 
 namespace vanguard::assets
 {
+    namespace detail
+    {
+        struct OwnedBuildRequestSourceBacking final
+        {
+            explicit OwnedBuildRequestSourceBacking(const resources::ResourceReference identity) noexcept
+                : sourceReference(identity), bytes(memory::pools::Assets::GetInstance())
+            {
+            }
+
+            concurrency::Atomic<u32> references{1u};
+            resources::ResourceReference sourceReference;
+            containers::DynamicArray<u8> bytes;
+        };
+    } // namespace detail
+
+    namespace
+    {
+        void AddOwnedBuildRequestSourceRef(detail::OwnedBuildRequestSourceBacking* const backing) noexcept
+        {
+            if (backing != nullptr)
+                static_cast<void>(backing->references.Increment());
+        }
+
+        void ReleaseOwnedBuildRequestSourceRef(detail::OwnedBuildRequestSourceBacking* const backing) noexcept
+        {
+            if (backing != nullptr && backing->references.Decrement() == 0u)
+                VANGUARD_DELETE(backing);
+        }
+    } // namespace
+
+    OwnedBuildRequest::SharedSourceHandle::SharedSourceHandle(const SharedSourceHandle& other) noexcept : value(other.value)
+    {
+        AddOwnedBuildRequestSourceRef(value);
+    }
+
+    OwnedBuildRequest::SharedSourceHandle& OwnedBuildRequest::SharedSourceHandle::operator=(const SharedSourceHandle& other) noexcept
+    {
+        if (this != &other)
+        {
+            detail::OwnedBuildRequestSourceBacking* const replacement = other.value;
+            AddOwnedBuildRequestSourceRef(replacement);
+            ReleaseOwnedBuildRequestSourceRef(value);
+            value = replacement;
+        }
+        return *this;
+    }
+
+    OwnedBuildRequest::SharedSourceHandle::SharedSourceHandle(SharedSourceHandle&& other) noexcept : value(other.value)
+    {
+        other.value = nullptr;
+    }
+
+    OwnedBuildRequest::SharedSourceHandle& OwnedBuildRequest::SharedSourceHandle::operator=(SharedSourceHandle&& other) noexcept
+    {
+        if (this != &other)
+        {
+            ReleaseOwnedBuildRequestSourceRef(value);
+            value = other.value;
+            other.value = nullptr;
+        }
+        return *this;
+    }
+
+    OwnedBuildRequest::SharedSourceHandle::~SharedSourceHandle() noexcept
+    {
+        ReleaseOwnedBuildRequestSourceRef(value);
+    }
+
+    void OwnedBuildRequest::SharedSourceHandle::Adopt(detail::OwnedBuildRequestSourceBacking* const adopted) noexcept
+    {
+        if (value == adopted)
+            return;
+        ReleaseOwnedBuildRequestSourceRef(value);
+        value = adopted;
+    }
+
+    void OwnedBuildRequest::SharedSourceHandle::Reset() noexcept
+    {
+        ReleaseOwnedBuildRequestSourceRef(value);
+        value = nullptr;
+    }
+
     OwnedBuildRequest::OwnedBuildRequest() noexcept
         : source(memory::pools::Assets::GetInstance()), metadata(memory::pools::Assets::GetInstance()), settings(memory::pools::Assets::GetInstance())
     {
@@ -258,6 +342,7 @@ namespace vanguard::assets
             return false;
         }
 
+        m_sharedSource.Reset();
         source.Resize(request.source.content.Count());
         metadata.Resize(request.source.metadata.Count());
         settings.Resize(request.settings.Count());
@@ -280,9 +365,99 @@ namespace vanguard::assets
         return true;
     }
 
+    bool OwnedBuildRequest::MakeSourceShared() noexcept
+    {
+        if (m_sharedSource.value != nullptr)
+            return source.Empty();
+        if (source.Empty())
+            return true;
+        if (!sourceReference.IsValid() || !sourceReference.IsTyped())
+            return false;
+
+        detail::OwnedBuildRequestSourceBacking* const backing =
+            VANGUARD_NEW(detail::OwnedBuildRequestSourceBacking, memory::pools::Assets)(sourceReference);
+        if (backing == nullptr)
+            return false;
+        backing->bytes = static_cast<containers::DynamicArray<u8>&&>(source);
+        m_sharedSource.Adopt(backing);
+        return true;
+    }
+
+    bool OwnedBuildRequest::SourceContentEquals(const BuildRequest& request) const noexcept
+    {
+        if (!request.IsValid() || request.source.identity != sourceReference ||
+            (m_sharedSource.value != nullptr && m_sharedSource.value->sourceReference != sourceReference))
+            return false;
+        const BuildRequest retained = View();
+        if (retained.source.content.Count() != request.source.content.Count())
+            return false;
+        if (retained.source.content.Empty())
+            return true;
+        return std::memcmp(retained.source.content.Data(), request.source.content.Data(), retained.source.content.Count()) == 0;
+    }
+
+    bool OwnedBuildRequest::CopyFromSharingSource(const BuildRequest& request, const OwnedBuildRequest& sourceOwner) noexcept
+    {
+        if (!request.IsValid() || !sourceOwner.SourceContentEquals(request) ||
+            (!request.source.content.Empty() && sourceOwner.m_sharedSource.value == nullptr))
+            return false;
+
+        OwnedBuildRequest staged;
+        staged.metadata.Resize(request.source.metadata.Count());
+        staged.settings.Resize(request.settings.Count());
+        if (staged.metadata.Size() != request.source.metadata.Count() || staged.settings.Size() != request.settings.Count())
+            return false;
+
+        staged.sourceReference = request.source.identity;
+        staged.outputReference = request.output;
+        staged.target = request.target;
+        staged.m_sharedSource = sourceOwner.m_sharedSource;
+        for (u32 index = 0; index < staged.metadata.Size(); ++index)
+            staged.metadata[index] = request.source.metadata[index];
+        for (u32 index = 0; index < staged.settings.Size(); ++index)
+            staged.settings[index] = request.settings[index];
+        *this = static_cast<OwnedBuildRequest&&>(staged);
+        return true;
+    }
+
+    bool OwnedBuildRequest::CopyFromSharingSource(const OwnedBuildRequest& request) noexcept
+    {
+        if (request.m_sharedSource.value == nullptr)
+            return CopyFrom(request.View());
+        // Both the immutable bytes and their identity are owned by `request`.
+        // Unlike the borrowed BuildRequest overload, this overload does not
+        // need to compare the entire content against an unrelated source view:
+        // it copies the exact same refcounted backing by provenance.
+        const BuildRequest view = request.View();
+        if (!view.IsValid() || request.m_sharedSource.value->sourceReference != request.sourceReference)
+            return false;
+        OwnedBuildRequest staged;
+        staged.metadata.Resize(request.metadata.Size());
+        staged.settings.Resize(request.settings.Size());
+        if (staged.metadata.Size() != request.metadata.Size() || staged.settings.Size() != request.settings.Size())
+            return false;
+        staged.sourceReference = request.sourceReference;
+        staged.outputReference = request.outputReference;
+        staged.target = request.target;
+        staged.m_sharedSource = request.m_sharedSource;
+        for (u32 index = 0; index < staged.metadata.Size(); ++index)
+            staged.metadata[index] = request.metadata[index];
+        for (u32 index = 0; index < staged.settings.Size(); ++index)
+            staged.settings[index] = request.settings[index];
+        *this = static_cast<OwnedBuildRequest&&>(staged);
+        return true;
+    }
+
+    bool OwnedBuildRequest::SharesSourceStorage(const OwnedBuildRequest& other) const noexcept
+    {
+        return m_sharedSource.value != nullptr && m_sharedSource.value == other.m_sharedSource.value;
+    }
+
     BuildRequest OwnedBuildRequest::View() const noexcept
     {
-        return {{sourceReference, {source.TypedData(), source.Size()}, {metadata.TypedData(), metadata.Size()}},
+        const u8* const sourceData = m_sharedSource.value != nullptr ? m_sharedSource.value->bytes.TypedData() : source.TypedData();
+        const u32 sourceSize = m_sharedSource.value != nullptr ? m_sharedSource.value->bytes.Size() : source.Size();
+        return {{sourceReference, {sourceData, sourceSize}, {metadata.TypedData(), metadata.Size()}},
                 outputReference,
                 target,
                 {settings.TypedData(), settings.Size()}};
@@ -290,7 +465,29 @@ namespace vanguard::assets
 
     u64 OwnedBuildRequest::ByteCount() const noexcept
     {
+        return SourceByteCount() + metadata.Size() + settings.Size();
+    }
+
+    u64 OwnedBuildRequest::SourceByteCount() const noexcept
+    {
+        return m_sharedSource.value != nullptr ? m_sharedSource.value->bytes.Size() : source.Size();
+    }
+
+    u64 OwnedBuildRequest::PrivateByteCount() const noexcept
+    {
         return static_cast<u64>(source.Size()) + metadata.Size() + settings.Size();
+    }
+
+    u64 OwnedBuildRequest::SharedSourceStorageByteCount() const noexcept
+    {
+        return m_sharedSource.value != nullptr
+                   ? sizeof(detail::OwnedBuildRequestSourceBacking) + static_cast<u64>(m_sharedSource.value->bytes.Size())
+                   : 0u;
+    }
+
+    u64 OwnedBuildRequest::SharedSourceStorageOverhead() noexcept
+    {
+        return sizeof(detail::OwnedBuildRequestSourceBacking);
     }
 
     void OwnedBuildRequest::Reset() noexcept
@@ -298,6 +495,7 @@ namespace vanguard::assets
         sourceReference = {};
         outputReference = {};
         target = TargetPlatform::WindowsD3D12;
+        m_sharedSource.Reset();
         source.Clear();
         metadata.Clear();
         settings.Clear();
@@ -305,6 +503,7 @@ namespace vanguard::assets
 
     void OwnedBuildRequest::ReleasePayload() noexcept
     {
+        m_sharedSource.Reset();
         source.Clear();
         source.Shrink();
         metadata.Clear();

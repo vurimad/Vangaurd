@@ -89,6 +89,7 @@ namespace vanguard::entities
         friend class IPlacedComponent;
 
         [[nodiscard]] bool ScheduleTransformUpdate(IPlacedComponent& component) noexcept;
+        void MarkTransformBranchDirty(IPlacedComponent& component) noexcept;
         void CancelTransformUpdate(IPlacedComponent& component) noexcept;
         void RecordTransformUpdated() noexcept;
         [[nodiscard]] u32 GetMaximumHierarchyDepth() const noexcept;

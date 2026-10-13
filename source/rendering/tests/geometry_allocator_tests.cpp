@@ -19,6 +19,7 @@
 #include <vanguard/rendering/render_camera.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
 #include <vanguard/rendering/render_flow_resource_execution.hpp>
+#include <vanguard/rendering/render_graph_cache.hpp>
 #include <vanguard/rendering/render_node_graph_factory.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/rendering/render_node_job.hpp>
@@ -158,6 +159,246 @@ namespace
 #endif
     }
 
+    // The stale allocator deliberately outlives the abandoned RHI. Run in a
+    // subprocess so its still-owned old-incarnation RHI refs are never released
+    // through the replacement backend by a C++ destructor.
+    [[noreturn]] void RunRF11RetainedImportIncarnationProof() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) | gpu::ShaderStageBit(gpu::ShaderStage::Pixel) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Compute);
+        gpu::DescriptorDomain descriptors(gpu::AdoptReference,
+                                          gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 1, 0, visibility}, &rhiFailure));
+        gpu::BufferDesc desc;
+        desc.size = 1024;
+        desc.structureStride = 16;
+        desc.usage = gpu::BufferUsage::Structured | gpu::BufferUsage::ShaderResource;
+        desc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer native(gpu::AdoptReference, gpu::CreateBuffer(desc, {}, &rhiFailure));
+        auto* allocator = new rendering::RenderFlowResourceAllocator();
+        rendering::RenderFlowResourceAllocatorConfig config;
+        config.resourceDescriptors = descriptors.GetRef();
+        config.descriptorCacheTarget = 1;
+        config.descriptorCacheMaximum = 1;
+        rendering::RetainedBufferImportDesc importDesc;
+        importDesc.token = {0x5246313141424141ull};
+        importDesc.buffer = native.GetRef();
+        importDesc.expected = desc;
+        importDesc.initialState = gpu::ResourceState::Common;
+        importDesc.terminalState = gpu::ResourceState::Common;
+        rendering::ImportedResourceId imported;
+        rendering::ResourcePlanningWriter writer;
+        rendering::LogicalResourceId logical;
+        rendering::ResourceUseId use;
+        rendering::BufferUseDesc read;
+        read.requiredState = gpu::ResourceState::ShaderResourceGraphics;
+        read.access = rendering::LogicalAccessIntent::Read;
+        read.content = rendering::ResourceContentIntent::Preserve;
+        constexpr rendering::RenderFlowNodeId node{0xA11};
+        constexpr rendering::GpuFlowGroupId flow{0xA11};
+        constexpr rendering::CommandScopeId scope{0xA11};
+        constexpr rendering::FlowSpaceId space{0xA11};
+        if (!descriptors.IsValid() || !native.IsValid() || !allocator->Initialize(config, &failure) || !allocator->BeginFrame(1011, {}, &failure) ||
+            !allocator->RegisterImport(importDesc, imported, &failure) || !allocator->CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+            !writer.ImportBuffer({space, "rf11.restart.retained"}, imported, logical, &failure) ||
+            !writer.BeginBufferUse(logical, read, use, &failure) || !writer.EndUse(use, &failure) || !writer.Close(&failure) ||
+            !allocator->SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) || !allocator->Resolve(nullptr, &failure) ||
+            !allocator->BeginExecution(&failure))
+            std::_Exit(20);
+        const rendering::ExecutionGenerationId generation = allocator->GetExecutionGeneration();
+        const rendering::CommandScopeExecutionReceipt receipts[] = {{scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, gpu::QueueType::Graphics, {}}};
+        const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                                                           vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                           rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+        if (!allocator->Finish(terminal, &failure) || allocator->GetStats().canonicalDescriptorLiveSlots != 1)
+            std::_Exit(21);
+        const vanguard::u64 oldIncarnation = gpu::GetDeviceIncarnation();
+        if (oldIncarnation == 0 || !gpu::AbandonDevice(&rhiFailure))
+            std::_Exit(22);
+        gpu::d3d12::Backend replacement;
+        gpu::DeviceParams params;
+#if VG_ENABLE_ASSERTS
+        params.enableValidation = true;
+#endif
+        if (!gpu::Initialize(replacement, params, &rhiFailure) || gpu::GetDeviceIncarnation() == oldIncarnation)
+            std::_Exit(23);
+        // Even if a newly created descriptor domain/native buffer reuses the
+        // old slot indices (ABA), it cannot authorize the persistent old owner.
+        gpu::DescriptorDomain replacementDomain(gpu::AdoptReference,
+                                                gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 1, 0, visibility}, &rhiFailure));
+        gpu::Buffer replacementNative(gpu::AdoptReference, gpu::CreateBuffer(desc, {}, &rhiFailure));
+        if (!replacementDomain.IsValid() || !replacementNative.IsValid())
+            std::_Exit(24);
+        if (allocator->ClearPersistentCaches(&failure) || failure.code != rendering::RenderFlowResourceFailureCode::InvalidOrStaleIdentity ||
+            allocator->Shutdown(&failure) || failure.code != rendering::RenderFlowResourceFailureCode::InvalidOrStaleIdentity)
+            std::_Exit(25);
+        // The allocator intentionally retains old-incarnation refs. Never run
+        // its destructor against the replacement device.
+        std::_Exit(0);
+    }
+
+    [[nodiscard]] bool RunRF11RetainedImportIncarnationProofSubprocess() noexcept
+    {
+#if defined(_WIN32)
+        char executable[MAX_PATH]{};
+        const DWORD executableLength = GetModuleFileNameA(nullptr, executable, MAX_PATH);
+        if (executableLength == 0 || executableLength == MAX_PATH)
+            return false;
+        char commandLine[MAX_PATH + 128]{};
+        const int length = std::snprintf(commandLine, sizeof(commandLine), "\"%s\" --rf11-retained-incarnation-proof", executable);
+        if (length <= 0 || static_cast<vanguard::usize>(length) >= sizeof(commandLine))
+            return false;
+        STARTUPINFOA startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessA(executable, commandLine, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+            return false;
+        const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+        DWORD exitCode = 0;
+        const bool exited = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exitCode) != FALSE;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return exited && exitCode == 0;
+#else
+        return true;
+#endif
+    }
+
+    // Compile one real, descriptor-domain-scoped semantic contract in the
+    // caller's already-open frame. No GPU work is submitted, so an aborted
+    // execution with a discarded command scope is the precise terminal proof.
+    [[nodiscard]] bool CompileAndFinishRF12ScopeContract(rendering::RenderFlowResourceAllocator& allocator,
+                                                         rendering::RenderFlowResourceContract& contract,
+                                                         rendering::RenderNodeGraph& graph,
+                                                         rendering::RenderNodeResourceBindings& bindings,
+                                                         rendering::RenderFlowResourceFailure& failure) noexcept
+    {
+        constexpr rendering::RenderFlowNodeId node{0xC12};
+        constexpr rendering::GpuFlowGroupId flow{0xC12};
+        constexpr rendering::CommandScopeId scope{0xC12};
+        constexpr rendering::FlowSpaceId space{0xC12};
+        rendering::FrameBufferDesc desc;
+        desc.active.size = 1024;
+        desc.active.structureStride = 16;
+        desc.active.usage = gpu::BufferUsage::Structured | gpu::BufferUsage::ShaderResource | gpu::BufferUsage::UnorderedAccess;
+        desc.active.initialState = gpu::ResourceState::Common;
+        desc.maximumSize = desc.active.size;
+        rendering::BufferUseDesc write;
+        write.requiredState = gpu::ResourceState::UnorderedAccess;
+        write.access = rendering::LogicalAccessIntent::Write;
+        write.content = rendering::ResourceContentIntent::Discard;
+        rendering::ResourcePlanningWriter writer;
+        rendering::LogicalResourceId resource;
+        rendering::ResourceUseId use;
+        if (!allocator.BeginResourceContractCompilation(contract, &failure) ||
+            !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+            !writer.DeclareBuffer({space, "rf12.scope.epoch.buffer"}, desc, resource, &failure) ||
+            !writer.BeginBufferUse(resource, write, use, &failure) || !writer.EndUse(use, &failure) || !writer.Close(&failure) ||
+            !graph.CaptureResourceContract(contract, bindings, allocator, &failure) ||
+            !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) ||
+            !allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure))
+            return false;
+        const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+        const rendering::CommandScopeExecutionReceipt receipts[] = {
+            {scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, gpu::QueueType::Graphics, {}}};
+        const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                                                           vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                           rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+        return contract.IsValid() && contract.GetPublicationSerial() != 0 && allocator.Finish(terminal, &failure) &&
+               allocator.GetState() == rendering::RenderFlowResourceSessionState::Idle;
+    }
+
+    // The prior RF11 child specifically covers stale retained descriptor owners.
+    // Keep that proof intact; this separate child tests the immutable RF12
+    // resource contract across a real RHI incarnation change.
+    [[noreturn]] void RunRF12ContractIncarnationProof() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Pixel) | gpu::ShaderStageBit(gpu::ShaderStage::Compute);
+        gpu::DescriptorDomain oldDomain(gpu::AdoptReference,
+                                        gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 4, 0, visibility}, &rhiFailure));
+        auto* const oldAllocator = new rendering::RenderFlowResourceAllocator();
+        rendering::RenderFlowResourceAllocatorConfig oldConfig;
+        oldConfig.resourceDescriptors = oldDomain.GetRef();
+        oldConfig.descriptorCacheTarget = 4;
+        oldConfig.descriptorCacheMaximum = 4;
+        rendering::RenderFlowResourceContract contract;
+        rendering::RenderNodeGraph graph;
+        graph.BuildRenderFlowGroups();
+        rendering::RenderNodeResourceBindings bindings;
+        if (!oldDomain.IsValid() || !oldAllocator->Initialize(oldConfig, &failure) ||
+            !oldAllocator->BeginFrame(0xC120, {}, &failure) ||
+            !CompileAndFinishRF12ScopeContract(*oldAllocator, contract, graph, bindings, failure) ||
+            oldAllocator->GetStats().structuralPlanBuilds != 1)
+            std::_Exit(40);
+        const vanguard::u64 oldPublication = contract.GetPublicationSerial();
+        const vanguard::u64 oldIncarnation = gpu::GetDeviceIncarnation();
+        if (oldPublication == 0 || oldIncarnation == 0 || !gpu::AbandonDevice(&rhiFailure))
+            std::_Exit(41);
+
+        gpu::d3d12::Backend replacementBackend;
+        gpu::DeviceParams params;
+#if VG_ENABLE_ASSERTS
+        params.enableValidation = true;
+#endif
+        if (!gpu::Initialize(replacementBackend, params, &rhiFailure) || gpu::GetDeviceIncarnation() == oldIncarnation)
+            std::_Exit(42);
+        {
+            gpu::DescriptorDomain newDomain(gpu::AdoptReference,
+                                            gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 4, 0, visibility}, &rhiFailure));
+            rendering::RenderFlowResourceAllocator newAllocator;
+            rendering::RenderFlowResourceAllocatorConfig newConfig;
+            newConfig.resourceDescriptors = newDomain.GetRef();
+            newConfig.descriptorCacheTarget = 4;
+            newConfig.descriptorCacheMaximum = 4;
+            if (!newDomain.IsValid() || !newAllocator.Initialize(newConfig, &failure) ||
+                !newAllocator.BeginFrame(0xC121, {}, &failure))
+                std::_Exit(43);
+            if (newAllocator.BindResourceContract(contract, &failure) ||
+                failure.code != rendering::RenderFlowResourceFailureCode::InvalidOrStaleIdentity ||
+                newAllocator.GetState() != rendering::RenderFlowResourceSessionState::Planning ||
+                !contract.IsValid() || contract.GetPublicationSerial() != oldPublication)
+                std::_Exit(44);
+            if (!CompileAndFinishRF12ScopeContract(newAllocator, contract, graph, bindings, failure) ||
+                contract.GetPublicationSerial() <= oldPublication || newAllocator.GetStats().structuralPlanBuilds != 1 ||
+                !newAllocator.Shutdown(&failure) || !gpu::FlushRetiredResources(&rhiFailure))
+                std::_Exit(45);
+        }
+        // Old allocator/pool/domain still own old-incarnation RHI references.
+        // Never destroy or Reset them through the replacement backend.
+        std::_Exit(0);
+    }
+
+    [[nodiscard]] bool RunRF12ContractIncarnationProofSubprocess() noexcept
+    {
+#if defined(_WIN32)
+        char executable[MAX_PATH]{};
+        const DWORD executableLength = GetModuleFileNameA(nullptr, executable, MAX_PATH);
+        if (executableLength == 0 || executableLength == MAX_PATH)
+            return false;
+        char commandLine[MAX_PATH + 128]{};
+        const int length = std::snprintf(commandLine, sizeof(commandLine), "\"%s\" --rf12-contract-incarnation-proof", executable);
+        if (length <= 0 || static_cast<vanguard::usize>(length) >= sizeof(commandLine))
+            return false;
+        STARTUPINFOA startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessA(executable, commandLine, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+            return false;
+        const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+        DWORD exitCode = 0;
+        const bool exited = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exitCode) != FALSE;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return exited && exitCode == 0;
+#else
+        return true;
+#endif
+    }
+
     using ByteArray = vanguard::containers::DynamicArray<vanguard::u8>;
 
     inline constexpr resources::ResourceTypeId TestMaterialType = vanguard::serialization::MakeFourCC('V', 'M', 'A', 'T');
@@ -234,6 +475,16 @@ namespace
         rendering::RenderFlowResourceAllocator allocator;
         if (!descriptorOwner.IsValid() || !allocator.Initialize(allocatorConfig, &failure))
             return false;
+        // RF12 semantic-plan ownership lives outside the allocator. This focused
+        // provider smoke keeps one cache-style contract alive while frame-local
+        // native imports/export slots are rebound below.
+        rendering::RenderFlowResourceContract resourceContract;
+        rendering::RenderNodeGraph contractCaptureGraph;
+        contractCaptureGraph.BuildRenderFlowGroups();
+        rendering::RenderNodeResourceBindings contractCaptureBindings;
+        constexpr rendering::ResourceContractPatchId dynamicImportPatch{0x5246313254455351ull};
+        constexpr rendering::ResourceContractPatchId anchorImportPatch{0x5246313254455353ull};
+        constexpr rendering::ResourceContractPatchId dynamicExportPatch{0x5246313254455352ull};
         // The allocator must be the strong owner for the entire persistent pool
         // lifetime. Keep only the raw identity as a test witness.
         descriptorOwner.Reset();
@@ -243,11 +494,27 @@ namespace
         importedNativeDesc.usage = gpu::BufferUsage::Structured | gpu::BufferUsage::ShaderResource;
         importedNativeDesc.initialState = gpu::ResourceState::Common;
         gpu::Buffer importedFirst(gpu::AdoptReference, gpu::CreateBuffer(importedNativeDesc, {}, &rhiFailure));
+        gpu::Buffer importedAnchor(gpu::AdoptReference, gpu::CreateBuffer(importedNativeDesc, {}, &rhiFailure));
+        // Cold and warm dynamic imports straddle this stationary import in
+        // native ResourceRef order. The cached RF17 program must remap its
+        // symbolic binding slots when the backend admission sort flips.
         gpu::Buffer importedSecond(gpu::AdoptReference, gpu::CreateBuffer(importedNativeDesc, {}, &rhiFailure));
-        if (!importedFirst.IsValid() || !importedSecond.IsValid() || importedFirst.GetRef() == importedSecond.GetRef())
+        gpu::BufferDesc incompatibleNativeDesc = importedNativeDesc;
+        incompatibleNativeDesc.size *= 2;
+        gpu::Buffer importedIncompatible(gpu::AdoptReference, gpu::CreateBuffer(incompatibleNativeDesc, {}, &rhiFailure));
+        if (!importedFirst.IsValid() || !importedSecond.IsValid() || !importedAnchor.IsValid() || !importedIncompatible.IsValid() || importedFirst.GetRef() == importedSecond.GetRef() ||
+            importedFirst.GetRef() == importedAnchor.GetRef() || importedSecond.GetRef() == importedAnchor.GetRef())
             return false;
+        const vanguard::u64 firstNativeSlot = gpu::ResourceRef(importedFirst.GetRef()).value;
+        const vanguard::u64 anchorNativeSlot = gpu::ResourceRef(importedAnchor.GetRef()).value;
+        const vanguard::u64 secondNativeSlot = gpu::ResourceRef(importedSecond.GetRef()).value;
+        if (!((firstNativeSlot < anchorNativeSlot && anchorNativeSlot < secondNativeSlot) ||
+              (secondNativeSlot < anchorNativeSlot && anchorNativeSlot < firstNativeSlot)))
+            return fail("native binding permutation fixture");
 
-        const auto runFrame = [&allocator, &failure, &importedNativeDesc](const vanguard::u64 frameSerial, const bool decisionValue, const gpu::BufferRef importedNative,
+        const auto runFrame = [&allocator, &failure, &importedNativeDesc, &importedAnchor, &resourceContract, &contractCaptureGraph, &contractCaptureBindings,
+                               dynamicImportPatch, anchorImportPatch, dynamicExportPatch](
+                                                     const vanguard::u64 frameSerial, const gpu::BufferRef importedNative,
                                                      gpu::BufferRef& resolvedBuffer,
                                                      gpu::DescriptorHandle& shaderResource, gpu::DescriptorHandle& unorderedAccess,
                                                      rendering::ExportSlotId& resolvedExportSlot, vanguard::u64& executionTapeSignature) noexcept
@@ -265,19 +532,26 @@ namespace
             desc.maximumSize = desc.active.size;
             rendering::LogicalResourceId resource;
             rendering::LogicalResourceId importedLogical;
+            rendering::LogicalResourceId anchorLogical;
             rendering::ResourceUseId use;
             rendering::ResourceUseId secondUse;
             rendering::ResourceUseId importedUse;
-            rendering::DecisionId decision;
-            const rendering::ResourceScopeId structuralScope{0x5246390000000000ull | frameSerial};
+            rendering::ResourceUseId anchorUse;
+            constexpr rendering::ResourceScopeId structuralScope{0x5246313253434f50ull};
             rendering::ImportedResourceId imported;
+            rendering::ImportedResourceId anchorImported;
             rendering::ExportSlotId exportSlot;
             rendering::RetainedBufferImportDesc importDesc;
             importDesc.token = {gpu::ResourceRef(importedNative).value};
+            importDesc.contractPatch = dynamicImportPatch;
             importDesc.buffer = importedNative;
             importDesc.expected = importedNativeDesc;
             importDesc.initialState = gpu::ResourceState::Common;
             importDesc.terminalState = gpu::ResourceState::Common;
+            rendering::RetainedBufferImportDesc anchorDesc = importDesc;
+            anchorDesc.token = {gpu::ResourceRef(importedAnchor.GetRef()).value};
+            anchorDesc.contractPatch = anchorImportPatch;
+            anchorDesc.buffer = importedAnchor.GetRef();
             rendering::BufferUseDesc useDesc;
             useDesc.requiredState = gpu::ResourceState::UnorderedAccess;
             useDesc.access = rendering::LogicalAccessIntent::Write;
@@ -290,25 +564,51 @@ namespace
             exportDesc.terminalState = gpu::ResourceState::Common;
             exportDesc.terminalQueue = gpu::QueueType::Graphics;
             exportDesc.readiness = rendering::ExportReadinessKind::ExplicitFenceSignal;
-            if (!allocator.BeginFrame(frameSerial, {false, false}, &failure) || !allocator.RegisterImport(importDesc, imported, &failure) ||
-                !allocator.ReserveExportSlot(exportSlot, &failure) ||
-                !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
-                !writer.DeclareBuffer({space, "dedicated.provider.smoke"}, desc, resource, &failure) || !writer.OpenResourceScope(resource, structuralScope, &failure) ||
-                !writer.BeginBufferUse(resource, useDesc, use, &failure) || !writer.EndUse(use, &failure) ||
-                !writer.CaptureDecision(decisionValue, decision, &failure) || !writer.BeginBufferUse(resource, useDesc, secondUse, &failure) || !writer.EndUse(secondUse, &failure) ||
-                !writer.CloseResourceScope(structuralScope, &failure) ||
-                !writer.ImportBuffer({space, "dedicated.provider.dynamic-import"}, imported, importedLogical, &failure) ||
-                !writer.BeginBufferUse(importedLogical, importedRead, importedUse, &failure) || !writer.EndUse(importedUse, &failure) ||
-                !writer.RequestExport(importedLogical, exportSlot, exportDesc, &failure) || !writer.Close(&failure) ||
-                !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+            if (!allocator.BeginFrame(frameSerial, {false, false}, &failure))
                 return false;
+            const bool coldCompile = !resourceContract.IsValid();
+            // Registration order is deliberately reversed after the cold compile.
+            // Patch identity, not positional import index, owns the warm mapping.
+            if ((coldCompile && (!allocator.RegisterImport(importDesc, imported, &failure) || !allocator.RegisterImport(anchorDesc, anchorImported, &failure))) ||
+                (!coldCompile && (!allocator.RegisterImport(anchorDesc, anchorImported, &failure) || !allocator.RegisterImport(importDesc, imported, &failure))) ||
+                !allocator.ReserveExportSlot(dynamicExportPatch, exportSlot, &failure))
+                return false;
+            if (coldCompile)
+            {
+                if (!allocator.BeginResourceContractCompilation(resourceContract, &failure) ||
+                    !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+                    !writer.DeclareBuffer({space, "dedicated.provider.smoke"}, desc, resource, &failure) || !writer.OpenResourceScope(resource, structuralScope, &failure) ||
+                    !writer.BeginBufferUse(resource, useDesc, use, &failure) || !writer.EndUse(use, &failure) ||
+                    !writer.BeginBufferUse(resource, useDesc, secondUse, &failure) || !writer.EndUse(secondUse, &failure) ||
+                    !writer.CloseResourceScope(structuralScope, &failure) ||
+                    !writer.ImportBuffer({space, "dedicated.provider.dynamic-import"}, imported, importedLogical, &failure) ||
+                    !writer.BeginBufferUse(importedLogical, importedRead, importedUse, &failure) || !writer.EndUse(importedUse, &failure) ||
+                    !writer.ImportBuffer({space, "dedicated.provider.anchor-import"}, anchorImported, anchorLogical, &failure) ||
+                    !writer.BeginBufferUse(anchorLogical, importedRead, anchorUse, &failure) || !writer.EndUse(anchorUse, &failure) ||
+                    !writer.RequestExport(importedLogical, exportSlot, exportDesc, &failure) || !writer.Close(&failure) ||
+                    !contractCaptureGraph.CaptureResourceContract(resourceContract, contractCaptureBindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+                    return false;
+            }
+            else
+            {
+                // The cached plan owns dense ordinals. Stamp only the current
+                // session generation, exactly as the renderer's node-template
+                // instantiation does for a warm graph hit.
+                use = {flow, 0, exportSlot.generation};
+                secondUse = {flow, 1, exportSlot.generation};
+                importedUse = {flow, 2, exportSlot.generation};
+                anchorUse = {flow, 3, exportSlot.generation};
+                if (!allocator.BindResourceContract(resourceContract, &failure))
+                    return false;
+            }
             rendering::CompiledExecutionPacketView packet;
             rendering::ExecutionPacketCursor cursor;
             rendering::ResolvedBufferUse resolved;
             rendering::ResolvedBufferUse secondResolved;
             rendering::ResolvedBufferUse importedResolved;
-            rendering::CompiledExecutionRange ranges[3];
-            bool observedDecision = !decisionValue;
+            rendering::ResolvedBufferUse anchorResolved;
+            rendering::CompiledExecutionRange ranges[4];
             gpu::Failure rhiFailure;
             gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246414255464645ull, &rhiFailure);
             if (!commands)
@@ -317,12 +617,14 @@ namespace
                 !packet.ResolveExecutionRange(0, 1, ranges[0], &failure) ||
                 !packet.ResolveExecutionRange(1, 1, ranges[1], &failure) ||
                 !packet.ResolveExecutionRange(2, 1, ranges[2], &failure) ||
+                !packet.ResolveExecutionRange(3, 1, ranges[3], &failure) ||
                 !packet.ResolveBufferUseBinding(use, 1, resolved, &failure) ||
                 !packet.ResolveBufferUseBinding(secondUse, 2, secondResolved, &failure) ||
                 !packet.ResolveBufferUseBinding(importedUse, 3, importedResolved, &failure) ||
-                packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 3, cursor, &failure) || failure.code != rendering::RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch ||
-                !gpu::BindCommandList(commands, &rhiFailure) || !packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 3, cursor, &failure) ||
-                resolved.IsValid() || secondResolved.IsValid() || importedResolved.IsValid() ||
+                !packet.ResolveBufferUseBinding(anchorUse, 4, anchorResolved, &failure) ||
+                packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 4, cursor, &failure) || failure.code != rendering::RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch ||
+                !gpu::BindCommandList(commands, &rhiFailure) || !packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 4, cursor, &failure) ||
+                resolved.IsValid() || secondResolved.IsValid() || importedResolved.IsValid() || anchorResolved.IsValid() ||
                 !cursor.BeginRange(ranges[0], 1, &failure) || !resolved.IsValid() || !resolved.GetBuffer().IsValid())
             {
                 gpu::UnbindCommandList();
@@ -330,14 +632,17 @@ namespace
                 return false;
             }
             const rendering::CompiledExecutionActionSegment exitSegment = packet.GetExitActionSegment();
-            executionTapeSignature =
-                static_cast<vanguard::u64>(ranges[0].beginActions.count) |
-                (static_cast<vanguard::u64>(ranges[0].endActions.count) << 8u) |
-                (static_cast<vanguard::u64>(ranges[1].beginActions.count) << 16u) |
-                (static_cast<vanguard::u64>(ranges[1].endActions.count) << 24u) |
-                (static_cast<vanguard::u64>(ranges[2].beginActions.count) << 32u) |
-                (static_cast<vanguard::u64>(ranges[2].endActions.count) << 40u) |
-                (static_cast<vanguard::u64>(exitSegment.count) << 48u);
+            executionTapeSignature = 14695981039346656037ull;
+            const auto mixSignature = [&executionTapeSignature](const vanguard::u32 value) noexcept
+            {
+                executionTapeSignature = (executionTapeSignature ^ value) * 1099511628211ull;
+            };
+            for (const rendering::CompiledExecutionRange& range : ranges)
+            {
+                mixSignature(range.beginActions.count);
+                mixSignature(range.endActions.count);
+            }
+            mixSignature(exitSegment.count);
             resolvedBuffer = resolved.GetBuffer();
             shaderResource = resolved.GetShaderResourceDescriptor();
             unorderedAccess = resolved.GetUnorderedAccessDescriptor();
@@ -349,10 +654,11 @@ namespace
             }
             if (!cursor.EndRange(ranges[0], 1, &failure) || resolved.IsValid() ||
                 !cursor.BeginRange(ranges[1], 2, &failure) || !secondResolved.IsValid() || secondResolved.GetBuffer() != resolvedBuffer ||
-                !cursor.CapturedDecision(decision, observedDecision, &failure) || observedDecision != decisionValue ||
                 !cursor.EndRange(ranges[1], 2, &failure) || secondResolved.IsValid() ||
                 !cursor.BeginRange(ranges[2], 3, &failure) || !importedResolved.IsValid() || importedResolved.GetBuffer() != importedNative ||
                 !cursor.EndRange(ranges[2], 3, &failure) || importedResolved.IsValid() ||
+                !cursor.BeginRange(ranges[3], 4, &failure) || !anchorResolved.IsValid() || anchorResolved.GetBuffer() != importedAnchor.GetRef() ||
+                !cursor.EndRange(ranges[3], 4, &failure) || anchorResolved.IsValid() ||
                 !cursor.FinalizePacket(&failure) || !gpu::FlushPendingBarriers(&rhiFailure))
             {
                 gpu::UnbindCommandList();
@@ -389,27 +695,111 @@ namespace
         rendering::ExportSlotId secondExportSlot;
         vanguard::u64 coldExecutionTapeSignature = 0;
         vanguard::u64 warmExecutionTapeSignature = 0;
-        if (!runFrame(1, true, importedFirst.GetRef(), first, firstShaderResource, firstUnorderedAccess, firstExportSlot, coldExecutionTapeSignature))
-            return false;
+        if (!runFrame(1, importedFirst.GetRef(), first, firstShaderResource, firstUnorderedAccess, firstExportSlot, coldExecutionTapeSignature))
+            return fail("cold resource-contract frame");
         const gpu::DescriptorDomainStats coldBufferDescriptors = gpu::GetDescriptorDomainStats(descriptorDomain);
         const rendering::RenderFlowResourceAllocatorStats coldBufferStats = allocator.GetStats();
-        if (coldBufferStats.structuralPlanBuilds != 1 || coldBufferStats.structuralPlanHits != 0 || coldBufferStats.structuralPlanMisses != 1)
+        if (coldBufferStats.structuralPlanBuilds != 1 || coldBufferStats.structuralPlanHits != 0 || coldBufferStats.structuralPlanMisses != 1 ||
+            coldBufferStats.persistentStateProgramBuilds != 1 || coldBufferStats.persistentStateProgramHits != 0)
             return false;
-        if (coldBufferDescriptors.allocated != 2 || coldBufferDescriptors.populated != 2 ||
-            !runFrame(2, false, importedSecond.GetRef(), second, secondShaderResource, secondUnorderedAccess, secondExportSlot, warmExecutionTapeSignature) || first != second ||
+        if (coldBufferDescriptors.allocated != 4 || coldBufferDescriptors.populated != 4)
+        {
+            std::fprintf(stderr, "[dedicated-provider] cold descriptor stats allocated=%u populated=%u pending=%u live=%u reusable=%u\n",
+                         coldBufferDescriptors.allocated, coldBufferDescriptors.populated, coldBufferDescriptors.pendingRetirement,
+                         coldBufferStats.canonicalDescriptorLiveSlots, coldBufferStats.canonicalDescriptorReusableSlots);
+            return fail("cold resource-contract descriptor publication");
+        }
+        if (!runFrame(2, importedSecond.GetRef(), second, secondShaderResource, secondUnorderedAccess, secondExportSlot, warmExecutionTapeSignature))
+            return fail("warm resource-contract frame");
+        if (first != second ||
             firstExportSlot.index != secondExportSlot.index || firstExportSlot.generation == secondExportSlot.generation ||
             firstShaderResource != secondShaderResource || firstUnorderedAccess != secondUnorderedAccess ||
             coldExecutionTapeSignature == 0 || warmExecutionTapeSignature != coldExecutionTapeSignature)
-            return false;
+            return fail("warm resource-contract equivalence");
         const rendering::RenderFlowResourceAllocatorStats persistentBufferStats = allocator.GetStats();
         if (persistentBufferStats.persistentDedicatedPlanBuilds != 1 || persistentBufferStats.persistentDedicatedPlanHits != 1 ||
             persistentBufferStats.persistentDedicatedLeaseHits != 1 || persistentBufferStats.persistentDedicatedLeaseFallbacks != 0 ||
+            persistentBufferStats.persistentStateProgramBuilds != 1 || persistentBufferStats.persistentStateProgramHits != 1 ||
+            persistentBufferStats.persistentStateProgramMisses != 0 ||
             persistentBufferStats.structuralPlanBuilds != 1 || persistentBufferStats.structuralPlanHits != 1 || persistentBufferStats.structuralPlanMisses != 1 ||
-            persistentBufferStats.compiledOperations != coldBufferStats.compiledOperations)
+            persistentBufferStats.compiledOperations != coldBufferStats.compiledOperations || persistentBufferStats.planningWriters != 0)
             return false;
         const gpu::DescriptorDomainStats warmBufferDescriptors = gpu::GetDescriptorDomainStats(descriptorDomain);
-        if (warmBufferDescriptors.allocated != 2 || warmBufferDescriptors.populated != 2 || warmBufferDescriptors.allocationFailures != coldBufferDescriptors.allocationFailures)
+        if (warmBufferDescriptors.allocated != 4 || warmBufferDescriptors.populated != 4 || warmBufferDescriptors.allocationFailures != coldBufferDescriptors.allocationFailures)
             return false;
+
+        // Native buffer identity and incoming fence values are legitimate
+        // per-frame patches; imported initial/terminal state and queue policy
+        // are NOT. Reject all four changed contracts before a cached state
+        // program can be admitted, without disturbing the published plan.
+        for (vanguard::u32 variant = 0; variant < 4; ++variant)
+        {
+            rendering::RetainedBufferImportDesc altered;
+            altered.token = {gpu::ResourceRef(importedFirst.GetRef()).value};
+            altered.contractPatch = dynamicImportPatch;
+            altered.buffer = importedFirst.GetRef();
+            altered.expected = importedNativeDesc;
+            altered.initialState = gpu::ResourceState::Common;
+            altered.terminalState = gpu::ResourceState::Common;
+            if (variant == 0)
+                altered.initialState = gpu::ResourceState::ShaderResourceGraphics;
+            else if (variant == 1)
+                altered.terminalState = gpu::ResourceState::ShaderResourceGraphics;
+            else if (variant == 2)
+                altered.initialQueue = gpu::QueueType::Compute;
+            else
+                altered.terminalQueue = gpu::QueueType::Compute;
+            rendering::RetainedBufferImportDesc anchor;
+            anchor.token = {gpu::ResourceRef(importedAnchor.GetRef()).value};
+            anchor.contractPatch = anchorImportPatch;
+            anchor.buffer = importedAnchor.GetRef();
+            anchor.expected = importedNativeDesc;
+            anchor.initialState = gpu::ResourceState::Common;
+            anchor.terminalState = gpu::ResourceState::Common;
+            rendering::ImportedResourceId changedId;
+            rendering::ImportedResourceId anchorId;
+            rendering::ExportSlotId slot;
+            if (!allocator.BeginFrame(3 + variant, {false, false}, &failure) ||
+                !allocator.RegisterImport(altered, changedId, &failure) ||
+                !allocator.RegisterImport(anchor, anchorId, &failure) ||
+                !allocator.ReserveExportSlot(dynamicExportPatch, slot, &failure) ||
+                allocator.BindResourceContract(resourceContract, &failure) ||
+                failure.code != rendering::RenderFlowResourceFailureCode::DescriptorConflict ||
+                !resourceContract.IsValid())
+                return fail("changed warm import state or queue policy");
+            allocator.CancelBeforePublication();
+        }
+
+        // A valid current import with the same semantic patch but a different
+        // descriptor shape is a structural miss, not a warm patch. Rejection
+        // must leave the published contract available for the cold fallback.
+        {
+            const vanguard::u64 publicationSerial = resourceContract.GetPublicationSerial();
+            rendering::RetainedBufferImportDesc incompatibleImport;
+            incompatibleImport.token = {gpu::ResourceRef(importedIncompatible.GetRef()).value};
+            incompatibleImport.contractPatch = dynamicImportPatch;
+            incompatibleImport.buffer = importedIncompatible.GetRef();
+            incompatibleImport.expected = incompatibleNativeDesc;
+            incompatibleImport.initialState = gpu::ResourceState::Common;
+            incompatibleImport.terminalState = gpu::ResourceState::Common;
+            rendering::RetainedBufferImportDesc anchorImport;
+            anchorImport.token = {gpu::ResourceRef(importedAnchor.GetRef()).value};
+            anchorImport.contractPatch = anchorImportPatch;
+            anchorImport.buffer = importedAnchor.GetRef();
+            anchorImport.expected = importedNativeDesc;
+            anchorImport.initialState = gpu::ResourceState::Common;
+            anchorImport.terminalState = gpu::ResourceState::Common;
+            rendering::ImportedResourceId incompatibleImported;
+            rendering::ImportedResourceId anchorImported;
+            rendering::ExportSlotId exportSlot;
+            if (!allocator.BeginFrame(7, {false, false}, &failure) || !allocator.RegisterImport(anchorImport, anchorImported, &failure) ||
+                !allocator.RegisterImport(incompatibleImport, incompatibleImported, &failure) ||
+                !allocator.ReserveExportSlot(dynamicExportPatch, exportSlot, &failure) ||
+                allocator.BindResourceContract(resourceContract, &failure) || failure.code != rendering::RenderFlowResourceFailureCode::DescriptorConflict ||
+                !resourceContract.IsValid() || resourceContract.GetPublicationSerial() != publicationSerial)
+                return fail("incompatible warm import shape");
+            allocator.CancelBeforePublication();
+        }
 
         // A structural miss may compile a candidate and then fail in physical
         // assignment. That failed candidate must never replace the last proven
@@ -432,11 +822,12 @@ namespace
             rejectedWrite.requiredState = gpu::ResourceState::UnorderedAccess;
             rejectedWrite.access = rendering::LogicalAccessIntent::Write;
             rejectedWrite.content = rendering::ResourceContentIntent::Discard;
-            if (!allocator.BeginFrame(3, {false, false}, &failure) ||
+            if (!allocator.BeginFrame(8, {false, false}, &failure) || !allocator.BeginResourceContractCompilation(resourceContract, &failure) ||
                 !allocator.CreatePlanningWriter(rejectedNode, rejectedFlow, rejectedScope, rejectedWriter, &failure) ||
                 !rejectedWriter.DeclareBuffer({rejectedSpace, "dedicated.provider.rejected-shape"}, rejectedDesc, rejectedResource, &failure) ||
                 !rejectedWriter.BeginBufferUse(rejectedResource, rejectedWrite, rejectedUse, &failure) || !rejectedWriter.EndUse(rejectedUse, &failure) ||
-                !rejectedWriter.Close(&failure) || !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+                !rejectedWriter.Close(&failure) || !contractCaptureGraph.CaptureResourceContract(resourceContract, contractCaptureBindings, allocator, &failure) ||
+                !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
                 return fail("failed-miss planning");
             rendering::detail::DedicatedResourceProviderTestAccess::Set(
                 allocator, {rendering::detail::DedicatedResourceProviderFailurePoint::NativeCreation, 0,
@@ -454,7 +845,7 @@ namespace
         gpu::DescriptorHandle recoveredUnorderedAccess;
         rendering::ExportSlotId recoveredExportSlot;
         vanguard::u64 recoveredExecutionTapeSignature = 0;
-        if (!runFrame(4, true, importedFirst.GetRef(), recoveredBuffer, recoveredShaderResource, recoveredUnorderedAccess, recoveredExportSlot, recoveredExecutionTapeSignature) ||
+        if (!runFrame(9, importedFirst.GetRef(), recoveredBuffer, recoveredShaderResource, recoveredUnorderedAccess, recoveredExportSlot, recoveredExecutionTapeSignature) ||
             recoveredBuffer != first || recoveredShaderResource != firstShaderResource || recoveredUnorderedAccess != firstUnorderedAccess)
             return fail("failed-miss old-plan recovery");
         const rendering::RenderFlowResourceAllocatorStats recoveredPlanStats = allocator.GetStats();
@@ -549,23 +940,36 @@ namespace
         gpu::DescriptorHandle firstTextureUnorderedAccess;
         gpu::DescriptorHandle secondTextureShaderResource;
         gpu::DescriptorHandle secondTextureUnorderedAccess;
-        if (!runTextureFrame(5, {16, 16, 1}, 4, firstTexture, firstTextureShaderResource, firstTextureUnorderedAccess) ||
-            !runTextureFrame(6, {32, 32, 1}, 5, secondTexture, secondTextureShaderResource, secondTextureUnorderedAccess) || firstTexture != secondTexture ||
+        if (!runTextureFrame(10, {16, 16, 1}, 4, firstTexture, firstTextureShaderResource, firstTextureUnorderedAccess))
+            return fail("cold texture frame");
+        if (!runTextureFrame(11, {32, 32, 1}, 5, secondTexture, secondTextureShaderResource, secondTextureUnorderedAccess) || firstTexture != secondTexture ||
             firstTextureShaderResource != secondTextureShaderResource || firstTextureUnorderedAccess != secondTextureUnorderedAccess)
-            return false;
+            return fail("warm texture frame");
         const rendering::RenderFlowResourceAllocatorStats stats = allocator.GetStats();
         gpu::Failure clearFailure;
-        if (stats.dedicatedResourcePoolMisses != 2 || stats.dedicatedResourcePoolHits != 3 || stats.chargedTextureBytes == 0 || stats.chargedBufferBytes == 0 ||
-            stats.chargedNativeBytes != stats.chargedTextureBytes + stats.chargedBufferBytes || stats.canonicalDescriptorLiveSlots != 4 ||
-            stats.canonicalDescriptorPublicationMisses != 2 || stats.canonicalDescriptorPublicationHits != 3 || stats.canonicalDescriptorMaintenanceEvictions != 0 ||
-            stats.structuralPlanBuilds != 3 || stats.structuralPlanHits != 2 || stats.structuralPlanMisses != 4 ||
-            gpu::GetDescriptorDomainStats(descriptorDomain).allocated != 4 || !allocator.ClearPersistentCaches(&failure))
+        // RF11 retained-import canonical descriptors share the same bounded
+        // ledger. Rebinding import A -> B and the first texture publication
+        // deliberately exercises global descriptor-pressure eviction/retry;
+        // that retry reclaims the newly created texture as a pool hit. Earlier
+        // canonical bundles are allowed to leave the cache under that pressure;
+        // only the current warm texture bundle must remain resident here.
+        if (stats.dedicatedResourcePoolMisses != 2 || stats.dedicatedResourcePoolHits != 4 || stats.chargedTextureBytes == 0 || stats.chargedBufferBytes == 0 ||
+            stats.chargedNativeBytes != stats.chargedTextureBytes + stats.chargedBufferBytes || stats.canonicalDescriptorLiveSlots != 2 ||
+            stats.canonicalDescriptorPublicationMisses != 8 || stats.canonicalDescriptorPublicationHits != 3 || stats.canonicalDescriptorPressureEvictions == 0 ||
+            stats.canonicalDescriptorMaintenanceEvictions != 0 ||
+            stats.structuralPlanBuilds != 1 || stats.structuralPlanHits != 2 || stats.structuralPlanMisses != 2 ||
+            gpu::GetDescriptorDomainStats(descriptorDomain).allocated != 2 || !allocator.ClearPersistentCaches(&failure))
         {
             std::fprintf(stderr, "[dedicated-provider] aggregate stats misses=%llu hits=%llu descriptorMisses=%llu descriptorHits=%llu structural=%llu/%llu/%llu\n",
                          static_cast<unsigned long long>(stats.dedicatedResourcePoolMisses), static_cast<unsigned long long>(stats.dedicatedResourcePoolHits),
                          static_cast<unsigned long long>(stats.canonicalDescriptorPublicationMisses), static_cast<unsigned long long>(stats.canonicalDescriptorPublicationHits),
                          static_cast<unsigned long long>(stats.structuralPlanBuilds), static_cast<unsigned long long>(stats.structuralPlanHits),
                          static_cast<unsigned long long>(stats.structuralPlanMisses));
+            std::fprintf(stderr, "[dedicated-provider] charged=%llu texture=%llu buffer=%llu live=%llu pressure=%llu maintenance=%llu domainAllocated=%u\n",
+                         static_cast<unsigned long long>(stats.chargedNativeBytes), static_cast<unsigned long long>(stats.chargedTextureBytes),
+                         static_cast<unsigned long long>(stats.chargedBufferBytes), static_cast<unsigned long long>(stats.canonicalDescriptorLiveSlots),
+                         static_cast<unsigned long long>(stats.canonicalDescriptorPressureEvictions), static_cast<unsigned long long>(stats.canonicalDescriptorMaintenanceEvictions),
+                         gpu::GetDescriptorDomainStats(descriptorDomain).allocated);
             return fail("aggregate stats");
         }
         const rendering::RenderFlowResourceAllocatorStats clearing = allocator.GetStats();
@@ -578,16 +982,778 @@ namespace
         gpu::TextureRef rebuiltTexture;
         gpu::DescriptorHandle rebuiltShaderResource;
         gpu::DescriptorHandle rebuiltUnorderedAccess;
-        if (!runTextureFrame(7, {32, 32, 1}, 5, rebuiltTexture, rebuiltShaderResource, rebuiltUnorderedAccess))
+        if (!runTextureFrame(12, {32, 32, 1}, 5, rebuiltTexture, rebuiltShaderResource, rebuiltUnorderedAccess))
             return false;
         const rendering::RenderFlowResourceAllocatorStats rebuilt = allocator.GetStats();
-        if (rebuilt.structuralPlanBuilds != 4 || rebuilt.structuralPlanHits != 2 || rebuilt.structuralPlanMisses != 5 ||
+        if (rebuilt.structuralPlanBuilds != 1 || rebuilt.structuralPlanHits != 2 || rebuilt.structuralPlanMisses != 2 ||
             gpu::GetDescriptorDomainStats(descriptorDomain).allocated != 2 || !allocator.ClearPersistentCaches(&failure) ||
             !gpu::FlushRetiredResources(&clearFailure) || !allocator.Shutdown(&failure))
             return false;
         if (!gpu::FlushRetiredResources(&clearFailure))
             return false;
         return gpu::GetDescriptorDomainStats(descriptorDomain).capacity == 0;
+    }
+
+    [[nodiscard]] bool RunRF13PhysicalProgramCacheProof() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        rendering::RenderFlowResourceAllocator allocator;
+        const auto fail = [&](const char* const stage) noexcept
+        {
+            const rendering::RenderFlowResourceAllocatorStats stats = allocator.GetStats();
+            std::fprintf(stderr, "[rf13-physical-program] %s flow=%u message=%s builds=%llu hits=%llu leaseHits=%llu leaseFallbacks=%llu structural=%llu/%llu/%llu\n",
+                         stage, static_cast<unsigned>(failure.code), failure.message != nullptr ? failure.message : "none",
+                         static_cast<unsigned long long>(stats.persistentDedicatedPlanBuilds), static_cast<unsigned long long>(stats.persistentDedicatedPlanHits),
+                         static_cast<unsigned long long>(stats.persistentDedicatedLeaseHits), static_cast<unsigned long long>(stats.persistentDedicatedLeaseFallbacks),
+                         static_cast<unsigned long long>(stats.structuralPlanBuilds), static_cast<unsigned long long>(stats.structuralPlanHits),
+                         static_cast<unsigned long long>(stats.structuralPlanMisses));
+            return false;
+        };
+        if (!allocator.Initialize({}, &failure))
+            return fail("initialize");
+
+        rendering::RenderNodeGraph captureGraph;
+        captureGraph.BuildRenderFlowGroups();
+        rendering::RenderNodeResourceBindings captureBindings;
+        constexpr vanguard::u32 PhysicalProgramCacheEntries = 4;
+        rendering::RenderFlowResourceContract contracts[PhysicalProgramCacheEntries + 1u];
+        rendering::CompiledExecutionPacketView heldEvictedPacket;
+
+        const auto run = [&](rendering::RenderFlowResourceContract& contract, const vanguard::u64 frameSerial) noexcept
+        {
+            constexpr rendering::RenderFlowNodeId node{0x52463133u};
+            constexpr rendering::GpuFlowGroupId flow{1};
+            constexpr rendering::CommandScopeId scope{0x52463133u};
+            constexpr rendering::FlowSpaceId space{0x52463133u};
+            rendering::FrameBufferDesc desc;
+            desc.active.size = 4096;
+            desc.active.usage = gpu::BufferUsage::UnorderedAccess;
+            desc.active.initialState = gpu::ResourceState::Common;
+            desc.maximumSize = desc.active.size;
+            rendering::BufferUseDesc useDesc;
+            useDesc.requiredState = gpu::ResourceState::UnorderedAccess;
+            useDesc.access = rendering::LogicalAccessIntent::Write;
+            useDesc.content = rendering::ResourceContentIntent::Discard;
+
+            if (!allocator.BeginFrame(frameSerial, {false, false}, &failure))
+                return fail("begin frame");
+            if (!contract.IsValid())
+            {
+                rendering::ResourcePlanningWriter writer;
+                rendering::LogicalResourceId resource;
+                rendering::ResourceUseId use;
+                if (!allocator.BeginResourceContractCompilation(contract, &failure) ||
+                    !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+                    !writer.DeclareBuffer({space, "rf13.physical-program"}, desc, resource, &failure) ||
+                    !writer.BeginBufferUse(resource, useDesc, use, &failure) || !writer.EndUse(use, &failure) || !writer.Close(&failure) ||
+                    !captureGraph.CaptureResourceContract(contract, captureBindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+                {
+                    allocator.CancelBeforePublication();
+                    return fail("cold planning");
+                }
+            }
+            else if (!allocator.BindResourceContract(contract, &failure))
+            {
+                allocator.CancelBeforePublication();
+                return fail("warm bind");
+            }
+
+            rendering::CompiledExecutionPacketView packet;
+            if (!allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure) || !allocator.PacketFor(node, packet, &failure))
+            {
+                allocator.CancelBeforePublication();
+                return fail("resolve/begin/packet");
+            }
+            if (&contract == &contracts[0] && !heldEvictedPacket.IsValid())
+                heldEvictedPacket = packet;
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            const rendering::CommandScopeExecutionReceipt receipt{packet.GetCommandScope(), rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission,
+                                                                   gpu::QueueType::Graphics, {}};
+            const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                                                                vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(&receipt, 1),
+                                                                rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+            return allocator.Finish(terminal, &failure) || fail("finish");
+        };
+
+        vanguard::u64 frameSerial = 0x524631330000ull;
+        for (rendering::RenderFlowResourceContract& contract : contracts)
+            if (!run(contract, ++frameSerial))
+                return fail("cold contract sequence");
+
+        // The fifth cold contract evicts only the oldest physical companion from
+        // the four-entry RF13 cache; every immutable structural contract survives.
+        const auto afterCold = allocator.GetStats();
+        if (afterCold.persistentDedicatedPlanBuilds != 5 || afterCold.persistentDedicatedPlanHits != 0 ||
+            afterCold.structuralPlanBuilds != 5 || afterCold.structuralPlanHits != 0)
+            return fail("cold cache counters");
+
+        // B/C/D remain resident and must check out their exact strong leases with
+        // no static physical-plan rebuild.
+        for (vanguard::u32 index = 1; index < 4; ++index)
+            if (!run(contracts[index], ++frameSerial))
+                return fail("warm survivor sequence");
+        const auto afterWarmSurvivors = allocator.GetStats();
+        if (afterWarmSurvivors.persistentDedicatedPlanBuilds != 5 || afterWarmSurvivors.persistentDedicatedPlanHits != 3 ||
+            afterWarmSurvivors.persistentDedicatedLeaseHits != 3 || afterWarmSurvivors.persistentDedicatedLeaseFallbacks != 0 ||
+            afterWarmSurvivors.structuralPlanHits != 3)
+            return fail("warm survivor counters");
+
+        // A still warm-hits its semantic contract after physical eviction. Only
+        // its physical program is rebuilt, proving the two cache layers are not
+        // accidentally coupled by graph-entry lifetime or storage address.
+        if (!run(contracts[0], ++frameSerial))
+            return fail("evicted physical rebuild");
+        const auto afterPhysicalRebuild = allocator.GetStats();
+        if (afterPhysicalRebuild.persistentDedicatedPlanBuilds != 6 || afterPhysicalRebuild.persistentDedicatedPlanHits != 3 ||
+            afterPhysicalRebuild.structuralPlanBuilds != 5 || afterPhysicalRebuild.structuralPlanHits != 4)
+            return fail("physical rebuild counters");
+
+        if (!heldEvictedPacket.IsValid() || heldEvictedPacket.GetStepCount() != 2 || heldEvictedPacket.GetUseCount() != 1 ||
+            !allocator.ClearPersistentCaches(&failure) || !heldEvictedPacket.IsValid() ||
+            heldEvictedPacket.GetStepCount() != 2 || heldEvictedPacket.GetUseCount() != 1)
+            return fail("held execution packet survived physical cache eviction");
+        rendering::CompiledExecutionRange staleRange;
+        if (heldEvictedPacket.ResolveExecutionRange(0, 1, staleRange, &failure) ||
+            failure.code != rendering::RenderFlowResourceFailureCode::InvalidPhase)
+            return fail("terminal packet must reject execution after cache eviction");
+        heldEvictedPacket = {};
+        return allocator.Shutdown(&failure) || fail("cleanup");
+    }
+
+    // RF12 dynamic bindings: one immutable semantic contract survives native
+    // import replacement, a newer incoming fence, reversed export reservations,
+    // and a warm Resolve failure without publishing a failed candidate.
+    [[nodiscard]] bool RunResourceContractDynamicPatchProof() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const auto fail = [&](const char* const stage) noexcept
+        {
+            std::fprintf(stderr, "[rf12-dynamic-patch] %s (flow=%u: %s, rhi=%u: %s)\n", stage, static_cast<unsigned>(failure.code),
+                         failure.message != nullptr ? failure.message : "none", static_cast<unsigned>(rhiFailure.code),
+                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "none");
+            return false;
+        };
+        constexpr rendering::ResourceContractPatchId importPatch{0x5246313244594e49ull};
+        constexpr rendering::ResourceContractPatchId exportImportPatch{0x5246313245585041ull};
+        constexpr rendering::ResourceContractPatchId exportNativePatch{0x5246313245585042ull};
+        constexpr rendering::RenderFlowNodeId node{1};
+        constexpr rendering::GpuFlowGroupId flow{1};
+        constexpr rendering::CommandScopeId scope{1};
+        constexpr rendering::FlowSpaceId space{1};
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceContract contract;
+        rendering::RenderNodeGraph graph;
+        graph.BuildRenderFlowGroups();
+        rendering::RenderNodeResourceBindings bindings;
+        if (!allocator.Initialize({}, &failure))
+            return fail("allocator initialize");
+        if (!gpu::FlushRetiredResources(&rhiFailure))
+            return fail("pre-ABA resource retirement drain");
+
+        gpu::BufferDesc externalDesc;
+        externalDesc.size = 1024;
+        externalDesc.structureStride = 16;
+        externalDesc.usage = gpu::BufferUsage::Structured | gpu::BufferUsage::ShaderResource;
+        externalDesc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer original(gpu::AdoptReference, gpu::CreateBuffer(externalDesc, {}, &rhiFailure));
+        if (!original.IsValid())
+            return fail("initial native import");
+
+        // Within one frame an external token is a unique native-resource
+        // identity. Stable cross-frame rebinding is expressed by contractPatch,
+        // never by silently changing the resource behind the same token.
+        gpu::Buffer tokenConflict(gpu::AdoptReference, gpu::CreateBuffer(externalDesc, {}, &rhiFailure));
+        if (!tokenConflict.IsValid())
+            return fail("same-token conflict native resource");
+        {
+            rendering::RetainedBufferImportDesc first;
+            first.token = {0x52463132544f4b4eull};
+            first.contractPatch = importPatch;
+            first.buffer = original.GetRef();
+            first.expected = externalDesc;
+            first.initialState = gpu::ResourceState::Common;
+            first.terminalState = gpu::ResourceState::Common;
+            rendering::ImportedResourceId accepted;
+            rendering::ImportedResourceId rejected;
+            if (!allocator.BeginFrame(1211, {}, &failure) || !allocator.RegisterImport(first, accepted, &failure))
+                return fail("same-token baseline registration");
+            rendering::RetainedBufferImportDesc conflicting = first;
+            conflicting.buffer = tokenConflict.GetRef();
+            if (allocator.RegisterImport(conflicting, rejected, &failure) ||
+                failure.code != rendering::RenderFlowResourceFailureCode::DescriptorConflict)
+                return fail("same token must reject a different native resource");
+            allocator.CancelBeforePublication();
+        }
+        tokenConflict.Reset();
+        if (!gpu::FlushRetiredResources(&rhiFailure))
+            return fail("same-token conflict cleanup");
+
+        // Public submission receipts provide real, strictly ordered graphics
+        // waits rather than manufactured fence values.
+        const auto submitFence = [&](const gpu::CommandListType type, gpu::GpuFence& fence) noexcept
+        {
+            gpu::CommandListRef list = gpu::CreateCommandList(type, 0x5246313246454e43ull, &rhiFailure);
+            if (!list.IsValid() || !gpu::BindCommandList(list, &rhiFailure))
+            {
+                if (list.IsValid()) gpu::DiscardCommandList(list);
+                return false;
+            }
+            gpu::UnbindCommandList();
+            const gpu::CommandListRef submissions[] = {list};
+            return gpu::CloseAndSubmitCommandLists("RF12 dynamic incoming fence", {submissions, 1}, gpu::CommandListSyncType::None, fence, &rhiFailure);
+        };
+        gpu::GpuFence coldWait;
+        gpu::GpuFence warmWait;
+        gpu::GpuFence copyWait;
+        if (!submitFence(gpu::CommandListType::Default, coldWait) || !coldWait.IsValid())
+            return fail("real cold graphics fence");
+
+        rendering::FrameBufferDesc nativeDesc;
+        nativeDesc.active.size = 4096;
+        nativeDesc.active.usage = gpu::BufferUsage::UnorderedAccess;
+        nativeDesc.active.initialState = gpu::ResourceState::Common;
+        nativeDesc.maximumSize = nativeDesc.active.size;
+        rendering::BufferUseDesc importedRead;
+        importedRead.requiredState = gpu::ResourceState::ShaderResourceGraphics;
+        importedRead.access = rendering::LogicalAccessIntent::Read;
+        importedRead.content = rendering::ResourceContentIntent::Preserve;
+        rendering::BufferUseDesc nativeWrite;
+        nativeWrite.requiredState = gpu::ResourceState::UnorderedAccess;
+        nativeWrite.access = rendering::LogicalAccessIntent::Write;
+        nativeWrite.content = rendering::ResourceContentIntent::Discard;
+        rendering::TerminalResourceExportDesc exported;
+        exported.terminalState = gpu::ResourceState::Common;
+        exported.terminalQueue = gpu::QueueType::Graphics;
+        exported.readiness = rendering::ExportReadinessKind::ExplicitFenceSignal;
+        // Hold all exported physical buffers through the injected failure so
+        // the provider must attempt native creation rather than reuse a pool hit.
+        gpu::Buffer heldNative[4];
+        vanguard::u32 heldCount = 0;
+        rendering::ExportSlotId coldImportSlot;
+        rendering::ExportSlotId coldNativeSlot;
+        rendering::ExportSlotId warmImportSlot;
+        rendering::ExportSlotId warmNativeSlot;
+        rendering::ImportedResourceId registeredImport;
+
+        const auto registerPatches = [&](const vanguard::u64 serial, const gpu::BufferRef current, const gpu::GpuFence incoming,
+                                         const bool reverse, rendering::ExportSlotId& importSlot, rendering::ExportSlotId& nativeSlot) noexcept
+        {
+            rendering::RetainedBufferImportDesc desc;
+            desc.token = {gpu::ResourceRef(current).value};
+            desc.contractPatch = importPatch;
+            desc.buffer = current;
+            desc.expected = externalDesc;
+            desc.initialState = gpu::ResourceState::Common;
+            desc.terminalState = gpu::ResourceState::Common;
+            desc.initialQueue = incoming.queue;
+            desc.terminalQueue = gpu::QueueType::Graphics;
+            desc.readiness = rendering::ImportReadinessKind::ExplicitFenceWait;
+            desc.incomingWait = incoming;
+            if (!allocator.BeginFrame(serial, {}, &failure) || !allocator.RegisterImport(desc, registeredImport, &failure))
+                return false;
+            if (reverse)
+                return allocator.ReserveExportSlot(exportNativePatch, nativeSlot, &failure) &&
+                       allocator.ReserveExportSlot(exportImportPatch, importSlot, &failure);
+            return allocator.ReserveExportSlot(exportImportPatch, importSlot, &failure) &&
+                   allocator.ReserveExportSlot(exportNativePatch, nativeSlot, &failure);
+        };
+
+        const auto runFrame = [&](const vanguard::u64 serial, const gpu::BufferRef current, const gpu::GpuFence incoming,
+                                  const bool cold, const bool abort, const bool injectNativeFailure,
+                                  rendering::ExportSlotId& importSlot, rendering::ExportSlotId& nativeSlot) noexcept
+        {
+            if (!registerPatches(serial, current, incoming, !cold, importSlot, nativeSlot))
+                return false;
+            rendering::ResourceUseId importedUse;
+            rendering::ResourceUseId nativeUse;
+            if (cold)
+            {
+                rendering::ResourcePlanningWriter writer;
+                rendering::LogicalResourceId logicalImport;
+                rendering::LogicalResourceId logicalNative;
+                if (!allocator.BeginResourceContractCompilation(contract, &failure) ||
+                    !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+                    !writer.ImportBuffer({space, "rf12.dynamic.import"}, registeredImport, logicalImport, &failure) ||
+                    !writer.BeginBufferUse(logicalImport, importedRead, importedUse, &failure) || !writer.EndUse(importedUse, &failure) ||
+                    !writer.DeclareBuffer({space, "rf12.dynamic.native"}, nativeDesc, logicalNative, &failure) ||
+                    !writer.BeginBufferUse(logicalNative, nativeWrite, nativeUse, &failure) || !writer.EndUse(nativeUse, &failure) ||
+                    !writer.RequestExport(logicalImport, importSlot, exported, &failure) ||
+                    !writer.RequestExport(logicalNative, nativeSlot, exported, &failure) || !writer.Close(&failure) ||
+                    !graph.CaptureResourceContract(contract, bindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+                    return false;
+            }
+            else
+            {
+                importedUse = {flow, 0, importSlot.generation};
+                nativeUse = {flow, 1, importSlot.generation};
+                if (!allocator.BindResourceContract(contract, &failure))
+                    return false;
+            }
+
+            if (injectNativeFailure)
+            {
+                const vanguard::u64 publishedSerial = contract.GetPublicationSerial();
+                rendering::detail::DedicatedResourceProviderTestAccess::Set(
+                    allocator, {rendering::detail::DedicatedResourceProviderFailurePoint::NativeCreation, 0,
+                                rendering::RenderFlowResourceFailureCode::NativeOutOfMemory});
+                const bool rejected = !allocator.Resolve(nullptr, &failure) &&
+                                      failure.code == rendering::RenderFlowResourceFailureCode::NativeOutOfMemory &&
+                                      !allocator.GetExecutionGeneration().IsValid() &&
+                                      allocator.GetState() == rendering::RenderFlowResourceSessionState::Idle &&
+                                      contract.GetPublicationSerial() == publishedSerial;
+                rendering::detail::DedicatedResourceProviderTestAccess::Clear(allocator);
+                return rejected;
+            }
+
+            if (!allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure))
+                return false;
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            if (abort)
+            {
+                const rendering::CommandScopeExecutionReceipt receipts[] = {
+                    {scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, gpu::QueueType::Graphics, {}}};
+                const rendering::TerminalExecutionReceipt terminal{
+                    generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                    vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                    rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+                rendering::PublishedResourceExport none;
+                return allocator.Finish(terminal, &failure) &&
+                       !allocator.TakeExport(importSlot, none, &failure) &&
+                       failure.code == rendering::RenderFlowResourceFailureCode::InvalidOrStaleIdentity &&
+                       !allocator.TakeExport(nativeSlot, none, &failure) &&
+                       failure.code == rendering::RenderFlowResourceFailureCode::InvalidOrStaleIdentity;
+            }
+
+            rendering::CompiledExecutionPacketView packet;
+            rendering::ExecutionPacketCursor cursor;
+            rendering::CompiledExecutionRange ranges[2];
+            rendering::ResolvedBufferUse resolvedImport;
+            rendering::ResolvedBufferUse resolvedNative;
+            gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246313244594e50ull, &rhiFailure);
+            bool valid = commands.IsValid() && gpu::BindCommandList(commands, &rhiFailure) &&
+                         allocator.PacketFor(node, packet, &failure) &&
+                         packet.ResolveExecutionRange(0, 1, ranges[0], &failure) &&
+                         packet.ResolveExecutionRange(1, 1, ranges[1], &failure) &&
+                         packet.ResolveBufferUseBinding(importedUse, 1, resolvedImport, &failure) &&
+                         packet.ResolveBufferUseBinding(nativeUse, 2, resolvedNative, &failure) &&
+                         packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 2, cursor, &failure);
+            // OpenCompiledCursor records the current incomingWait using
+            // AddCommandListWait; no public getter for the recorded fence exists.
+            valid = valid && cursor.BeginRange(ranges[0], 1, &failure) &&
+                    resolvedImport.IsValid() && resolvedImport.GetBuffer() == current &&
+                    cursor.EndRange(ranges[0], 1, &failure) && !resolvedImport.IsValid() &&
+                    cursor.BeginRange(ranges[1], 2, &failure) &&
+                    resolvedNative.IsValid() && resolvedNative.GetBuffer() != current &&
+                    cursor.EndRange(ranges[1], 2, &failure) && !resolvedNative.IsValid() &&
+                    cursor.FinalizePacket(&failure) && gpu::FlushPendingBarriers(&rhiFailure);
+            if (gpu::GetBoundCommandList().IsValid())
+                gpu::UnbindCommandList();
+            if (!valid)
+            {
+                if (commands.IsValid()) gpu::DiscardCommandList(commands);
+                return false;
+            }
+            const gpu::CommandListRef submissions[] = {commands};
+            gpu::GpuFence completion;
+            if (!gpu::CloseAndSubmitCommandLists("RF12 dynamic patched resources", {submissions, 1},
+                                                 gpu::CommandListSyncType::None, completion, &rhiFailure))
+                return false;
+            const rendering::CommandScopeExecutionReceipt receipts[] = {
+                {scope, rendering::CommandScopeCompletionKind::Submitted, gpu::QueueType::Graphics, completion}};
+            const rendering::TerminalExecutionReceipt terminal{
+                generation, rendering::TerminalExecutionCompletionKind::Completed,
+                vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+            rendering::PublishedResourceExport currentImport;
+            rendering::PublishedResourceExport currentNative;
+            if (!allocator.Finish(terminal, &failure) ||
+                !allocator.TakeExport(importSlot, currentImport, &failure) ||
+                !allocator.TakeExport(nativeSlot, currentNative, &failure) ||
+                currentImport.GetSlot() != importSlot || currentNative.GetSlot() != nativeSlot ||
+                currentImport.GetBuffer() != current || !currentNative.GetBuffer().IsValid() ||
+                currentNative.GetBuffer() == current || currentImport.GetReadyFence() != completion ||
+                currentNative.GetReadyFence() != completion || heldCount >= 4)
+                return false;
+            heldNative[heldCount++] = gpu::Buffer(currentNative.GetBuffer());
+            currentImport.Reset();
+            currentNative.Reset();
+            return gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure);
+        };
+
+        rendering::ExportSlotId firstImportSlot;
+        rendering::ExportSlotId firstNativeSlot;
+        if (!runFrame(1212, original.GetRef(), coldWait, true, false, false, firstImportSlot, firstNativeSlot) ||
+            !contract.IsValid() || contract.GetPublicationSerial() == 0)
+            return fail("cold semantic contract / paired exports");
+        const vanguard::u64 publicationSerial = contract.GetPublicationSerial();
+        const rendering::RenderFlowResourceAllocatorStats coldStats = allocator.GetStats();
+        if (coldStats.structuralPlanBuilds != 1 || coldStats.structuralPlanHits != 0 ||
+            coldStats.persistentStateProgramBuilds != 1 || coldStats.persistentStateProgramHits != 0)
+            return fail("cold structural witness");
+
+        const gpu::BufferRef stale = original.GetRef();
+        original.Reset();
+        if (!gpu::FlushRetiredResources(&rhiFailure))
+            return fail("old import released");
+        gpu::BufferDesc staleDescription;
+        if (gpu::GetBufferDesc(stale, staleDescription, &rhiFailure) || rhiFailure.code != gpu::FailureCode::InvalidReference)
+            return fail("old import generation must be rejected");
+        gpu::Buffer replacement(gpu::AdoptReference, gpu::CreateBuffer(externalDesc, {}, &rhiFailure));
+        if (!replacement.IsValid() || replacement.GetRef() == stale ||
+            replacement.GetRef().index != stale.index || replacement.GetRef().generation == stale.generation ||
+            gpu::GetBufferDesc(stale, staleDescription, &rhiFailure))
+            return fail("native replacement must recycle the stale index with an advanced generation");
+
+        if (!submitFence(gpu::CommandListType::Default, warmWait) ||
+            warmWait.queue != coldWait.queue || warmWait.value <= coldWait.value ||
+            !runFrame(1213, replacement.GetRef(), warmWait, false, false, false, warmImportSlot, warmNativeSlot) ||
+            warmImportSlot.index == firstImportSlot.index || warmNativeSlot.index == firstNativeSlot.index ||
+            warmImportSlot.generation == firstImportSlot.generation ||
+            contract.GetPublicationSerial() != publicationSerial)
+            return fail("warm current native/wait and reverse export patches");
+        const rendering::RenderFlowResourceAllocatorStats warmStats = allocator.GetStats();
+        if (warmStats.structuralPlanBuilds != 1 || warmStats.structuralPlanHits != 1 || warmStats.planningWriters != 0 ||
+            warmStats.persistentStateProgramBuilds != 1 || warmStats.persistentStateProgramHits != 1 ||
+            warmStats.persistentStateProgramMisses != 0)
+            return fail("warm semantic plan hit without declaration replay");
+
+        // The queue is semantic topology; the current fence value is not.
+        if (!submitFence(gpu::CommandListType::CopyAsync, copyWait) || copyWait.queue != gpu::QueueType::Copy)
+            return fail("real Copy queue wait witness");
+        rendering::ExportSlotId rejectedImportSlot;
+        rendering::ExportSlotId rejectedNativeSlot;
+        if (!registerPatches(1214, replacement.GetRef(), copyWait, true, rejectedImportSlot, rejectedNativeSlot) ||
+            allocator.BindResourceContract(contract, &failure) ||
+            failure.code != rendering::RenderFlowResourceFailureCode::DescriptorConflict ||
+            contract.GetPublicationSerial() != publicationSerial)
+            return fail("incoming wait queue semantic miss");
+        allocator.CancelBeforePublication();
+
+        rendering::ExportSlotId failedImportSlot;
+        rendering::ExportSlotId failedNativeSlot;
+        if (!runFrame(1215, replacement.GetRef(), warmWait, false, false, true, failedImportSlot, failedNativeSlot) ||
+            contract.GetPublicationSerial() != publicationSerial)
+            return fail("transactional warm Resolve native-creation failure");
+        rendering::ExportSlotId recoveredImportSlot;
+        rendering::ExportSlotId recoveredNativeSlot;
+        if (!runFrame(1216, replacement.GetRef(), warmWait, false, false, false, recoveredImportSlot, recoveredNativeSlot) ||
+            contract.GetPublicationSerial() != publicationSerial ||
+            allocator.GetStats().structuralPlanBuilds != 1 ||
+            allocator.GetStats().structuralPlanHits < 2)
+            return fail("old published contract warm recovery");
+        rendering::ExportSlotId abortedImportSlot;
+        rendering::ExportSlotId abortedNativeSlot;
+        if (!runFrame(1217, replacement.GetRef(), warmWait, false, true, false, abortedImportSlot, abortedNativeSlot) ||
+            contract.GetPublicationSerial() != publicationSerial ||
+            allocator.GetStats().outstandingPublishedExports != 0)
+            return fail("aborted dynamic export must not publish");
+
+        for (gpu::Buffer& held : heldNative) held.Reset();
+        replacement.Reset();
+        if (!allocator.ClearPersistentCaches(&failure) || !allocator.Shutdown(&failure) ||
+            !gpu::FlushRetiredResources(&rhiFailure))
+            return fail("dynamic patch cleanup");
+        return true;
+    }
+
+    // RF12 cache-entry revision proof on the real D3D12 path.  Logical-only
+    // validation intentionally never publishes persistent structural plans, so
+    // the non-native allocator tests cover declaration/topology semantics while
+    // this test proves the actual cache-entry-owned contract cold-recompiles.
+    [[nodiscard]] bool RunRF12RevisionTopologyContractProof() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const auto fail = [&](const char* const stage) noexcept
+        {
+            std::fprintf(stderr, "[rf12-revision-topology] %s (flow=%u: %s, rhi=%u: %s)\n", stage, static_cast<unsigned>(failure.code),
+                         failure.message != nullptr ? failure.message : "none", static_cast<unsigned>(rhiFailure.code),
+                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "none");
+            return false;
+        };
+        const auto makeKey = [](const vanguard::u64 rendererRevision) noexcept
+        {
+            rendering::RenderGraphKey key;
+            key.renderExtent = {1, 1};
+            key.outputExtent = {1, 1};
+            key.rendererRevision = rendererRevision;
+            key.RebuildHash();
+            return key;
+        };
+        rendering::FrameBufferDesc bufferDesc;
+        bufferDesc.active.size = 4096;
+        bufferDesc.active.usage = gpu::BufferUsage::ShaderResource | gpu::BufferUsage::UnorderedAccess;
+        bufferDesc.active.initialState = gpu::ResourceState::Common;
+        bufferDesc.maximumSize = bufferDesc.active.size;
+        rendering::BufferUseDesc write;
+        write.requiredState = gpu::ResourceState::UnorderedAccess;
+        write.access = rendering::LogicalAccessIntent::Write;
+        write.content = rendering::ResourceContentIntent::Discard;
+
+        // Changed semantic swap order/count must select another cache entry and
+        // publish a second cold structural contract with the changed mapping.
+        {
+            rendering::RenderGraphCache cache;
+            rendering::RenderFlowResourceAllocator allocator;
+            if (!allocator.Initialize({}, &failure))
+                return fail("swap allocator initialize");
+            bool needsRebuild = false;
+            const rendering::RenderGraphKey baselineKey = makeKey(0x5100);
+            rendering::RenderGraphCache::CacheEntry* const baseline = cache.GetGraph(0x5100, baselineKey, 0, needsRebuild);
+            if (baseline == nullptr || !needsRebuild)
+                return fail("swap baseline cache miss");
+            constexpr rendering::RenderFlowNodeId node{0x510};
+            constexpr rendering::GpuFlowGroupId flow{0x510};
+            constexpr rendering::CommandScopeId scope{0x510};
+            constexpr rendering::FlowSpaceId space{0x510};
+            constexpr rendering::ResourceScopeId lifetimeScopes[] = {{0x5101}, {0x5102}, {0x5103}};
+            const auto compileSwap = [&](rendering::RenderGraphCache::CacheEntry& entry, const vanguard::u64 frameSerial,
+                                         const bool secondSwap) noexcept
+            {
+                entry.graph.BuildRenderFlowGroups();
+                rendering::RenderNodeResourceBindings bindings;
+                rendering::ResourcePlanningWriter writer;
+                rendering::LogicalResourceId resources[3];
+                rendering::ResourceUseId originalUses[3];
+                rendering::ResourceUseId finalUse;
+                if (!allocator.BeginFrame(frameSerial, {}, &failure) ||
+                    !allocator.BeginResourceContractCompilation(entry.resourceContract, &failure) ||
+                    !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+                    !writer.DeclareBuffer({space, "rf12.revision.swap.a"}, bufferDesc, resources[0], &failure) ||
+                    !writer.DeclareBuffer({space, "rf12.revision.swap.b"}, bufferDesc, resources[1], &failure) ||
+                    !writer.DeclareBuffer({space, "rf12.revision.swap.c"}, bufferDesc, resources[2], &failure))
+                    return false;
+                for (vanguard::u32 index = 0; index < 3; ++index)
+                    if (!writer.OpenResourceScope(resources[index], lifetimeScopes[index], &failure) ||
+                        !writer.BeginBufferUse(resources[index], write, originalUses[index], &failure) || !writer.EndUse(originalUses[index], &failure))
+                        return false;
+                if (!writer.SwapLogicalMappings(resources[0], resources[1], &failure) ||
+                    (secondSwap && !writer.SwapLogicalMappings(resources[0], resources[2], &failure)) ||
+                    !writer.BeginBufferUse(resources[0], write, finalUse, &failure) || !writer.EndUse(finalUse, &failure))
+                    return false;
+                for (vanguard::u32 index = 3; index-- > 0;)
+                    if (!writer.CloseResourceScope(lifetimeScopes[index], &failure))
+                        return false;
+                if (!writer.Close(&failure) || !entry.graph.CaptureResourceContract(entry.resourceContract, bindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) || !allocator.Resolve(nullptr, &failure) ||
+                    !allocator.BeginExecution(&failure))
+                    return false;
+
+                rendering::CompiledExecutionPacketView packet;
+                rendering::ResolvedBufferUse originals[3];
+                rendering::ResolvedBufferUse finalResolved;
+                bool resolved = allocator.PacketFor(node, packet, &failure);
+                for (vanguard::u32 index = 0; resolved && index < 3; ++index)
+                    resolved = packet.ResolveBufferUseBinding(originalUses[index], 1, originals[index], &failure);
+                resolved = resolved && packet.ResolveBufferUseBinding(finalUse, 1, finalResolved, &failure);
+                const rendering::PhysicalResourceId expected = resolved ? originals[secondSwap ? 2u : 1u].GetPhysicalResource() : rendering::PhysicalResourceId{};
+                const rendering::PhysicalResourceId actual = resolved ? finalResolved.GetPhysicalResource() : rendering::PhysicalResourceId{};
+                const bool mapped = expected.IsValid() && actual == expected &&
+                                    originals[0].GetPhysicalResource() != originals[1].GetPhysicalResource() &&
+                                    originals[0].GetPhysicalResource() != originals[2].GetPhysicalResource() &&
+                                    originals[1].GetPhysicalResource() != originals[2].GetPhysicalResource();
+                for (rendering::ResolvedBufferUse& original : originals)
+                    original = {};
+                finalResolved = {};
+                const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+                const rendering::CommandScopeExecutionReceipt receipt{
+                    scope, rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, gpu::QueueType::Graphics, {}};
+                const rendering::TerminalExecutionReceipt terminal{
+                    generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                    vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(&receipt, 1),
+                    rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+                return mapped && allocator.Finish(terminal, &failure) && entry.resourceContract.IsValid() &&
+                       entry.resourceContract.GetPublicationSerial() != 0;
+            };
+            if (!compileSwap(*baseline, 0x5100, false))
+                return fail("baseline swap contract compile");
+            baseline->PostBuildClear();
+            bool warmNeedsRebuild = true;
+            if (cache.GetGraph(0x5101, baselineKey, 0, warmNeedsRebuild) != baseline || warmNeedsRebuild)
+                return fail("unchanged swap revision cache hit");
+            rendering::RenderGraphKey revisedKey = baselineKey;
+            ++revisedKey.rendererRevision;
+            revisedKey.RebuildHash();
+            rendering::RenderGraphCache::CacheEntry* const revised = cache.GetGraph(0x5102, revisedKey, 0, needsRebuild);
+            if (revised == nullptr || revised == baseline || !needsRebuild || revised->resourceContract.IsValid() ||
+                !compileSwap(*revised, 0x5102, true))
+                return fail("changed swap revision cold contract compile");
+            revised->PostBuildClear();
+            const rendering::RenderFlowResourceAllocatorStats stats = allocator.GetStats();
+            if (stats.structuralPlanBuilds != 2 || stats.structuralPlanMisses != 2 || stats.structuralPlanHits != 0 ||
+                !allocator.Shutdown(&failure) || !gpu::FlushRetiredResources(&rhiFailure))
+                return fail("swap revision structural accounting/cleanup");
+        }
+
+        // The same cache-revision boundary must cold-compile a changed queue
+        // topology rather than reusing the Graphics-only packet schedule.
+        {
+            rendering::RenderGraphCache cache;
+            rendering::RenderFlowResourceAllocator allocator;
+            if (!allocator.Initialize({}, &failure))
+                return fail("queue allocator initialize");
+            bool needsRebuild = false;
+            const rendering::RenderGraphKey baselineKey = makeKey(0x5200);
+            rendering::RenderGraphCache::CacheEntry* const baseline = cache.GetGraph(0x5200, baselineKey, 0, needsRebuild);
+            if (baseline == nullptr || !needsRebuild)
+                return fail("queue baseline cache miss");
+            constexpr rendering::RenderFlowNodeId nodes[] = {{0x520}, {0x521}, {0x522}};
+            constexpr rendering::GpuFlowGroupId flows[] = {{0x520}, {0x522}, {0x524}};
+            constexpr rendering::GpuFlowGroupId forkFlow{0x521};
+            constexpr rendering::GpuFlowGroupId joinFlow{0x523};
+            constexpr rendering::CommandScopeId scopes[] = {{0x520}, {0x521}, {0x522}};
+            constexpr rendering::LogicalResourceKey resourceKey{{0x520}, "rf12.revision.queue"};
+            const auto compileQueue = [&](rendering::RenderGraphCache::CacheEntry& entry, const vanguard::u64 frameSerial,
+                                          const bool asyncCompute) noexcept
+            {
+                entry.graph.BuildRenderFlowGroups();
+                rendering::RenderNodeResourceBindings bindings;
+                rendering::ResourcePlanningWriter writers[3];
+                rendering::LogicalResourceId resources[3];
+                rendering::ResourceUseId uses[3];
+                if (!allocator.BeginFrame(frameSerial, {}, &failure) ||
+                    !allocator.BeginResourceContractCompilation(entry.resourceContract, &failure))
+                    return false;
+                if (asyncCompute && (!allocator.RequestQueueSync(forkFlow, gpu::CommandListSyncType::ForkAsyncCompute, &failure) ||
+                                     !allocator.RequestBeginQueue(gpu::QueueType::Compute, flows[1], &failure) || !allocator.RequestEndQueue(flows[1], &failure) ||
+                                     !allocator.RequestQueueSync(joinFlow, gpu::CommandListSyncType::JoinAsyncCompute, &failure)))
+                    return false;
+                for (vanguard::u32 index = 0; index < 3; ++index)
+                    if (!allocator.CreatePlanningWriter(nodes[index], flows[index], scopes[index], writers[index], &failure))
+                        return false;
+                bool planned = writers[0].DeclareBuffer(resourceKey, bufferDesc, resources[0], &failure) &&
+                               writers[0].BeginBufferUse(resources[0], write, uses[0], &failure) && writers[0].EndUse(uses[0], &failure);
+                for (vanguard::u32 index = 1; planned && index < 3; ++index)
+                    planned = writers[index].ReferenceResource(resourceKey, resources[index], &failure) &&
+                              writers[index].BeginBufferUse(resources[index], write, uses[index], &failure) && writers[index].EndUse(uses[index], &failure);
+                for (vanguard::u32 index = 0; planned && index < 3; ++index)
+                    planned = writers[index].Close(&failure);
+                if (!planned || !entry.graph.CaptureResourceContract(entry.resourceContract, bindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) || !allocator.Resolve(nullptr, &failure) ||
+                    !allocator.BeginExecution(&failure))
+                    return false;
+                rendering::CompiledExecutionPacketView packets[3];
+                for (vanguard::u32 index = 0; index < 3; ++index)
+                {
+                    const gpu::QueueType expectedQueue = asyncCompute && index == 1 ? gpu::QueueType::Compute : gpu::QueueType::Graphics;
+                    if (!allocator.PacketFor(nodes[index], packets[index], &failure) || packets[index].GetQueue() != expectedQueue)
+                        return false;
+                }
+                const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+                const rendering::CommandScopeExecutionReceipt receipts[] = {
+                    {scopes[0], rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, gpu::QueueType::Graphics, {}},
+                    {scopes[1], rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission,
+                     asyncCompute ? gpu::QueueType::Compute : gpu::QueueType::Graphics, {}},
+                    {scopes[2], rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission, gpu::QueueType::Graphics, {}}};
+                const rendering::QueueDependencyExecutionReceipt dependencies[] = {
+                    {scopes[0], scopes[1], gpu::CommandListSyncType::ForkAsyncCompute, rendering::QueueDependencyCompletionKind::DiscardedBeforeSubmission},
+                    {scopes[1], scopes[2], gpu::CommandListSyncType::JoinAsyncCompute, rendering::QueueDependencyCompletionKind::DiscardedBeforeSubmission}};
+                const rendering::TerminalExecutionReceipt terminal{
+                    generation, rendering::TerminalExecutionCompletionKind::Aborted,
+                    vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                    rendering::TerminalJoinToken::CompletedSynchronously(generation),
+                    asyncCompute ? vanguard::containers::ArraySpan<const rendering::QueueDependencyExecutionReceipt>(dependencies)
+                                 : vanguard::containers::ArraySpan<const rendering::QueueDependencyExecutionReceipt>{}};
+                return allocator.Finish(terminal, &failure) && entry.resourceContract.IsValid() &&
+                       entry.resourceContract.GetPublicationSerial() != 0;
+            };
+            if (!compileQueue(*baseline, 0x5200, false))
+                return fail("baseline Graphics queue contract compile");
+            baseline->PostBuildClear();
+            bool warmNeedsRebuild = true;
+            if (cache.GetGraph(0x5201, baselineKey, 0, warmNeedsRebuild) != baseline || warmNeedsRebuild)
+                return fail("unchanged queue revision cache hit");
+            rendering::RenderGraphKey revisedKey = baselineKey;
+            ++revisedKey.rendererRevision;
+            revisedKey.RebuildHash();
+            rendering::RenderGraphCache::CacheEntry* const revised = cache.GetGraph(0x5202, revisedKey, 0, needsRebuild);
+            if (revised == nullptr || revised == baseline || !needsRebuild || revised->resourceContract.IsValid() ||
+                !compileQueue(*revised, 0x5202, true))
+                return fail("changed queue revision cold contract compile");
+            revised->PostBuildClear();
+            const rendering::RenderFlowResourceAllocatorStats stats = allocator.GetStats();
+            if (stats.structuralPlanBuilds != 2 || stats.structuralPlanMisses != 2 || stats.structuralPlanHits != 0 ||
+                !allocator.Shutdown(&failure) || !gpu::FlushRetiredResources(&rhiFailure))
+                return fail("queue revision structural accounting/cleanup");
+        }
+        return true;
+    }
+
+    // RF12: the normalized contract is bound to its descriptor-domain owner,
+    // not to the caller's semantic declarations alone. A fresh allocator on
+    // the same device must reject the old domain before it may cold-republish.
+    [[nodiscard]] bool RunRF12ContractDomainEpochProof() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const auto fail = [&](const char* const stage) noexcept
+        {
+            std::fprintf(stderr, "[rf12-contract-domain] %s (flow=%u: %s, rhi=%u: %s)\n", stage, static_cast<unsigned>(failure.code),
+                         failure.message != nullptr ? failure.message : "none", static_cast<unsigned>(rhiFailure.code),
+                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "none");
+            return false;
+        };
+        const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Pixel) | gpu::ShaderStageBit(gpu::ShaderStage::Compute);
+        rendering::RenderFlowResourceContract contract;
+        rendering::RenderNodeGraph graph;
+        graph.BuildRenderFlowGroups();
+        rendering::RenderNodeResourceBindings bindings;
+        const vanguard::u64 deviceIncarnation = gpu::GetDeviceIncarnation();
+        if (deviceIncarnation == 0)
+            return fail("initial device incarnation");
+
+        vanguard::u64 publicationSerial = 0;
+        gpu::DescriptorDomainRef oldDomainRef;
+        {
+            gpu::DescriptorDomain domain(gpu::AdoptReference,
+                                         gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 4, 0, visibility}, &rhiFailure));
+            rendering::RenderFlowResourceAllocator allocator;
+            rendering::RenderFlowResourceAllocatorConfig config;
+            config.resourceDescriptors = domain.GetRef();
+            config.descriptorCacheTarget = 4;
+            config.descriptorCacheMaximum = 4;
+            if (!domain.IsValid() || !allocator.Initialize(config, &failure) || !allocator.BeginFrame(0xC120, {}, &failure) ||
+                !CompileAndFinishRF12ScopeContract(allocator, contract, graph, bindings, failure))
+                return fail("first domain cold contract publication");
+            publicationSerial = contract.GetPublicationSerial();
+            oldDomainRef = domain.GetRef();
+            const rendering::RenderFlowResourceAllocatorStats cold = allocator.GetStats();
+            if (publicationSerial == 0 || cold.structuralPlanBuilds != 1 || cold.structuralPlanMisses != 1 ||
+                cold.structuralPlanHits != 0 || !allocator.Shutdown(&failure))
+                return fail("first domain finish and shutdown");
+        }
+        if (!gpu::FlushRetiredResources(&rhiFailure) || gpu::GetDeviceIncarnation() != deviceIncarnation)
+            return fail("same-device domain retirement");
+
+        gpu::DescriptorDomain replacement(gpu::AdoptReference,
+                                          gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 4, 0, visibility}, &rhiFailure));
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceAllocatorConfig config;
+        config.resourceDescriptors = replacement.GetRef();
+        config.descriptorCacheTarget = 4;
+        config.descriptorCacheMaximum = 4;
+        if (!replacement.IsValid() || replacement.GetRef() == oldDomainRef || !allocator.Initialize(config, &failure) ||
+            !allocator.BeginFrame(0xC121, {}, &failure))
+            return fail("replacement domain initialization");
+        if (allocator.BindResourceContract(contract, &failure) ||
+            failure.code != rendering::RenderFlowResourceFailureCode::InvalidOrStaleIdentity ||
+            allocator.GetState() != rendering::RenderFlowResourceSessionState::Planning ||
+            !contract.IsValid() || contract.GetPublicationSerial() != publicationSerial ||
+            gpu::GetDeviceIncarnation() != deviceIncarnation)
+            return fail("old contract must reject replacement descriptor domain");
+
+        if (!CompileAndFinishRF12ScopeContract(allocator, contract, graph, bindings, failure) ||
+            contract.GetPublicationSerial() <= publicationSerial)
+            return fail("replacement domain cold contract recovery");
+        const rendering::RenderFlowResourceAllocatorStats recovered = allocator.GetStats();
+        if (recovered.structuralPlanBuilds != 1 || recovered.structuralPlanMisses != 1 || recovered.structuralPlanHits != 0 ||
+            !allocator.Shutdown(&failure) || !gpu::FlushRetiredResources(&rhiFailure))
+            return fail("replacement domain clean shutdown");
+        return true;
     }
 
     [[nodiscard]] bool RunExplicitBufferNoOpTransitionBoundaryTest() noexcept
@@ -653,9 +1819,9 @@ namespace
             !packet.ResolveBufferUseBinding(computeReadUse, 2, resolvedRead, &failure) ||
             !packet.ResolveBufferUseBinding(repeatedReadUse, 3, resolvedRepeatedRead, &failure) ||
             uploadRange.beginStepCount != 1 || uploadRange.endStepCount != 1 ||
-            uploadRange.beginActions.count != 1 || !uploadRange.endActions.Empty() ||
+            !uploadRange.beginActions.Empty() || !uploadRange.endActions.Empty() ||
             readRange.beginStepCount != 1 || readRange.endStepCount != 1 ||
-            readRange.beginActions.count != 1 || !readRange.endActions.Empty() ||
+            !readRange.beginActions.Empty() || !readRange.endActions.Empty() ||
             repeatedReadRange.beginStepCount != 1 || repeatedReadRange.endStepCount != 1 ||
             !repeatedReadRange.beginActions.Empty() || !repeatedReadRange.endActions.Empty() ||
             packet.GetExitActionSegment().count != 1 ||
@@ -742,6 +1908,8 @@ namespace
             !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) || !allocator.Resolve(nullptr, &failure) ||
             !allocator.BeginExecution(&failure))
             return fail("plan/resolve");
+        if (allocator.GetStats().compiledBarriers == 0)
+            return fail("RF17 exact barrier program");
 
         gpu::Failure rhiFailure;
         gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x4558505445585354ull, &rhiFailure);
@@ -832,10 +2000,39 @@ namespace
             !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
             return fail("planning");
 
-        if (allocator.Resolve(nullptr, &failure) || failure.code != rendering::RenderFlowResourceFailureCode::UnsupportedCapability || allocator.GetExecutionGeneration().IsValid())
-            return fail("whole-resource barrier guard");
-        if (!allocator.Shutdown(&failure))
-            return fail("shutdown");
+        if (!allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure))
+            return fail("partial UAV resolve");
+
+        // RF11 makes the backend's whole-resource UAV barrier legal for a
+        // partial texture range by normalizing untouched subresources around
+        // the barrier and restoring their exact prior state afterwards.
+        gpu::Failure rhiFailure;
+        gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5054554156424152ull, &rhiFailure);
+        rendering::CompiledExecutionPacketView packet;
+        rendering::ExecutionPacketCursor cursor;
+        rendering::ResolvedTextureUse resolved;
+        if (!commands || !gpu::BindCommandList(commands, &rhiFailure) || !allocator.PacketFor(node, packet, &failure) ||
+            !packet.OpenCursor(scope, gpu::QueueType::Graphics, cursor, &failure) ||
+            !cursor.BeginTextureUse(uses[0], resolved, &failure) || !resolved.IsValid() || !cursor.EndUse(uses[0], &failure) || resolved.IsValid() ||
+            !cursor.BeginTextureUse(uses[1], resolved, &failure) || !resolved.IsValid() || !cursor.EndUse(uses[1], &failure) || resolved.IsValid() ||
+            !cursor.FinalizePacket(&failure) || !gpu::FlushPendingBarriers(&rhiFailure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return fail("partial UAV execution");
+        }
+        gpu::UnbindCommandList();
+        const gpu::CommandListRef submissions[] = {commands};
+        gpu::GpuFence completion;
+        if (!gpu::CloseAndSubmitCommandLists("resource-flow partial texture UAV barrier", {submissions, 1}, gpu::CommandListSyncType::None, completion, &rhiFailure))
+            return fail("partial UAV submission");
+        const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+        const rendering::CommandScopeExecutionReceipt receipts[] = {{scope, rendering::CommandScopeCompletionKind::Submitted, gpu::QueueType::Graphics, completion}};
+        const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                           vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                           rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+        if (!allocator.Finish(terminal, &failure) || !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure) || !allocator.Shutdown(&failure))
+            return fail("partial UAV finish/shutdown");
         return true;
     }
 
@@ -1020,7 +2217,7 @@ namespace
         rendering::ExecutionPacketCursor cursor;
         rendering::ResolvedBufferUse resolved[4];
         gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246414C49464554ull, &rhiFailure);
-        if (!commands || !gpu::BindCommandList(commands, &rhiFailure) || !allocator.Resolve(nullptr, &failure) || allocator.GetStats().compiledResourceActions != 5 || !allocator.BeginExecution(&failure) ||
+        if (!commands || !gpu::BindCommandList(commands, &rhiFailure) || !allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure) ||
             !allocator.PacketFor(node, packet, &failure) || !packet.OpenCursor(scope, gpu::QueueType::Graphics, cursor, &failure) || !cursor.BeginBufferUse(uses[0], resolved[0], &failure) ||
             !cursor.BeginBufferUse(uses[1], resolved[1], &failure))
         {
@@ -1457,8 +2654,10 @@ namespace
             if (!gpu::GetMemoryRequirements(canonicalVirtualDesc, canonicalRequirements, &rhiFailure) || canonicalRequirements.size == 0 || canonicalRequirements.alignment == 0)
                 return fail("RF3 placed canonical requirements");
             const rendering::detail::PlacedRangeRequest canonicalRequests[] = {
-                {0, rendering::FrameResourceKind::Buffer, gpu::QueueType::Graphics, {{1}, 0}, {{2}, 1}, canonicalRequirements},
-                {1, rendering::FrameResourceKind::Buffer, gpu::QueueType::Graphics, {{3}, 2}, {{4}, 3}, canonicalRequirements},
+                {0, rendering::FrameResourceKind::Buffer, gpu::QueueType::Graphics, {{1}, 0}, {{2}, 1}, rendering::InvalidRenderFlowResourceIndex,
+                 rendering::InvalidRenderFlowResourceIndex, canonicalRequirements},
+                {1, rendering::FrameResourceKind::Buffer, gpu::QueueType::Graphics, {{3}, 2}, {{4}, 3}, rendering::InvalidRenderFlowResourceIndex,
+                 rendering::InvalidRenderFlowResourceIndex, canonicalRequirements},
             };
             rendering::detail::PlacedRangePlan canonicalPlan;
             if (!rendering::detail::BuildPlacedRangePlan(canonicalRequests, plannerConfig, canonicalPlan, &failure) || canonicalPlan.heaps.Size() != 1 || canonicalPlan.assignments.Size() != 2 ||
@@ -1579,18 +2778,28 @@ namespace
         rendering::RenderNodeCommandListUsage m_usage;
     };
 
-    constexpr rendering::LogicalResourceName RFEX1DuplicateName = VG_RENDER_FLOW_NAME("RFEX1.Duplicate");
+    // All 64 repeated uses exercise a heap-backed cold name (>20 bytes) and
+    // must become allocation-free borrowed names on the warm contract path.
+    constexpr rendering::LogicalResourceName RFEX1DuplicateName = VG_RENDER_FLOW_NAME("RFEX1.Duplicate.Warm.LongName");
     constexpr rendering::LogicalResourceName RFEX1CollisionNameA = VG_RENDER_FLOW_NAME("rfex1.2l2jjq6yf6");
     constexpr rendering::LogicalResourceName RFEX1CollisionNameB = VG_RENDER_FLOW_NAME("rfex1.j971n4e0yg");
+    // Deliberately exceeds containers::String's 20-byte inline capacity.
+    // Cold declaration owns the bytes; a warm contract must use the exact
+    // immutable cached name without constructing a heap-backed copy per frame.
+    constexpr rendering::LogicalResourceName RFEX1LongName = VG_RENDER_FLOW_NAME("RFEX1.Immutable.Warm.Contract.LongName");
     constexpr vanguard::u32 RFEX1DuplicateUseCount = 64;
     static_assert(RFEX1CollisionNameA.GetHash() == RFEX1CollisionNameB.GetHash());
 
     struct RFEX1BindingState
     {
         bool valid = true;
+        bool decisionValue = true;
+        bool observedDecision = false;
         const rendering::ResolvedBufferUse* escaped = nullptr;
         rendering::ResourceUseId firstDuplicate;
         rendering::ResourceUseId secondDuplicate;
+        vanguard::u32 declarationCalls = 0;
+        vanguard::u32 patchCalls = 0;
     };
 
     class RFEX1BindingNode final : public rendering::RenderNodeImpl
@@ -1607,6 +2816,7 @@ namespace
 
         bool DeclareResources(const rendering::RenderNodeImplContext& context, rendering::RenderFlowResourceFailure*) const noexcept override
         {
+            ++m_state->declarationCalls;
             rendering::BufferUseDesc use;
             if (m_stage == Stage::Initialize)
             {
@@ -1621,12 +2831,15 @@ namespace
                 const rendering::RenderFlowNameTag duplicate = context.RTSharedAlloc(RFEX1DuplicateName, desc);
                 const rendering::RenderFlowNameTag collisionA = context.RTSharedAlloc(RFEX1CollisionNameA, desc);
                 const rendering::RenderFlowNameTag collisionB = context.RTSharedAlloc(RFEX1CollisionNameB, desc);
+                const rendering::RenderFlowNameTag longName = context.RTSharedAlloc(RFEX1LongName, desc);
                 context.RTUseBegin(duplicate, use);
                 context.RTUseEnd(duplicate);
                 context.RTUseBegin(collisionA, use);
                 context.RTUseEnd(collisionA);
                 context.RTUseBegin(collisionB, use);
                 context.RTUseEnd(collisionB);
+                context.RTUseBegin(longName, use);
+                context.RTUseEnd(longName);
                 return true;
             }
 
@@ -1647,6 +2860,10 @@ namespace
                 context.RTUseEnd(collisionA);
                 context.RTUseBegin(collisionB, use);
                 context.RTUseEnd(collisionB);
+                const rendering::RenderFlowNameTag longName = rendering::RenderNodeImplContext::RTSharedNameTag(RFEX1LongName);
+                context.RTUseBegin(longName, use);
+                context.RTUseEnd(longName);
+                static_cast<void>(context.RTDecision(m_state->decisionValue));
 
                 rendering::FrameBufferDesc temporaryDesc;
                 temporaryDesc.active.size = 256;
@@ -1669,12 +2886,22 @@ namespace
             return true;
         }
 
+        bool PatchResourceContract(const rendering::RenderNodeImplContext& context, rendering::RenderFlowResourceFailure*) const noexcept override
+        {
+            ++m_state->patchCalls;
+            if (m_stage == Stage::Lookup)
+                static_cast<void>(context.RTDecision(m_state->decisionValue));
+            return true;
+        }
+
         void Execute(const rendering::RenderNodeImplContext& context, jobs::Builder*) const override
         {
             if (m_stage == Stage::Initialize)
                 return;
             if (m_stage == Stage::Lookup)
             {
+                m_state->observedDecision = context.RTDecision(!m_state->decisionValue);
+                m_state->valid = m_state->valid && m_state->observedDecision == m_state->decisionValue;
                 const rendering::RenderFlowNameTag duplicate = rendering::RenderNodeImplContext::RTSharedNameTag(RFEX1DuplicateName);
                 const rendering::ResolvedBufferUse* first = nullptr;
                 rendering::ResourceUseId previous;
@@ -1700,11 +2927,15 @@ namespace
                     context.RTBuffer(rendering::RenderNodeImplContext::RTSharedNameTag(RFEX1CollisionNameA));
                 const rendering::ResolvedBufferUse& collisionB =
                     context.RTBuffer(rendering::RenderNodeImplContext::RTSharedNameTag(RFEX1CollisionNameB));
+                const rendering::ResolvedBufferUse& longName =
+                    context.RTBuffer(rendering::RenderNodeImplContext::RTSharedNameTag(RFEX1LongName));
                 const rendering::ResolvedBufferUse& temporary = context.RTBuffer(context.RTNameTag(VG_RENDER_FLOW_NAME("RFEX1.Temp")));
-                m_state->valid = m_state->valid && first != nullptr && fallback.IsValid() && collisionA.IsValid() && collisionB.IsValid() && temporary.IsValid() &&
+                m_state->valid = m_state->valid && first != nullptr && fallback.IsValid() && collisionA.IsValid() && collisionB.IsValid() &&
+                                 longName.IsValid() && temporary.IsValid() &&
                                  fallback.GetBuffer().IsValid() && collisionA.GetBuffer().IsValid() && collisionB.GetBuffer().IsValid() &&
-                                 temporary.GetBuffer().IsValid() &&
-                                 fallback.GetUse() == m_state->firstDuplicate && collisionA.GetUse() != collisionB.GetUse();
+                                 longName.GetBuffer().IsValid() && temporary.GetBuffer().IsValid() &&
+                                 fallback.GetUse() == m_state->firstDuplicate && collisionA.GetUse() != collisionB.GetUse() &&
+                                 longName.GetUse() != collisionA.GetUse() && longName.GetUse() != collisionB.GetUse();
                 m_state->escaped = first;
                 return;
             }
@@ -1810,10 +3041,15 @@ namespace
         rendering::RenderFlowResourceFailure failure;
         if (!allocator.Initialize({}, &failure))
             return false;
+        rendering::RenderFlowResourceContract resourceContract;
 
         const auto runFrame = [&](const vanguard::u64 frameSerial) noexcept
         {
-            state = {};
+            state.valid = true;
+            state.observedDecision = !state.decisionValue;
+            state.escaped = nullptr;
+            state.firstDuplicate = {};
+            state.secondDuplicate = {};
             rendering::RenderNodeResourceBindings bindings;
             rendering::RenderNodeResourcePreparationFailures preparationFailures;
             rendering::RenderFrameCommandLists lists;
@@ -1826,11 +3062,22 @@ namespace
             context.Init(init);
             if (!allocator.BeginFrame(frameSerial, {}, &failure) || !graph.PrepareResourceBindings(bindings, preparationFailures))
                 return false;
-            jobs::Builder declarations({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker});
-            graph.PrepareResourcesParallel(context, allocator, bindings, preparationFailures, declarations);
-            if (!declarations.WaitForCompletion() || preparationFailures.HasFailure() ||
-                !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) || !allocator.Resolve(nullptr, &failure) ||
-                !allocator.BeginExecution(&failure) || !graph.PrepareExecutionPackets(allocator, lists, bindings, &failure))
+            if (!resourceContract.IsValid())
+            {
+                if (!allocator.BeginResourceContractCompilation(resourceContract, &failure))
+                    return false;
+                jobs::Builder declarations({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker});
+                graph.PrepareResourcesParallel(context, allocator, bindings, preparationFailures, declarations);
+                if (!declarations.WaitForCompletion() || preparationFailures.HasFailure() ||
+                    !graph.CaptureResourceContract(resourceContract, bindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+                    return false;
+            }
+            else if (!graph.InstantiateResourceContract(resourceContract, bindings, allocator, &failure) ||
+                     !graph.PatchResourceContract(context, allocator, bindings, &failure) ||
+                     !allocator.BindResourceContract(resourceContract, &failure))
+                return false;
+            if (!allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure) || !graph.PrepareExecutionPackets(allocator, lists, bindings, &failure))
                 return false;
 
             jobs::Builder kickoffBuilder({jobs::Priority::RenderPath, jobs::Affinity::AnyWorker});
@@ -1865,13 +3112,46 @@ namespace
 
         if (!runFrame(2))
             return false;
+        const rendering::ResourceUseId coldFirstDuplicate = state.firstDuplicate;
+        const vanguard::u64 publicationSerial = resourceContract.GetPublicationSerial();
         const rendering::RenderFlowResourceAllocatorStats cold = allocator.GetStats();
-        if (cold.structuralPlanBuilds != 1 || cold.structuralPlanMisses != 1 || cold.structuralPlanHits != 0)
+        if (!resourceContract.IsValid() || publicationSerial == 0 || state.declarationCalls != 3 || state.patchCalls != 0 || !state.observedDecision ||
+            cold.structuralPlanBuilds != 1 || cold.structuralPlanMisses != 1 || cold.structuralPlanHits != 0 || cold.compiledBarriers == 0)
             return false;
-        if (!runFrame(3))
+
+        // Missing the decision-only patch must reject warm admission without
+        // replacing or invalidating the last proven contract.
+        {
+            rendering::RenderNodeResourceBindings bindings;
+            rendering::RenderNodeResourcePreparationFailures preparationFailures;
+            if (!allocator.BeginFrame(3, {}, &failure) || !graph.PrepareResourceBindings(bindings, preparationFailures) ||
+                !graph.InstantiateResourceContract(resourceContract, bindings, allocator, &failure) ||
+                allocator.BindResourceContract(resourceContract, &failure) || failure.code != rendering::RenderFlowResourceFailureCode::DescriptorConflict ||
+                !resourceContract.IsValid() || resourceContract.GetPublicationSerial() != publicationSerial)
+                return false;
+            allocator.CancelBeforePublication();
+        }
+
+        state.decisionValue = false;
+        if (!runFrame(4))
             return false;
         const rendering::RenderFlowResourceAllocatorStats warm = allocator.GetStats();
-        return warm.structuralPlanBuilds == 1 && warm.structuralPlanMisses == 1 && warm.structuralPlanHits == 1 && allocator.Shutdown(&failure);
+        if (state.declarationCalls != 3 || state.patchCalls != 3 || state.observedDecision || !state.firstDuplicate.IsValid() ||
+            state.firstDuplicate.generation == coldFirstDuplicate.generation || warm.planningWriters != 0 ||
+            warm.structuralPlanBuilds != 1 || warm.structuralPlanMisses != 1 || warm.structuralPlanHits != 1 ||
+            warm.persistentStateProgramHits != 0 || warm.persistentStateProgramMisses != 1 || warm.persistentStateProgramBuilds != 2 ||
+            resourceContract.GetPublicationSerial() != publicationSerial)
+            return false;
+        // A changed decision must compile exactly one new state variant, not
+        // trigger a cold barrier compiler on every subsequent stable frame.
+        if (!runFrame(5))
+            return false;
+        const rendering::RenderFlowResourceAllocatorStats stable = allocator.GetStats();
+        return state.declarationCalls == 3 && state.patchCalls == 6 && !state.observedDecision &&
+               stable.structuralPlanBuilds == 1 && stable.structuralPlanHits == 2 &&
+               stable.persistentStateProgramBuilds == 2 && stable.persistentStateProgramMisses == 1 &&
+               stable.persistentStateProgramHits == 1 &&
+               resourceContract.GetPublicationSerial() == publicationSerial && allocator.Shutdown(&failure);
     }
 
     [[nodiscard]] bool RunPlacedResourceExecutionSmokeTest() noexcept
@@ -1959,7 +3239,11 @@ namespace
 
         {
             rendering::RenderFlowResourceAllocatorConfig capacityConfig;
-            capacityConfig.maximumCompiledResourceActions = 6;
+            // RF11 sparse lowering reduced this frame to four native actions
+            // (the stats counter also includes the earlier one-action seed).
+            // Keep the per-frame cap one below that exact current program so
+            // the placed-allocation rollback path is still exercised.
+            capacityConfig.maximumCompiledResourceActions = 3;
             rendering::RenderFlowResourceAllocator capacityAllocator;
             rendering::ResourcePlanningWriter seedWriter;
             rendering::LogicalResourceId seedResource;
@@ -2378,7 +3662,7 @@ namespace
             return fail("resolve");
         const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
         const rendering::RenderFlowResourceAllocatorStats resolvedStats = allocator.GetStats();
-        if (resolvedStats.placedHeapPoolMisses != 1 || resolvedStats.placedObjectPoolMisses != 2 || resolvedStats.dedicatedResourcePoolMisses != 0 || resolvedStats.compiledResourceActions != 7 ||
+        if (resolvedStats.placedHeapPoolMisses != 1 || resolvedStats.placedObjectPoolMisses != 2 || resolvedStats.dedicatedResourcePoolMisses != 0 || resolvedStats.compiledResourceActions != 4 ||
             !allocator.BeginExecution(&failure))
             return fail("placed selection");
 
@@ -2408,7 +3692,7 @@ namespace
             !packet.ResolveBufferUseBinding(secondRead, 3, resolvedSecondRead, &failure) ||
             firstAliasRange.beginActions.count != 1 || firstAliasRange.endActions.count != 1 ||
             secondAliasWriteRange.beginActions.count != 1 ||
-            secondAliasReadRange.beginActions.count != 1 ||
+            !secondAliasReadRange.beginActions.Empty() ||
             !packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 3, cursor, &failure))
         {
             gpu::UnbindCommandList();
@@ -3558,8 +4842,6 @@ namespace
             rendering::RenderFlowResourceAllocator allocator;
             if (!allocator.Initialize({}, &failure) || !resolveBuffers(allocator, 50, 1, bufferDesc, failure))
                 return fail("device-loss setup");
-            if (!rendering::detail::RenderFlowResourceShutdownTestAccess::HasStructuralPlan(allocator))
-                return fail("device-loss structural-plan setup");
             constexpr rendering::CommandScopeId scope{70};
             const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
             const rendering::CommandScopeExecutionReceipt scopes[] = {{scope, rendering::CommandScopeCompletionKind::UnknownDueToDeviceLoss, gpu::QueueType::Graphics, {}}};
@@ -3569,8 +4851,7 @@ namespace
             if (!allocator.Finish(receipt, &failure))
                 return fail("device-loss finish");
             const rendering::RenderFlowResourceAllocatorStats lost = allocator.GetStats();
-            if (rendering::detail::RenderFlowResourceShutdownTestAccess::HasStructuralPlan(allocator) ||
-                lost.state != rendering::RenderFlowResourceSessionState::DeviceUnavailable || lost.chargedNativeBytes != 0 || lost.abortedFrames != 1 || !allocator.Shutdown(&failure) ||
+            if (lost.state != rendering::RenderFlowResourceSessionState::DeviceUnavailable || lost.chargedNativeBytes != 0 || lost.abortedFrames != 1 || !allocator.Shutdown(&failure) ||
                 !gpu::FlushRetiredResources(&rhiFailure))
                 return fail("device-loss cleanup");
         }
@@ -3579,6 +4860,143 @@ namespace
             return fail("RHI-uninitialized shutdown/destructor proof");
 
         return true;
+    }
+
+    // RF11 real-backend parity: the same buffer/texture clear + repeated UAV
+    // uses must execute with NVRHI automatic close-state restoration enabled or
+    // disabled. Disjoint logical lifetimes also exercise the placed alias tape.
+    [[nodiscard]] bool RunAutomaticExplicitStateParityTest() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        rendering::RenderFlowResourceAllocator allocator;
+        const auto fail = [&](const char* stage) noexcept
+        {
+            std::fprintf(stderr, "[rf11-state-parity] %s (flow=%u: %s, rhi=%u: %s)\n", stage, static_cast<unsigned>(failure.code),
+                         failure.message != nullptr ? failure.message : "none", static_cast<unsigned>(rhiFailure.code),
+                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "none");
+            return false;
+        };
+        if (!allocator.Initialize({}, &failure))
+            return fail("initialize");
+
+        rendering::ResourceUseId previousGenerationUse;
+        for (vanguard::u32 mode = 0; mode < 2; ++mode)
+        {
+            const bool automatic = mode != 0;
+            constexpr rendering::RenderFlowNodeId node{0x711};
+            constexpr rendering::GpuFlowGroupId flow{0x711};
+            constexpr rendering::CommandScopeId scope{0x711};
+            constexpr rendering::FlowSpaceId space{0x711};
+            rendering::FrameBufferDesc bufferDesc;
+            bufferDesc.active.size = 4096;
+            bufferDesc.active.usage = gpu::BufferUsage::ShaderResource | gpu::BufferUsage::UnorderedAccess | gpu::BufferUsage::CopySource;
+            bufferDesc.active.initialState = gpu::ResourceState::Common;
+            bufferDesc.active.keepInitialState = automatic;
+            bufferDesc.maximumSize = bufferDesc.active.size;
+            rendering::FrameTextureDesc textureDesc;
+            textureDesc.active.extent = {8, 8, 1};
+            textureDesc.active.dimension = gpu::TextureDimension::Texture2D;
+            textureDesc.active.format = gpu::Format::R32UInt;
+            textureDesc.active.usage = gpu::TextureUsage::UnorderedAccess | gpu::TextureUsage::ShaderResource;
+            textureDesc.active.initialState = gpu::ResourceState::Common;
+            textureDesc.active.keepInitialState = automatic;
+            textureDesc.maximumExtent = textureDesc.active.extent;
+            textureDesc.maximumMipCount = 1;
+            rendering::BufferUseDesc bufferWrite;
+            bufferWrite.requiredState = gpu::ResourceState::UnorderedAccess;
+            bufferWrite.access = rendering::LogicalAccessIntent::Write;
+            bufferWrite.content = rendering::ResourceContentIntent::Clear;
+            bufferWrite.clearValue = rendering::BufferClearValue::Uint(0x12480000u + mode);
+            rendering::TextureUseDesc textureWrite;
+            textureWrite.requiredState = gpu::ResourceState::UnorderedAccess;
+            textureWrite.access = rendering::LogicalAccessIntent::Write;
+            textureWrite.content = rendering::ResourceContentIntent::Clear;
+            textureWrite.clearValue = rendering::TextureClearValue::Uint(0x24570000u + mode);
+
+            rendering::ResourcePlanningWriter writer;
+            rendering::LogicalResourceId logical[4];
+            rendering::ResourceUseId uses[6];
+            vanguard::u32 useCount = 0;
+            if (!allocator.BeginFrame(711 + mode, {true}, &failure) || !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+                !writer.DeclareBuffer({space, "rf11.parity.buffer.a"}, bufferDesc, logical[0], &failure) ||
+                !writer.DeclareBuffer({space, "rf11.parity.buffer.b"}, bufferDesc, logical[1], &failure) ||
+                !writer.DeclareTexture({space, "rf11.parity.texture.a"}, textureDesc, logical[2], &failure) ||
+                !writer.DeclareTexture({space, "rf11.parity.texture.b"}, textureDesc, logical[3], &failure))
+                return fail("planning declarations");
+            bool planned = true;
+            for (vanguard::u32 resource = 0; resource < 4 && planned; ++resource)
+            {
+                planned = writer.OpenResourceScope(logical[resource], &failure);
+                const vanguard::u32 repetitions = resource == 1 || resource == 3 ? 2u : 1u;
+                for (vanguard::u32 repeat = 0; repeat < repetitions && planned; ++repeat)
+                {
+                    const vanguard::u32 index = useCount++;
+                    planned = resource < 2 ? writer.BeginBufferUse(logical[resource], bufferWrite, uses[index], &failure)
+                                           : writer.BeginTextureUse(logical[resource], textureWrite, uses[index], &failure);
+                    planned = planned && writer.EndUse(uses[index], &failure);
+                }
+                planned = planned && writer.CloseResourceScope(logical[resource], &failure);
+            }
+            if (!planned || useCount != 6 || !writer.Close(&failure) || !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) ||
+                !allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure))
+                return fail("resolve UAV/clear/alias timeline");
+
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            rendering::CompiledExecutionPacketView packet;
+            rendering::ExecutionPacketCursor cursor;
+            rendering::CompiledExecutionRange ranges[6];
+            rendering::ResolvedBufferUse bufferBindings[3];
+            rendering::ResolvedTextureUse textureBindings[3];
+            gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246313153544154ull + mode, &rhiFailure);
+            bool prepared = commands.IsValid() && gpu::BindCommandList(commands, &rhiFailure) && allocator.PacketFor(node, packet, &failure);
+            for (vanguard::u32 index = 0; prepared && index < 6; ++index)
+                prepared = packet.ResolveExecutionRange(index, 1, ranges[index], &failure);
+            for (vanguard::u32 index = 0; prepared && index < 6; ++index)
+                prepared = index < 3 ? packet.ResolveBufferUseBinding(uses[index], index + 1, bufferBindings[index], &failure)
+                                     : packet.ResolveTextureUseBinding(uses[index], index + 1, textureBindings[index - 3], &failure);
+            if (prepared && mode != 0)
+            {
+                rendering::ResolvedBufferUse rejected;
+                if (packet.ResolveBufferUseBinding(previousGenerationUse, 1, rejected, &failure) || rejected.IsValid() ||
+                    failure.code != rendering::RenderFlowResourceFailureCode::IncompleteExecution)
+                    prepared = false;
+            }
+            prepared = prepared && packet.OpenCompiledCursor(scope, gpu::QueueType::Graphics, 6, cursor, &failure);
+            gpu::BufferRef firstBuffer;
+            gpu::TextureRef firstTexture;
+            for (vanguard::u32 index = 0; prepared && index < 6; ++index)
+            {
+                const bool buffer = index < 3;
+                prepared = cursor.BeginRange(ranges[index], index + 1, &failure) &&
+                           (buffer ? bufferBindings[index].IsValid() : textureBindings[index - 3].IsValid());
+                if (prepared && index == 0) firstBuffer = bufferBindings[0].GetBuffer();
+                if (prepared && index == 3) firstTexture = textureBindings[0].GetTexture();
+                if (prepared && index == 1) prepared = bufferBindings[1].GetBuffer() != firstBuffer;
+                if (prepared && index == 4) prepared = textureBindings[1].GetTexture() != firstTexture;
+                prepared = prepared && cursor.EndRange(ranges[index], index + 1, &failure) &&
+                           (buffer ? !bufferBindings[index].IsValid() : !textureBindings[index - 3].IsValid());
+            }
+            prepared = prepared && cursor.FinalizePacket(&failure) && gpu::FlushPendingBarriers(&rhiFailure);
+            if (gpu::GetBoundCommandList().IsValid()) gpu::UnbindCommandList();
+            if (!prepared)
+            {
+                if (commands.IsValid()) gpu::DiscardCommandList(commands);
+                return fail("compiled native action execution / stale generation");
+            }
+            const gpu::CommandListRef submissions[] = {commands};
+            gpu::GpuFence completion;
+            if (!gpu::CloseAndSubmitCommandLists("RF11 automatic/explicit native state parity", {submissions, 1}, gpu::CommandListSyncType::None, completion, &rhiFailure))
+                return fail("GPU clear + UAV submission");
+            const rendering::CommandScopeExecutionReceipt receipts[] = {{scope, rendering::CommandScopeCompletionKind::Submitted, gpu::QueueType::Graphics, completion}};
+            const rendering::TerminalExecutionReceipt terminal{generation, rendering::TerminalExecutionCompletionKind::Completed,
+                                                               vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
+                                                               rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+            if (!allocator.Finish(terminal, &failure) || !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure))
+                return fail("finish state parity frame");
+            previousGenerationUse = uses[0];
+        }
+        return allocator.Shutdown(&failure) && gpu::FlushRetiredResources(&rhiFailure);
     }
 
     [[nodiscard]] bool RunTypedClearSmokeTest() noexcept
@@ -3663,7 +5081,9 @@ namespace
             !writer.EndUse(uses[4], &failure) || !writer.Close(&failure) || !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
             return fail("planning");
 
-        if (!allocator.Resolve(nullptr, &failure) || allocator.GetStats().compiledResourceActions != 10 || !allocator.BeginExecution(&failure))
+        // RF11 keeps ordinary state transitions on the intrinsic begin-step
+        // path. Only the five semantic clear actions remain in the sparse tape.
+        if (!allocator.Resolve(nullptr, &failure) || allocator.GetStats().compiledResourceActions != 5 || !allocator.BeginExecution(&failure))
             return fail("resolve");
         const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
 
@@ -3906,7 +5326,9 @@ namespace
 
         rendering::RenderFlowResourceAllocatorConfig allocatorConfig;
         allocatorConfig.resourceDescriptors = descriptors.GetRef();
-        allocatorConfig.descriptorCacheTarget = 0;
+        // RF11 keeps imported canonical descriptors warm across completed frames.
+        // A two-slot target prevents maintenance from disguising a reuse miss.
+        allocatorConfig.descriptorCacheTarget = 2;
         allocatorConfig.descriptorCacheMaximum = 2;
         rendering::RenderFlowResourceAllocator allocator;
         if (!allocator.Initialize(allocatorConfig, &failure) || !allocator.BeginFrame(20, {}, &failure))
@@ -3985,10 +5407,12 @@ namespace
         rendering::ResolvedBufferUse resolvedBuffer;
         rendering::ResolvedBufferUse overlappingResolvedBuffer;
         rendering::ResolvedTextureUse resolvedTexture;
+        gpu::DescriptorHandle coldBufferShaderResource;
+        gpu::DescriptorHandle coldTextureShaderResource;
         gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246494d504f5254ull, &rhiFailure);
         if (!commands || !gpu::BindCommandList(commands, &rhiFailure) || !allocator.PacketFor(node, packet, &failure) || !packet.OpenCursor(scope, gpu::QueueType::Graphics, cursor, &failure) ||
             !cursor.BeginBufferUse(bufferUse, resolvedBuffer, &failure) || resolvedBuffer.GetBuffer() != externalBuffer.GetRef() ||
-            !resolvedBuffer.GetShaderResourceDescriptor().IsValid() ||
+            !(coldBufferShaderResource = resolvedBuffer.GetShaderResourceDescriptor()).IsValid() ||
             !cursor.BeginBufferUse(overlappingBufferUse, overlappingResolvedBuffer, &failure) || overlappingResolvedBuffer.GetBuffer() != externalBuffer.GetRef() ||
             !overlappingResolvedBuffer.GetShaderResourceDescriptor().IsValid() ||
             !cursor.EndUse(overlappingBufferUse, &failure) ||
@@ -3999,7 +5423,7 @@ namespace
             !gpu::TransitionBuffer(externalBuffer.GetRef(), gpu::ResourceState::ShaderResourceGraphics, gpu::ResourceState::ShaderResourceGraphics, &rhiFailure) ||
             !cursor.EndUse(bufferUse, &failure) ||
             !cursor.BeginTextureUse(textureUse, resolvedTexture, &failure) || resolvedTexture.GetTexture() != externalTexture.GetRef() ||
-            !resolvedTexture.GetShaderResourceDescriptor().IsValid() || !cursor.EndUse(textureUse, &failure) ||
+            !(coldTextureShaderResource = resolvedTexture.GetShaderResourceDescriptor()).IsValid() || !cursor.EndUse(textureUse, &failure) ||
             !cursor.FinalizePacket(&failure) || !gpu::FlushPendingBarriers(&rhiFailure))
         {
             gpu::UnbindCommandList();
@@ -4017,24 +5441,25 @@ namespace
                                                            rendering::TerminalJoinToken::CompletedSynchronously(generation)};
         if (!allocator.Finish(terminal, &failure))
             return fail("terminal completion");
-        const gpu::DescriptorDomainStats retiringDescriptorStats = gpu::GetDescriptorDomainStats(descriptors.GetRef());
-        if (retiringDescriptorStats.allocated != 0 || retiringDescriptorStats.populated != 0 || retiringDescriptorStats.pendingRetirement != 2)
-            return fail("retained import descriptor retirement admission");
+        const gpu::DescriptorDomainStats warmDescriptorStats = gpu::GetDescriptorDomainStats(descriptors.GetRef());
+        if (warmDescriptorStats.allocated != 2 || warmDescriptorStats.populated != 2 || warmDescriptorStats.pendingRetirement != 0 ||
+            allocator.GetStats().canonicalDescriptorLiveSlots != 2 || allocator.GetStats().canonicalDescriptorReusableSlots != 2)
+            return fail("retained import descriptor cache ownership after Finish");
         if (!gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure) || !gpu::RetireResources(&rhiFailure))
-            return fail("retained import descriptor retirement completion");
-        const gpu::DescriptorDomainStats reclaimedDescriptorStats = gpu::GetDescriptorDomainStats(descriptors.GetRef());
-        if (reclaimedDescriptorStats.allocated != 0 || reclaimedDescriptorStats.populated != 0 || reclaimedDescriptorStats.pendingRetirement != 0 ||
-            reclaimedDescriptorStats.completedRetirements < 2)
-            return fail("retained import descriptor reclamation");
+            return fail("retained import completed frame fence");
+        const gpu::DescriptorDomainStats stillWarm = gpu::GetDescriptorDomainStats(descriptors.GetRef());
+        if (stillWarm.allocated != 2 || stillWarm.populated != 2 || stillWarm.pendingRetirement != 0)
+            return fail("retained import descriptors must survive completed frame fences");
 
-        // Finish, not the lifetime of copied packet/cursor views, owns terminal
-        // release of retained-import references. The packet metadata remains
-        // readable, but keeping that view alive must not pin either import.
-        if (!packet.IsValid() || packet.GetNode() != node || gpu::GetRefCount(externalBuffer.GetRef()) != initialBufferRefs || gpu::GetRefCount(externalTexture.GetRef()) != initialTextureRefs)
+        // Finish releases frame-import references while the two persistent
+        // populated canonical slots each retain one native reference. Copied
+        // packet/cursor metadata must not add another native owner.
+        if (!packet.IsValid() || packet.GetNode() != node || gpu::GetRefCount(externalBuffer.GetRef()) != initialBufferRefs + 1 ||
+            gpu::GetRefCount(externalTexture.GetRef()) != initialTextureRefs + 1)
             return fail("finish-owned retained-import release");
         packet = {};
         cursor = {};
-        if (gpu::GetRefCount(externalBuffer.GetRef()) != initialBufferRefs || gpu::GetRefCount(externalTexture.GetRef()) != initialTextureRefs)
+        if (gpu::GetRefCount(externalBuffer.GetRef()) != initialBufferRefs + 1 || gpu::GetRefCount(externalTexture.GetRef()) != initialTextureRefs + 1)
             return fail("retained-view release is ownership-neutral");
 
         // A concrete Common before-state assertion proves the execution generation restored
@@ -4056,6 +5481,93 @@ namespace
             !gpu::WaitForGpuFence(verifyCompletion, 5'000'000'000ull, &rhiFailure) || allocator.GetStats().chargedNativeBytes != 0)
             return fail("terminal-state verification submission");
 
+        // Same exact external generations must borrow the same canonical SRVs
+        // on the next frame. The old use ID must not gain a fresh liveness lease.
+        rendering::ImportedResourceId warmBufferImport;
+        rendering::ImportedResourceId warmTextureImport;
+        rendering::ResourcePlanningWriter warmWriter;
+        rendering::LogicalResourceId warmLogicalBuffer;
+        rendering::LogicalResourceId warmLogicalTexture;
+        rendering::ResourceUseId warmBufferUse;
+        rendering::ResourceUseId warmOverlappingBufferUse;
+        rendering::ResourceUseId warmTextureUse;
+        if (!allocator.BeginFrame(21, {}, &failure) || !allocator.RegisterImport(bufferImport, warmBufferImport, &failure) ||
+            !allocator.RegisterImport(textureImport, warmTextureImport, &failure) ||
+            !allocator.CreatePlanningWriter(node, flow, scope, warmWriter, &failure) ||
+            !warmWriter.ImportBuffer({space, "retained.import.buffer"}, warmBufferImport, warmLogicalBuffer, &failure) ||
+            !warmWriter.BeginBufferUse(warmLogicalBuffer, bufferRead, warmBufferUse, &failure) ||
+            !warmWriter.BeginBufferUse(warmLogicalBuffer, bufferRead, warmOverlappingBufferUse, &failure) ||
+            !warmWriter.EndUse(warmOverlappingBufferUse, &failure) || !warmWriter.EndUse(warmBufferUse, &failure) ||
+            !warmWriter.ImportTexture({space, "retained.import.texture"}, warmTextureImport, warmLogicalTexture, &failure) ||
+            !warmWriter.BeginTextureUse(warmLogicalTexture, textureRead, warmTextureUse, &failure) ||
+            !warmWriter.EndUse(warmTextureUse, &failure) || !warmWriter.Close(&failure) ||
+            !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) ||
+            !allocator.Resolve(nullptr, &failure) || !allocator.BeginExecution(&failure))
+            return fail("warm retained import plan");
+        const rendering::RenderFlowResourceAllocatorStats warmStats = allocator.GetStats();
+        if (warmStats.canonicalDescriptorLiveSlots != 2 || warmStats.canonicalDescriptorPublicationHits < 2 ||
+            gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 2)
+            return fail("warm retained import descriptor hit");
+
+        rendering::CompiledExecutionPacketView warmPacket;
+        rendering::ExecutionPacketCursor warmCursor;
+        rendering::ResolvedBufferUse warmResolvedBuffer;
+        rendering::ResolvedBufferUse warmOverlappingResolvedBuffer;
+        rendering::ResolvedTextureUse warmResolvedTexture;
+        gpu::CommandListRef warmCommands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246494d5741524dull, &rhiFailure);
+        if (!warmCommands || !gpu::BindCommandList(warmCommands, &rhiFailure) || !allocator.PacketFor(node, warmPacket, &failure) ||
+            !warmPacket.OpenCursor(scope, gpu::QueueType::Graphics, warmCursor, &failure))
+            return fail("warm retained import cursor");
+        if (warmCursor.BeginBufferUse(bufferUse, warmResolvedBuffer, &failure) ||
+            failure.code != rendering::RenderFlowResourceFailureCode::IncompleteExecution ||
+            !warmCursor.BeginBufferUse(warmBufferUse, warmResolvedBuffer, &failure) ||
+            warmResolvedBuffer.GetBuffer() != externalBuffer.GetRef() ||
+            warmResolvedBuffer.GetShaderResourceDescriptor() != coldBufferShaderResource ||
+            !warmCursor.BeginBufferUse(warmOverlappingBufferUse, warmOverlappingResolvedBuffer, &failure) ||
+            !warmCursor.EndUse(warmOverlappingBufferUse, &failure) || !warmCursor.EndUse(warmBufferUse, &failure) ||
+            !warmCursor.BeginTextureUse(warmTextureUse, warmResolvedTexture, &failure) ||
+            warmResolvedTexture.GetTexture() != externalTexture.GetRef() ||
+            warmResolvedTexture.GetShaderResourceDescriptor() != coldTextureShaderResource ||
+            !warmCursor.EndUse(warmTextureUse, &failure) || !warmCursor.FinalizePacket(&failure) ||
+            !gpu::FlushPendingBarriers(&rhiFailure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(warmCommands);
+            return fail("warm retained import use binding");
+        }
+        gpu::UnbindCommandList();
+        const gpu::CommandListRef warmSubmissions[] = {warmCommands};
+        gpu::GpuFence warmCompletion;
+        if (!gpu::CloseAndSubmitCommandLists("resource-flow warm retained imports", {warmSubmissions, 1}, gpu::CommandListSyncType::None, warmCompletion, &rhiFailure))
+            return fail("warm retained import submission");
+        const rendering::CommandScopeExecutionReceipt warmReceipts[] = {{scope, rendering::CommandScopeCompletionKind::Submitted, gpu::QueueType::Graphics, warmCompletion}};
+        const rendering::TerminalExecutionReceipt warmTerminal{allocator.GetExecutionGeneration(), rendering::TerminalExecutionCompletionKind::Completed,
+                                                                vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(warmReceipts),
+                                                                rendering::TerminalJoinToken::CompletedSynchronously(allocator.GetExecutionGeneration())};
+        if (!allocator.Finish(warmTerminal, &failure) || allocator.GetStats().canonicalDescriptorReusableSlots != 2)
+            return fail("warm retained import terminal");
+        warmPacket = {};
+        warmCursor = {};
+
+        // Clear before waiting for the submitted graphics fence. If the real
+        // GPU has not yet finished, neither descriptor slot may be recycled;
+        // the RHI must keep both in pending retirement. A fast GPU is permitted
+        // to finish during this observation, so make the pending assertion only
+        // while the fence is verifiably incomplete rather than inventing a fence.
+        if (!allocator.ClearPersistentCaches(&failure))
+            return fail("retained import explicit cache clear");
+        const gpu::DescriptorDomainStats beforeFence = gpu::GetDescriptorDomainStats(descriptors.GetRef());
+        if (beforeFence.allocated != 0 || beforeFence.populated != 0 || allocator.GetStats().canonicalDescriptorLiveSlots != 0 ||
+            (!gpu::IsGpuFenceComplete(warmCompletion) && beforeFence.pendingRetirement != 2))
+            return fail("retained descriptors protected by submitted fence");
+        if (!gpu::WaitForGpuFence(warmCompletion, 5'000'000'000ull, &rhiFailure) || !gpu::FlushRetiredResources(&rhiFailure))
+            return fail("retained import fence and retirement drain");
+        const gpu::DescriptorDomainStats clearedDescriptorStats = gpu::GetDescriptorDomainStats(descriptors.GetRef());
+        if (clearedDescriptorStats.allocated != 0 || clearedDescriptorStats.populated != 0 || clearedDescriptorStats.pendingRetirement != 0 ||
+            gpu::GetRefCount(externalBuffer.GetRef()) != initialBufferRefs || gpu::GetRefCount(externalTexture.GetRef()) != initialTextureRefs ||
+            allocator.GetStats().canonicalDescriptorLiveSlots != 0)
+            return fail("retained import explicit cache reclamation");
+
         // A declared import with no executable use cannot silently promise a
         // different terminal state: there is no legal recorder on which to
         // place that transition.
@@ -4068,7 +5580,7 @@ namespace
         constexpr rendering::RenderFlowNodeId rejectedNode{4};
         constexpr rendering::GpuFlowGroupId rejectedFlow{4};
         constexpr rendering::CommandScopeId rejectedScope{4};
-        if (!allocator.BeginFrame(21, {}, &failure) || !allocator.RegisterImport(noUseTransition, rejectedNoUseImport, &failure) ||
+        if (!allocator.BeginFrame(22, {}, &failure) || !allocator.RegisterImport(noUseTransition, rejectedNoUseImport, &failure) ||
             !allocator.CreatePlanningWriter(rejectedNode, rejectedFlow, rejectedScope, rejectedWriter, &failure) ||
             !rejectedWriter.ImportBuffer({space, "retained.import.no-use"}, rejectedNoUseImport, rejectedLogical, &failure) || !rejectedWriter.Close(&failure) ||
             !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) || allocator.Resolve(nullptr, &failure) ||
@@ -4080,6 +5592,339 @@ namespace
             return false;
         const gpu::DescriptorDomainStats shutdownDescriptorStats = gpu::GetDescriptorDomainStats(descriptors.GetRef());
         return shutdownDescriptorStats.allocated == 0 && shutdownDescriptorStats.populated == 0 && shutdownDescriptorStats.pendingRetirement == 0;
+    }
+
+    // RF11: a later imported resource exhausting the shared descriptor domain
+    // must roll back all earlier borrow publications, with no untracked live
+    // generation left behind. The persistent cache may remain warm until clear.
+    [[nodiscard]] bool RunRetainedImportRollbackAndDeviceLossTest() noexcept
+    {
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const auto fail = [&](const char* stage) noexcept
+        {
+            std::fprintf(stderr, "[rf11-retained-rollback] %s (flow=%u: %s, rhi=%u: %s)\n", stage, static_cast<unsigned>(failure.code),
+                         failure.message != nullptr ? failure.message : "none", static_cast<unsigned>(rhiFailure.code),
+                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "none");
+            return false;
+        };
+        const gpu::ShaderStageMask visibility = gpu::ShaderStageBit(gpu::ShaderStage::Vertex) | gpu::ShaderStageBit(gpu::ShaderStage::Pixel) |
+                                                gpu::ShaderStageBit(gpu::ShaderStage::Compute);
+        gpu::DescriptorDomain descriptors(gpu::AdoptReference,
+                                          gpu::CreateDescriptorDomain({gpu::DescriptorDomainKind::Resources, 2, 0, visibility}, &rhiFailure));
+        const gpu::DescriptorHandle externalDescriptor = gpu::AllocateDescriptor(descriptors.GetRef(), &rhiFailure);
+        gpu::BufferDesc bufferDesc;
+        bufferDesc.size = 2048;
+        bufferDesc.structureStride = 16;
+        bufferDesc.usage = gpu::BufferUsage::Structured | gpu::BufferUsage::ShaderResource;
+        bufferDesc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer importedBuffer(gpu::AdoptReference, gpu::CreateBuffer(bufferDesc, {}, &rhiFailure));
+        gpu::TextureDesc textureDesc;
+        textureDesc.extent = {4, 4, 1};
+        textureDesc.format = gpu::Format::R8G8B8A8UNorm;
+        textureDesc.usage = gpu::TextureUsage::ShaderResource;
+        textureDesc.initialState = gpu::ResourceState::Common;
+        gpu::Texture importedTexture(gpu::AdoptReference, gpu::CreateTexture(textureDesc, {}, &rhiFailure));
+        if (!descriptors.IsValid() || !externalDescriptor.IsValid() || !importedBuffer.IsValid() || !importedTexture.IsValid())
+            return fail("native owner setup");
+        const vanguard::i32 bufferRefs = gpu::GetRefCount(importedBuffer.GetRef());
+        const vanguard::i32 textureRefs = gpu::GetRefCount(importedTexture.GetRef());
+        rendering::RenderFlowResourceAllocatorConfig config;
+        config.resourceDescriptors = descriptors.GetRef();
+        config.descriptorCacheTarget = 2;
+        config.descriptorCacheMaximum = 2;
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RetainedBufferImportDesc bufferImport;
+        bufferImport.token = {0x5246313142554646ull};
+        bufferImport.buffer = importedBuffer.GetRef();
+        bufferImport.expected = bufferDesc;
+        bufferImport.initialState = gpu::ResourceState::Common;
+        bufferImport.terminalState = gpu::ResourceState::Common;
+        rendering::RetainedTextureImportDesc textureImport;
+        textureImport.token = {0x5246313154455854ull};
+        textureImport.texture = importedTexture.GetRef();
+        textureImport.expected = textureDesc;
+        textureImport.initialState = gpu::ResourceState::Common;
+        textureImport.terminalState = gpu::ResourceState::Common;
+        rendering::ImportedResourceId imports[2];
+        rendering::ResourcePlanningWriter writer;
+        rendering::LogicalResourceId buffer;
+        rendering::LogicalResourceId texture;
+        rendering::ResourceUseId uses[2];
+        rendering::BufferUseDesc bufferRead;
+        bufferRead.requiredState = gpu::ResourceState::ShaderResourceGraphics;
+        bufferRead.access = rendering::LogicalAccessIntent::Read;
+        bufferRead.content = rendering::ResourceContentIntent::Preserve;
+        rendering::TextureUseDesc textureRead;
+        textureRead.requiredState = gpu::ResourceState::ShaderResourceGraphics;
+        textureRead.access = rendering::LogicalAccessIntent::Read;
+        textureRead.content = rendering::ResourceContentIntent::Preserve;
+        constexpr rendering::RenderFlowNodeId node{0x811};
+        constexpr rendering::GpuFlowGroupId flow{0x811};
+        constexpr rendering::CommandScopeId scope{0x811};
+        constexpr rendering::FlowSpaceId space{0x811};
+        if (!allocator.Initialize(config, &failure) || !allocator.BeginFrame(811, {}, &failure) ||
+            !allocator.RegisterImport(bufferImport, imports[0], &failure) || !allocator.RegisterImport(textureImport, imports[1], &failure) ||
+            !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+            !writer.ImportBuffer({space, "rf11.rollback.buffer"}, imports[0], buffer, &failure) ||
+            !writer.BeginBufferUse(buffer, bufferRead, uses[0], &failure) || !writer.EndUse(uses[0], &failure) ||
+            !writer.ImportTexture({space, "rf11.rollback.texture"}, imports[1], texture, &failure) ||
+            !writer.BeginTextureUse(texture, textureRead, uses[1], &failure) || !writer.EndUse(uses[1], &failure) ||
+            !writer.Close(&failure) || !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+            return fail("rollback planning");
+        // A single descriptor slot cannot satisfy both live imported borrows.
+        // At least one canonical descriptor must have been published before the
+        // later physical binding exhausts shared-domain capacity.
+        if (allocator.Resolve(nullptr, &failure) || allocator.GetExecutionGeneration().IsValid() ||
+            allocator.GetState() != rendering::RenderFlowResourceSessionState::Idle ||
+            allocator.GetStats().canonicalDescriptorPublicationMisses < 2 ||
+            gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 2 ||
+            allocator.GetStats().canonicalDescriptorReusableSlots != 1 ||
+            gpu::GetRefCount(importedBuffer.GetRef()) != bufferRefs + 1 ||
+            gpu::GetRefCount(importedTexture.GetRef()) != textureRefs)
+            return fail("borrow publication rollback and retained cache ownership");
+        if (!allocator.ClearPersistentCaches(&failure) || gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 1 ||
+            allocator.GetStats().canonicalDescriptorLiveSlots != 0 ||
+            gpu::GetRefCount(importedBuffer.GetRef()) != bufferRefs || !allocator.Shutdown(&failure) ||
+            !gpu::RetireDescriptor(descriptors.GetRef(), externalDescriptor, {}, &rhiFailure) || !gpu::FlushRetiredResources(&rhiFailure) ||
+            gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 0)
+            return fail("rollback cache reclamation");
+
+        // Device-loss completion of a still-borrowed imported canonical slot
+        // must discard its cache without a healthy fence or reusable entry.
+        rendering::RenderFlowResourceAllocator lostAllocator;
+        rendering::RenderFlowResourceAllocatorConfig lostConfig;
+        lostConfig.resourceDescriptors = descriptors.GetRef();
+        lostConfig.descriptorCacheTarget = 1;
+        lostConfig.descriptorCacheMaximum = 1;
+        rendering::ImportedResourceId lostImport;
+        rendering::ResourcePlanningWriter lostWriter;
+        rendering::LogicalResourceId lostBuffer;
+        rendering::ResourceUseId lostUse;
+        if (!lostAllocator.Initialize(lostConfig, &failure) || !lostAllocator.BeginFrame(812, {}, &failure) ||
+            !lostAllocator.RegisterImport(bufferImport, lostImport, &failure) ||
+            !lostAllocator.CreatePlanningWriter(node, flow, scope, lostWriter, &failure) ||
+            !lostWriter.ImportBuffer({space, "rf11.lost.buffer"}, lostImport, lostBuffer, &failure) ||
+            !lostWriter.BeginBufferUse(lostBuffer, bufferRead, lostUse, &failure) || !lostWriter.EndUse(lostUse, &failure) ||
+            !lostWriter.Close(&failure) || !lostAllocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure) ||
+            !lostAllocator.Resolve(nullptr, &failure) || !lostAllocator.BeginExecution(&failure))
+            return fail("borrowed descriptor device-loss setup");
+        const rendering::ExecutionGenerationId lostGeneration = lostAllocator.GetExecutionGeneration();
+        const rendering::CommandScopeExecutionReceipt lostReceipts[] = {{scope, rendering::CommandScopeCompletionKind::UnknownDueToDeviceLoss, gpu::QueueType::Graphics, {}}};
+        const rendering::TerminalExecutionReceipt lostTerminal{lostGeneration, rendering::TerminalExecutionCompletionKind::DeviceLost,
+                                                               vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(lostReceipts),
+                                                               rendering::TerminalJoinToken::CompletedSynchronously(lostGeneration)};
+        if (!lostAllocator.Finish(lostTerminal, &failure) || lostAllocator.GetStats().canonicalDescriptorLiveSlots != 0 ||
+            lostAllocator.GetState() != rendering::RenderFlowResourceSessionState::DeviceUnavailable ||
+            !lostAllocator.Shutdown(&failure) || !gpu::FlushRetiredResources(&rhiFailure) ||
+            gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 0 ||
+            gpu::GetRefCount(importedBuffer.GetRef()) != bufferRefs)
+            return fail("retained canonical device-loss cleanup");
+        return true;
+    }
+
+    // RF11: the presentation transition must be owned by the compiled packet,
+    // not manually issued by the caller after RenderTarget use.
+    [[nodiscard]] bool RunPresentationImportExecutionTest() noexcept
+    {
+#if defined(_WIN32)
+        rendering::RenderFlowResourceFailure failure;
+        gpu::Failure rhiFailure;
+        const auto fail = [&](const char* stage) noexcept
+        {
+            std::fprintf(stderr, "[rf11-presentation] %s (flow=%u: %s, rhi=%u: %s)\n", stage, static_cast<unsigned>(failure.code),
+                         failure.message != nullptr ? failure.message : "none", static_cast<unsigned>(rhiFailure.code),
+                         rhiFailure.message[0] != '\0' ? rhiFailure.message : "none");
+            return false;
+        };
+        struct WindowOwner final
+        {
+            HWND handle = nullptr;
+            ~WindowOwner() { if (handle != nullptr) DestroyWindow(handle); }
+        } window;
+        window.handle = CreateWindowExW(0, L"STATIC", L"RF11 RenderFlow present", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 320, 200,
+                                       nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (window.handle == nullptr)
+            return fail("native Win32 test window");
+        ShowWindow(window.handle, SW_SHOWNA);
+        UpdateWindow(window.handle);
+        gpu::SwapChainDesc swapDesc;
+        swapDesc.surface = {gpu::PresentationSurfaceKind::Win32, window.handle, nullptr};
+        swapDesc.width = 320;
+        swapDesc.height = 180;
+        swapDesc.bufferCount = 3;
+        swapDesc.format = gpu::Format::B8G8R8A8UNorm;
+        gpu::SwapChain swapChain(gpu::AdoptReference, gpu::CreateSwapChainWithBackBuffer(swapDesc, &rhiFailure));
+        if (!swapChain.IsValid())
+            return fail("real D3D12 swap chain");
+        rendering::RenderFlowResourceAllocator allocator;
+        rendering::RenderFlowResourceContract contract;
+        rendering::RenderNodeGraph graph;
+        graph.BuildRenderFlowGroups();
+        rendering::RenderNodeResourceBindings bindings;
+        rendering::RenderNodeResourcePreparationFailures preparationFailures;
+        constexpr rendering::RenderFlowNodeId node{0x611};
+        constexpr rendering::GpuFlowGroupId flow{0x611};
+        constexpr rendering::CommandScopeId scope{0x611};
+        constexpr rendering::FlowSpaceId space{0x611};
+        constexpr rendering::ResourceContractPatchId presentationPatch{0x5246313250524553ull};
+        rendering::TextureUseDesc renderTarget;
+        renderTarget.requiredState = gpu::ResourceState::RenderTarget;
+        renderTarget.access = rendering::LogicalAccessIntent::Write;
+        renderTarget.content = rendering::ResourceContentIntent::Discard;
+        if (!allocator.Initialize({}, &failure) || !graph.PrepareResourceBindings(bindings, preparationFailures) || preparationFailures.HasFailure())
+            return fail("presentation contract setup");
+
+        vanguard::u64 firstAcquisitionSerial = 0;
+        vanguard::u64 contractPublicationSerial = 0;
+        rendering::RenderFlowResourceAllocatorStats coldStats;
+        rendering::ResourceUseId firstGenerationUse;
+        const auto presentFrame = [&](const vanguard::u64 frameSerial, const bool cold) noexcept
+        {
+            gpu::AcquiredBackBuffer backBuffer;
+            if (!gpu::AcquireBackBuffer(swapChain, backBuffer, &rhiFailure) || !backBuffer.IsValid())
+                return fail("real back-buffer acquisition");
+            if (!cold && backBuffer.serial == firstAcquisitionSerial)
+            {
+                static_cast<void>(gpu::AbandonBackBuffer(backBuffer, &rhiFailure));
+                return fail("new presentation acquisition serial");
+            }
+
+            rendering::CompiledExecutionPacketView packet;
+            rendering::ExecutionPacketCursor cursor;
+            gpu::CommandListRef commands;
+            gpu::GpuFence completion;
+            bool submitted = false;
+            const auto reject = [&](const char* const stage) noexcept
+            {
+                if (gpu::GetBoundCommandList().IsValid())
+                    gpu::UnbindCommandList();
+                cursor = {};
+                packet = {};
+                if (!submitted && commands.IsValid())
+                    gpu::DiscardCommandList(commands);
+                const rendering::ExecutionGenerationId active = allocator.GetExecutionGeneration();
+                if (active.IsValid())
+                {
+                    const rendering::CommandScopeExecutionReceipt receipt{
+                        scope, submitted ? rendering::CommandScopeCompletionKind::Submitted : rendering::CommandScopeCompletionKind::DiscardedBeforeSubmission,
+                        gpu::QueueType::Graphics, completion};
+                    const rendering::TerminalExecutionReceipt terminal{
+                        active, submitted ? rendering::TerminalExecutionCompletionKind::Completed : rendering::TerminalExecutionCompletionKind::Aborted,
+                        vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(&receipt, 1),
+                        rendering::TerminalJoinToken::CompletedSynchronously(active)};
+                    static_cast<void>(allocator.Finish(terminal, &failure));
+                }
+                else if (allocator.GetState() != rendering::RenderFlowResourceSessionState::Idle)
+                    allocator.CancelBeforePublication();
+                if (submitted && completion.IsValid())
+                    static_cast<void>(gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure));
+                static_cast<void>(gpu::AbandonBackBuffer(backBuffer, &rhiFailure));
+                return fail(stage);
+            };
+
+            rendering::ImportedResourceId imported;
+            rendering::ResourceUseId renderTargetUse;
+            if (!allocator.BeginFrame(frameSerial, {}, &failure) ||
+                !allocator.RegisterPresentationImport(backBuffer, presentationPatch, imported, &failure))
+                return reject("presentation frame/import registration");
+            if (cold)
+            {
+                rendering::ResourcePlanningWriter writer;
+                rendering::LogicalResourceId target;
+                if (!allocator.BeginResourceContractCompilation(contract, &failure) ||
+                    !allocator.CreatePlanningWriter(node, flow, scope, writer, &failure) ||
+                    !writer.ImportTexture({space, "rf11.present.backbuffer"}, imported, target, &failure) ||
+                    !writer.BeginTextureUse(target, renderTarget, renderTargetUse, &failure) || !writer.EndUse(renderTargetUse, &failure) ||
+                    !writer.Close(&failure) || !graph.CaptureResourceContract(contract, bindings, allocator, &failure) ||
+                    !allocator.SealPlanning(rendering::PlanningJoinToken::CompletedSynchronously(), &failure))
+                {
+                    writer.Abandon();
+                    return reject("cold presentation contract compilation");
+                }
+                firstGenerationUse = renderTargetUse;
+            }
+            else
+            {
+                // The contract retains the semantic use ordinal, but neither
+                // the previous acquisition nor its planning generation.
+                renderTargetUse = {flow, 0, imported.generation};
+                if (!graph.InstantiateResourceContract(contract, bindings, allocator, &failure) ||
+                    !allocator.BindResourceContract(contract, &failure))
+                    return reject("warm presentation contract binding");
+            }
+
+            if (!allocator.Resolve(nullptr, &failure) || allocator.GetStats().compiledResourceActions == 0 ||
+                !allocator.BeginExecution(&failure))
+                return reject("presentation native Resolve");
+            const rendering::ExecutionGenerationId generation = allocator.GetExecutionGeneration();
+            commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246313150524553ull + frameSerial, &rhiFailure);
+            rendering::CompiledExecutionRange presentRange;
+            rendering::ResolvedTextureUse resolved;
+            if (!commands.IsValid() || !gpu::BindCommandList(commands, &rhiFailure) || !allocator.PacketFor(node, packet, &failure) ||
+                !packet.ResolveExecutionRange(0, 1, presentRange, &failure) || presentRange.endActions.count != 1)
+                return reject("presentation compiled packet");
+            if (!cold)
+            {
+                rendering::ResolvedTextureUse stale;
+                if (packet.ResolveTextureUseBinding(firstGenerationUse, 1, stale, &failure) || stale.IsValid() ||
+                    failure.code != rendering::RenderFlowResourceFailureCode::IncompleteExecution)
+                    return reject("previous-acquisition stale use rejection");
+            }
+            if (!packet.OpenCursor(scope, gpu::QueueType::Graphics, cursor, &failure) ||
+                !cursor.BeginTextureUse(renderTargetUse, resolved, &failure) || resolved.GetTexture() != backBuffer.texture)
+                return reject("current acquired texture binding");
+            gpu::RenderTargetSetup setup{};
+            setup.colorTargets[0].texture = resolved.GetTexture();
+            setup.colorTargetCount = 1;
+            if (!gpu::SetupRenderTargets(setup, &rhiFailure) || !cursor.EndUse(renderTargetUse, &failure) ||
+                resolved.IsValid() || !cursor.FinalizePacket(&failure) || !gpu::FlushPendingBarriers(&rhiFailure))
+                return reject("RenderTarget use and compiled present transition");
+            gpu::UnbindCommandList();
+            const gpu::CommandListRef submissions[] = {commands};
+            if (!gpu::CloseAndSubmitCommandLists("RF11/RF12 RenderFlow present", {submissions, 1}, gpu::CommandListSyncType::None, completion, &rhiFailure))
+                return reject("presentation submission");
+            submitted = true;
+            const rendering::CommandScopeExecutionReceipt receipt{
+                scope, rendering::CommandScopeCompletionKind::Submitted, gpu::QueueType::Graphics, completion};
+            const rendering::TerminalExecutionReceipt terminal{
+                generation, rendering::TerminalExecutionCompletionKind::Completed,
+                vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(&receipt, 1),
+                rendering::TerminalJoinToken::CompletedSynchronously(generation)};
+            if (!allocator.Finish(terminal, &failure))
+                return reject("presentation ownership completion");
+            packet = {};
+            cursor = {};
+            if (!gpu::Present(backBuffer, &rhiFailure) || !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure))
+                return reject("real swapchain Present");
+            if (cold)
+            {
+                firstAcquisitionSerial = backBuffer.serial;
+                contractPublicationSerial = contract.GetPublicationSerial();
+                coldStats = allocator.GetStats();
+                if (!contract.IsValid() || contractPublicationSerial == 0 || coldStats.structuralPlanBuilds != 1 ||
+                    coldStats.structuralPlanMisses != 1 || coldStats.structuralPlanHits != 0)
+                    return fail("cold presentation contract witness");
+            }
+            else
+            {
+                const rendering::RenderFlowResourceAllocatorStats stats = allocator.GetStats();
+                if (contract.GetPublicationSerial() != contractPublicationSerial || stats.structuralPlanBuilds != 1 ||
+                    stats.structuralPlanMisses != coldStats.structuralPlanMisses ||
+                    stats.structuralPlanHits != coldStats.structuralPlanHits + 1 || stats.planningWriters != 0)
+                    return fail("warm presentation contract hit and publication stability");
+            }
+            return true;
+        };
+
+        if (!presentFrame(611, true) || !presentFrame(612, false) ||
+            gpu::GetSwapChainStats(swapChain).presentedFrames != 2 || !allocator.Shutdown(&failure))
+            return fail("two real presentation acquisitions through cold/warm contract");
+        swapChain.Reset();
+        return gpu::RetireResources(&rhiFailure);
+#else
+        return true;
+#endif
     }
 
     [[nodiscard]] bool RunTerminalExportSmokeTest() noexcept
@@ -4345,15 +6190,14 @@ namespace
         const rendering::TerminalExecutionReceipt receipt{generation, rendering::TerminalExecutionCompletionKind::Completed,
                                                            vanguard::containers::ArraySpan<const rendering::CommandScopeExecutionReceipt>(receipts),
                                                            rendering::TerminalJoinToken::CompletedSynchronously(generation)};
-        if (!allocator.Finish(receipt, &failure) || allocator.GetStats().chargedNativeBytes != 0 || allocator.GetStats().canonicalDescriptorLiveSlots != 0 ||
+        if (!allocator.Finish(receipt, &failure) || allocator.GetStats().chargedNativeBytes != 0 || allocator.GetStats().canonicalDescriptorLiveSlots != 1 ||
             allocator.GetStats().outstandingPublishedExports != 3)
             return fail("atomic publication");
-        // RF4 detaches the pool-owned canonical bundle at Finish, but the RHI
-        // retirement remains fenced by the completed generation's submitted work.
-        // Reclaiming those descriptor slots must not affect the independently
-        // published native resource owners or retained generation metadata views.
+        // Export-owned canonical bundles retire at Finish. RF11's imported
+        // buffer canonical SRV remains allocator-persistent and independent of
+        // those exported native owners.
         if (!gpu::WaitForGpuFence(completion, 5'000'000'000ull, &rhiFailure) || !gpu::RetireResources(&rhiFailure) ||
-            gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 0 || allocator.GetStats().outstandingPublishedExports != 3)
+            gpu::GetDescriptorDomainStats(descriptors.GetRef()).allocated != 1 || allocator.GetStats().outstandingPublishedExports != 3)
             return fail("canonical export descriptor retirement");
 
         rendering::PublishedResourceExport exportedBuffer;
@@ -5436,6 +7280,21 @@ namespace
         if (!RunDedicatedResourceProviderSmokeTest())
             return false;
         std::printf("Vanguard Resource Flow dedicated-resource provider smoke test passed.\n");
+        if (!RunRF13PhysicalProgramCacheProof())
+            return false;
+        std::printf("Vanguard RF13 bounded contract physical-program cache proof passed.\n");
+        if (!RunResourceContractDynamicPatchProof())
+            return false;
+        std::printf("Vanguard RF12 dynamic import/fence/export patch proof passed.\n");
+        if (!RunRF12RevisionTopologyContractProof())
+            return false;
+        std::printf("Vanguard RF12 cache-revision swap/queue topology contract proof passed.\n");
+        if (!RunRF12ContractDomainEpochProof())
+            return false;
+        std::printf("Vanguard RF12 descriptor-domain contract scope proof passed.\n");
+        if (!RunRF12ContractIncarnationProofSubprocess())
+            return false;
+        std::printf("Vanguard RF12 RHI-incarnation contract scope proof passed.\n");
         if (!RunExplicitBufferNoOpTransitionBoundaryTest())
             return false;
         std::printf("Vanguard Resource Flow no-op transition boundary test passed.\n");
@@ -5469,12 +7328,24 @@ namespace
         if (!RunTypedClearSmokeTest())
             return false;
         std::printf("Vanguard Resource Flow typed clear smoke test passed.\n");
+        if (!RunAutomaticExplicitStateParityTest())
+            return false;
+        std::printf("Vanguard Resource Flow D3D12 automatic/explicit state parity passed.\n");
         if (!RunRenderFlowDescriptorPublicationSmokeTest())
             return false;
         std::printf("Vanguard Resource Flow descriptor publication smoke test passed.\n");
         if (!RunRetainedImportSmokeTest())
             return false;
         std::printf("Vanguard Resource Flow retained import smoke test passed.\n");
+        if (!RunRetainedImportRollbackAndDeviceLossTest())
+            return false;
+        std::printf("Vanguard Resource Flow retained import rollback and device-loss test passed.\n");
+        if (!RunRF11RetainedImportIncarnationProofSubprocess())
+            return false;
+        std::printf("Vanguard Resource Flow retained import RHI incarnation test passed.\n");
+        if (!RunPresentationImportExecutionTest())
+            return false;
+        std::printf("Vanguard Resource Flow D3D12 presentation import execution test passed.\n");
         if (!RunTerminalExportSmokeTest())
             return false;
         std::printf("Vanguard Resource Flow terminal export smoke test passed.\n");
@@ -6734,6 +8605,10 @@ int main(const int argumentCount, const char* const* const arguments)
 
     if (argumentCount == 2 && arguments != nullptr && std::strcmp(arguments[1], "--rf2-rhi-uninitialized-shutdown-proof") == 0)
         RunRhiUninitializedShutdownDestructorProof();
+    if (argumentCount == 2 && arguments != nullptr && std::strcmp(arguments[1], "--rf11-retained-incarnation-proof") == 0)
+        RunRF11RetainedImportIncarnationProof();
+    if (argumentCount == 2 && arguments != nullptr && std::strcmp(arguments[1], "--rf12-contract-incarnation-proof") == 0)
+        RunRF12ContractIncarnationProof();
 
     const bool viewportOutputProof = argumentCount == 2 && arguments != nullptr &&
                                      std::strcmp(arguments[1], "--viewport-output-proof") == 0;

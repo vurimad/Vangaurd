@@ -1,4 +1,4 @@
-local importedRoot = "../imported/common"
+local importedRoot = "../../imported/common"
 local redSystemRoot = path.join(importedRoot, "redSystem")
 local redMemoryRoot = path.join(importedRoot, "redMemory")
 local redMathRoot = path.join(importedRoot, "redMath")

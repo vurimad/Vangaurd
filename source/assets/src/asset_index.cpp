@@ -14,7 +14,7 @@ namespace
     // The current index contract preserves Required/Optional/Soft exactly.
     // Development indexes with any other format version are disposable.
     constexpr u16 IndexMajorVersion = 2;
-    constexpr u16 IndexMinorVersion = 0;
+    constexpr u16 IndexMinorVersion = 1;
     constexpr u32 IndexHeaderSize = 128;
     constexpr char IndexFileName[] = "asset-dependencies.vadi";
     constexpr char TemporaryFileName[] = "asset-dependencies.vadi.tmp";
@@ -246,7 +246,10 @@ namespace vanguard::assets
             : config(value), root(filesystem::AbsolutePath::ParseDirPath(value.root)), path(root.AddFilePath(IndexFileName)),
               temporaryPath(root.AddFilePath(TemporaryFileName)), records(memory::pools::Assets::GetInstance()), lookup(memory::pools::Assets::GetInstance()),
               reverseEdges(memory::pools::Assets::GetInstance()), stagedRecords(memory::pools::Assets::GetInstance()),
-              stagedLookup(memory::pools::Assets::GetInstance())
+              stagedLookup(memory::pools::Assets::GetInstance()), stagedRemovals(memory::pools::Assets::GetInstance()),
+              stagedRemovalLookup(memory::pools::Assets::GetInstance()), stagedRetirementSuccessors(memory::pools::Assets::GetInstance()),
+              retirementBatches(memory::pools::Assets::GetInstance()),
+              retiredRecords(memory::pools::Assets::GetInstance()), retirementSuccessors(memory::pools::Assets::GetInstance())
         {
             config.root = nullptr;
         }
@@ -255,6 +258,7 @@ namespace vanguard::assets
         {
             ClearRecordsLocked();
             ClearStagedLocked();
+            ClearRetirementProtectionLocked();
         }
 
         DependencyIndexConfig config;
@@ -267,6 +271,12 @@ namespace vanguard::assets
         mutable containers::DynamicArray<ReverseEdge> reverseEdges;
         containers::DynamicArray<DependencyRecord*> stagedRecords;
         containers::HashMap<resources::ResourceId, u32> stagedLookup;
+        containers::DynamicArray<resources::ResourceReference> stagedRemovals;
+        containers::HashMap<resources::ResourceId, u32> stagedRemovalLookup;
+        containers::DynamicArray<resources::ResourceReference> stagedRetirementSuccessors;
+        containers::DynamicArray<DependencyRetirementProtectionBatch> retirementBatches;
+        containers::DynamicArray<DependencyRecord> retiredRecords;
+        containers::DynamicArray<DependencyPublicationWitness> retirementSuccessors;
         DependencyIndexStats stats;
         u64 generation = 0;
         u64 stagedPublications = 0;
@@ -289,6 +299,9 @@ namespace vanguard::assets
             }
             stagedRecords.Clear();
             stagedLookup.Clear();
+            stagedRemovals.Clear();
+            stagedRemovalLookup.Clear();
+            stagedRetirementSuccessors.Clear();
             stagedPublications = 0;
             stagedReplacements = 0;
         }
@@ -306,6 +319,13 @@ namespace vanguard::assets
             stats.dependencies = 0;
             stats.artifacts = 0;
             reverseDirty = true;
+        }
+
+        void ClearRetirementProtectionLocked() noexcept
+        {
+            retirementBatches.Clear();
+            retiredRecords.Clear();
+            retirementSuccessors.Clear();
         }
 
         [[nodiscard]] bool RebuildLookupLocked() noexcept
@@ -528,6 +548,99 @@ namespace vanguard::assets
                    writer.WriteU32(record.artifacts.Size());
         }
 
+        [[nodiscard]] bool WritePublicationWitness(BufferWriter& writer, const DependencyPublicationWitness& witness) noexcept
+        {
+            return writer.WriteU64(witness.output.GetPath().Id()) && writer.WriteU32(witness.output.ExpectedType()) &&
+                   writer.WriteBytes(witness.buildFingerprint.bytes, BuildFingerprint::ByteCount) &&
+                   writer.WriteBytes(witness.contentFingerprint.bytes, BuildFingerprint::ByteCount) &&
+                   writer.WriteU8(witness.predecessorPresent ? 1u : 0u) && writer.WriteU8(0u) && writer.WriteU16(0u);
+        }
+
+        [[nodiscard]] IndexResult ReadRecord(BufferReader& reader, const DependencyIndexConfig& config,
+                                             DependencyRecord& record, u32& dependencyCount, u32& artifactCount) noexcept
+        {
+            dependencyCount = 0u;
+            artifactCount = 0u;
+            u64 sourcePath = 0u;
+            u32 sourceType = 0u;
+            u64 outputPath = 0u;
+            u32 outputType = 0u;
+            u8 target = 0u;
+            u8 reserved8 = 0u;
+            u16 reserved16 = 0u;
+            const bool fixedRead = reader.ReadU64(sourcePath) && reader.ReadU32(sourceType) && reader.ReadU64(outputPath) &&
+                                   reader.ReadU32(outputType) && reader.ReadU8(target) && reader.ReadU8(reserved8) &&
+                                   reader.ReadU16(reserved16) && reader.ReadU64(record.compiler) && reader.ReadU32(record.compilerVersion) &&
+                                   reader.ReadBytes(record.sourceInputFingerprint.bytes, BuildFingerprint::ByteCount) &&
+                                   reader.ReadBytes(record.buildFingerprint.bytes, BuildFingerprint::ByteCount) &&
+                                   reader.ReadBytes(record.contentFingerprint.bytes, BuildFingerprint::ByteCount) &&
+                                   reader.ReadU32(dependencyCount) && reader.ReadU32(artifactCount);
+            record.source = resources::ResourceReference(resources::ResourcePath::FromId(sourcePath), sourceType);
+            record.output = resources::ResourceReference(resources::ResourcePath::FromId(outputPath), outputType);
+            record.target = static_cast<TargetPlatform>(target);
+            if (!fixedRead || reserved8 != 0u || reserved16 != 0u || !record.source.IsValid() || !record.source.IsTyped() ||
+                !record.output.IsValid() || !record.output.IsTyped() || record.target >= TargetPlatform::Count ||
+                record.compiler == InvalidCompilerId || record.compilerVersion == 0u ||
+                dependencyCount > config.maximumDependenciesPerRecord || artifactCount > config.maximumArtifactsPerRecord)
+                return IndexResult::Corrupt;
+
+            record.dependencies.Resize(dependencyCount);
+            record.artifacts.Resize(artifactCount);
+            if (record.dependencies.Size() != dependencyCount || record.artifacts.Size() != artifactCount)
+                return IndexResult::OutOfMemory;
+
+            bool valid = true;
+            for (BuildDependency& dependency : record.dependencies)
+            {
+                u64 path = 0u;
+                u32 type = 0u;
+                u8 role = 0u;
+                u8 requirement = 0u;
+                reserved16 = 0u;
+                valid = valid && reader.ReadU64(path) && reader.ReadU32(type) &&
+                        reader.ReadBytes(dependency.content.bytes, BuildFingerprint::ByteCount) && reader.ReadU8(role) &&
+                        reader.ReadU8(requirement) && reader.ReadU16(reserved16);
+                dependency.identity = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
+                dependency.role = static_cast<DependencyRole>(role);
+                dependency.requirement = static_cast<DependencyRequirement>(requirement);
+                valid = valid && reserved16 == 0u && dependency.IsValid();
+            }
+            for (IndexedArtifact& artifact : record.artifacts)
+            {
+                u64 path = 0u;
+                u32 type = 0u;
+                u16 flags = 0u;
+                reserved8 = 0u;
+                u32 reserved32 = 0u;
+                valid = valid && reader.ReadU64(path) && reader.ReadU32(type) && reader.ReadU32(artifact.segment) &&
+                        reader.ReadU16(flags) && reader.ReadU8(artifact.alignmentLog2) && reader.ReadU8(reserved8) &&
+                        reader.ReadU64(artifact.byteCount) && reader.ReadU32(reserved32);
+                artifact.resource = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
+                artifact.flags = static_cast<ArtifactFlags>(flags);
+                valid = valid && artifact.resource.IsValid() && artifact.resource.IsTyped() && reserved8 == 0u &&
+                        reserved32 == 0u && artifact.alignmentLog2 <= 63;
+            }
+            return valid ? IndexResult::Success : IndexResult::Corrupt;
+        }
+
+        [[nodiscard]] bool ReadPublicationWitness(BufferReader& reader, DependencyPublicationWitness& witness) noexcept
+        {
+            u64 outputPath = 0u;
+            u32 outputType = 0u;
+            u8 predecessorPresent = 0u;
+            u8 reserved8 = 0u;
+            u16 reserved16 = 0u;
+            if (!reader.ReadU64(outputPath) || !reader.ReadU32(outputType) ||
+                !reader.ReadBytes(witness.buildFingerprint.bytes, BuildFingerprint::ByteCount) ||
+                !reader.ReadBytes(witness.contentFingerprint.bytes, BuildFingerprint::ByteCount) ||
+                !reader.ReadU8(predecessorPresent) || !reader.ReadU8(reserved8) || !reader.ReadU16(reserved16) ||
+                predecessorPresent > 1u || reserved8 != 0u || reserved16 != 0u)
+                return false;
+            witness.output = resources::ResourceReference(resources::ResourcePath::FromId(outputPath), outputType);
+            witness.predecessorPresent = predecessorPresent != 0u;
+            return witness.IsValid();
+        }
+
         [[nodiscard]] IndexResult BuildSerializedIndex(const DependencyIndex::Impl& impl, BufferWriter& writer) noexcept
         {
             u64 dependencyCount = 0;
@@ -543,6 +656,11 @@ namespace vanguard::assets
                 order[index] = index;
                 dependencyCount += impl.records[index]->dependencies.Size();
                 artifactCount += impl.records[index]->artifacts.Size();
+            }
+            for (const DependencyRecord& record : impl.retiredRecords)
+            {
+                dependencyCount += record.dependencies.Size();
+                artifactCount += record.artifacts.Size();
             }
             if (dependencyCount > ~u32{0} || artifactCount > ~u32{0})
             {
@@ -565,9 +683,8 @@ namespace vanguard::assets
                            writer.WriteU32(IndexHeaderSize) && writer.WriteU32(impl.records.Size()) && writer.WriteU32(static_cast<u32>(dependencyCount)) &&
                            writer.WriteU32(static_cast<u32>(artifactCount)) && writer.WriteU32(0) && writer.WriteU64(0) &&
                            writer.WriteU64(impl.generation + 1u) && writer.WriteBytes(impl.config.settingsFingerprint.bytes, BuildFingerprint::ByteCount) &&
-                           writer.WriteBytes(empty.bytes, BuildFingerprint::ByteCount);
-            const u8 reserved[IndexHeaderSize - 108]{};
-            written = written && writer.WriteBytes(reserved, sizeof(reserved));
+                           writer.WriteBytes(empty.bytes, BuildFingerprint::ByteCount) && writer.WriteU32(impl.retirementBatches.Size()) &&
+                           writer.WriteU32(impl.retiredRecords.Size()) && writer.WriteU32(impl.retirementSuccessors.Size()) && writer.WriteU64(0u);
             for (const u32 index : order)
             {
                 const DependencyRecord& record = *impl.records[index];
@@ -581,6 +698,38 @@ namespace vanguard::assets
                     written = written && WriteArtifact(writer, artifact);
                 }
             }
+            u32 expectedRecordOffset = 0u;
+            u32 expectedSuccessorOffset = 0u;
+            for (const DependencyRetirementProtectionBatch& batch : impl.retirementBatches)
+            {
+                if (batch.successorCount == 0u || batch.recordOffset != expectedRecordOffset ||
+                    batch.successorOffset != expectedSuccessorOffset || batch.recordOffset > impl.retiredRecords.Size() ||
+                    batch.recordCount > impl.retiredRecords.Size() - batch.recordOffset ||
+                    batch.successorOffset > impl.retirementSuccessors.Size() ||
+                    batch.successorCount > impl.retirementSuccessors.Size() - batch.successorOffset)
+                    return IndexResult::InvalidState;
+                written = written && writer.WriteU32(batch.recordCount) && writer.WriteU32(batch.successorCount);
+                for (u32 index = 0u; index < batch.recordCount; ++index)
+                {
+                    const DependencyRecord& record = impl.retiredRecords[batch.recordOffset + index];
+                    written = written && WriteRecord(writer, record);
+                    for (const BuildDependency& dependency : record.dependencies)
+                        written = written && WriteDependency(writer, dependency);
+                    for (const IndexedArtifact& artifact : record.artifacts)
+                        written = written && WriteArtifact(writer, artifact);
+                }
+                for (u32 index = 0u; index < batch.successorCount; ++index)
+                {
+                    const DependencyPublicationWitness& witness = impl.retirementSuccessors[batch.successorOffset + index];
+                    if (!witness.IsValid())
+                        return IndexResult::InvalidState;
+                    written = written && WritePublicationWitness(writer, witness);
+                }
+                expectedRecordOffset += batch.recordCount;
+                expectedSuccessorOffset += batch.successorCount;
+            }
+            if (expectedRecordOffset != impl.retiredRecords.Size() || expectedSuccessorOffset != impl.retirementSuccessors.Size())
+                return IndexResult::InvalidState;
             if (!written)
             {
                 return IndexResult::LimitExceeded;
@@ -612,20 +761,30 @@ namespace vanguard::assets
             u64 generation = 0;
             BuildFingerprint settings;
             BuildFingerprint payload;
+            u32 retirementBatchCount = 0u;
+            u32 retiredRecordCount = 0u;
+            u32 retirementSuccessorCount = 0u;
+            u64 reserved64 = 0u;
             if (!reader.ReadU32(magic) || !reader.ReadU16(major) || !reader.ReadU16(minor) || !reader.ReadU32(headerSize) || !reader.ReadU32(recordCount) ||
                 !reader.ReadU32(dependencyCount) || !reader.ReadU32(artifactCount) || !reader.ReadU32(reserved32) || !reader.ReadU64(fileSize) ||
                 !reader.ReadU64(generation) || !reader.ReadBytes(settings.bytes, BuildFingerprint::ByteCount) ||
-                !reader.ReadBytes(payload.bytes, BuildFingerprint::ByteCount) || !reader.Skip(IndexHeaderSize - 108))
+                !reader.ReadBytes(payload.bytes, BuildFingerprint::ByteCount) || !reader.ReadU32(retirementBatchCount) ||
+                !reader.ReadU32(retiredRecordCount) || !reader.ReadU32(retirementSuccessorCount) || !reader.ReadU64(reserved64))
             {
                 return IndexResult::Corrupt;
             }
-            if (magic != IndexMagic || major != IndexMajorVersion || minor != IndexMinorVersion || settings != impl.config.settingsFingerprint)
+            if (magic != IndexMagic || major != IndexMajorVersion || minor > IndexMinorVersion || settings != impl.config.settingsFingerprint)
             {
                 return IndexResult::Incompatible;
             }
-            if (headerSize != IndexHeaderSize || reserved32 != 0 || fileSize != bytes.Size() || recordCount > impl.config.maximumRecords ||
-                dependencyCount > static_cast<u64>(recordCount) * impl.config.maximumDependenciesPerRecord ||
-                artifactCount > static_cast<u64>(recordCount) * impl.config.maximumArtifactsPerRecord ||
+            const u64 totalRecordCount = static_cast<u64>(recordCount) + retiredRecordCount;
+            if (headerSize != IndexHeaderSize || reserved32 != 0u || reserved64 != 0u || fileSize != bytes.Size() ||
+                (minor == 0u && (retirementBatchCount != 0u || retiredRecordCount != 0u || retirementSuccessorCount != 0u)) ||
+                recordCount > impl.config.maximumRecords || retiredRecordCount > impl.config.maximumRecords ||
+                totalRecordCount > impl.config.maximumRecords || retirementBatchCount > impl.config.maximumRecords ||
+                retirementSuccessorCount > impl.config.maximumRecords ||
+                dependencyCount > totalRecordCount * impl.config.maximumDependenciesPerRecord ||
+                artifactCount > totalRecordCount * impl.config.maximumArtifactsPerRecord ||
                 crypto::Sha256(bytes.TypedData() + IndexHeaderSize, bytes.Size() - IndexHeaderSize) != payload)
             {
                 return IndexResult::Corrupt;
@@ -637,78 +796,17 @@ namespace vanguard::assets
             {
                 auto* const record = VANGUARD_NEW(DependencyRecord);
                 if (record == nullptr)
-                {
                     return IndexResult::OutOfMemory;
-                }
-                u64 sourcePath = 0;
-                u32 sourceType = 0;
-                u64 outputPath = 0;
-                u32 outputType = 0;
-                u8 target = 0;
-                u8 reserved8 = 0;
-                u16 reserved16 = 0;
                 u32 recordDependencyCount = 0;
                 u32 recordArtifactCount = 0;
-                const bool fixedRead = reader.ReadU64(sourcePath) && reader.ReadU32(sourceType) && reader.ReadU64(outputPath) && reader.ReadU32(outputType) &&
-                                       reader.ReadU8(target) && reader.ReadU8(reserved8) && reader.ReadU16(reserved16) && reader.ReadU64(record->compiler) &&
-                                       reader.ReadU32(record->compilerVersion) &&
-                                       reader.ReadBytes(record->sourceInputFingerprint.bytes, BuildFingerprint::ByteCount) &&
-                                       reader.ReadBytes(record->buildFingerprint.bytes, BuildFingerprint::ByteCount) &&
-                                       reader.ReadBytes(record->contentFingerprint.bytes, BuildFingerprint::ByteCount) &&
-                                       reader.ReadU32(recordDependencyCount) && reader.ReadU32(recordArtifactCount);
-                record->source = resources::ResourceReference(resources::ResourcePath::FromId(sourcePath), sourceType);
-                record->output = resources::ResourceReference(resources::ResourcePath::FromId(outputPath), outputType);
-                record->target = static_cast<TargetPlatform>(target);
-                if (!fixedRead || reserved8 != 0 || reserved16 != 0 || !record->source.IsValid() || !record->source.IsTyped() || !record->output.IsValid() ||
-                    !record->output.IsTyped() || record->target >= TargetPlatform::Count || record->compiler == InvalidCompilerId ||
-                    record->compilerVersion == 0 || recordDependencyCount > impl.config.maximumDependenciesPerRecord ||
-                    recordArtifactCount > impl.config.maximumArtifactsPerRecord)
+                const IndexResult read = ReadRecord(reader, impl.config, *record, recordDependencyCount, recordArtifactCount);
+                if (read != IndexResult::Success)
                 {
                     VANGUARD_DELETE(record);
-                    return IndexResult::Corrupt;
+                    return read;
                 }
                 u32 duplicateIndex = 0;
                 if (impl.lookup.Find(record->output.GetPath().Id(), duplicateIndex))
-                {
-                    VANGUARD_DELETE(record);
-                    return IndexResult::Corrupt;
-                }
-
-                record->dependencies.Resize(recordDependencyCount);
-                record->artifacts.Resize(recordArtifactCount);
-                if (record->dependencies.Size() != recordDependencyCount || record->artifacts.Size() != recordArtifactCount)
-                {
-                    VANGUARD_DELETE(record);
-                    return IndexResult::OutOfMemory;
-                }
-                bool valid = true;
-                for (BuildDependency& dependency : record->dependencies)
-                {
-                    u64 path = 0;
-                    u32 type = 0;
-                    u8 role = 0;
-                    u8 requirement = 0;
-                    valid = valid && reader.ReadU64(path) && reader.ReadU32(type) && reader.ReadBytes(dependency.content.bytes, BuildFingerprint::ByteCount) &&
-                            reader.ReadU8(role) && reader.ReadU8(requirement) && reader.ReadU16(reserved16);
-                    dependency.identity = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
-                    dependency.role = static_cast<DependencyRole>(role);
-                    dependency.requirement = static_cast<DependencyRequirement>(requirement);
-                    valid = valid && reserved16 == 0 && dependency.IsValid();
-                }
-                for (IndexedArtifact& artifact : record->artifacts)
-                {
-                    u64 path = 0;
-                    u32 type = 0;
-                    u16 flags = 0;
-                    valid = valid && reader.ReadU64(path) && reader.ReadU32(type) && reader.ReadU32(artifact.segment) && reader.ReadU16(flags) &&
-                            reader.ReadU8(artifact.alignmentLog2) && reader.ReadU8(reserved8) && reader.ReadU64(artifact.byteCount) &&
-                            reader.ReadU32(reserved32);
-                    artifact.resource = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
-                    artifact.flags = static_cast<ArtifactFlags>(flags);
-                    valid = valid && artifact.resource.IsValid() && artifact.resource.IsTyped() && reserved8 == 0 && reserved32 == 0 &&
-                            artifact.alignmentLog2 <= 63;
-                }
-                if (!valid)
                 {
                     VANGUARD_DELETE(record);
                     return IndexResult::Corrupt;
@@ -728,6 +826,56 @@ namespace vanguard::assets
                 }
                 parsedDependencies += recordDependencyCount;
                 parsedArtifacts += recordArtifactCount;
+            }
+
+            impl.retirementBatches.Reserve(retirementBatchCount);
+            impl.retiredRecords.Reserve(retiredRecordCount);
+            impl.retirementSuccessors.Reserve(retirementSuccessorCount);
+            if (impl.retirementBatches.Capacity() < retirementBatchCount || impl.retiredRecords.Capacity() < retiredRecordCount ||
+                impl.retirementSuccessors.Capacity() < retirementSuccessorCount)
+                return IndexResult::OutOfMemory;
+            for (u32 batchIndex = 0u; batchIndex < retirementBatchCount; ++batchIndex)
+            {
+                u32 batchRecordCount = 0u;
+                u32 batchSuccessorCount = 0u;
+                if (!reader.ReadU32(batchRecordCount) || !reader.ReadU32(batchSuccessorCount) || batchSuccessorCount == 0u ||
+                    batchRecordCount > retiredRecordCount - impl.retiredRecords.Size() ||
+                    batchSuccessorCount > retirementSuccessorCount - impl.retirementSuccessors.Size())
+                    return IndexResult::Corrupt;
+
+                DependencyRetirementProtectionBatch batch;
+                batch.recordOffset = impl.retiredRecords.Size();
+                batch.recordCount = batchRecordCount;
+                batch.successorOffset = impl.retirementSuccessors.Size();
+                batch.successorCount = batchSuccessorCount;
+                for (u32 recordIndex = 0u; recordIndex < batchRecordCount; ++recordIndex)
+                {
+                    DependencyRecord record;
+                    u32 recordDependencyCount = 0u;
+                    u32 recordArtifactCount = 0u;
+                    const IndexResult read = ReadRecord(reader, impl.config, record, recordDependencyCount, recordArtifactCount);
+                    if (read != IndexResult::Success)
+                        return read;
+                    const u32 before = impl.retiredRecords.Size();
+                    impl.retiredRecords.PushBack(static_cast<DependencyRecord&&>(record));
+                    if (impl.retiredRecords.Size() != before + 1u)
+                        return IndexResult::OutOfMemory;
+                    parsedDependencies += recordDependencyCount;
+                    parsedArtifacts += recordArtifactCount;
+                }
+                for (u32 successorIndex = 0u; successorIndex < batchSuccessorCount; ++successorIndex)
+                {
+                    DependencyPublicationWitness witness;
+                    if (!ReadPublicationWitness(reader, witness))
+                        return IndexResult::Corrupt;
+                    const u32 before = impl.retirementSuccessors.Size();
+                    impl.retirementSuccessors.PushBack(witness);
+                    if (impl.retirementSuccessors.Size() != before + 1u)
+                        return IndexResult::OutOfMemory;
+                }
+                impl.retirementBatches.PushBack(batch);
+                if (impl.retirementBatches.Size() != batchIndex + 1u)
+                    return IndexResult::OutOfMemory;
             }
             if (reader.Position() != reader.Size() || parsedDependencies != dependencyCount || parsedArtifacts != artifactCount)
             {
@@ -841,19 +989,41 @@ namespace vanguard::assets
             return IndexResult::IoFailure;
         }
         bool recovered = false;
-        if (manager.FileExist(m_impl->temporaryPath))
+        const bool primaryExists = manager.FileExist(m_impl->path);
+        const bool temporaryExists = manager.FileExist(m_impl->temporaryPath);
+        if (temporaryExists && (primaryExists || m_impl->config.allowDestructiveRecovery))
         {
-            recovered = manager.DeleteFile(m_impl->temporaryPath);
+            // With destructive recovery disabled, retain a temp-only image: no
+            // committed primary exists to prove that discarding it is harmless.
+            // When a primary exists we defer the no-destructive cleanup until
+            // after that primary parses successfully below.
+            if (!m_impl->config.allowDestructiveRecovery && primaryExists)
+            {
+                recovered = false;
+            }
+            else
+            {
+                recovered = manager.DeleteFile(m_impl->temporaryPath);
+            }
             if (!recovered)
             {
-                ++m_impl->stats.ioFailures;
-                VANGUARD_DELETE(m_impl);
-                m_impl = nullptr;
-                return IndexResult::IoFailure;
+                if (m_impl->config.allowDestructiveRecovery)
+                {
+                    ++m_impl->stats.ioFailures;
+                    VANGUARD_DELETE(m_impl);
+                    m_impl = nullptr;
+                    return IndexResult::IoFailure;
+                }
             }
         }
-        if (!manager.FileExist(m_impl->path))
+        if (!primaryExists)
         {
+            if (temporaryExists && !m_impl->config.allowDestructiveRecovery)
+            {
+                VANGUARD_DELETE(m_impl);
+                m_impl = nullptr;
+                return IndexResult::InvalidState;
+            }
             if (recovered)
             {
                 ++m_impl->stats.recoveries;
@@ -873,6 +1043,17 @@ namespace vanguard::assets
         const IndexResult loaded = ParseIndex(*m_impl, bytes);
         if (loaded == IndexResult::Success)
         {
+            if (temporaryExists && !m_impl->config.allowDestructiveRecovery)
+            {
+                if (!manager.DeleteFile(m_impl->temporaryPath))
+                {
+                    ++m_impl->stats.ioFailures;
+                    VANGUARD_DELETE(m_impl);
+                    m_impl = nullptr;
+                    return IndexResult::IoFailure;
+                }
+                recovered = true;
+            }
             ++m_impl->stats.loads;
             return recovered ? IndexResult::Recovered : IndexResult::Success;
         }
@@ -890,7 +1071,14 @@ namespace vanguard::assets
         {
             ++m_impl->stats.incompatibleFiles;
         }
+        if (!m_impl->config.allowDestructiveRecovery)
+        {
+            VANGUARD_DELETE(m_impl);
+            m_impl = nullptr;
+            return loaded;
+        }
         m_impl->ClearRecordsLocked();
+        m_impl->ClearRetirementProtectionLocked();
         if (!manager.DeleteFile(m_impl->path))
         {
             ++m_impl->stats.ioFailures;
@@ -1090,6 +1278,12 @@ namespace vanguard::assets
                     VANGUARD_DELETE(replacement);
                     return IndexResult::InvalidArgument;
                 }
+                u32 retiredIndex = 0u;
+                if (m_impl->stagedRemovalLookup.Find(request.output.GetPath().Id(), retiredIndex))
+                {
+                    VANGUARD_DELETE(replacement);
+                    return IndexResult::InvalidState;
+                }
                 u32 stagedIndex = 0;
                 if (m_impl->stagedLookup.Find(request.output.GetPath().Id(), stagedIndex))
                 {
@@ -1136,7 +1330,7 @@ namespace vanguard::assets
             }
             else
             {
-                if (m_impl->records.Size() >= m_impl->config.maximumRecords)
+                if (static_cast<u64>(m_impl->records.Size()) + m_impl->retiredRecords.Size() >= m_impl->config.maximumRecords)
                 {
                     VANGUARD_DELETE(replacement);
                     return IndexResult::LimitExceeded;
@@ -1214,6 +1408,7 @@ namespace vanguard::assets
             return;
         }
         m_impl->ClearRecordsLocked();
+        m_impl->ClearRetirementProtectionLocked();
         m_impl->changed = true;
     }
 
@@ -1442,8 +1637,9 @@ namespace vanguard::assets
 
         concurrency::ScopedLock guard(m_impl->lock);
         const u64 committed = m_impl->records.Size();
+        const u64 retired = m_impl->retiredRecords.Size();
         const u64 staged = m_impl->transactionActive ? m_impl->stagedRecords.Size() : 0u;
-        const u64 count = committed + staged;
+        const u64 count = committed + retired + staged;
         if (count > maximumRecords || count > maximumBytes / sizeof(ArtifactSetKey))
             return IndexResult::LimitExceeded;
 
@@ -1463,6 +1659,15 @@ namespace vanguard::assets
             }
             keys[write++] = {record->buildFingerprint, record->contentFingerprint};
         }
+        for (const DependencyRecord& record : m_impl->retiredRecords)
+        {
+            if (record.buildFingerprint.IsEmpty() || record.contentFingerprint.IsEmpty())
+            {
+                keys.Clear();
+                return IndexResult::InvalidState;
+            }
+            keys[write++] = {record.buildFingerprint, record.contentFingerprint};
+        }
         if (m_impl->transactionActive)
         {
             for (const DependencyRecord* const record : m_impl->stagedRecords)
@@ -1474,6 +1679,234 @@ namespace vanguard::assets
                 }
                 keys[write++] = {record->buildFingerprint, record->contentFingerprint};
             }
+        }
+        return IndexResult::Success;
+    }
+
+    IndexResult DependencyIndex::CaptureRetiredProtectionRecords(containers::DynamicArray<DependencyRecord>& records,
+                                                                 const u32 maximumRecords, const u64 maximumBytes) const noexcept
+    {
+        records.Clear();
+        if (m_impl == nullptr || maximumRecords == 0u || maximumBytes == 0u)
+            return IndexResult::InvalidArgument;
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (m_impl->retiredRecords.Size() > maximumRecords)
+            return IndexResult::LimitExceeded;
+
+        u64 retainedBytes = 0u;
+        for (const DependencyRecord& record : m_impl->retiredRecords)
+        {
+            const u64 dependencyBytes = static_cast<u64>(record.dependencies.Size()) * sizeof(BuildDependency);
+            const u64 artifactBytes = static_cast<u64>(record.artifacts.Size()) * sizeof(IndexedArtifact);
+            const u64 recordBytes = sizeof(DependencyRecord) + dependencyBytes + artifactBytes;
+            if (retainedBytes > maximumBytes || recordBytes > maximumBytes - retainedBytes)
+                return IndexResult::LimitExceeded;
+            retainedBytes += recordBytes;
+        }
+
+        records.Resize(m_impl->retiredRecords.Size());
+        if (records.Size() != m_impl->retiredRecords.Size())
+        {
+            records.Clear();
+            return IndexResult::OutOfMemory;
+        }
+        for (u32 index = 0u; index < m_impl->retiredRecords.Size(); ++index)
+        {
+            if (!CopyRecord(m_impl->retiredRecords[index], records[index]))
+            {
+                records.Clear();
+                return IndexResult::OutOfMemory;
+            }
+        }
+        return IndexResult::Success;
+    }
+
+    IndexResult DependencyIndex::CaptureRetirementProtectionSnapshot(
+        containers::DynamicArray<DependencyRetirementProtectionBatch>& batches,
+        containers::DynamicArray<DependencyRecord>& records,
+        containers::DynamicArray<DependencyPublicationWitness>& successors,
+        const u32 maximumRecords, const u64 maximumBytes) const noexcept
+    {
+        batches.Clear();
+        records.Clear();
+        successors.Clear();
+        if (m_impl == nullptr || maximumRecords == 0u || maximumBytes == 0u)
+            return IndexResult::InvalidArgument;
+
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (m_impl->retirementBatches.Size() > maximumRecords || m_impl->retiredRecords.Size() > maximumRecords ||
+            m_impl->retirementSuccessors.Size() > maximumRecords)
+            return IndexResult::LimitExceeded;
+
+        u64 retainedBytes = static_cast<u64>(m_impl->retirementBatches.Size()) * sizeof(DependencyRetirementProtectionBatch) +
+                            static_cast<u64>(m_impl->retirementSuccessors.Size()) * sizeof(DependencyPublicationWitness);
+        if (retainedBytes > maximumBytes)
+            return IndexResult::LimitExceeded;
+        for (const DependencyRecord& record : m_impl->retiredRecords)
+        {
+            const u64 recordBytes = sizeof(DependencyRecord) +
+                                    static_cast<u64>(record.dependencies.Size()) * sizeof(BuildDependency) +
+                                    static_cast<u64>(record.artifacts.Size()) * sizeof(IndexedArtifact);
+            if (recordBytes > maximumBytes - retainedBytes)
+                return IndexResult::LimitExceeded;
+            retainedBytes += recordBytes;
+        }
+
+        batches.Resize(m_impl->retirementBatches.Size());
+        records.Resize(m_impl->retiredRecords.Size());
+        successors.Resize(m_impl->retirementSuccessors.Size());
+        if (batches.Size() != m_impl->retirementBatches.Size() || records.Size() != m_impl->retiredRecords.Size() ||
+            successors.Size() != m_impl->retirementSuccessors.Size())
+        {
+            batches.Clear();
+            records.Clear();
+            successors.Clear();
+            return IndexResult::OutOfMemory;
+        }
+        for (u32 index = 0u; index < batches.Size(); ++index)
+            batches[index] = m_impl->retirementBatches[index];
+        for (u32 index = 0u; index < successors.Size(); ++index)
+            successors[index] = m_impl->retirementSuccessors[index];
+        for (u32 index = 0u; index < records.Size(); ++index)
+        {
+            if (!CopyRecord(m_impl->retiredRecords[index], records[index]))
+            {
+                batches.Clear();
+                records.Clear();
+                successors.Clear();
+                return IndexResult::OutOfMemory;
+            }
+        }
+        return IndexResult::Success;
+    }
+
+    IndexResult DependencyIndex::ReleaseSatisfiedRetirementProtections(
+        const containers::ArraySpan<const DependencyPublicationWitness> visible) noexcept
+    {
+        if (m_impl == nullptr || (!visible.Empty() && visible.Data() == nullptr))
+            return IndexResult::InvalidArgument;
+
+        containers::HashMap<resources::ResourceId, u32> visibleIndex(memory::pools::Assets::GetInstance());
+        visibleIndex.Reserve(visible.Count());
+        if (visibleIndex.Capacity() < visible.Count())
+            return IndexResult::OutOfMemory;
+        for (u32 index = 0u; index < visible.Count(); ++index)
+        {
+            if (!visible[index].IsValid())
+                return IndexResult::InvalidArgument;
+            u32 duplicate = 0u;
+            if (visibleIndex.Find(visible[index].output.GetPath().Id(), duplicate))
+                return IndexResult::InvalidArgument;
+            if (!visibleIndex.Insert(visible[index].output.GetPath().Id(), index).IsSuccessful())
+                return IndexResult::OutOfMemory;
+        }
+
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (m_impl->transactionActive || m_impl->changed || m_impl->persistentProtectionDomainReservation != nullptr ||
+            m_impl->activePersistentPublications != 0u)
+            return IndexResult::InvalidState;
+        if (m_impl->retirementBatches.Empty() || visible.Empty())
+            return IndexResult::Success;
+
+        const auto batchSatisfied = [&](const DependencyRetirementProtectionBatch& batch) noexcept
+        {
+            if (batch.successorOffset > m_impl->retirementSuccessors.Size() ||
+                batch.successorCount > m_impl->retirementSuccessors.Size() - batch.successorOffset)
+                return false;
+            for (u32 index = 0u; index < batch.successorCount; ++index)
+            {
+                const DependencyPublicationWitness& required = m_impl->retirementSuccessors[batch.successorOffset + index];
+                u32 visibleSlot = 0u;
+                if (!visibleIndex.Find(required.output.GetPath().Id(), visibleSlot) || visibleSlot >= visible.Count())
+                    return false;
+                const DependencyPublicationWitness& observed = visible[visibleSlot];
+                if (observed.output != required.output || observed.buildFingerprint != required.buildFingerprint ||
+                    observed.contentFingerprint != required.contentFingerprint)
+                    return false;
+            }
+            return true;
+        };
+
+        u32 retainedBatchCount = 0u;
+        u32 retainedRecordCount = 0u;
+        u32 retainedSuccessorCount = 0u;
+        for (const DependencyRetirementProtectionBatch& batch : m_impl->retirementBatches)
+        {
+            if (batchSatisfied(batch))
+                continue;
+            if (batch.recordOffset > m_impl->retiredRecords.Size() ||
+                batch.recordCount > m_impl->retiredRecords.Size() - batch.recordOffset ||
+                batch.successorOffset > m_impl->retirementSuccessors.Size() ||
+                batch.successorCount > m_impl->retirementSuccessors.Size() - batch.successorOffset)
+                return IndexResult::InvalidState;
+            ++retainedBatchCount;
+            retainedRecordCount += batch.recordCount;
+            retainedSuccessorCount += batch.successorCount;
+        }
+        if (retainedBatchCount == m_impl->retirementBatches.Size())
+            return IndexResult::Success;
+
+        containers::DynamicArray<DependencyRetirementProtectionBatch> batches(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<DependencyRecord> retainedRecords(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<DependencyPublicationWitness> successors(memory::pools::Assets::GetInstance());
+        batches.Reserve(retainedBatchCount);
+        retainedRecords.Reserve(retainedRecordCount);
+        successors.Reserve(retainedSuccessorCount);
+        if (batches.Capacity() < retainedBatchCount || retainedRecords.Capacity() < retainedRecordCount ||
+            successors.Capacity() < retainedSuccessorCount)
+            return IndexResult::OutOfMemory;
+
+        for (const DependencyRetirementProtectionBatch& batch : m_impl->retirementBatches)
+        {
+            if (batchSatisfied(batch))
+                continue;
+            DependencyRetirementProtectionBatch retained;
+            retained.recordOffset = retainedRecords.Size();
+            retained.recordCount = batch.recordCount;
+            retained.successorOffset = successors.Size();
+            retained.successorCount = batch.successorCount;
+            for (u32 index = 0u; index < batch.recordCount; ++index)
+            {
+                DependencyRecord record;
+                if (!CopyRecord(m_impl->retiredRecords[batch.recordOffset + index], record))
+                    return IndexResult::OutOfMemory;
+                retainedRecords.PushBack(static_cast<DependencyRecord&&>(record));
+                if (retainedRecords.Size() != retained.recordOffset + index + 1u)
+                    return IndexResult::OutOfMemory;
+            }
+            for (u32 index = 0u; index < batch.successorCount; ++index)
+            {
+                successors.PushBack(m_impl->retirementSuccessors[batch.successorOffset + index]);
+                if (successors.Size() != retained.successorOffset + index + 1u)
+                    return IndexResult::OutOfMemory;
+            }
+            const u32 before = batches.Size();
+            batches.PushBack(retained);
+            if (batches.Size() != before + 1u)
+                return IndexResult::OutOfMemory;
+        }
+
+        containers::DynamicArray<DependencyRetirementProtectionBatch> oldBatches(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<DependencyRecord> oldRecords(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<DependencyPublicationWitness> oldSuccessors(memory::pools::Assets::GetInstance());
+        oldBatches.Swap(m_impl->retirementBatches);
+        oldRecords.Swap(m_impl->retiredRecords);
+        oldSuccessors.Swap(m_impl->retirementSuccessors);
+        batches.Swap(m_impl->retirementBatches);
+        retainedRecords.Swap(m_impl->retiredRecords);
+        successors.Swap(m_impl->retirementSuccessors);
+        m_impl->changed = true;
+        const IndexResult saved = SaveIndexLocked(*m_impl);
+        if (saved != IndexResult::Success)
+        {
+            batches.Swap(m_impl->retirementBatches);
+            retainedRecords.Swap(m_impl->retiredRecords);
+            successors.Swap(m_impl->retirementSuccessors);
+            oldBatches.Swap(m_impl->retirementBatches);
+            oldRecords.Swap(m_impl->retiredRecords);
+            oldSuccessors.Swap(m_impl->retirementSuccessors);
+            m_impl->changed = false;
+            return saved;
         }
         return IndexResult::Success;
     }
@@ -1499,7 +1932,7 @@ namespace vanguard::assets
             return false;
         }
         concurrency::ScopedLock guard(m_impl->lock);
-        return m_impl->changed || !m_impl->stagedRecords.Empty();
+        return m_impl->changed || !m_impl->stagedRecords.Empty() || !m_impl->stagedRemovals.Empty();
     }
 
     IndexResult DependencyIndex::BeginTransaction() noexcept
@@ -1515,6 +1948,82 @@ namespace vanguard::assets
         }
         m_impl->ClearStagedLocked();
         m_impl->transactionActive = true;
+        return IndexResult::Success;
+    }
+
+    IndexResult DependencyIndex::StageRemoval(const resources::ResourceReference output) noexcept
+    {
+        if (m_impl == nullptr)
+            return IndexResult::InvalidState;
+        if (!output.IsValid() || !output.IsTyped())
+            return IndexResult::InvalidArgument;
+        concurrency::ScopedLock guard(m_impl->lock);
+        u32 stagedIndex = 0;
+        if (!m_impl->transactionActive || m_impl->stagedLookup.Find(output.GetPath().Id(), stagedIndex))
+            return IndexResult::InvalidState;
+        const DependencyRecord* const committed = m_impl->FindLocked(output);
+        if (committed == nullptr)
+            return IndexResult::NotFound;
+        u32 existingIndex = 0u;
+        if (m_impl->stagedRemovalLookup.Find(output.GetPath().Id(), existingIndex))
+            return existingIndex < m_impl->stagedRemovals.Size() && m_impl->stagedRemovals[existingIndex] == output
+                       ? IndexResult::Success : IndexResult::InvalidArgument;
+        const u32 previous = m_impl->stagedRemovals.Size();
+        m_impl->stagedRemovals.PushBack(output);
+        if (m_impl->stagedRemovals.Size() != previous + 1u)
+            return IndexResult::OutOfMemory;
+        if (!m_impl->stagedRemovalLookup.Insert(output.GetPath().Id(), previous).IsSuccessful())
+        {
+            static_cast<void>(m_impl->stagedRemovals.RemoveAt(previous));
+            return IndexResult::OutOfMemory;
+        }
+        return IndexResult::Success;
+    }
+
+    IndexResult DependencyIndex::StageRetirementSuccessors(
+        const containers::ArraySpan<const resources::ResourceReference> outputs) noexcept
+    {
+        if (m_impl == nullptr)
+            return IndexResult::InvalidState;
+        if (outputs.Empty() || outputs.Data() == nullptr || outputs.Count() > m_impl->config.maximumRecords)
+            return IndexResult::InvalidArgument;
+        concurrency::ScopedLock guard(m_impl->lock);
+        if (!m_impl->transactionActive || !m_impl->stagedRetirementSuccessors.Empty())
+            return IndexResult::InvalidState;
+
+        m_impl->stagedRetirementSuccessors.Reserve(outputs.Count());
+        if (m_impl->stagedRetirementSuccessors.Capacity() < outputs.Count())
+            return IndexResult::OutOfMemory;
+        for (u32 index = 0u; index < outputs.Count(); ++index)
+        {
+            const resources::ResourceReference output = outputs[index];
+            if (!output.IsValid() || !output.IsTyped())
+            {
+                m_impl->stagedRetirementSuccessors.Clear();
+                return IndexResult::InvalidArgument;
+            }
+            u32 stagedIndex = 0u;
+            if (!m_impl->stagedLookup.Find(output.GetPath().Id(), stagedIndex) || stagedIndex >= m_impl->stagedRecords.Size() ||
+                m_impl->stagedRecords[stagedIndex] == nullptr || m_impl->stagedRecords[stagedIndex]->output != output)
+            {
+                m_impl->stagedRetirementSuccessors.Clear();
+                return IndexResult::InvalidState;
+            }
+            for (u32 previous = 0u; previous < index; ++previous)
+            {
+                if (outputs[previous] == output)
+                {
+                    m_impl->stagedRetirementSuccessors.Clear();
+                    return IndexResult::InvalidArgument;
+                }
+            }
+            m_impl->stagedRetirementSuccessors.PushBack(output);
+            if (m_impl->stagedRetirementSuccessors.Size() != index + 1u)
+            {
+                m_impl->stagedRetirementSuccessors.Clear();
+                return IndexResult::OutOfMemory;
+            }
+        }
         return IndexResult::Success;
     }
 
@@ -1584,126 +2093,395 @@ namespace vanguard::assets
         {
             return IndexResult::InvalidState;
         }
-        if (m_impl->stagedRecords.Empty())
+        if (m_impl->stagedRecords.Empty() && m_impl->stagedRemovals.Empty())
         {
             m_impl->transactionActive = false;
             ++m_impl->stats.transactionCommits;
             return IndexResult::Success;
         }
 
-        struct AppliedRecord
+        // Ordinary recooks only publish/rewrite existing records. Preserve
+        // their incremental O(staged records) commit behavior rather than
+        // scanning every indexed output for the schema-retirement path.
+        if (m_impl->stagedRemovals.Empty() && m_impl->stagedRetirementSuccessors.Empty())
         {
-            u32 stageIndex = 0;
-            u32 recordIndex = 0;
-            DependencyRecord* previous = nullptr;
-            bool inserted = false;
-        };
+            struct AppliedRecord
+            {
+                u32 stageIndex = 0;
+                u32 recordIndex = 0;
+                DependencyRecord* previous = nullptr;
+                bool inserted = false;
+            };
+            u32 newRecords = 0u;
+            for (DependencyRecord* const staged : m_impl->stagedRecords)
+            {
+                u32 recordIndex = 0u;
+                if (m_impl->lookup.Find(staged->output.GetPath().Id(), recordIndex))
+                {
+                    if (recordIndex >= m_impl->records.Size() || m_impl->records[recordIndex]->output != staged->output)
+                        return IndexResult::InvalidArgument;
+                }
+                else
+                    ++newRecords;
+            }
+            if (static_cast<u64>(m_impl->records.Size()) + m_impl->retiredRecords.Size() + newRecords >
+                m_impl->config.maximumRecords)
+                return IndexResult::LimitExceeded;
 
-        u32 newRecords = 0;
+            containers::DynamicArray<AppliedRecord> applied(memory::pools::Assets::GetInstance());
+            applied.Resize(m_impl->stagedRecords.Size());
+            if (applied.Size() != m_impl->stagedRecords.Size())
+                return IndexResult::OutOfMemory;
+            u32 appliedCount = 0u;
+            const auto undo = [&]() noexcept
+            {
+                while (appliedCount != 0u)
+                {
+                    const AppliedRecord& change = applied[--appliedCount];
+                    DependencyRecord* const current = m_impl->records[change.recordIndex];
+                    if (change.inserted)
+                        static_cast<void>(m_impl->records.RemoveAt(change.recordIndex));
+                    else
+                        m_impl->records[change.recordIndex] = change.previous;
+                    m_impl->stagedRecords[change.stageIndex] = current;
+                }
+                static_cast<void>(m_impl->RebuildLookupLocked());
+                m_impl->changed = false;
+                m_impl->reverseDirty = true;
+                m_impl->UpdateCountsLocked();
+            };
+
+            for (u32 stageIndex = 0u; stageIndex < m_impl->stagedRecords.Size(); ++stageIndex)
+            {
+                DependencyRecord* const staged = m_impl->stagedRecords[stageIndex];
+                u32 recordIndex = 0u;
+                if (m_impl->lookup.Find(staged->output.GetPath().Id(), recordIndex))
+                {
+                    applied[appliedCount++] = {stageIndex, recordIndex, m_impl->records[recordIndex], false};
+                    m_impl->records[recordIndex] = staged;
+                    m_impl->stagedRecords[stageIndex] = nullptr;
+                }
+                else
+                {
+                    recordIndex = m_impl->records.Size();
+                    m_impl->records.PushBack(staged);
+                    if (m_impl->records.Size() != recordIndex + 1u ||
+                        !m_impl->lookup.Insert(staged->output.GetPath().Id(), recordIndex).IsSuccessful())
+                    {
+                        if (m_impl->records.Size() == recordIndex + 1u)
+                            static_cast<void>(m_impl->records.RemoveAt(recordIndex));
+                        undo();
+                        return IndexResult::OutOfMemory;
+                    }
+                    applied[appliedCount++] = {stageIndex, recordIndex, nullptr, true};
+                    m_impl->stagedRecords[stageIndex] = nullptr;
+                }
+            }
+            m_impl->changed = true;
+            m_impl->reverseDirty = true;
+            m_impl->UpdateCountsLocked();
+            const IndexResult saved = SaveIndexLocked(*m_impl);
+            if (saved != IndexResult::Success)
+            {
+                undo();
+                return saved;
+            }
+            u64 committedReplacements = 0u;
+            for (u32 i = 0u; i < appliedCount; ++i)
+            {
+                if (applied[i].previous != nullptr)
+                {
+                    ++committedReplacements;
+                    VANGUARD_DELETE(applied[i].previous);
+                }
+            }
+            const u64 publications = m_impl->stagedPublications;
+            const u64 replacements = m_impl->stagedReplacements;
+            m_impl->ClearStagedLocked();
+            m_impl->transactionActive = false;
+            m_impl->stats.publications += publications;
+            m_impl->stats.replacements += replacements + committedReplacements;
+            ++m_impl->stats.transactionCommits;
+            return IndexResult::Success;
+        }
+
+        // Build a complete candidate pointer/index view without mutating the
+        // committed view or the staged owner records. This makes removal,
+        // replacement and insertion one save-or-rollback operation, including
+        // allocation failures and failures of the durable file replacement.
+        containers::DynamicArray<DependencyRecord*> candidate(memory::pools::Assets::GetInstance());
+        containers::HashMap<resources::ResourceId, u32> candidateLookup(memory::pools::Assets::GetInstance());
+        const u32 originalCount = m_impl->records.Size();
+        const u32 stageCount = m_impl->stagedRecords.Size();
+        const u32 removalCount = m_impl->stagedRemovals.Size();
+        if (removalCount > originalCount || stageCount > m_impl->config.maximumRecords)
+            return IndexResult::LimitExceeded;
+        u32 newRecords = 0u;
         for (DependencyRecord* const staged : m_impl->stagedRecords)
         {
-            u32 recordIndex = 0;
-            if (m_impl->lookup.Find(staged->output.GetPath().Id(), recordIndex))
+            if (staged == nullptr)
+                return IndexResult::InvalidState;
+            u32 index = 0u;
+            if (m_impl->lookup.Find(staged->output.GetPath().Id(), index))
             {
-                if (recordIndex >= m_impl->records.Size() || m_impl->records[recordIndex]->output != staged->output)
-                {
+                if (index >= originalCount || m_impl->records[index]->output != staged->output)
                     return IndexResult::InvalidArgument;
-                }
             }
             else
             {
                 ++newRecords;
             }
         }
-        if (newRecords > m_impl->config.maximumRecords - m_impl->records.Size())
+        const u64 finalCount = static_cast<u64>(originalCount) - removalCount + newRecords;
+        const bool retirementProtectionRequested = !m_impl->stagedRetirementSuccessors.Empty();
+        u32 replacementRetentionCount = 0u;
+        u32 predecessorSuccessorCount = 0u;
+        u32 newSuccessorCount = 0u;
+        if (retirementProtectionRequested)
         {
-            return IndexResult::LimitExceeded;
-        }
-
-        containers::DynamicArray<AppliedRecord> applied(memory::pools::Assets::GetInstance());
-        applied.Resize(m_impl->stagedRecords.Size());
-        if (applied.Size() != m_impl->stagedRecords.Size())
-        {
-            return IndexResult::OutOfMemory;
-        }
-        u32 appliedCount = 0;
-
-        const auto rollbackApplied = [&]() noexcept
-        {
-            while (appliedCount != 0)
+            for (const resources::ResourceReference output : m_impl->stagedRetirementSuccessors)
             {
-                --appliedCount;
-                const AppliedRecord& change = applied[appliedCount];
-                DependencyRecord* current = m_impl->records[change.recordIndex];
-                if (change.inserted)
+                u32 stagedIndex = 0u;
+                if (!m_impl->stagedLookup.Find(output.GetPath().Id(), stagedIndex) || stagedIndex >= m_impl->stagedRecords.Size() ||
+                    m_impl->stagedRecords[stagedIndex] == nullptr || m_impl->stagedRecords[stagedIndex]->output != output)
+                    return IndexResult::InvalidState;
+                u32 removalIndex = 0u;
+                if (m_impl->stagedRemovalLookup.Find(output.GetPath().Id(), removalIndex))
+                    continue;
+                const DependencyRecord* const previous = m_impl->FindLocked(output);
+                if (previous != nullptr)
                 {
-                    static_cast<void>(m_impl->records.RemoveAt(change.recordIndex));
+                    ++predecessorSuccessorCount;
+                    if (previous->buildFingerprint != m_impl->stagedRecords[stagedIndex]->buildFingerprint ||
+                        previous->contentFingerprint != m_impl->stagedRecords[stagedIndex]->contentFingerprint)
+                        ++replacementRetentionCount;
                 }
                 else
-                {
-                    m_impl->records[change.recordIndex] = change.previous;
-                }
-                m_impl->stagedRecords[change.stageIndex] = current;
+                    ++newSuccessorCount;
             }
-            static_cast<void>(m_impl->RebuildLookupLocked());
-            m_impl->changed = false;
-            m_impl->reverseDirty = true;
-            m_impl->UpdateCountsLocked();
-        };
-
-        for (u32 stageIndex = 0; stageIndex < m_impl->stagedRecords.Size(); ++stageIndex)
+        }
+        const u64 transactionRetentionCount = static_cast<u64>(removalCount) + replacementRetentionCount;
+        const bool protectRetirements = retirementProtectionRequested &&
+                                        (transactionRetentionCount != 0u ||
+                                         (predecessorSuccessorCount != 0u && newSuccessorCount != 0u));
+        const u64 retainedAfterCommit = static_cast<u64>(m_impl->retiredRecords.Size()) +
+                                        (protectRetirements ? transactionRetentionCount : 0u);
+        if (finalCount > m_impl->config.maximumRecords ||
+            retainedAfterCommit > m_impl->config.maximumRecords ||
+            finalCount + retainedAfterCommit > m_impl->config.maximumRecords ||
+            (protectRetirements &&
+             static_cast<u64>(m_impl->retirementSuccessors.Size()) + m_impl->stagedRetirementSuccessors.Size() >
+                 m_impl->config.maximumRecords))
+            return IndexResult::LimitExceeded;
+        candidate.Reserve(static_cast<u32>(finalCount));
+        if (candidate.Capacity() < finalCount)
+            return IndexResult::OutOfMemory;
+        const auto append = [&](DependencyRecord* const record) noexcept -> IndexResult
         {
-            DependencyRecord* const staged = m_impl->stagedRecords[stageIndex];
-            u32 recordIndex = 0;
-            if (m_impl->lookup.Find(staged->output.GetPath().Id(), recordIndex))
+            if (candidate.Size() >= m_impl->config.maximumRecords)
+                return IndexResult::LimitExceeded;
+            const u32 index = candidate.Size();
+            candidate.PushBack(record);
+            if (candidate.Size() != index + 1u)
+                return IndexResult::OutOfMemory;
+            return candidateLookup.Insert(record->output.GetPath().Id(), index).IsSuccessful()
+                       ? IndexResult::Success : IndexResult::OutOfMemory;
+        };
+        for (DependencyRecord* const record : m_impl->records)
+        {
+            u32 retiredIndex = 0u;
+            const bool retired = m_impl->stagedRemovalLookup.Find(record->output.GetPath().Id(), retiredIndex);
+            u32 stageIndex = 0;
+            if (retired || m_impl->stagedLookup.Find(record->output.GetPath().Id(), stageIndex))
+                continue;
+            const IndexResult result = append(record);
+            if (result != IndexResult::Success)
+                return result;
+        }
+        u64 committedReplacements = 0u;
+        for (DependencyRecord* const staged : m_impl->stagedRecords)
+        {
+            if (staged == nullptr)
+                return IndexResult::InvalidState;
+            const DependencyRecord* const previous = m_impl->FindLocked(staged->output);
+            if (previous != nullptr)
+                ++committedReplacements;
+            const IndexResult result = append(staged);
+            if (result != IndexResult::Success)
+                return result;
+        }
+
+        const u32 originalRetirementBatchCount = m_impl->retirementBatches.Size();
+        const u32 originalRetiredRecordCount = m_impl->retiredRecords.Size();
+        const u32 originalRetirementSuccessorCount = m_impl->retirementSuccessors.Size();
+        const auto rollbackRetirementProtection = [&]() noexcept
+        {
+            m_impl->retirementBatches.Resize(originalRetirementBatchCount);
+            m_impl->retiredRecords.Resize(originalRetiredRecordCount);
+            m_impl->retirementSuccessors.Resize(originalRetirementSuccessorCount);
+        };
+        if (protectRetirements)
+        {
+            if (m_impl->stagedRetirementSuccessors.Empty() || m_impl->retirementBatches.Size() >= m_impl->config.maximumRecords)
+                return IndexResult::InvalidState;
+            m_impl->retirementBatches.Reserve(originalRetirementBatchCount + 1u);
+            m_impl->retiredRecords.Reserve(originalRetiredRecordCount + static_cast<u32>(transactionRetentionCount));
+            m_impl->retirementSuccessors.Reserve(originalRetirementSuccessorCount + m_impl->stagedRetirementSuccessors.Size());
+            if (m_impl->retirementBatches.Capacity() < originalRetirementBatchCount + 1u ||
+                m_impl->retiredRecords.Capacity() < originalRetiredRecordCount + transactionRetentionCount ||
+                m_impl->retirementSuccessors.Capacity() < originalRetirementSuccessorCount + m_impl->stagedRetirementSuccessors.Size())
+                return IndexResult::OutOfMemory;
+
+            DependencyRetirementProtectionBatch protection;
+            protection.recordOffset = originalRetiredRecordCount;
+            protection.recordCount = static_cast<u32>(transactionRetentionCount);
+            protection.successorOffset = originalRetirementSuccessorCount;
+            protection.successorCount = m_impl->stagedRetirementSuccessors.Size();
+            for (u32 removalIndex = 0u; removalIndex < m_impl->stagedRemovals.Size(); ++removalIndex)
             {
-                applied[appliedCount++] = {stageIndex, recordIndex, m_impl->records[recordIndex], false};
-                m_impl->records[recordIndex] = staged;
-                m_impl->stagedRecords[stageIndex] = nullptr;
-            }
-            else
-            {
-                recordIndex = m_impl->records.Size();
-                m_impl->records.PushBack(staged);
-                if (m_impl->records.Size() != recordIndex + 1u || !m_impl->lookup.Insert(staged->output.GetPath().Id(), recordIndex).IsSuccessful())
+                const DependencyRecord* const record = m_impl->FindLocked(m_impl->stagedRemovals[removalIndex]);
+                if (record == nullptr)
                 {
-                    if (m_impl->records.Size() == recordIndex + 1u)
-                    {
-                        static_cast<void>(m_impl->records.RemoveAt(recordIndex));
-                    }
-                    rollbackApplied();
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+                if (record->buildFingerprint.IsEmpty() || record->contentFingerprint.IsEmpty())
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+                DependencyRecord retained;
+                if (!CopyRecord(*record, retained))
+                {
+                    rollbackRetirementProtection();
                     return IndexResult::OutOfMemory;
                 }
-                applied[appliedCount++] = {stageIndex, recordIndex, nullptr, true};
-                m_impl->stagedRecords[stageIndex] = nullptr;
+                m_impl->retiredRecords.PushBack(static_cast<DependencyRecord&&>(retained));
+                if (m_impl->retiredRecords.Size() != protection.recordOffset + removalIndex + 1u)
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+            }
+            for (const resources::ResourceReference output : m_impl->stagedRetirementSuccessors)
+            {
+                u32 stagedIndex = 0u;
+                if (!m_impl->stagedLookup.Find(output.GetPath().Id(), stagedIndex) || stagedIndex >= m_impl->stagedRecords.Size())
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+                u32 removalIndex = 0u;
+                if (m_impl->stagedRemovalLookup.Find(output.GetPath().Id(), removalIndex))
+                    continue;
+                const DependencyRecord* const staged = m_impl->stagedRecords[stagedIndex];
+                const DependencyRecord* const previous = m_impl->FindLocked(output);
+                if (staged == nullptr || previous == nullptr ||
+                    (previous->buildFingerprint == staged->buildFingerprint && previous->contentFingerprint == staged->contentFingerprint))
+                    continue;
+                if (previous->buildFingerprint.IsEmpty() || previous->contentFingerprint.IsEmpty())
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+                DependencyRecord retained;
+                if (!CopyRecord(*previous, retained))
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::OutOfMemory;
+                }
+                const u32 before = m_impl->retiredRecords.Size();
+                m_impl->retiredRecords.PushBack(static_cast<DependencyRecord&&>(retained));
+                if (m_impl->retiredRecords.Size() != before + 1u)
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::OutOfMemory;
+                }
+            }
+            if (m_impl->retiredRecords.Size() != protection.recordOffset + protection.recordCount)
+            {
+                rollbackRetirementProtection();
+                return IndexResult::InvalidState;
+            }
+
+            for (u32 successorIndex = 0u; successorIndex < m_impl->stagedRetirementSuccessors.Size(); ++successorIndex)
+            {
+                const resources::ResourceReference output = m_impl->stagedRetirementSuccessors[successorIndex];
+                u32 stagedIndex = 0u;
+                if (!m_impl->stagedLookup.Find(output.GetPath().Id(), stagedIndex) || stagedIndex >= m_impl->stagedRecords.Size())
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+                const DependencyRecord* const staged = m_impl->stagedRecords[stagedIndex];
+                if (staged == nullptr || staged->output != output || staged->buildFingerprint.IsEmpty() ||
+                    staged->contentFingerprint.IsEmpty())
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::InvalidState;
+                }
+                const bool predecessorPresent = m_impl->FindLocked(output) != nullptr;
+                m_impl->retirementSuccessors.PushBack(
+                    {staged->output, staged->buildFingerprint, staged->contentFingerprint, predecessorPresent});
+                if (m_impl->retirementSuccessors.Size() != protection.successorOffset + successorIndex + 1u)
+                {
+                    rollbackRetirementProtection();
+                    return IndexResult::OutOfMemory;
+                }
+            }
+            m_impl->retirementBatches.PushBack(protection);
+            if (m_impl->retirementBatches.Size() != originalRetirementBatchCount + 1u)
+            {
+                rollbackRetirementProtection();
+                return IndexResult::OutOfMemory;
             }
         }
 
+        // Candidate pointers are borrowed until the one durable Save succeeds.
+        // The old container owns unchanged and superseded entries until then.
+        containers::DynamicArray<DependencyRecord*> oldRecords(memory::pools::Assets::GetInstance());
+        containers::HashMap<resources::ResourceId, u32> oldLookup(memory::pools::Assets::GetInstance());
+        oldRecords.Swap(m_impl->records);
+        oldLookup.Swap(m_impl->lookup);
+        candidate.Swap(m_impl->records);
+        candidateLookup.Swap(m_impl->lookup);
         m_impl->changed = true;
         m_impl->reverseDirty = true;
         m_impl->UpdateCountsLocked();
         const IndexResult saved = SaveIndexLocked(*m_impl);
         if (saved != IndexResult::Success)
         {
-            rollbackApplied();
+            candidate.Swap(m_impl->records);
+            candidateLookup.Swap(m_impl->lookup);
+            oldRecords.Swap(m_impl->records);
+            oldLookup.Swap(m_impl->lookup);
+            rollbackRetirementProtection();
+            m_impl->changed = false;
+            m_impl->reverseDirty = true;
+            m_impl->UpdateCountsLocked();
             return saved;
         }
 
+        // The candidate now owns staged publications. Delete only the old
+        // entries that were replaced/retired; unchanged pointers moved intact.
+        for (DependencyRecord* const old : oldRecords)
+        {
+            u32 stagedIndex = 0u;
+            u32 retiredIndex = 0u;
+            const bool obsolete = m_impl->stagedLookup.Find(old->output.GetPath().Id(), stagedIndex) ||
+                                  m_impl->stagedRemovalLookup.Find(old->output.GetPath().Id(), retiredIndex);
+            if (obsolete)
+                VANGUARD_DELETE(old);
+        }
+        for (u32 index = 0; index < stageCount; ++index)
+            m_impl->stagedRecords[index] = nullptr;
         const u64 publications = m_impl->stagedPublications;
         const u64 replacements = m_impl->stagedReplacements;
-        u64 committedReplacements = 0;
-        for (u32 index = 0; index < appliedCount; ++index)
-        {
-            if (applied[index].previous != nullptr)
-            {
-                ++committedReplacements;
-                VANGUARD_DELETE(applied[index].previous);
-            }
-        }
         m_impl->ClearStagedLocked();
         m_impl->transactionActive = false;
         m_impl->stats.publications += publications;
         m_impl->stats.replacements += replacements + committedReplacements;
+        m_impl->stats.removals += removalCount;
         ++m_impl->stats.transactionCommits;
         return IndexResult::Success;
     }
@@ -1733,6 +2511,16 @@ namespace vanguard::assets
         }
         concurrency::ScopedLock guard(m_impl->lock);
         return m_impl->transactionActive;
+    }
+
+    bool DependencyIndex::HasRetirementProtections() const noexcept
+    {
+        if (m_impl == nullptr)
+        {
+            return false;
+        }
+        concurrency::ScopedLock guard(m_impl->lock);
+        return !m_impl->retirementBatches.Empty();
     }
 
     DependencyIndexStats DependencyIndex::GetStats() const noexcept

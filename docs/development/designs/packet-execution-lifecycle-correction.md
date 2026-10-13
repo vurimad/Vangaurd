@@ -17,7 +17,7 @@ All three phases are complete at the source-only gate. No compilation, tests, ge
 | Phase mutation must not overlap consumption | `renderFlowInternalData.cpp`: inclusive `UpdateFlagGuard` for consumption/resource lookup, exclusive guard for `SetPhase` | Explicit allocator coordinator/recording contract; packet/generation lifecycle locks removed in Phase 2 |
 | Detect invalid overlap rather than serialize supported work | `redThreadsThread.h/.inl`: `UpdateFlag` asserts on conflict and is disabled without `RED_ASSERTS_ENABLED` | No new runtime synchronization added in Phase 1; consider reuse of this existing diagnostic primitive in Phase 2 only if needed |
 
-Authoritative RED renderer files are under `D:/root/R6.Root/Mainline/dev/src/common/renderer/src`; the imported concurrency implementation is under `source/imported/common/redSystem`. Vanguard's `jobs::Builder` continuation and dependency adapters delegate to imported `job::Builder(RunContext)` and `DispatchWait`, not an independent scheduler.
+Authoritative RED renderer files are under `D:/root/R6.Root/Mainline/dev/src/common/renderer/src`; the imported concurrency implementation is under `imported/common/redSystem`. Vanguard's `jobs::Builder` continuation and dependency adapters delegate to imported `job::Builder(RunContext)` and `DispatchWait`, not an independent scheduler.
 
 ## Required ownership contract
 

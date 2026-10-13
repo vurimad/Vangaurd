@@ -94,6 +94,19 @@ namespace vanguard::jobs
             return task;
         }
 
+        // Creates a task whose state is owned by the caller. The state must
+        // outlive task execution; the jobs backend invokes no destructor or
+        // deallocator for it. This is intended for frame-owned payloads that
+        // already have a stronger completion lifetime than the dispatched job.
+        [[nodiscard]] static Task CreateBorrowed(void* const state, void (*const execute)(void*, const JobContext&) noexcept) noexcept
+        {
+            if (state == nullptr || execute == nullptr)
+                return {};
+            Task task;
+            task.m_packet = {state, execute, [](void*) noexcept {}};
+            return task;
+        }
+
         [[nodiscard]] explicit operator bool() const noexcept
         {
             return m_packet.state != nullptr;

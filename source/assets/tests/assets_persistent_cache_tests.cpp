@@ -17,12 +17,24 @@ namespace
 
     constexpr resources::ResourceTypeId SourceType = 0x53524345u;
     constexpr resources::ResourceTypeId OutputType = 0x434f4f4bu;
+    constexpr resources::ResourceTypeId OtherOutputType = 0x4f544852u;
+
+    enum class GeneratedFallbackMode : u8
+    {
+        Resolve,
+        Miss,
+        WrongOutput,
+        WrongTarget
+    };
 
     struct CompilerState
     {
         concurrency::Atomic<u32> compileCalls;
         concurrency::Atomic<u32> barrierReady;
         bool synchronizeCompile = false;
+        resources::ResourceReference generatedDependency;
+        u32 generatedFallbackCalls = 0u;
+        GeneratedFallbackMode generatedFallbackMode = GeneratedFallbackMode::Resolve;
     };
 
     int g_failures = 0;
@@ -152,9 +164,71 @@ namespace
         static_cast<void>(manager.DeletePath(root));
     }
 
-    [[nodiscard]] bool Discover(const assets::BuildRequest&, assets::DependencyCollector&, void*) noexcept
+    [[nodiscard]] bool Discover(const assets::BuildRequest& request, assets::DependencyCollector& dependencies, void* const userData) noexcept
     {
+        const auto& state = *static_cast<const CompilerState*>(userData);
+        if (state.generatedDependency.IsValid() && request.output != state.generatedDependency)
+            return dependencies.Add({state.generatedDependency, {}, assets::DependencyRole::Generated,
+                                     assets::DependencyRequirement::Required}) == assets::Result::Success;
         return true;
+    }
+
+    [[nodiscard]] bool Estimate(const assets::BuildRequest&, containers::ArraySpan<const assets::BuildDependency>,
+                                assets::BuildResourceEstimate& estimate, void*) noexcept
+    {
+        estimate.compilerTransientBytes = 64u;
+        estimate.artifactBytes = 64u;
+        return true;
+    }
+
+    [[nodiscard]] bool ResolveGeneratedFallback(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request,
+                                                void* const userData) noexcept
+    {
+        auto& state = *static_cast<CompilerState*>(userData);
+        ++state.generatedFallbackCalls;
+        if (dependency.identity != state.generatedDependency || state.generatedFallbackMode == GeneratedFallbackMode::Miss)
+            return false;
+        const u8 sourceBytes[] = {0xc1u, 0xa5u, 0x7eu};
+        const u8 settingsBytes[] = {0x31u, 0x32u};
+        const resources::ResourceReference output =
+            state.generatedFallbackMode == GeneratedFallbackMode::WrongOutput
+                ? resources::ResourceReference(resources::ResourcePath::FromString("generated/wrong-output.asset"), OutputType)
+                : dependency.identity;
+        const assets::TargetPlatform target = state.generatedFallbackMode == GeneratedFallbackMode::WrongTarget
+                                                  ? assets::TargetPlatform::WindowsVulkan
+                                                  : assets::TargetPlatform::WindowsD3D12;
+        const assets::BuildRequest borrowed{
+            {resources::ResourceReference(resources::ResourcePath::FromString("generated/fallback.asset"), SourceType),
+             {sourceBytes, sizeof(sourceBytes)}, {}},
+            output, target, {settingsBytes, sizeof(settingsBytes)}};
+        return request.CopyFrom(borrowed);
+    }
+
+    [[nodiscard]] filesystem::AbsolutePath MetadataPath(const filesystem::AbsolutePath& source) noexcept
+    {
+        containers::String path(source.AsStringView().Data(), source.AsStringView().Length());
+        path.Append(".vmeta", 6u);
+        return filesystem::AbsolutePath::CreateFilePath(path);
+    }
+
+    [[nodiscard]] bool WriteBytes(filesystem::Manager& manager, const filesystem::AbsolutePath& path, const u8* const bytes,
+                                  const u32 size) noexcept
+    {
+        auto writer = manager.CreateFileWriter(path, filesystem::FOF_Buffered);
+        if (!writer)
+            return false;
+        if (size != 0u)
+            writer->Serialize(const_cast<u8*>(bytes), size);
+        writer->Flush();
+        return !writer->HasErrors() && writer->GetSize() == size;
+    }
+
+    [[nodiscard]] bool WriteMetadata(filesystem::Manager& manager, const filesystem::AbsolutePath& source,
+                                     const assets::AssetMetadata& metadata) noexcept
+    {
+        containers::String text;
+        return assets::EncodeMetadata(metadata, text) == assets::MetadataResult::Success &&
+               WriteBytes(manager, MetadataPath(source), reinterpret_cast<const u8*>(text.AsChar()), text.Length());
     }
 
     [[nodiscard]] bool Compile(const assets::CompileContext& context, assets::ArtifactWriter& writer, void* const userData) noexcept
@@ -201,6 +275,150 @@ namespace
     [[nodiscard]] bool InitializeBuildSystem(assets::BuildSystem& system, const assets::Config& config, const assets::CompilerDescriptor& compiler) noexcept
     {
         return system.Initialize(config) && system.RegisterCompiler(compiler) == assets::Result::Success;
+    }
+
+    void RunGeneratedFallbackTests(filesystem::Manager& manager, const filesystem::AbsolutePath& working,
+                                   const assets::CompilerDescriptor& compiler, CompilerState& state) noexcept
+    {
+        const filesystem::AbsolutePath sourceRoot = working.AddDirPath("vanguard_assets_generated_fallback_sources");
+        const filesystem::AbsolutePath cacheRoot = working.AddDirPath("vanguard_assets_generated_fallback_cache");
+        const filesystem::AbsolutePath indexRoot = working.AddDirPath("vanguard_assets_generated_fallback_index");
+        DeleteTestFiles(manager, sourceRoot);
+        DeleteTestFiles(manager, cacheRoot);
+        DeleteTestFiles(manager, indexRoot);
+        Check(manager.CreatePath(sourceRoot) && manager.CreatePath(cacheRoot) && manager.CreatePath(indexRoot),
+              "generated fallback fixture roots creation");
+
+        const filesystem::AbsolutePath sourcePath = sourceRoot.AddFilePath("root.asset");
+        const filesystem::AbsolutePath unavailableSourcePath = sourceRoot.AddFilePath("unavailable.asset");
+        const u8 rootBytes[] = {0x19u, 0x27u, 0x35u};
+        const u8 unavailableBytes[] = {0x73u, 0x81u, 0x92u};
+        assets::AssetMetadata metadata;
+        metadata.id.bytes[0] = 0x51u;
+        metadata.importer = compiler.id;
+        metadata.importerVersion = compiler.version;
+        metadata.settingsVersion = 1u;
+        assets::AssetOutput& first = metadata.outputs.EmplaceBack();
+        first.key = "root-a";
+        first.type = OutputType;
+        assets::AssetOutput& second = metadata.outputs.EmplaceBack();
+        second.key = "root-b";
+        second.type = OutputType;
+        assets::AssetMetadata unavailableMetadata;
+        unavailableMetadata.id.bytes[0] = 0x52u;
+        unavailableMetadata.importer = compiler.id;
+        unavailableMetadata.importerVersion = compiler.version + 1u;
+        unavailableMetadata.settingsVersion = 1u;
+        assets::AssetOutput& unavailable = unavailableMetadata.outputs.EmplaceBack();
+        unavailable.key = "unavailable";
+        unavailable.type = OutputType;
+        Check(WriteBytes(manager, sourcePath, rootBytes, sizeof(rootBytes)) && WriteMetadata(manager, sourcePath, metadata) &&
+                  WriteBytes(manager, unavailableSourcePath, unavailableBytes, sizeof(unavailableBytes)) &&
+                  WriteMetadata(manager, unavailableSourcePath, unavailableMetadata),
+              "generated fallback fixture sources and metadata write");
+
+        const assets::SourceRoot root{sourceRoot, false};
+        const assets::SourceFile sourceFiles[]{{sourcePath, 0u}, {unavailableSourcePath, 0u}};
+        assets::SourceDatabase sources;
+        Check(sources.Rebuild(manager, {&root, 1u}, {sourceFiles, 2u}) == assets::SourceDatabaseResult::Success,
+              "generated fallback fixture catalog rebuild");
+        const resources::ResourceReference firstOutput = assets::GetAssetOutputReference(metadata.id, metadata.outputs[0]);
+        const resources::ResourceReference secondOutput = assets::GetAssetOutputReference(metadata.id, metadata.outputs[1]);
+        const resources::ResourceReference unavailableOutput =
+            assets::GetAssetOutputReference(unavailableMetadata.id, unavailableMetadata.outputs[0]);
+        Check(sources.LookupOutput(firstOutput) != nullptr && sources.LookupOutput(secondOutput) != nullptr &&
+                  sources.LookupOutput(unavailableOutput) != nullptr,
+              "generated fallback fixture declares every project-owned output");
+
+        const assets::SourceImporterDescriptor importer = assets::MakeDirectSourceImporterDescriptor(compiler, nullptr);
+        assets::ProjectAssetBuildConfig config;
+        config.artifactCacheRoot = cacheRoot;
+        config.dependencyIndexRoot = indexRoot;
+        config.target = assets::TargetPlatform::WindowsD3D12;
+        config.settingsFingerprint.bytes[0] = 0x61u;
+        config.buildSystem.maximumCacheEntries = 0u;
+        config.resolveGeneratedFallback = &ResolveGeneratedFallback;
+        config.resolveGeneratedFallbackUserData = &state;
+        assets::ProjectAssetBuildSystem project;
+        Check(project.Initialize(manager, sources, {&compiler, 1u}, {&importer, 1u}, config) == assets::ProjectAssetBuildResult::Success,
+              "project build system accepts one undeclared-generated fallback provider");
+
+        state.generatedFallbackCalls = 0u;
+        state.generatedFallbackMode = GeneratedFallbackMode::Resolve;
+        state.generatedDependency = secondOutput;
+        assets::ProjectAssetBuildResult requestResult = assets::ProjectAssetBuildResult::InvalidArgument;
+        assets::GraphRequest declaredRequest = project.Request(firstOutput, assets::BuildPriority::Normal, &requestResult);
+        if (declaredRequest)
+            declaredRequest.Wait();
+        Check(requestResult == assets::ProjectAssetBuildResult::Success && declaredRequest.HasSucceeded() &&
+                  state.generatedFallbackCalls == 0u,
+              "declared generated dependencies remain authoritative and never consult the fallback provider");
+        declaredRequest.Reset();
+
+        state.generatedFallbackCalls = 0u;
+        state.generatedDependency = resources::ResourceReference(resources::ResourcePath::FromString("generated/canonical-child.asset"), OutputType);
+        const u32 callsBeforeSharedChild = state.compileCalls.GetValue();
+        assets::GraphRequest firstRequest = project.Request(firstOutput, assets::BuildPriority::Normal, &requestResult);
+        assets::GraphRequest secondRequest = project.Request(secondOutput, assets::BuildPriority::Normal, &requestResult);
+        if (firstRequest)
+            firstRequest.Wait();
+        if (secondRequest)
+            secondRequest.Wait();
+        Check(requestResult == assets::ProjectAssetBuildResult::Success && firstRequest.HasSucceeded() && secondRequest.HasSucceeded() &&
+                  state.generatedFallbackCalls == 2u && state.compileCalls.GetValue() == callsBeforeSharedChild + 3u,
+              "stack-local fallback payload is deeply owned and a shared undeclared child coalesces to one compile");
+        firstRequest.Reset();
+        secondRequest.Reset();
+
+        const u32 callsBeforeManagedPath = state.generatedFallbackCalls;
+        state.generatedDependency = resources::ResourceReference(secondOutput.GetPath(), OtherOutputType);
+        assets::GraphRequest managedPathRequest = project.Request(secondOutput, assets::BuildPriority::Normal, &requestResult);
+        if (managedPathRequest)
+            managedPathRequest.Wait();
+        Check(requestResult == assets::ProjectAssetBuildResult::Success && managedPathRequest.HasFinished() && !managedPathRequest.HasSucceeded() &&
+                  managedPathRequest.GetError() == assets::BuildFailure::ResolutionFailed &&
+                  state.generatedFallbackCalls == callsBeforeManagedPath,
+              "managed project output paths never fall through to the undeclared generated provider on a wrong-type lookup");
+        managedPathRequest.Reset();
+
+        const u32 callsBeforeUnavailableImporter = state.generatedFallbackCalls;
+        state.generatedDependency = unavailableOutput;
+        assets::GraphRequest unavailableImporterRequest = project.Request(firstOutput, assets::BuildPriority::Normal, &requestResult);
+        if (unavailableImporterRequest)
+            unavailableImporterRequest.Wait();
+        Check(requestResult == assets::ProjectAssetBuildResult::Success && unavailableImporterRequest.HasFinished() &&
+                  !unavailableImporterRequest.HasSucceeded() && unavailableImporterRequest.GetError() == assets::BuildFailure::ResolutionFailed &&
+                  state.generatedFallbackCalls == callsBeforeUnavailableImporter,
+              "managed generated outputs with an unavailable persisted importer fail authoritatively without fallback");
+        unavailableImporterRequest.Reset();
+
+        const auto checkRejectedFallback = [&](const char* const path, const GeneratedFallbackMode mode, const char* const message) noexcept
+        {
+            const u32 callsBefore = state.generatedFallbackCalls;
+            state.generatedDependency = resources::ResourceReference(resources::ResourcePath::FromString(path), OutputType);
+            state.generatedFallbackMode = mode;
+            assets::GraphRequest rejected = project.Request(firstOutput, assets::BuildPriority::Normal, &requestResult);
+            if (rejected)
+                rejected.Wait();
+            Check(requestResult == assets::ProjectAssetBuildResult::Success && rejected.HasFinished() && !rejected.HasSucceeded() &&
+                      rejected.GetError() == assets::BuildFailure::ResolutionFailed && state.generatedFallbackCalls == callsBefore + 1u,
+                  message);
+            rejected.Reset();
+        };
+        checkRejectedFallback("generated/provider-miss.asset", GeneratedFallbackMode::Miss,
+                              "required generated dependency fails when the fallback provider declines it");
+        checkRejectedFallback("generated/provider-wrong-output.asset", GeneratedFallbackMode::WrongOutput,
+                              "fallback provider cannot substitute a different generated output identity");
+        checkRejectedFallback("generated/provider-wrong-target.asset", GeneratedFallbackMode::WrongTarget,
+                              "fallback provider cannot escape the project build target");
+
+        state.generatedFallbackMode = GeneratedFallbackMode::Resolve;
+        state.generatedDependency = {};
+        Check(project.Shutdown() == assets::ProjectAssetBuildResult::Success, "generated fallback project build-system shutdown");
+
+        DeleteTestFiles(manager, sourceRoot);
+        DeleteTestFiles(manager, cacheRoot);
+        DeleteTestFiles(manager, indexRoot);
     }
 
     void RunPersistentMaintenanceTests(filesystem::Manager& manager, const filesystem::AbsolutePath& working,
@@ -622,7 +840,7 @@ int main()
 
     CompilerState state;
     const assets::CompilerId compilerId = assets::HashCompilerName("assets.persistent_test");
-    const assets::CompilerDescriptor compiler{compilerId, "assets.persistent_test", 7, SourceType, OutputType, &Discover, &Compile, &state};
+    const assets::CompilerDescriptor compiler{compilerId, "assets.persistent_test", 7, SourceType, OutputType, &Discover, &Compile, &state, &Estimate};
     assets::Config config;
     config.maximumCacheEntries = 0;
     config.persistentCacheRoot = root.AsChar();
@@ -1012,6 +1230,7 @@ int main()
         Check(verificationSystem.Shutdown(), "publication-race verification shutdown");
     }
 
+    RunGeneratedFallbackTests(manager, working, compiler, state);
     RunPersistentMaintenanceTests(manager, working, compiler);
 
     DeleteTestFiles(manager, root);

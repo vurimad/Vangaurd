@@ -23,19 +23,20 @@ project "meshTools"
         "../crypto/include",
         "../resources/include",
         "../assets/include",
+        "../concurrency/include",
         "../diagnostics/include",
         "../meshes/include",
         "../../external/assimp/include",
         "../../external/meshoptimizer/src"
     }
-    links { "assets", "meshes", "meshoptimizer", "assimp", "resources", "crypto", "serialization", "filesystem", "io", "diagnostics", "containers", "memory", "system" }
+    links { "assets", "meshes", "meshoptimizer", "assimp", "resources", "crypto", "serialization", "filesystem", "io", "diagnostics", "concurrency", "containers", "memory", "system" }
     vpaths {
         ["Public API/*"] = { "include/**.hpp" },
         ["Source/*"] = { "src/**.hpp", "src/**.cpp" },
         ["Documentation"] = { "README.md" }
     }
 
-local importedRoot = "../imported/common"
+local importedRoot = "../../imported/common"
 local redSystemRoot = path.join(importedRoot, "redSystem")
 local redMemoryRoot = path.join(importedRoot, "redMemory")
 local redMathRoot = path.join(importedRoot, "redMath")
@@ -44,10 +45,10 @@ local redIORoot = path.join(importedRoot, "redIO")
 local redCoreRoot = path.join(importedRoot, "redCore")
 local redCompressionRoot = path.join(importedRoot, "redCompression")
 local redFileSystemRoot = path.join(importedRoot, "redFileSystem")
-local fileSyncRoot = path.getabsolute("../imported/internal/FileSync")
-local udtRoot = path.getabsolute("../imported/external/udt")
-local oodleRoot = path.getabsolute("../imported/external/oodle")
-local nvToolsRoot = path.getabsolute("../imported/external/nvToolsExt")
+local fileSyncRoot = path.getabsolute("../../imported/internal/FileSync")
+local udtRoot = path.getabsolute("../../imported/external/udt")
+local oodleRoot = path.getabsolute("../../imported/external/oodle")
+local nvToolsRoot = path.getabsolute("../../imported/external/nvToolsExt")
 
 group "Tests/Mesh Tools"
 
@@ -73,6 +74,7 @@ project "meshToolsTests"
         "../crypto/include",
         "../resources/include",
         "../assets/include",
+        "../concurrency/include",
         "../packages/include",
         "../meshes/include",
         path.join(redFileSystemRoot, "include"),
@@ -97,6 +99,8 @@ project "meshToolsTests"
         "packages",
         "packagesCompat",
         "resources",
+        "concurrency",
+        "concurrencyCompat",
         "crypto",
         "serialization",
         "serializationCompat",

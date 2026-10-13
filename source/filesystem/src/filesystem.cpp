@@ -56,6 +56,34 @@ namespace vanguard::filesystem
         return IsInitialized() && ReplaceFile(GetManager(), staged, target);
     }
 
+    bool ReplaceFileWithBackup(Manager& manager, const AbsolutePath& staged, const AbsolutePath& target,
+                               const AbsolutePath& backup) noexcept
+    {
+        if (staged.Empty() || target.Empty() || backup.Empty() || !staged.IsFilePath() || !target.IsFilePath() ||
+            !backup.IsFilePath() || staged == target || staged == backup || target == backup ||
+            paths::ParentAbsolutePath(staged) != paths::ParentAbsolutePath(target) ||
+            paths::ParentAbsolutePath(backup) != paths::ParentAbsolutePath(target) || !manager.FileExist(staged) ||
+            !manager.FileExist(target) || manager.FileExist(backup))
+            return false;
+#if defined(RED_PLATFORM_WINPC)
+        UniChar stagedSystem[::io::REDIO_MAX_PATH_LENGTH]{};
+        UniChar targetSystem[::io::REDIO_MAX_PATH_LENGTH]{};
+        UniChar backupSystem[::io::REDIO_MAX_PATH_LENGTH]{};
+        if (!MakeSystemPath(staged, stagedSystem) || !MakeSystemPath(target, targetSystem) ||
+            !MakeSystemPath(backup, backupSystem))
+            return false;
+        return ::ReplaceFileW(targetSystem, stagedSystem, backupSystem, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr) != FALSE;
+#else
+        static_cast<void>(manager);
+        return false;
+#endif
+    }
+
+    bool ReplaceFileWithBackup(const AbsolutePath& staged, const AbsolutePath& target, const AbsolutePath& backup) noexcept
+    {
+        return IsInitialized() && ReplaceFileWithBackup(GetManager(), staged, target, backup);
+    }
+
     PublishNewFileResult PublishNewFile(Manager& manager, const AbsolutePath& staged, const AbsolutePath& target) noexcept
     {
         if (staged.Empty() || target.Empty() || !staged.IsFilePath() || !target.IsFilePath() || staged == target ||

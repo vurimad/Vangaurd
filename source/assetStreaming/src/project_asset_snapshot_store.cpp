@@ -367,6 +367,46 @@ namespace vanguard::asset_streaming
                    (!diagnostic.hasParsedAssetIdentity || diagnostic.asset.IsValid());
         }
 
+        [[nodiscard]] bool EmptyCohortIntent(const ProjectAssetCohortIntent& intent) noexcept
+        {
+            return !intent.asset.IsValid() && !intent.sourceIdentity.IsValid() && intent.reviewedAcceptedGeneration == 0u &&
+                   intent.targetMetadataFingerprint.IsEmpty() && intent.predecessorOutputs.Empty() && intent.successorOutputs.Empty();
+        }
+
+        [[nodiscard]] bool ValidCohortOutputSet(
+            const containers::DynamicArray<resources::ResourceReference>& outputs) noexcept
+        {
+            if (outputs.Empty())
+                return false;
+            for (u32 index = 0u; index < outputs.Size(); ++index)
+            {
+                if (!outputs[index].IsValid() || !outputs[index].IsTyped() ||
+                    (index != 0u && CompareResource(outputs[index - 1u], outputs[index]) >= 0))
+                    return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool ValidCohortIntent(const ProjectAssetAcceptedBaseline& snapshot) noexcept
+        {
+            const ProjectAssetCohortIntent& intent = snapshot.cohortIntent;
+            if (EmptyCohortIntent(intent))
+                return true;
+            if (!intent.IsActive() || intent.reviewedAcceptedGeneration > snapshot.generation ||
+                intent.predecessorOutputs.Size() > snapshot.limits.maximumOutputs ||
+                intent.successorOutputs.Size() > snapshot.limits.maximumOutputs ||
+                (!intent.predecessorOutputs.Empty() && !ValidCohortOutputSet(intent.predecessorOutputs)) ||
+                !ValidCohortOutputSet(intent.successorOutputs))
+                return false;
+            for (const ProjectAssetState& state : snapshot.assets)
+                if (state.asset == intent.asset)
+                    return state.sourceIdentity == intent.sourceIdentity;
+            // A first import has no accepted predecessor yet. The target VMETA
+            // digest validates this write-ahead marker after transaction recovery;
+            // a reimport must still bind to the exact accepted source owner.
+            return intent.predecessorOutputs.Empty();
+        }
+
         [[nodiscard]] ProjectAssetSnapshotResult ValidateSnapshotForWrite(const ProjectAssetAcceptedBaseline& snapshot) noexcept
         {
             if (!snapshot.limits.IsValid() || snapshot.assets.Size() > snapshot.limits.maximumAssets ||
@@ -415,6 +455,8 @@ namespace vanguard::asset_streaming
                 if (!ValidDiagnostic(snapshot.diagnostics[index]) ||
                     (index != 0u && !DiagnosticLess(snapshot.diagnostics[index - 1u], snapshot.diagnostics[index])))
                     return ProjectAssetSnapshotResult::InvalidState;
+            if (!ValidCohortIntent(snapshot))
+                return ProjectAssetSnapshotResult::InvalidState;
             return ProjectAssetSnapshotResult::Success;
         }
 
@@ -454,6 +496,26 @@ namespace vanguard::asset_streaming
                    writer.WriteU32(static_cast<u32>(diagnostic.reasons));
         }
 
+        [[nodiscard]] bool WriteResourceReference(BufferWriter& writer, const resources::ResourceReference output) noexcept
+        {
+            return writer.WriteU64(output.GetPath().Id()) && writer.WriteU32(output.ExpectedType());
+        }
+
+        [[nodiscard]] bool WriteCohortIntent(BufferWriter& writer, const ProjectAssetCohortIntent& intent) noexcept
+        {
+            if (!intent.IsActive())
+                return true;
+            bool written = writer.WriteBytes(intent.asset.bytes, sizeof(intent.asset.bytes)) &&
+                           writer.WriteU64(intent.sourceIdentity.Id()) && writer.WriteU64(intent.reviewedAcceptedGeneration) &&
+                           writer.WriteBytes(intent.targetMetadataFingerprint.bytes, crypto::Digest256::ByteCount) &&
+                           writer.WriteU32(intent.predecessorOutputs.Size()) && writer.WriteU32(intent.successorOutputs.Size());
+            for (const resources::ResourceReference output : intent.predecessorOutputs)
+                written = written && WriteResourceReference(writer, output);
+            for (const resources::ResourceReference output : intent.successorOutputs)
+                written = written && WriteResourceReference(writer, output);
+            return written;
+        }
+
         [[nodiscard]] ProjectAssetSnapshotResult BuildSerializedSnapshot(const ProjectAssetAcceptedBaseline& snapshot,
                                                                          BufferWriter& writer) noexcept
         {
@@ -466,7 +528,8 @@ namespace vanguard::asset_streaming
                            writer.WriteU16(ProjectAssetSnapshotMinorVersion) && writer.WriteU32(ProjectAssetSnapshotHeaderSize) &&
                            writer.WriteU32(snapshot.assets.Size()) && writer.WriteU32(snapshot.tombstones) &&
                            writer.WriteU32(snapshot.outputs.Size()) && writer.WriteU32(snapshot.references.Size()) &&
-                           writer.WriteU32(snapshot.diagnostics.Size()) && writer.WriteU32(0u) && writer.WriteU64(0u) &&
+                           writer.WriteU32(snapshot.diagnostics.Size()) && writer.WriteU32(snapshot.cohortIntent.IsActive() ? 1u : 0u) &&
+                           writer.WriteU64(0u) &&
                            writer.WriteU64(snapshot.generation) && writer.WriteBytes(empty.bytes, crypto::Digest256::ByteCount);
             const u8 reserved[ProjectAssetSnapshotHeaderSize - 84u]{};
             written = written && writer.WriteBytes(reserved, sizeof(reserved));
@@ -481,6 +544,7 @@ namespace vanguard::asset_streaming
             }
             for (const ProjectAssetSourceDiagnostic& diagnostic : snapshot.diagnostics)
                 written = written && WriteDiagnostic(writer, diagnostic);
+            written = written && WriteCohortIntent(writer, snapshot.cohortIntent);
             if (!written)
                 return ProjectAssetSnapshotResult::LimitExceeded;
 
@@ -617,6 +681,58 @@ namespace vanguard::asset_streaming
             return hasParsedAssetIdentity <= 1u && ValidDiagnostic(diagnostic);
         }
 
+        [[nodiscard]] bool ReadResourceReference(BufferReader& reader, resources::ResourceReference& output) noexcept
+        {
+            u64 path = 0u;
+            u32 type = resources::InvalidResourceTypeId;
+            if (!reader.ReadU64(path) || !reader.ReadU32(type))
+                return false;
+            output = resources::ResourceReference(resources::ResourcePath::FromId(path), type);
+            return output.IsValid() && output.IsTyped();
+        }
+
+        [[nodiscard]] bool ReadCohortIntent(BufferReader& reader, const ProjectAssetChangeStateLimits& limits,
+                                            ProjectAssetCohortIntent& intent) noexcept
+        {
+            u64 sourceIdentity = 0u;
+            u32 predecessorCount = 0u;
+            u32 successorCount = 0u;
+            if (!reader.ReadBytes(intent.asset.bytes, sizeof(intent.asset.bytes)) || !reader.ReadU64(sourceIdentity) ||
+                !reader.ReadU64(intent.reviewedAcceptedGeneration) ||
+                !reader.ReadBytes(intent.targetMetadataFingerprint.bytes, crypto::Digest256::ByteCount) ||
+                !reader.ReadU32(predecessorCount) || !reader.ReadU32(successorCount))
+                return false;
+            intent.sourceIdentity = resources::ResourcePath::FromId(sourceIdentity);
+            if (successorCount == 0u || predecessorCount > limits.maximumOutputs ||
+                successorCount > limits.maximumOutputs)
+                return false;
+            intent.predecessorOutputs.Reserve(predecessorCount);
+            intent.successorOutputs.Reserve(successorCount);
+            if (intent.predecessorOutputs.Capacity() < predecessorCount || intent.successorOutputs.Capacity() < successorCount)
+                return false;
+            for (u32 index = 0u; index < predecessorCount; ++index)
+            {
+                resources::ResourceReference output;
+                if (!ReadResourceReference(reader, output) ||
+                    (index != 0u && CompareResource(intent.predecessorOutputs[index - 1u], output) >= 0))
+                    return false;
+                intent.predecessorOutputs.PushBack(output);
+                if (intent.predecessorOutputs.Size() != index + 1u)
+                    return false;
+            }
+            for (u32 index = 0u; index < successorCount; ++index)
+            {
+                resources::ResourceReference output;
+                if (!ReadResourceReference(reader, output) ||
+                    (index != 0u && CompareResource(intent.successorOutputs[index - 1u], output) >= 0))
+                    return false;
+                intent.successorOutputs.PushBack(output);
+                if (intent.successorOutputs.Size() != index + 1u)
+                    return false;
+            }
+            return intent.IsActive();
+        }
+
         [[nodiscard]] ProjectAssetSnapshotResult ParseSnapshot(const containers::DynamicArray<u8>& bytes,
                                                                const ProjectAssetChangeStateLimits& limits,
                                                                ProjectAssetAcceptedBaseline& destination) noexcept
@@ -643,12 +759,12 @@ namespace vanguard::asset_streaming
                 !reader.ReadBytes(reservedHeader, sizeof(reservedHeader)))
                 return ProjectAssetSnapshotResult::Corrupt;
             if (magic != ProjectAssetSnapshotMagic || major != ProjectAssetSnapshotMajorVersion ||
-                minor != ProjectAssetSnapshotMinorVersion || headerSize != ProjectAssetSnapshotHeaderSize)
+                minor > ProjectAssetSnapshotMinorVersion || headerSize != ProjectAssetSnapshotHeaderSize)
                 return ProjectAssetSnapshotResult::Incompatible;
             bool reservedHeaderZero = true;
             for (const u8 value : reservedHeader)
                 reservedHeaderZero = reservedHeaderZero && value == 0u;
-            if (reserved32 != 0u || !reservedHeaderZero || fileSize != bytes.Size() ||
+            if ((minor == 0u ? reserved32 != 0u : reserved32 > 1u) || !reservedHeaderZero || fileSize != bytes.Size() ||
                 crypto::Sha256(bytes.TypedData() + ProjectAssetSnapshotHeaderSize, bytes.Size() - ProjectAssetSnapshotHeaderSize) != checksum)
                 return ProjectAssetSnapshotResult::Corrupt;
             if (assetCount > limits.maximumAssets || tombstoneCount > limits.maximumTombstones || tombstoneCount > assetCount ||
@@ -740,6 +856,8 @@ namespace vanguard::asset_streaming
                 if (parsed.diagnostics.Size() != before + 1u)
                     return ProjectAssetSnapshotResult::OutOfMemory;
             }
+            if (minor >= 1u && reserved32 == 1u && !ReadCohortIntent(reader, limits, parsed.cohortIntent))
+                return reader.OutOfMemory() ? ProjectAssetSnapshotResult::OutOfMemory : ProjectAssetSnapshotResult::Corrupt;
             if (reader.Position() != reader.Size())
                 return ProjectAssetSnapshotResult::Corrupt;
 
@@ -765,6 +883,8 @@ namespace vanguard::asset_streaming
             }
             if (parsed.backwardReferences.Size() > 1u)
                 std::sort(parsed.backwardReferences.Begin(), parsed.backwardReferences.End(), ReferenceToLess);
+            if (!ValidCohortIntent(parsed))
+                return ProjectAssetSnapshotResult::Corrupt;
 
             // Durable images intentionally carry no current changes or
             // invalidation work. Those arrays remain empty in `parsed`.
@@ -820,12 +940,11 @@ namespace vanguard::asset_streaming
         ProjectAssetSnapshotResult loaded = ReadSnapshotFile(files, path, limits.maximumSerializedBytes, bytes);
         if (loaded == ProjectAssetSnapshotResult::Success)
             loaded = ParseSnapshot(bytes, limits, destination);
-        if (loaded == ProjectAssetSnapshotResult::Corrupt || loaded == ProjectAssetSnapshotResult::Incompatible ||
-            loaded == ProjectAssetSnapshotResult::LimitExceeded)
-        {
-            if (!files.DeleteFile(path))
-                return ProjectAssetSnapshotResult::IoFailure;
-        }
+        // VPAS 1.1 carries the P5 write-ahead cohort intent that protects the
+        // previous visible generation before a VADI retirement journal exists.
+        // An unusable final image is therefore safety-critical evidence: preserve
+        // it for diagnosis/recovery and let pipeline initialization fail closed.
+        // Only an actually missing image is a valid bootstrap condition.
         return loaded;
     }
 

@@ -24,11 +24,15 @@ code must never depend on editor UI code.
 Vellum is designed against the end-state capability of a shipped AAA game UI system, not against
 the easiest first rectangle or menu.
 
-The user's direction is explicit: REDengine ink is a master-class reference and Vellum should
-copy as much of its practical capability as useful, then improve the implementation where Vanguard
-can provide cleaner ownership, stronger performance contracts or better tooling. Unreal Slate/UMG
-is a second source-level reference, especially for semantic invalidation, focus/navigation, event
-replies, virtualization, text shaping and renderer separation.
+The user's direction is explicit: REDengine ink is the authoritative implementation target for
+Vellum. As of 2026-10-10, Vellum should follow ink **1:1 by default** in architecture, subsystem
+boundaries, runtime semantics, behavior, data flow, authoring capability and ownership contracts.
+Do not replace an ink design because a different design appears cleaner, newer or theoretically
+faster. Adapt only where Vanguard's already-established engine ownership/API boundaries make a
+literal port impossible, preserve ink-observable behavior and structure as closely as possible, and
+record such deviations. Any intentional semantic/architectural departure otherwise requires explicit
+user authorization. Unreal Slate/UMG is a secondary source-level reference only for areas where ink
+does not provide the needed contract.
 
 The first implementation must therefore be **small in breadth but final-direction in architecture**.
 The following naive shortcuts are rejected even for the first proof:
@@ -413,6 +417,24 @@ production path for:
 Shaping/layout results should be immutable/hash-keyed where practical. Locale/font/text changes
 invalidate shaping explicitly; unrelated paint changes do not.
 
+The program splits this work at a deliberate backend boundary. **V2.5 Text Backend** owns font-file
+ingestion and face instances, Unicode/script/direction shaping services, font fallback resolution,
+glyph raster/vector representation, glyph cache/atlas population, and renderer-facing `GlyphRun`
+lowering. **V3 Text** builds the semantic text system above that backend: text nodes and paragraphs,
+line breaking/wrapping/alignment/overflow, localization and live locale changes, rich runs, inline
+content, and shaped-layout cache orchestration. Editable interaction such as selection/caret focus and
+IME session ownership remains integrated with V4 Interaction rather than being hidden inside the
+backend.
+
+**V2.5 implementation lock:** copy RED ink's proven backend architecture 1:1 rather than
+engineering a new primary text renderer. The reference path is ICU -> HarfBuzz -> shaped-text cache ->
+FreeType hinted grayscale rasterization -> dynamic `R8_UNORM` glyph atlas -> glyph quads/instances.
+Use RED's `common/textSystem`, `common/inkRendering`, `common/renderData/src/font.cpp`, and
+`common/renderer/src/fontCache.*` as the direct implementation references. Preserve the behavior,
+ownership split, cache model and raster path; adapt only unavoidable integration plumbing to Vanguard's
+existing renderer/resource APIs. MSDF/SDF or direct GPU outline rendering are not substitutes for the
+ink baseline unless the user explicitly authorizes that deviation later.
+
 ### Input prompts and conditional presentation
 
 Vellum must be able to author semantic input prompts that resolve through Vanguard game-input/device
@@ -625,7 +647,7 @@ cooked Vellum document
   -> compact runtime instance
   -> semantic invalidation
   -> measure + arrange
-  -> Rect + Image (+ Text once shaping foundation is ready)
+  -> Rect + Image (+ GlyphRun once the V2.5 text backend is ready)
   -> retained display-list segment
   -> Vanguard renderer UI phase
   -> ordinary viewport presentation
@@ -647,6 +669,7 @@ The authoritative program decomposition is now
 - V0 Architecture;
 - V1 Runtime kernel;
 - V2 Rendering foundation;
+- V2.5 Text Backend;
 - V3 Text;
 - V4 Interaction;
 - V5 Styling / behavior / animation;
@@ -657,8 +680,9 @@ The authoritative program decomposition is now
 
 The closed detailed V0 architecture record is
 [`vellum-v0-architecture-plan.md`](vellum-v0-architecture-plan.md). V0 was architecture-only and
-contains its own Definition + P0-P6 closure evidence. V1-V9 remain separately gated, unauthorized
-production phases until explicitly started.
+contains its own Definition + P0-P6 closure evidence. V1 Runtime Kernel was explicitly started on
+2026-10-10 and is now closed under `vellum-v1-runtime-kernel-plan.md`; V2, V2.5 and V3-V9 remain
+separately gated, unauthorized production phases until explicitly started.
 
 ## Definition exit conditions
 

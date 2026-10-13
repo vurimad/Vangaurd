@@ -3,8 +3,8 @@
  */
 #pragma once
 
-#include "../../../imported/common/redSystem/include/redSystemPublic.h"
-#include "../../../imported/common/redSystem/include/hash.h"
+#include "../../../../imported/common/redSystem/include/redSystemPublic.h"
+#include "../../../../imported/common/redSystem/include/hash.h"
 
 #include "redMathApi.h"
 

@@ -48,6 +48,11 @@ namespace vanguard::rendering::detail
 
     struct CandidateResource
     {
+        enum Flag : u8
+        {
+            FastPathExceptional = 1u << 0,
+        };
+
         CandidateResource() noexcept : name(memory::pools::Rendering::GetInstance()) {}
 
         void Reset() noexcept
@@ -56,6 +61,8 @@ namespace vanguard::rendering::detail
             flowSpace = {};
             logicalNameHash = 0;
             name.Clear();
+            planningFlags = 0;
+            namedScopeDepth = 0;
         }
 
         void SetNameBounded(const containers::StringView value) noexcept
@@ -83,6 +90,11 @@ namespace vanguard::rendering::detail
         containers::String name;
         u8 nameDormantFrames = 0;
         bool nameRetentionTracked = false;
+        u8 planningFlags = 0;
+        u8 namedScopeDepth = 0;
+
+        void MarkFastPathExceptional() noexcept { planningFlags |= FastPathExceptional; }
+        [[nodiscard]] bool FastPathEligible() const noexcept { return (planningFlags & FastPathExceptional) == 0 && namedScopeDepth == 0; }
     };
 
     struct CandidateTextureView
@@ -136,6 +148,37 @@ namespace vanguard::rendering::detail
         u32 endSequence = InvalidRenderFlowResourceIndex;
         CandidateUsePayload payload;
     };
+
+    struct CandidateSemanticEvent
+    {
+        static constexpr u32 UseEndBit = 0x80000000u;
+        static constexpr u32 IndexMask = ~UseEndBit;
+
+        u32 value = InvalidRenderFlowResourceIndex;
+
+        [[nodiscard]] static CandidateSemanticEvent Operation(const u32 operationIndex) noexcept
+        {
+            CandidateSemanticEvent result;
+            result.value = operationIndex;
+            return result;
+        }
+
+        [[nodiscard]] static CandidateSemanticEvent UseEnd(const u32 useIndex) noexcept
+        {
+            CandidateSemanticEvent result;
+            result.value = UseEndBit | useIndex;
+            return result;
+        }
+
+        [[nodiscard]] bool IsValid() const noexcept { return value != InvalidRenderFlowResourceIndex; }
+        [[nodiscard]] bool IsUseEnd() const noexcept { return IsValid() && (value & UseEndBit) != 0; }
+        [[nodiscard]] bool IsOperation() const noexcept { return IsValid() && (value & UseEndBit) == 0; }
+        [[nodiscard]] u32 Index() const noexcept { return value & IndexMask; }
+
+        [[nodiscard]] friend constexpr bool operator==(const CandidateSemanticEvent&, const CandidateSemanticEvent&) noexcept = default;
+    };
+
+    static_assert(sizeof(CandidateSemanticEvent) == 4);
 
     union CandidateOperationPayload
     {
@@ -305,7 +348,7 @@ namespace vanguard::rendering::detail
     {
         CandidateWriterBatch() noexcept
             : resources(memory::pools::Rendering::GetInstance()), textureViews(memory::pools::Rendering::GetInstance()), bufferViews(memory::pools::Rendering::GetInstance()),
-              coldPayloads(memory::pools::Rendering::GetInstance()), uses(memory::pools::Rendering::GetInstance()), useEndOrder(memory::pools::Rendering::GetInstance()),
+              coldPayloads(memory::pools::Rendering::GetInstance()), uses(memory::pools::Rendering::GetInstance()), semanticEvents(memory::pools::Rendering::GetInstance()),
               operations(memory::pools::Rendering::GetInstance()),
               namedResourceSlots(memory::pools::Rendering::GetInstance()), namedResourceStamps(memory::pools::Rendering::GetInstance()),
               oversizedNameSlots(memory::pools::Rendering::GetInstance())
@@ -326,7 +369,7 @@ namespace vanguard::rendering::detail
             bufferViews.Clear();
             coldPayloads.Clear();
             uses.Clear();
-            useEndOrder.Clear();
+            semanticEvents.Clear();
             operations.Clear();
             ResetNamedResourceIndex();
             node = batchNode;
@@ -335,6 +378,7 @@ namespace vanguard::rendering::detail
             sessionGeneration = generation;
             declarationCount = 0;
             semanticSequenceCount = 0;
+            openUseCount = 0;
             stepCount = 0;
             explicitScopeOpenCount = 0;
             decisionCount = 0;
@@ -523,7 +567,10 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<CandidateBufferView> bufferViews;
         containers::DynamicArray<CandidateColdPayload> coldPayloads;
         containers::DynamicArray<CandidateUse> uses;
-        containers::DynamicArray<u32> useEndOrder;
+        // Authoritative dense semantic order. Recording publishes one compact
+        // entry for every operation and UseEnd, so Resolve never has to merge
+        // two independently ordered tapes back together.
+        containers::DynamicArray<CandidateSemanticEvent> semanticEvents;
         containers::DynamicArray<CandidateOperation> operations;
         containers::DynamicArray<u32> namedResourceSlots;
         containers::DynamicArray<u32> namedResourceStamps;
@@ -531,6 +578,7 @@ namespace vanguard::rendering::detail
         u32 resourceCount = 0;
         u32 declarationCount = 0;
         u32 semanticSequenceCount = 0;
+        u32 openUseCount = 0;
         u32 stepCount = 0;
         u32 explicitScopeOpenCount = 0;
         u32 decisionCount = 0;
@@ -614,6 +662,10 @@ namespace vanguard::rendering::detail
         PlanPosition declarationPosition;
         PlanPosition firstUsePosition;
         PlanPosition lastUsePosition;
+        // Dense frame-semantic ordinals preserve the exact PlanPosition ordering
+        // without requiring ordered structures to compare two-field keys.
+        u32 firstUseSemanticOrdinal = InvalidRenderFlowResourceIndex;
+        u32 lastUseSemanticOrdinal = InvalidRenderFlowResourceIndex;
         u32 firstUseCommandScopeIndex = InvalidRenderFlowResourceIndex;
         u32 lastUseCommandScopeIndex = InvalidRenderFlowResourceIndex;
         PhysicalResourceId physical;
@@ -658,6 +710,12 @@ namespace vanguard::rendering::detail
         u32 aliasPredecessorCount = 0;
         u32 actionTapeOffset = 0;
         u32 actionTapeCount = 0;
+        u32 resourceBinding = InvalidRenderFlowResourceIndex;
+        // RF17 packet-local exact-state lowering owns ordinary use-state barriers.
+        // This span addresses CompiledPacket::compiledBarriers and executes after
+        // alias activation, before this step's exceptional before-action slice.
+        u32 compiledBarrierOffset = 0;
+        u32 compiledBarrierCount = 0;
         rhi::ResourceState terminalState = rhi::ResourceState::Unknown;
         TextureClearValue nativeTextureClearValue;
         BufferClearValue nativeBufferClearValue;
@@ -666,6 +724,9 @@ namespace vanguard::rendering::detail
         bool finalizeForAlias = false;
         bool nativeHasClear = false;
         bool terminalPresent = false;
+        // Resolve-time intent consumed by RF17's packet-local exact-state compiler.
+        // Runtime execution never lowers Unknown -> requiredState from this flag.
+        bool localStateRequired = false;
     };
 
     enum class CompiledResourceActionKind : u8
@@ -689,6 +750,12 @@ namespace vanguard::rendering::detail
         CompiledResourceActionKind kind = CompiledResourceActionKind::BufferTransition;
         u32 logicalAllocation = InvalidRenderFlowResourceIndex;
         PhysicalResourceId physical;
+        u32 resourceBinding = InvalidRenderFlowResourceIndex;
+        // Barrier actions retain their semantic action record for generic fallback
+        // and validation, but their exact native request lives in this packet-local
+        // compiled barrier span. Non-barrier actions keep a zero count.
+        u32 compiledBarrierOffset = 0;
+        u32 compiledBarrierCount = 0;
         rhi::ResourceState before = rhi::ResourceState::Unknown;
         rhi::ResourceState after = rhi::ResourceState::Unknown;
         rhi::SubresourceRange textureSubresources;
@@ -703,9 +770,10 @@ namespace vanguard::rendering::detail
         Exit
     };
 
-    // One entry per compiled step that has real semantic execution work.
-    // Begin order is alias activation then action slice; End order is action
-    // slice then alias finalization. Exit entries address packet.exitActions.
+    // One entry per compiled step that has exceptional semantic work. Ordinary
+    // local state requests remain intrinsic to begin steps. Begin exceptional
+    // order is alias activation then action slice; End order is action slice then
+    // alias finalization. Exit entries address packet.exitActions.
     struct CompiledActionTapeEntry
     {
         CompiledActionTapePhase phase = CompiledActionTapePhase::Begin;
@@ -861,8 +929,11 @@ namespace vanguard::rendering::detail
         CompiledPacket() noexcept
             : steps(memory::pools::Rendering::GetInstance()), beginStepByUseOrdinal(memory::pools::Rendering::GetInstance()), endStepByUseOrdinal(memory::pools::Rendering::GetInstance()),
               actions(memory::pools::Rendering::GetInstance()), actionTape(memory::pools::Rendering::GetInstance()), aliasPredecessors(memory::pools::Rendering::GetInstance()),
-              aliasPredecessorPhysicalIndices(memory::pools::Rendering::GetInstance()),
-              decisions(memory::pools::Rendering::GetInstance()), entryStates(memory::pools::Rendering::GetInstance()), exitActions(memory::pools::Rendering::GetInstance()), statePredecessorPackets(memory::pools::Rendering::GetInstance())
+              aliasPredecessorPhysicalIndices(memory::pools::Rendering::GetInstance()), aliasPredecessorBindingSlots(memory::pools::Rendering::GetInstance()),
+              decisions(memory::pools::Rendering::GetInstance()), resourceBindings(memory::pools::Rendering::GetInstance()), resourceBindingPhysicals(memory::pools::Rendering::GetInstance()),
+              resourceBindingShaderResources(memory::pools::Rendering::GetInstance()), resourceBindingUnorderedAccess(memory::pools::Rendering::GetInstance()),
+              entryStates(memory::pools::Rendering::GetInstance()), compiledBarriers(memory::pools::Rendering::GetInstance()), compiledBarrierBatches(memory::pools::Rendering::GetInstance()),
+              exitActions(memory::pools::Rendering::GetInstance()), statePredecessorPackets(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -876,6 +947,9 @@ namespace vanguard::rendering::detail
         CommandScopeId commandScope;
         rhi::QueueType queue = rhi::QueueType::Graphics;
         containers::DynamicArray<CompiledStep> steps;
+        // Expected certified structural step count even when the warm
+        // execution-program path defers copying this array until validation.
+        u32 structuralStepCount = 0;
         // Dense ResourceUseId.ordinal -> TextureUseBegin/BufferUseBegin step.
         // Sealed while steps are emitted/copied so later execution-range publication
         // never needs to rescan the packet's use stream.
@@ -886,8 +960,27 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<CompiledActionTapeEntry> actionTape;
         containers::DynamicArray<rhi::ResourceRef> aliasPredecessors;
         containers::DynamicArray<u32> aliasPredecessorPhysicalIndices;
+        containers::DynamicArray<u32> aliasPredecessorBindingSlots;
         containers::DynamicArray<CapturedDecisionRecord> decisions;
+        // Sorted unique native resource table for this packet's compiled resource
+        // execution. OpenCursor admits this table to the command list once; generic
+        // node recording may still add resources outside the table normally.
+        containers::DynamicArray<rhi::ResourceRef> resourceBindings;
+        // Packet-local binding slot -> generation physical identity. Kept parallel
+        // with resourceBindings so execution validates the packet-local slot once
+        // instead of rediscovering the generation-wide physical record per action.
+        containers::DynamicArray<PhysicalResourceId> resourceBindingPhysicals;
+        // Canonical whole-resource descriptor witnesses are packet-local too so
+        // resolved-use publication does not return to the generation-wide physical
+        // table after the binding slot has already been proved.
+        containers::DynamicArray<rhi::DescriptorHandle> resourceBindingShaderResources;
+        containers::DynamicArray<rhi::DescriptorHandle> resourceBindingUnorderedAccess;
         containers::DynamicArray<rhi::CommandListEntryState> entryStates;
+        // RF17 exact barrier program. Entries are appended in semantic execution
+        // order. Parallel batch ids identify dependency-free native runs; Invalid
+        // marks a generic-only transition (currently Present/fixed-heap cases).
+        containers::DynamicArray<rhi::CompiledBarrier> compiledBarriers;
+        containers::DynamicArray<u32> compiledBarrierBatches;
         containers::DynamicArray<CompiledResourceAction> exitActions;
         u32 exitActionTapeOffset = 0;
         u32 exitActionTapeCount = 0;
@@ -963,6 +1056,7 @@ namespace vanguard::rendering::detail
     struct RetainedImportRecord
     {
         ExternalResourceToken token;
+        ResourceContractPatchId contractPatch;
         FrameResourceDesc desc;
         rhi::Texture texture;
         rhi::Buffer buffer;
@@ -973,6 +1067,21 @@ namespace vanguard::rendering::detail
         ImportReadinessKind readiness = ImportReadinessKind::SameQueueContinuation;
         rhi::GpuFence incomingWait;
         rhi::AcquiredBackBuffer presentationAcquisition;
+    };
+
+    // Allocator-persistent canonical descriptor owner for externally retained
+    // resources. The ResourceRef carries the native resource generation; the
+    // allocator cache itself is scoped to one RHI/device incarnation and one
+    // descriptor-domain generation. Frame generations borrow handles from these
+    // owners and never retire them directly.
+    struct RetainedImportDescriptorOwner
+    {
+        rhi::ResourceRef resource;
+        CanonicalResourceDescriptors descriptors;
+        rhi::ResidencyFenceSet safeAfter;
+        u32 activeBorrows = 0;
+        u32 reusablePosition = InvalidRenderFlowResourceIndex;
+        FrameResourceKind kind = FrameResourceKind::Invalid;
     };
 
     enum class PhysicalBindingKind : u8
@@ -999,15 +1108,16 @@ namespace vanguard::rendering::detail
         u16 textureArraySize = 1;
         rhi::MemoryType bufferMemoryType = rhi::MemoryType::DeviceLocal;
         u32 retainedImport = InvalidRenderFlowResourceIndex;
+        u32 retainedDescriptorOwner = InvalidRenderFlowResourceIndex;
         bool explicitState = false;
         rhi::DescriptorHandle shaderResource;
         rhi::DescriptorHandle unorderedAccess;
     };
 
-        // Dedicated/placed canonical handles are borrowed from their physical
-        // owners. RetainedImport handles, when present, are generation-owned and
-        // retire at the terminal receipt before physical bindings are released.
-        static_assert(sizeof(PhysicalBindingRecord) == 68);
+    // Every canonical handle is borrowed from a persistent physical/import
+    // owner. Generation teardown releases the retained-import borrow but does
+    // not rewrite or retire the descriptor bundle on an ordinary frame.
+    static_assert(sizeof(PhysicalBindingRecord) == 72);
 
     struct SealedWriterRecord
     {
@@ -1016,9 +1126,10 @@ namespace vanguard::rendering::detail
         u32 textureViewOffset = 0;
         u32 bufferViewOffset = 0;
         u32 useRecordOffset = 0;
+        u32 semanticEventOffset = 0;
     };
 
-    static_assert(sizeof(SealedWriterRecord) == 20);
+    static_assert(sizeof(SealedWriterRecord) == 24);
 
     struct SealedPlanningSummary
     {
@@ -1029,8 +1140,10 @@ namespace vanguard::rendering::detail
             textureViewCount = 0;
             bufferViewCount = 0;
             useBeginCount = 0;
+            unterminatedUseCount = 0;
             explicitScopeOpenCount = 0;
             exportCount = 0;
+            semanticEventCount = 0;
         }
 
         u32 declarationCount = 0;
@@ -1038,8 +1151,10 @@ namespace vanguard::rendering::detail
         u32 textureViewCount = 0;
         u32 bufferViewCount = 0;
         u32 useBeginCount = 0;
+        u32 unterminatedUseCount = 0;
         u32 explicitScopeOpenCount = 0;
         u32 exportCount = 0;
+        u32 semanticEventCount = 0;
     };
 
     struct NamedScopeState
@@ -1069,6 +1184,7 @@ namespace vanguard::rendering::detail
         u32 firstUseRecord = InvalidRenderFlowResourceIndex;
         u32 lastUseBeginRecord = InvalidRenderFlowResourceIndex;
         u32 terminalUseRecord = InvalidRenderFlowResourceIndex;
+        u8 useQueueMask = 0;
         rhi::ResourceState bufferState = rhi::ResourceState::Common;
         bool bufferContentsDefined = false;
         CommandScopeId bufferLastCommandScope;
@@ -1092,7 +1208,7 @@ namespace vanguard::rendering::detail
     struct WholeFrameLane
     {
         u64 capacity = 0;
-        PlanPosition lastUsePosition;
+        u32 lastUseSemanticOrdinal = InvalidRenderFlowResourceIndex;
         u32 lastUseCommandScopeIndex = InvalidRenderFlowResourceIndex;
         u32 physicalIndex = InvalidRenderFlowResourceIndex;
         u32 reuseClass = InvalidRenderFlowResourceIndex;
@@ -1102,6 +1218,10 @@ namespace vanguard::rendering::detail
     struct PersistentDedicatedPlanAllocation
     {
         FrameResourceDesc desc;
+        // Certified physical request is immutable for the lifetime of this
+        // exact dedicated contract. Rebuild only when the contract changes;
+        // warm assignment must still acquire/check the live owner each frame.
+        DedicatedResourceRequest dedicatedRequest;
         PlanPosition firstUsePosition;
         PlanPosition lastUsePosition;
         u32 firstUseCommandScopeIndex = InvalidRenderFlowResourceIndex;
@@ -1131,6 +1251,99 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<DedicatedResourceLease> leases;
     };
 
+    // Immutable native-state program captured after the certified dedicated
+    // assignment topology has been lowered. It owns no RHI handles, descriptor
+    // borrows, packet liveness, or frame fences: every execution generation
+    // receives its own patched copy before publication.
+    struct PersistentStateDescriptorWitness
+    {
+        PhysicalBindingKind kind = PhysicalBindingKind::DedicatedPool;
+        FrameResourceKind resourceKind = FrameResourceKind::Invalid;
+        rhi::ResourceState initialState = rhi::ResourceState::Unknown;
+        u32 usage = 0;
+        u16 mipCount = 0;
+        u16 arraySize = 0;
+        rhi::MemoryType memoryType = rhi::MemoryType::DeviceLocal;
+        bool explicitState = false;
+    };
+
+    struct PersistentStateEntryCell
+    {
+        rhi::ResourceState state = rhi::ResourceState::Unknown;
+        rhi::TextureSubresource subresource;
+    };
+
+    struct PersistentStateEntryGroup
+    {
+        u32 offset = 0;
+        u32 count = 0;
+    };
+
+    struct PersistentStateBindingSort
+    {
+        rhi::ResourceRef resource;
+        u32 oldSlot = InvalidRenderFlowResourceIndex;
+    };
+
+    struct PersistentStatePacket
+    {
+        PersistentStatePacket() noexcept
+            : steps(memory::pools::Rendering::GetInstance()), actions(memory::pools::Rendering::GetInstance()),
+              exitActions(memory::pools::Rendering::GetInstance()), actionTape(memory::pools::Rendering::GetInstance()),
+              statePredecessors(memory::pools::Rendering::GetInstance()), bindingPhysicalIndices(memory::pools::Rendering::GetInstance()),
+              entryGroups(memory::pools::Rendering::GetInstance()), entryCells(memory::pools::Rendering::GetInstance()),
+              barriers(memory::pools::Rendering::GetInstance()), barrierBatches(memory::pools::Rendering::GetInstance()),
+              decisions(memory::pools::Rendering::GetInstance()) {}
+
+        PersistentStatePacket(PersistentStatePacket&&) noexcept = default;
+        PersistentStatePacket& operator=(PersistentStatePacket&&) noexcept = default;
+        PersistentStatePacket(const PersistentStatePacket&) = delete;
+        PersistentStatePacket& operator=(const PersistentStatePacket&) = delete;
+
+        RenderFlowNodeId node;
+        GpuFlowGroupId flowGroup;
+        CommandScopeId commandScope;
+        rhi::QueueType queue = rhi::QueueType::Graphics;
+        containers::DynamicArray<CompiledStep> steps;
+        containers::DynamicArray<CompiledResourceAction> actions;
+        containers::DynamicArray<CompiledResourceAction> exitActions;
+        containers::DynamicArray<CompiledActionTapeEntry> actionTape;
+        containers::DynamicArray<u32> statePredecessors;
+        containers::DynamicArray<u32> bindingPhysicalIndices;
+        containers::DynamicArray<PersistentStateEntryGroup> entryGroups;
+        containers::DynamicArray<PersistentStateEntryCell> entryCells;
+        containers::DynamicArray<rhi::CompiledBarrier> barriers;
+        containers::DynamicArray<u32> barrierBatches;
+        containers::DynamicArray<u8> decisions;
+        u32 exitTapeOffset = 0;
+        u32 exitTapeCount = 0;
+    };
+
+    struct PersistentStateProgram
+    {
+        PersistentStateProgram() noexcept
+            : physicalByAllocation(memory::pools::Rendering::GetInstance()),
+              physicalWitnesses(memory::pools::Rendering::GetInstance()),
+              packets(memory::pools::Rendering::GetInstance()) {}
+        PersistentStateProgram(PersistentStateProgram&&) noexcept = default;
+        PersistentStateProgram& operator=(PersistentStateProgram&&) noexcept = default;
+        PersistentStateProgram(const PersistentStateProgram&) = delete;
+        PersistentStateProgram& operator=(const PersistentStateProgram&) = delete;
+
+        void Clear() noexcept
+        {
+            physicalByAllocation.Clear();
+            physicalWitnesses.Clear();
+            packets.Clear();
+            valid = false;
+        }
+
+        containers::DynamicArray<u32> physicalByAllocation;
+        containers::DynamicArray<PersistentStateDescriptorWitness> physicalWitnesses;
+        containers::DynamicArray<PersistentStatePacket> packets;
+        bool valid = false;
+    };
+
     struct PersistentDedicatedPhysicalPlan
     {
         PersistentDedicatedPhysicalPlan() noexcept
@@ -1152,6 +1365,7 @@ namespace vanguard::rendering::detail
             crossQueueProducerScopes.Clear();
             lanes.Clear();
             laneRuntime.Clear();
+            stateProgram.Clear();
             valid = false;
         }
 
@@ -1160,7 +1374,41 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<u32> crossQueueProducerScopes;
         containers::DynamicArray<PersistentDedicatedPlanLane> lanes;
         containers::DynamicArray<PersistentDedicatedPlanLaneRuntime> laneRuntime;
+        PersistentStateProgram stateProgram;
         bool valid = false;
+    };
+
+    inline constexpr u32 MaximumPersistentDedicatedPhysicalPrograms = 4;
+
+    // RF13 cache-variant physical program. The immutable resource contract owns
+    // semantic topology; this allocator-local companion owns only dedicated-pool
+    // lane topology and strong reusable leases. Exact contract publication and
+    // backend epochs prevent graph-cache reuse, storage ABA, device recreation,
+    // or descriptor-domain replacement from reviving a stale native chain.
+    struct PersistentDedicatedPhysicalProgram
+    {
+        PersistentDedicatedPhysicalPlan plan;
+        u64 contractIdentity = 0;
+        u64 contractPublicationSerial = 0;
+        u64 rhiDeviceIncarnation = 0;
+        u64 descriptorDomainIdentity = 0;
+        u64 lastUsedFrame = 0;
+
+        [[nodiscard]] bool Matches(const u64 identity, const u64 publication, const u64 device, const u64 domain) const noexcept
+        {
+            return plan.valid && contractIdentity != 0 && contractIdentity == identity && contractPublicationSerial == publication &&
+                   rhiDeviceIncarnation == device && descriptorDomainIdentity == domain;
+        }
+
+        void Clear() noexcept
+        {
+            plan.Clear();
+            contractIdentity = 0;
+            contractPublicationSerial = 0;
+            rhiDeviceIncarnation = 0;
+            descriptorDomainIdentity = 0;
+            lastUsedFrame = 0;
+        }
     };
 
     struct StructuralResourceKey
@@ -1178,6 +1426,7 @@ namespace vanguard::rendering::detail
 
     struct StructuralImportContract
     {
+        ResourceContractPatchId contractPatch;
         FrameResourceDesc desc;
         rhi::ResourceState initialState = rhi::ResourceState::Common;
         rhi::ResourceState terminalState = rhi::ResourceState::Common;
@@ -1193,7 +1442,7 @@ namespace vanguard::rendering::detail
         StructuralBatchKey() noexcept
             : resources(memory::pools::Rendering::GetInstance()), textureViews(memory::pools::Rendering::GetInstance()),
               bufferViews(memory::pools::Rendering::GetInstance()), uses(memory::pools::Rendering::GetInstance()),
-              useEndOrder(memory::pools::Rendering::GetInstance()), operations(memory::pools::Rendering::GetInstance())
+              semanticEvents(memory::pools::Rendering::GetInstance()), operations(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -1216,7 +1465,7 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<CandidateTextureView> textureViews;
         containers::DynamicArray<CandidateBufferView> bufferViews;
         containers::DynamicArray<CandidateUse> uses;
-        containers::DynamicArray<u32> useEndOrder;
+        containers::DynamicArray<CandidateSemanticEvent> semanticEvents;
         containers::DynamicArray<CandidateOperation> operations;
     };
 
@@ -1229,7 +1478,15 @@ namespace vanguard::rendering::detail
 
     struct StructuralPacketTemplate
     {
-        StructuralPacketTemplate() noexcept : steps(memory::pools::Rendering::GetInstance()) {}
+        struct ImportEvent
+        {
+            u32 logicalAllocation = InvalidRenderFlowResourceIndex;
+            bool beginsUse = false;
+            bool terminalPresent = false;
+        };
+        StructuralPacketTemplate() noexcept
+            : steps(memory::pools::Rendering::GetInstance()), beginStepByUseOrdinal(memory::pools::Rendering::GetInstance()),
+              endStepByUseOrdinal(memory::pools::Rendering::GetInstance()), importEvents(memory::pools::Rendering::GetInstance()) {}
         StructuralPacketTemplate(StructuralPacketTemplate&&) noexcept = default;
         StructuralPacketTemplate& operator=(StructuralPacketTemplate&&) noexcept = default;
         StructuralPacketTemplate(const StructuralPacketTemplate&) = delete;
@@ -1240,6 +1497,10 @@ namespace vanguard::rendering::detail
         CommandScopeId commandScope;
         rhi::QueueType queue = rhi::QueueType::Graphics;
         containers::DynamicArray<CompiledStep> steps;
+        // Immutable cold-compiler dense step maps and dynamic import sites.
+        containers::DynamicArray<u32> beginStepByUseOrdinal;
+        containers::DynamicArray<u32> endStepByUseOrdinal;
+        containers::DynamicArray<ImportEvent> importEvents;
         u32 decisionCount = 0;
         u32 useSlotCount = 0;
     };
@@ -1252,7 +1513,7 @@ namespace vanguard::rendering::detail
               allocations(memory::pools::Rendering::GetInstance()), packets(memory::pools::Rendering::GetInstance()),
               commandScopes(memory::pools::Rendering::GetInstance()), queueDependencies(memory::pools::Rendering::GetInstance()),
               crossQueueProducerScopes(memory::pools::Rendering::GetInstance()), firstTouchAllocationOrder(memory::pools::Rendering::GetInstance()),
-              pendingExports(memory::pools::Rendering::GetInstance())
+              pendingExports(memory::pools::Rendering::GetInstance()), exportPatches(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -1274,8 +1535,8 @@ namespace vanguard::rendering::detail
             crossQueueProducerScopes.Clear();
             firstTouchAllocationOrder.Clear();
             pendingExports.Clear();
-            signature = 0;
-            policy = {};
+            exportPatches.Clear();
+            semanticEventCount = 0;
             valid = false;
         }
 
@@ -1290,8 +1551,98 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<u32> crossQueueProducerScopes;
         containers::DynamicArray<u32> firstTouchAllocationOrder;
         containers::DynamicArray<PendingExportRecord> pendingExports;
-        u64 signature = 0;
-        FrameResourcePolicy policy;
+        containers::DynamicArray<ResourceContractPatchId> exportPatches;
+        // Global dense semantic extent authored by the cold compiler. Warm
+        // frames deliberately have no SealedPlanningSummary/writers, but the
+        // cached allocation lifetimes and reuse buckets still use these
+        // ordinals and therefore require the original exact bound.
+        u32 semanticEventCount = 0;
+        bool valid = false;
+    };
+
+    struct ResourceContractUseTemplate
+    {
+        ResourceContractUseTemplate() noexcept : name(memory::pools::Rendering::GetInstance()) {}
+        ResourceContractUseTemplate(ResourceContractUseTemplate&&) noexcept = default;
+        ResourceContractUseTemplate& operator=(ResourceContractUseTemplate&&) noexcept = default;
+        ResourceContractUseTemplate(const ResourceContractUseTemplate&) = delete;
+        ResourceContractUseTemplate& operator=(const ResourceContractUseTemplate&) = delete;
+
+        FlowSpaceId flowSpace;
+        containers::String name;
+        u32 lookupHash = 0;
+        GpuFlowGroupId flowGroup;
+        u32 ordinal = InvalidRenderFlowResourceIndex;
+        FrameResourceKind kind = FrameResourceKind::Invalid;
+        u32 nextDuplicate = InvalidRenderFlowResourceIndex;
+        u32 resolvedIndex = InvalidRenderFlowResourceIndex;
+    };
+
+    struct ResourceContractDecisionTemplate
+    {
+        GpuFlowGroupId flowGroup;
+        u32 ordinal = InvalidRenderFlowResourceIndex;
+    };
+
+    struct ResourceContractRangeTemplate
+    {
+        u32 firstUse = 0;
+        u32 useCount = 0;
+        u32 firstDecision = 0;
+        u32 decisionCount = 0;
+        u32 lookupBucketOffset = 0;
+        u32 lookupBucketCount = 0;
+        u32 lookupGroupOffset = 0;
+        u32 lookupGroupCount = 0;
+    };
+
+    struct ResourceContractLookupGroupTemplate
+    {
+        u32 lookupHash = 0;
+        u32 firstUse = InvalidRenderFlowResourceIndex;
+        u32 lastUse = InvalidRenderFlowResourceIndex;
+        u32 nextBucketGroup = InvalidRenderFlowResourceIndex;
+    };
+
+    struct ResourceContractNodeTemplate
+    {
+        ResourceContractNodeTemplate() noexcept
+            : uses(memory::pools::Rendering::GetInstance()), decisions(memory::pools::Rendering::GetInstance()),
+              ranges(memory::pools::Rendering::GetInstance()), lookupBuckets(memory::pools::Rendering::GetInstance()),
+              lookupGroups(memory::pools::Rendering::GetInstance())
+        {
+        }
+
+        ResourceContractNodeTemplate(ResourceContractNodeTemplate&&) noexcept = default;
+        ResourceContractNodeTemplate& operator=(ResourceContractNodeTemplate&&) noexcept = default;
+        ResourceContractNodeTemplate(const ResourceContractNodeTemplate&) = delete;
+        ResourceContractNodeTemplate& operator=(const ResourceContractNodeTemplate&) = delete;
+
+        RenderFlowNodeId node;
+        containers::DynamicArray<ResourceContractUseTemplate> uses;
+        containers::DynamicArray<ResourceContractDecisionTemplate> decisions;
+        containers::DynamicArray<ResourceContractRangeTemplate> ranges;
+        containers::DynamicArray<u32> lookupBuckets;
+        containers::DynamicArray<ResourceContractLookupGroupTemplate> lookupGroups;
+        u32 textureBindingCount = 0;
+        u32 bufferBindingCount = 0;
+    };
+
+    struct ResourceContractStorage
+    {
+        ResourceContractStorage() noexcept
+            : nodes(memory::pools::Rendering::GetInstance()), candidateNodes(memory::pools::Rendering::GetInstance())
+        {
+        }
+
+        PersistentStructuralPlan plan;
+        containers::DynamicArray<ResourceContractNodeTemplate> nodes;
+        containers::DynamicArray<ResourceContractNodeTemplate> candidateNodes;
+        u64 contractIdentity = 0;
+        u64 rhiDeviceIncarnation = 0;
+        u64 descriptorDomainIdentity = 0;
+        u64 publicationSerial = 0;
+        bool candidateNodesReady = false;
         bool valid = false;
     };
 
@@ -1538,7 +1889,7 @@ namespace vanguard::rendering::detail
 
     struct WholeFrameReleaseEvent
     {
-        PlanPosition release;
+        u32 next = InvalidRenderFlowResourceIndex;
         u32 lane = InvalidRenderFlowResourceIndex;
         u32 epoch = 0;
     };
@@ -1564,6 +1915,8 @@ namespace vanguard::rendering::detail
             copyReady.Reset();
             graphicsToComputePending.Clear();
             computeToGraphicsPending.Clear();
+            graphicsToComputePendingCursor = 0;
+            computeToGraphicsPendingCursor = 0;
             graphicsToComputeReady.Reset();
             computeToGraphicsReady.Reset();
         }
@@ -1602,8 +1955,10 @@ namespace vanguard::rendering::detail
         WholeFrameReadyIndex computeReady;
         WholeFrameReadyIndex copyReady;
         containers::DynamicArray<WholeFrameReuseCandidate> graphicsToComputePending;
+        u32 graphicsToComputePendingCursor = 0;
         WholeFrameReadyIndex graphicsToComputeReady;
         containers::DynamicArray<WholeFrameReuseCandidate> computeToGraphicsPending;
+        u32 computeToGraphicsPendingCursor = 0;
         WholeFrameReadyIndex computeToGraphicsReady;
     };
 
@@ -1967,7 +2322,7 @@ namespace vanguard::rendering::detail
         ResolveScratch() noexcept
             : batchResourceSlots(memory::pools::Rendering::GetInstance()), batchTextureViews(memory::pools::Rendering::GetInstance()), batchBufferViews(memory::pools::Rendering::GetInstance()),
               terminalDependencyByConsumer(memory::pools::Rendering::GetInstance()),
-              slots(memory::pools::Rendering::GetInstance()),
+              slots(memory::pools::Rendering::GetInstance()), slotFastPath(memory::pools::Rendering::GetInstance()),
               uses(memory::pools::Rendering::GetInstance()), scopes(memory::pools::Rendering::GetInstance()), namedScopes(memory::pools::Rendering::GetInstance()),
               allocationStates(memory::pools::Rendering::GetInstance()), textureSubresourceStates(memory::pools::Rendering::GetInstance()), crossQueueProducerScopes(memory::pools::Rendering::GetInstance()),
               terminalDependencyProducerScopes(memory::pools::Rendering::GetInstance()),
@@ -1976,11 +2331,15 @@ namespace vanguard::rendering::detail
               persistentLaneAdoptionEntries(memory::pools::Rendering::GetInstance()), releasedPersistentLeases(memory::pools::Rendering::GetInstance()),
               structuralScopeClosed(memory::pools::Rendering::GetInstance()), structuralImportIndices(memory::pools::Rendering::GetInstance()),
               structuralExportSlots(memory::pools::Rendering::GetInstance()), structuralDecisionValues(memory::pools::Rendering::GetInstance()),
-              wholeFrameLanes(memory::pools::Rendering::GetInstance()), wholeFrameReleaseEvents(memory::pools::Rendering::GetInstance()),
+              wholeFrameLanes(memory::pools::Rendering::GetInstance()), wholeFrameReleaseEvents(memory::pools::Rendering::GetInstance()), wholeFrameReleaseHeads(memory::pools::Rendering::GetInstance()),
               wholeFrameReuseClasses(memory::pools::Rendering::GetInstance()), placedRequests(memory::pools::Rendering::GetInstance()), placedObjects(memory::pools::Rendering::GetInstance()),
-              physicalHistory(memory::pools::Rendering::GetInstance()), physicalStateCells(memory::pools::Rendering::GetInstance()),
+              physicalHistory(memory::pools::Rendering::GetInstance()), physicalStateCells(memory::pools::Rendering::GetInstance()), physicalGlobalState(memory::pools::Rendering::GetInstance()),
               physicalAccessCells(memory::pools::Rendering::GetInstance()),
-              packetPhysicalIndices(memory::pools::Rendering::GetInstance())
+              packetPhysicalIndices(memory::pools::Rendering::GetInstance()),
+              cachedOldToCurrentPhysical(memory::pools::Rendering::GetInstance()),
+              cachedCurrentToOldPhysical(memory::pools::Rendering::GetInstance()),
+              cachedBindingSort(memory::pools::Rendering::GetInstance()),
+              cachedBindingSlotRemap(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -1991,6 +2350,7 @@ namespace vanguard::rendering::detail
             batchBufferViews.Clear();
             terminalDependencyByConsumer.Clear();
             slotCount = 0;
+            slotFastPath.Clear();
             uses.Clear();
             scopes.Clear();
             namedScopes.Clear();
@@ -2000,6 +2360,7 @@ namespace vanguard::rendering::detail
             identityIds.Reset();
             retainedImportTokens.Reset();
             retainedImportResources.Reset();
+            retainedImportContractPatches.Reset();
             presentationImports.Reset();
             textureTransitionRuns.Reset();
             crossQueueProducerScopes.Clear();
@@ -2020,6 +2381,7 @@ namespace vanguard::rendering::detail
             candidateDedicatedPlan.Clear();
             wholeFrameLanes.Clear();
             wholeFrameReleaseEvents.Clear();
+            wholeFrameReleaseHeads.Clear();
             wholeFrameReuseHeads.Reset();
             const u32 activeReuseClassCount = wholeFrameReuseClassCount;
             for (u32 index = 0; index < activeReuseClassCount; ++index)
@@ -2051,8 +2413,13 @@ namespace vanguard::rendering::detail
             placedPlannerScratch.Reset();
             physicalHistoryCount = 0;
             physicalStateCells.Clear();
+            physicalGlobalState.Clear();
             physicalAccessCells.Clear();
             packetPhysicalIndices.Clear();
+            cachedOldToCurrentPhysical.Clear();
+            cachedCurrentToOldPhysical.Clear();
+            cachedBindingSort.Clear();
+            cachedBindingSlotRemap.Clear();
         }
 
         void ResetPhysicalHistory(const u32 count) noexcept
@@ -2071,6 +2438,11 @@ namespace vanguard::rendering::detail
         // ResourceUseId metadata and is never sized from the planning tape.
         containers::DynamicArray<u32> terminalDependencyByConsumer;
         containers::DynamicArray<LogicalSlot> slots;
+        // Global logical-slot classification after named-resource coalescing.
+        // 1 means the slot has a stable direct mapping and canonical/non-nested
+        // named scopes; 0 routes every mapping-sensitive semantic through the
+        // existing general interpreter.
+        containers::DynamicArray<u8> slotFastPath;
         containers::DynamicArray<ActiveUseRecord> uses;
         containers::DynamicArray<OpenScopeRecord> scopes;
         containers::DynamicArray<NamedScopeState> namedScopes;
@@ -2085,6 +2457,7 @@ namespace vanguard::rendering::detail
         // planning writers exist; Resolve resets them once their job is done.
         ResolveScratchHashMap<u64, u32> retainedImportTokens;
         ResolveScratchHashMap<u64, u32> retainedImportResources;
+        ResolveScratchHashMap<u64, u32> retainedImportContractPatches;
         ResolveScratchHashMap<PresentationImportKey, u32> presentationImports;
         ResolveScratchHashMap<TextureTransitionRunKey, u32> textureTransitionRuns;
         // Lazily materialized only after the first real Fork/Join. Once active,
@@ -2099,8 +2472,9 @@ namespace vanguard::rendering::detail
         containers::DynamicArray<u32> terminalDependencyProducerScopes;
         ResolveScratchHashMap<u64, u32> openScopeIndices;
         containers::DynamicArray<u8> importedInstalled;
-        // Resolve scratch reused in three phases: reserved export-slot map prefix
-        // + first-touch physical-assignment suffix, then dense physical->export.
+        // Resolve scratch reused serially: reserved export-slot map prefix +
+        // first-touch physical-assignment suffix, dense physical->export for
+        // terminal lowering, then physical->packet-binding slot compilation.
         containers::DynamicArray<u32> physicalAssignmentOrder;
         containers::DynamicArray<u32> persistentAllocationLanes;
         containers::DynamicArray<u32> persistentLanePhysical;
@@ -2115,6 +2489,9 @@ namespace vanguard::rendering::detail
         PersistentDedicatedPhysicalPlan candidateDedicatedPlan;
         containers::DynamicArray<WholeFrameLane> wholeFrameLanes;
         containers::DynamicArray<WholeFrameReleaseEvent> wholeFrameReleaseEvents;
+        // semantic ordinal -> intrusive release-event list. The assignment walk
+        // advances this array monotonically, replacing the old O(log R) heap.
+        containers::DynamicArray<u32> wholeFrameReleaseHeads;
         ResolveScratchHashMap<u64, u32> wholeFrameReuseHeads;
         containers::DynamicArray<WholeFrameReuseClass> wholeFrameReuseClasses;
         containers::DynamicArray<PlacedRangeRequest> placedRequests;
@@ -2123,18 +2500,55 @@ namespace vanguard::rendering::detail
         PlacedRangePlannerScratch placedPlannerScratch;
         containers::DynamicArray<PhysicalScopeState> physicalHistory;
         containers::DynamicArray<rhi::ResourceState> physicalStateCells;
+        // Sparse global-proof classifier. Ordinary same-queue resources stay 0
+        // and use only command-list-local native state tracking.
+        containers::DynamicArray<u8> physicalGlobalState;
         containers::DynamicArray<u8> physicalAccessCells;
         containers::DynamicArray<u32> packetPhysicalIndices;
+        containers::DynamicArray<u32> cachedOldToCurrentPhysical;
+        containers::DynamicArray<u32> cachedCurrentToOldPhysical;
+        containers::DynamicArray<PersistentStateBindingSort> cachedBindingSort;
+        containers::DynamicArray<u32> cachedBindingSlotRemap;
         u32 slotCount = 0;
         u32 physicalHistoryCount = 0;
         u32 wholeFrameReuseClassCount = 0;
         u32 wholeFrameReuseDormantTrimCursor = 0;
     };
 
-    [[nodiscard]] inline constexpr u32 NextGeneration(const u32 generation) noexcept
+    [[nodiscard]] inline u32 NextRenderFlowSessionGeneration() noexcept
     {
-        const u32 next = generation + 1u;
-        return next != 0 ? next : 1u;
+        // Value-only session identities (imports/exports/uses/decisions) can
+        // outlive one allocator implementation.  A process-wide sequence keeps
+        // them stale across allocator shutdown/reinitialize and across distinct
+        // allocators instead of restarting the ABA space at generation 1.
+        static concurrency::Atomic<u32> generation{0};
+        u32 next = generation.Increment();
+        if (next == 0)
+            next = generation.Increment();
+        return next;
+    }
+
+    [[nodiscard]] inline u32 NextRenderFlowExecutionGeneration() noexcept
+    {
+        // Compiled execution ranges are plain value witnesses, so they require
+        // the same cross-incarnation property independently from planning IDs.
+        static concurrency::Atomic<u32> generation{0};
+        u32 next = generation.Increment();
+        if (next == 0)
+            next = generation.Increment();
+        return next;
+    }
+
+    [[nodiscard]] inline u64 NextRenderFlowResourceContractIdentity() noexcept
+    {
+        // Contract storage can be destroyed and later reused at the same address.
+        // A process-wide identity keeps allocator-local RF13 physical programs
+        // from accepting pointer ABA even when publication serials restart at 1.
+        static concurrency::Atomic<u64> identity{0};
+        u64 next = identity.Increment();
+        if (next == 0)
+            next = identity.Increment();
+        return next;
     }
 
     inline void ClearFailure(RenderFlowResourceFailure* const failure) noexcept
@@ -2206,11 +2620,23 @@ namespace vanguard::rendering::detail
     void RetainGeneration(ExecutionGenerationRef::Impl* generation) noexcept;
     void ReleaseGeneration(ExecutionGenerationRef::Impl* generation) noexcept;
     void ReleaseGenerationRuntimeOwners(ExecutionGenerationRef::Impl* generation) noexcept;
-    [[nodiscard]] bool RetireRetainedImportDescriptors(RenderFlowResourceAllocator::Impl& allocator,
-                                                       ExecutionGenerationRef::Impl& generation,
-                                                       const rhi::ResidencyFenceSet& fences,
-                                                       bool deviceLost,
-                                                       RenderFlowResourceFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool BorrowRetainedImportCanonicalDescriptors(RenderFlowResourceAllocator::Impl& allocator,
+                                                                PhysicalBindingRecord& binding,
+                                                                const FrameResourceDesc& desc,
+                                                                CanonicalDescriptorPressure* pressure,
+                                                                bool recordStats,
+                                                                RenderFlowResourceFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool ReleaseRetainedImportDescriptorBorrows(RenderFlowResourceAllocator::Impl& allocator,
+                                                              ExecutionGenerationRef::Impl& generation,
+                                                              const rhi::ResidencyFenceSet& fences,
+                                                              bool deviceLost,
+                                                              RenderFlowResourceFailure* failure = nullptr) noexcept;
+    [[nodiscard]] bool PrepareRetainedImportDescriptorCacheShutdown(RenderFlowResourceAllocator::Impl& allocator,
+                                                                   bool& deviceLost,
+                                                                   RenderFlowResourceFailure* failure = nullptr) noexcept;
+    void CommitRetainedImportDescriptorCacheShutdown(RenderFlowResourceAllocator::Impl& allocator) noexcept;
+    void RetainedImportDescriptorCacheDeviceLost(RenderFlowResourceAllocator::Impl& allocator,
+                                                 const rhi::ResidencyFenceSet& submittedFences = {}) noexcept;
     void RetainAllocator(RenderFlowResourceAllocator::Impl* allocator) noexcept;
     void ReleaseAllocator(RenderFlowResourceAllocator::Impl* allocator) noexcept;
     void AbandonAllocatorSession(RenderFlowResourceAllocator::Impl& allocator, u32 generation) noexcept;
@@ -2283,7 +2709,11 @@ namespace vanguard::rendering
             : writerReservations(memory::pools::Rendering::GetInstance()), sealedWriters(memory::pools::Rendering::GetInstance()), sealedQueueGroups(memory::pools::Rendering::GetInstance()),
               queueRequestGroups(memory::pools::Rendering::GetInstance()),
               writerImpls(memory::pools::Rendering::GetInstance()),
-              retainedImports(memory::pools::Rendering::GetInstance()), publishedExports(memory::pools::Rendering::GetInstance()), config(allocatorConfig),
+              retainedImports(memory::pools::Rendering::GetInstance()), publishedExports(memory::pools::Rendering::GetInstance()),
+              reservedExportContractPatches(memory::pools::Rendering::GetInstance()),
+              persistentDedicatedPrograms(memory::pools::Rendering::GetInstance()),
+              retainedImportDescriptorOwners(memory::pools::Rendering::GetInstance()), retainedImportDescriptorReusable(memory::pools::Rendering::GetInstance()),
+              freeRetainedImportDescriptorOwners(memory::pools::Rendering::GetInstance()), config(allocatorConfig),
               resourceDescriptors(allocatorConfig.resourceDescriptors), descriptorLedger(allocatorConfig.descriptorCacheTarget, allocatorConfig.descriptorCacheMaximum),
               nativeByteLedger(allocatorConfig.hardNativeByteLimit), dedicatedPool(allocatorConfig, nativeByteLedger, descriptorLedger, resourceDescriptors.GetRef()),
               placedPool(allocatorConfig, nativeByteLedger, descriptorLedger, resourceDescriptors.GetRef())
@@ -2302,9 +2732,16 @@ namespace vanguard::rendering
         containers::DynamicArray<detail::RetainedImportRecord> retainedImports;
         containers::DynamicArray<detail::PublishedExportRecord> publishedExports;
         detail::ResolveScratchHashMap<u64, u32> publishedExportIndices;
+        containers::DynamicArray<ResourceContractPatchId> reservedExportContractPatches;
+        detail::ResolveScratchHashMap<u64, u32> reservedExportContractPatchIndices;
+        detail::ResolveScratchHashMap<u64, u32> contractDecisionPatches;
         detail::ResolveScratch resolveScratch;
-        detail::PersistentStructuralPlan structuralPlan;
         detail::PersistentDedicatedPhysicalPlan persistentDedicatedPlan;
+        containers::DynamicArray<detail::PersistentDedicatedPhysicalProgram> persistentDedicatedPrograms;
+        containers::DynamicArray<detail::RetainedImportDescriptorOwner> retainedImportDescriptorOwners;
+        detail::ResolveScratchHashMap<u64, u32> retainedImportDescriptorOwnerByResource;
+        containers::DynamicArray<u32> retainedImportDescriptorReusable;
+        containers::DynamicArray<u32> freeRetainedImportDescriptorOwners;
         RenderFlowResourceAllocatorConfig config;
         FrameResourcePolicy activePolicy;
         RenderFlowResourceAllocatorStats stats;
@@ -2313,6 +2750,8 @@ namespace vanguard::rendering
         detail::AllocatorNativeByteLedger nativeByteLedger;
         detail::DedicatedResourcePool dedicatedPool;
         detail::PlacedResourcePool placedPool;
+        u64 rhiDeviceIncarnation = 0;
+        u64 descriptorDomainIdentity = 0;
         detail::RenderFlowResourceShutdownFailureInjection shutdownFailureInjection;
         ExecutionGenerationRef::Impl* publishedGeneration = nullptr;
         u64 frameSerial = 0;
@@ -2322,6 +2761,8 @@ namespace vanguard::rendering
         concurrency::Atomic<u64> recordedQueueRequestCount{0};
         concurrency::Atomic<u32> recordedQueueGroupCount{0};
         u32 reservedExportSlots = 0;
+        detail::ResourceContractStorage* contractCompileTarget = nullptr;
+        const detail::ResourceContractStorage* boundContract = nullptr;
         RenderFlowResourceSessionState state = RenderFlowResourceSessionState::Idle;
     };
 } // namespace vanguard::rendering

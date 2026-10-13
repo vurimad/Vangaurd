@@ -86,20 +86,36 @@ namespace vanguard::rendering
         [[nodiscard]] bool ValidCameraSurfaceState(const RenderPhaseKey phase, const pipelines::GraphicsState& state,
                                                    const pipelines::AttachmentSignature& attachments) noexcept
         {
-            if (phase != standardRenderPhases::DepthPrepass && phase != standardRenderPhases::Opaque)
+            const bool transparent = phase == standardRenderPhases::Transparent;
+            if (phase != standardRenderPhases::DepthPrepass && phase != standardRenderPhases::Opaque && !transparent)
                 return true;
-            // These existing camera nodes write single-sample opaque/masked
-            // targets. Blended surfaces require their separately ordered phase.
             if (state.blend.attachmentCount != attachments.colorCount || state.blend.logicOperationEnable ||
                 state.multisample.sampleCount != attachments.sampleCount || state.multisample.alphaToCoverage || state.multisample.sampleMask != 0xffffffffu ||
-                !state.depthStencil.depthTest || !state.depthStencil.depthWrite || state.depthStencil.stencilTest || state.depthStencil.depthBoundsTest ||
+                !state.depthStencil.depthTest || (transparent ? state.depthStencil.depthWrite : !state.depthStencil.depthWrite) ||
+                state.depthStencil.stencilTest || state.depthStencil.depthBoundsTest ||
                 (state.depthStencil.depthCompare != pipelines::CompareOperation::LessEqual && state.depthStencil.depthCompare != pipelines::CompareOperation::GreaterEqual))
                 return false;
-            for (u32 index = 0; index < attachments.colorCount; ++index)
+            if (transparent)
             {
-                const auto& attachment = state.blend.attachments[state.blend.independentBlend ? index : 0u];
-                if (attachment.blendEnable || attachment.writeMask != 0x0f)
+                if (attachments.colorCount != 1u)
                     return false;
+                const auto& attachment = state.blend.attachments[0];
+                if (!attachment.blendEnable || attachment.sourceColor != pipelines::BlendFactor::SourceAlpha ||
+                    attachment.destinationColor != pipelines::BlendFactor::OneMinusSourceAlpha ||
+                    attachment.colorOperation != pipelines::BlendOperation::Add ||
+                    attachment.sourceAlpha != pipelines::BlendFactor::One ||
+                    attachment.destinationAlpha != pipelines::BlendFactor::OneMinusSourceAlpha ||
+                    attachment.alphaOperation != pipelines::BlendOperation::Add || attachment.writeMask != 0x0f)
+                    return false;
+            }
+            else
+            {
+                for (u32 index = 0; index < attachments.colorCount; ++index)
+                {
+                    const auto& attachment = state.blend.attachments[state.blend.independentBlend ? index : 0u];
+                    if (attachment.blendEnable || attachment.writeMask != 0x0f)
+                        return false;
+                }
             }
             // Keep raster coverage identical between the optional prepass and
             // GBuffer. Special depth-bias/conservative paths use other phases.
@@ -1345,7 +1361,8 @@ namespace vanguard::rendering
                             if (!validSurfaceState)
                             {
                                 poison();
-                                return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology, "camera surface technique requires unblended, depth-writing, single-sample state with inclusive depth comparison");
+                                return Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology,
+                                            "camera surface technique has fixed-function state incompatible with its renderer phase");
                             }
                             if (phaseKey == standardRenderPhases::DepthPrepass)
                                 depthState = &graphics;
@@ -1784,12 +1801,18 @@ namespace vanguard::rendering
         }
         prepared.sourceSubmesh = sourceSubmesh;
         prepared.phase = phase;
+        prepared.sortCenter[0] = submesh.bounds.sphereCenter[0];
+        prepared.sortCenter[1] = submesh.bounds.sphereCenter[1];
+        prepared.sortCenter[2] = submesh.bounds.sphereCenter[2];
         prepared.geometry = work->definitions.geometryDefinitions[geometry];
         prepared.placement = uploaded.geometries[geometry];
         prepared.m_normal = prepared.normal.m_technique;
         prepared.m_mirrored = prepared.mirrored.m_technique;
         prepared.m_phase = prepared.phase;
         prepared.m_sourceSubmesh = prepared.sourceSubmesh;
+        prepared.m_sortCenter[0] = prepared.sortCenter[0];
+        prepared.m_sortCenter[1] = prepared.sortCenter[1];
+        prepared.m_sortCenter[2] = prepared.sortCenter[2];
         output = std::move(prepared);
         return true;
     }
@@ -1805,7 +1828,9 @@ namespace vanguard::rendering
         if (preparation.normal.m_runtime != m_materials || preparation.mirrored.m_runtime != m_materials ||
             preparation.normal.m_technique.index != preparation.m_normal.index || preparation.normal.m_technique.generation != preparation.m_normal.generation ||
             preparation.mirrored.m_technique.index != preparation.m_mirrored.index || preparation.mirrored.m_technique.generation != preparation.m_mirrored.generation ||
-            preparation.phase != preparation.m_phase || preparation.sourceSubmesh != preparation.m_sourceSubmesh)
+            preparation.phase != preparation.m_phase || preparation.sourceSubmesh != preparation.m_sourceSubmesh ||
+            preparation.sortCenter[0] != preparation.m_sortCenter[0] || preparation.sortCenter[1] != preparation.m_sortCenter[1] ||
+            preparation.sortCenter[2] != preparation.m_sortCenter[2])
             return GeometryBatchResult::InvalidPreparation;
         Impl::ResidencyWork* work = nullptr;
         u16 anchorLod = 0;
@@ -1957,7 +1982,18 @@ namespace vanguard::rendering
             }
         }
         drawable->owner = this;
-        drawable->info = {work->renderable, ++work->placementRevision, anchor, memberCount, {}};
+        if (!drawable->allocations.primitives.IsValid() || drawable->allocations.primitives.count < work->primitives.Size())
+        {
+            static_cast<void>(Fail(failure, MeshResidencyFailureCode::InvalidRenderableTopology,
+                                   "drawable GPU primitive allocation does not cover retained topology"));
+            return rollback();
+        }
+        drawable->info.renderable = work->renderable;
+        drawable->info.placementRevision = ++work->placementRevision;
+        drawable->info.anchorLod = anchor;
+        drawable->info.placementCount = memberCount;
+        drawable->info.firstGpuPrimitive = drawable->allocations.primitives.first;
+        drawable->info.gpuPrimitiveCount = drawable->allocations.primitives.count;
         drawable->residency.generation = work->renderable.generation;
         drawable->residency.placementRevision = work->placementRevision;
         drawable->residency.anchorLod = anchor;

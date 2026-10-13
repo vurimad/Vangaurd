@@ -19,12 +19,10 @@ namespace vanguard::rendering
         [[nodiscard]] bool ResolveProbeEnabled() noexcept
         {
 #if defined(_MSC_VER)
-            char* requested = nullptr;
+            char requested[8]{};
             std::size_t requestedLength = 0;
-            const bool enabled = _dupenv_s(&requested, &requestedLength, "VANGUARD_RENDER_GRAPH_SCHEDULER_PROBE") == 0 &&
-                                 requested != nullptr && std::strcmp(requested, "1") == 0;
-            std::free(requested);
-            return enabled;
+            return getenv_s(&requestedLength, requested, sizeof(requested), "VANGUARD_RENDER_GRAPH_SCHEDULER_PROBE") == 0 &&
+                   requestedLength != 0 && std::strcmp(requested, "1") == 0;
 #else
             const char* const requested = std::getenv("VANGUARD_RENDER_GRAPH_SCHEDULER_PROBE");
             return requested != nullptr && std::strcmp(requested, "1") == 0;
@@ -57,17 +55,14 @@ namespace vanguard::rendering
             {
                 // Keep the established 320-resource allocation-ceiling probe as
                 // the Profile default. RF2 profiling can opt into the separate
-                // 64-resource RED-like mix without changing production builds
+                // 64-resource reference mix without changing production builds
                 // or reinterpreting the first phase of the 320 workload.
                 bool redMix = false;
 #if defined(_MSC_VER)
-                char* requested = nullptr;
+                char requested[8]{};
                 std::size_t requestedLength = 0;
-                if (_dupenv_s(&requested, &requestedLength, "VANGUARD_RF_PROBE_RESOURCES") == 0 && requested != nullptr)
-                {
+                if (getenv_s(&requestedLength, requested, sizeof(requested), "VANGUARD_RF_PROBE_RESOURCES") == 0 && requestedLength != 0)
                     redMix = std::strcmp(requested, "64") == 0;
-                    std::free(requested);
-                }
 #else
                 const char* const requested = std::getenv("VANGUARD_RF_PROBE_RESOURCES");
                 redMix = requested != nullptr && std::strcmp(requested, "64") == 0;
@@ -107,7 +102,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool ProbeTextureIsCompute(const u32 index) noexcept
         {
             VG_ASSERT(ProbeResourceIsTexture(index));
-            // The RED-ceiling probe distributes synthetic uses over Vanguard's
+            // The allocation-ceiling probe distributes synthetic uses over Vanguard's
             // existing geometry-compute writers. Keep every synthetic texture
             // legal on that queue so the test measures allocator/resolve scale,
             // not an artificial cross-queue capability failure.
@@ -197,25 +192,9 @@ namespace vanguard::rendering
             [[nodiscard]] const char* GetName() const noexcept override { return m_name; }
             [[nodiscard]] RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::None; }
 
-            void Execute(const RenderNodeImplContext& context, jobs::Builder*) const override
-            {
-                // Intentionally dependency-heavy integer work. The result is
-                // externally observable through a node-private atomic sink, so
-                // optimized Profile builds cannot fold the loop away. Using
-                // the frame serial and worker index also prevents a constant
-                // result across frames without introducing shared hot writes.
-                u64 state = m_seed ^ context.GetFrameInfo().GetSerial() ^
-                            (static_cast<u64>(context.GetDispatcherThreadIndex()) << 32u);
-                for (u32 iteration = 0; iteration < m_iterations; ++iteration)
-                {
-                    state ^= state >> 12u;
-                    state ^= state << 25u;
-                    state ^= state >> 27u;
-                    state *= 0x2545f4914f6cdd1dull;
-                    state += 0x9e3779b97f4a7c15ull + static_cast<u64>(iteration);
-                }
-                g_probeSinks[m_sinkIndex].value.store(state, std::memory_order_relaxed);
-            }
+            // Keep every scheduling node and dependency while measuring the
+            // graph machinery without artificial CPU-bound work.
+            void Execute(const RenderNodeImplContext&, jobs::Builder*) const override {}
 
         private:
             const char* m_name = nullptr;

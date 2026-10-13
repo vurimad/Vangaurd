@@ -42,9 +42,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define AI_GLTF2IMPORTER_H_INC
 
 #include <assimp/BaseImporter.h>
+#include <assimp/vanguard_model_provenance.h>
 #include "glTF2Asset.h"
 
 struct aiNode;
+struct aiBone;
 
 namespace glTF2 {
     class Asset;
@@ -74,6 +76,7 @@ private:
     void ImportCameras(glTF2::Asset &a);
     void ImportLights(glTF2::Asset &a);
     void ImportNodes(glTF2::Asset &a);
+    void ResolveVanguardBoneNodes();
     void ImportAnimations(glTF2::Asset &a);
     void ImportCommonMetadata(glTF2::Asset &a);
     aiNode *ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr);
@@ -82,10 +85,14 @@ private:
     std::vector<unsigned int> meshOffsets;
     std::vector<int> mEmbeddedTexIdxs;
     std::vector<std::vector<unsigned int>> mVertexRemappingTables; // for each converted aiMesh in the scene, it stores a list of vertices that are actually used
+    std::vector<std::uint64_t> mVanguardAppliedSkinKeys;
+    std::vector<aiNode *> mVanguardNodePointers;
+    std::vector<std::pair<aiBone *, unsigned int>> mVanguardPendingBoneNodes;
     aiScene *mScene;
 
     /// An instance of rapidjson::IRemoteSchemaDocumentProvider
     void *mSchemaDocumentProvider = nullptr;
+    aiVanguardModelProvenanceSink *mVanguardModelProvenance = nullptr;
 };
 
 } // namespace Assimp

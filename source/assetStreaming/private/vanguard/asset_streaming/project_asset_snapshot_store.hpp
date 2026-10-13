@@ -9,7 +9,7 @@ namespace vanguard::asset_streaming
 {
     inline constexpr u32 ProjectAssetSnapshotMagic = serialization::MakeFourCC('V', 'P', 'A', 'S');
     inline constexpr u16 ProjectAssetSnapshotMajorVersion = 1;
-    inline constexpr u16 ProjectAssetSnapshotMinorVersion = 0;
+    inline constexpr u16 ProjectAssetSnapshotMinorVersion = 1;
     inline constexpr u32 ProjectAssetSnapshotHeaderSize = 128;
     inline constexpr char ProjectAssetSnapshotFileName[] = "project-asset-accepted.vpas";
     inline constexpr char ProjectAssetSnapshotStageFileName[] = "project-asset-accepted.vpas.tmp";

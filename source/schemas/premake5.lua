@@ -1,4 +1,4 @@
-local importedRoot = "../imported/common"
+local importedRoot = "../../imported/common"
 local redSystemRoot = path.join(importedRoot, "redSystem")
 local redMemoryRoot = path.join(importedRoot, "redMemory")
 local redMathRoot = path.join(importedRoot, "redMath")
@@ -14,12 +14,12 @@ local redConfigRoot = path.join(importedRoot, "redConfig")
 local commProtocolRoot = path.join(importedRoot, "commProtocol")
 local commChannelRoot = path.join(importedRoot, "commChannel")
 local redReflectionRoot = path.join(importedRoot, "redReflection")
-local redLexerRoot = path.getabsolute("../imported/internal/RedLexer")
-local generatedRoot = path.getabsolute("../imported/generated")
-local fileSyncRoot = path.getabsolute("../imported/internal/FileSync")
-local udtRoot = path.getabsolute("../imported/external/udt")
-local oodleRoot = path.getabsolute("../imported/external/oodle")
-local nvToolsRoot = path.getabsolute("../imported/external/nvToolsExt")
+local redLexerRoot = path.getabsolute("../../imported/internal/RedLexer")
+local generatedRoot = path.getabsolute("../../imported/generated")
+local fileSyncRoot = path.getabsolute("../../imported/internal/FileSync")
+local udtRoot = path.getabsolute("../../imported/external/udt")
+local oodleRoot = path.getabsolute("../../imported/external/oodle")
+local nvToolsRoot = path.getabsolute("../../imported/external/nvToolsExt")
 
 local function importedIncludes()
     includedirs {

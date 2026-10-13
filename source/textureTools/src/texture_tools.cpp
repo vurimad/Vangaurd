@@ -30,7 +30,8 @@ namespace
     constexpr u32 MaximumProfiles = 32;
     tools::TextureCookingProfile g_profiles[MaximumProfiles]{};
     u32 g_profileCount = 0;
-    bool g_initialized = false;
+    bool g_rootInitialized = false;
+    u32 g_acquisitionReferences = 0;
     bool g_registrySealed = false;
     crypto::Digest256 g_profileRegistryFingerprint;
 
@@ -1060,10 +1061,60 @@ namespace vanguard::texture_tools
 {
     [[nodiscard]] bool RegisterBuiltInTextureImporters() noexcept;
     [[nodiscard]] bool FreezeTextureImporterRegistry(crypto::Digest256& fingerprint) noexcept;
+    void ResetTextureImporterRegistry() noexcept;
+
+    namespace
+    {
+        bool InitializeGlobalState() noexcept
+        {
+            rgbcx::init();
+            bc7enc_compress_block_init();
+            if (!RegisterBuiltInTextureImporters())
+            {
+                ResetTextureImporterRegistry();
+                return false;
+            }
+            const TextureCookingFlags runtimeMips = TextureCookingFlags::GenerateFullMipChain | TextureCookingFlags::Streamable;
+            if (RegisterInternal({profiles::Color, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb, runtimeMips, 4, 3, 0.5f, 2}) !=
+                    ProfileRegistrationResult::Success ||
+                RegisterInternal({profiles::ColorAlpha, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb,
+                                  runtimeMips | TextureCookingFlags::PreserveAlphaCoverage, 4, 3, 0.5f, 2}) != ProfileRegistrationResult::Success ||
+                RegisterInternal({profiles::Normal, 2, textures::PixelFormat::BC5UNorm, textures::ColorSpace::Linear,
+                                  runtimeMips | TextureCookingFlags::RenormalizeNormals, 4, 3, 0.5f, 10}) != ProfileRegistrationResult::Success ||
+                RegisterInternal({profiles::Masks, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 1}) !=
+                    ProfileRegistrationResult::Success ||
+                RegisterInternal({profiles::Data, 2, textures::PixelFormat::BC4UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 0, 0.5f, 10}) !=
+                    ProfileRegistrationResult::Success ||
+                RegisterInternal({profiles::Ui, 1, textures::PixelFormat::R8G8B8A8UNorm, textures::ColorSpace::SRgb, TextureCookingFlags::None, 1, 3, 0.5f, 0}) !=
+                    ProfileRegistrationResult::Success ||
+                RegisterInternal({profiles::Hdr, 2, textures::PixelFormat::BC6HUFloat, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 0}) !=
+                    ProfileRegistrationResult::Success)
+            {
+                for (u32 index = 0; index < g_profileCount; ++index)
+                    g_profiles[index] = {};
+                g_profileCount = 0;
+                g_registrySealed = false;
+                g_profileRegistryFingerprint = {};
+                ResetTextureImporterRegistry();
+                return false;
+            }
+            return true;
+        }
+
+        void ShutdownGlobalState() noexcept
+        {
+            for (u32 index = 0; index < g_profileCount; ++index)
+                g_profiles[index] = {};
+            g_profileCount = 0;
+            g_registrySealed = false;
+            g_profileRegistryFingerprint = {};
+            ResetTextureImporterRegistry();
+        }
+    } // namespace
 
     [[nodiscard]] bool FreezeCookingProfileRegistry(crypto::Digest256& fingerprint) noexcept
     {
-        if (!g_initialized)
+        if (!IsInitialized())
             return false;
         if (!g_registrySealed)
         {
@@ -1137,37 +1188,47 @@ namespace vanguard::texture_tools
 
     bool Initialize() noexcept
     {
-        if (g_initialized)
+        if (g_rootInitialized)
             return true;
-        rgbcx::init();
-        bc7enc_compress_block_init();
-        if (!RegisterBuiltInTextureImporters())
+        if (g_acquisitionReferences == 0 && !InitializeGlobalState())
             return false;
-        const TextureCookingFlags runtimeMips = TextureCookingFlags::GenerateFullMipChain | TextureCookingFlags::Streamable;
-        if (RegisterInternal({profiles::Color, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb, runtimeMips, 4, 3, 0.5f, 2}) !=
-                ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::ColorAlpha, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::SRgb,
-                              runtimeMips | TextureCookingFlags::PreserveAlphaCoverage, 4, 3, 0.5f, 2}) != ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Normal, 2, textures::PixelFormat::BC5UNorm, textures::ColorSpace::Linear,
-                              runtimeMips | TextureCookingFlags::RenormalizeNormals, 4, 3, 0.5f, 10}) != ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Masks, 2, textures::PixelFormat::BC7UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 1}) !=
-                ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Data, 2, textures::PixelFormat::BC4UNorm, textures::ColorSpace::Linear, runtimeMips, 4, 0, 0.5f, 10}) !=
-                ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Ui, 1, textures::PixelFormat::R8G8B8A8UNorm, textures::ColorSpace::SRgb, TextureCookingFlags::None, 1, 3, 0.5f, 0}) !=
-                ProfileRegistrationResult::Success ||
-            RegisterInternal({profiles::Hdr, 2, textures::PixelFormat::BC6HUFloat, textures::ColorSpace::Linear, runtimeMips, 4, 3, 0.5f, 0}) !=
-                ProfileRegistrationResult::Success)
-        {
+        g_rootInitialized = true;
+        return true;
+    }
+
+    bool Shutdown() noexcept
+    {
+        if (!g_rootInitialized)
             return false;
-        }
-        g_initialized = true;
+        g_rootInitialized = false;
+        if (g_acquisitionReferences == 0)
+            ShutdownGlobalState();
+        return true;
+    }
+
+    bool Acquire() noexcept
+    {
+        if (g_acquisitionReferences == ~u32{0})
+            return false;
+        if (!g_rootInitialized && g_acquisitionReferences == 0 && !InitializeGlobalState())
+            return false;
+        ++g_acquisitionReferences;
+        return true;
+    }
+
+    bool Release() noexcept
+    {
+        if (g_acquisitionReferences == 0)
+            return false;
+        --g_acquisitionReferences;
+        if (!g_rootInitialized && g_acquisitionReferences == 0)
+            ShutdownGlobalState();
         return true;
     }
 
     bool IsInitialized() noexcept
     {
-        return g_initialized;
+        return g_rootInitialized || g_acquisitionReferences != 0;
     }
 
     bool FreezeConfiguration(TextureToolsConfigurationFingerprint& fingerprint) noexcept
@@ -1181,7 +1242,7 @@ namespace vanguard::texture_tools
 
     ProfileRegistrationResult RegisterCookingProfile(const TextureCookingProfile& profile) noexcept
     {
-        if (!g_initialized)
+        if (!IsInitialized())
             return ProfileRegistrationResult::InvalidArgument;
         return RegisterInternal(profile);
     }
@@ -1198,7 +1259,7 @@ namespace vanguard::texture_tools
 
     Result CookTexture(const SourceTexture& source, filesystem::IFile& output, const CookSettings& settings, CookReport* report) noexcept
     {
-        if (!g_initialized)
+        if (!IsInitialized())
             return Result::InvalidState;
         if (settings.cancellation.IsCancellationRequested())
             return Result::Cancelled;

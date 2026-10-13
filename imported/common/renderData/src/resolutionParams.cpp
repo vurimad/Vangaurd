@@ -1,0 +1,86 @@
+/**
+* Copyright (c)2019 CD Projekt Red. All Rights Reserved.
+*/
+
+#include "build.h"
+#include "resolutionParams.h"
+
+RTTI_BEGIN_ENUM_IN_NAMESPACE( EPreset, rend, dim );
+{
+	RTTI_ENUM_OPTION_ALIAS( "228x128", eSAVE_THUMBNAIL_CONSOLE );
+	RTTI_ENUM_OPTION_ALIAS( "456x256", eSAVE_THUMBNAIL );
+	RTTI_ENUM_OPTION_ALIAS( "480x270", eHD_16 );
+	RTTI_ENUM_OPTION_ALIAS( "640x480", eVGA );
+	RTTI_ENUM_OPTION_ALIAS( "960x540", eHD_4 );
+	RTTI_ENUM_OPTION_ALIAS( "1280x720", eHD );
+	RTTI_ENUM_OPTION_ALIAS( "1600x900", eHD_PLUS );
+	RTTI_ENUM_OPTION_ALIAS( "1920x1080", eFULL_HD );
+	RTTI_ENUM_OPTION_ALIAS( "2560x1080", eUltrawide_HD );
+	RTTI_ENUM_OPTION_ALIAS( "2560x1440", eQHD );
+	RTTI_ENUM_OPTION_ALIAS( "3440x1440", eUWQHD );
+	RTTI_ENUM_OPTION_ALIAS( "3840x1600", eWQHD_PLUS );
+	RTTI_ENUM_OPTION_ALIAS( "3840x2160", eULTRA_HD );
+	RTTI_ENUM_OPTION_ALIAS( "Console_Base", eCONSOLE_BASE );
+	RTTI_ENUM_OPTION_ALIAS( "Console_Pro_Prospero_Lockhart", eCONSOLE_PRO_PROSPERO_LOCKHART );
+	RTTI_ENUM_OPTION_ALIAS( "Console_Scorpio", eCONSOLE_SCORPIO );
+	RTTI_ENUM_OPTION_ALIAS( "Console_Anaconda", eCONSOLE_ANACONDA );
+}
+RTTI_END_ENUM();
+
+namespace rend
+{
+	namespace dim
+	{
+		void GetResolution( const EPreset preset, Uint32& outWidth, Uint32& outHeight )
+		{
+#define CHECK_RESOLUTION(type) if ( preset == type ) { outWidth = Preset<type>::W; outHeight = Preset<type>::H; return; }
+
+			CHECK_RESOLUTION( eSAVE_THUMBNAIL_CONSOLE );
+			CHECK_RESOLUTION( eSAVE_THUMBNAIL );
+			CHECK_RESOLUTION( eHD_16 );
+			CHECK_RESOLUTION( eVGA );
+			CHECK_RESOLUTION( eHD_4 );
+			CHECK_RESOLUTION( eHD );
+			CHECK_RESOLUTION( eHD_PLUS );
+			CHECK_RESOLUTION( eUltrawide_HD );
+			CHECK_RESOLUTION( eFULL_HD );
+			CHECK_RESOLUTION( eQHD );
+			CHECK_RESOLUTION( eUWQHD );
+			CHECK_RESOLUTION( eWQHD_PLUS );
+			CHECK_RESOLUTION( eULTRA_HD );
+
+#undef CHECK_RESOLUTION
+		}
+
+		void GetPreset( const Uint32 width, const Uint32 height, EPreset& outPreset )
+		{
+#define CHECK_RESOLUTION(type) if ( Preset<type>::W == width && Preset<type>::H == height ) { outPreset = type; return; }
+
+			CHECK_RESOLUTION( eSAVE_THUMBNAIL_CONSOLE );
+			CHECK_RESOLUTION( eSAVE_THUMBNAIL );
+			CHECK_RESOLUTION( eHD_16 );
+			CHECK_RESOLUTION( eVGA );
+			CHECK_RESOLUTION( eHD_4 );
+			CHECK_RESOLUTION( eHD );
+			CHECK_RESOLUTION( eHD_PLUS );
+			CHECK_RESOLUTION( eUltrawide_HD );
+			CHECK_RESOLUTION( eFULL_HD );
+			CHECK_RESOLUTION( eQHD );
+			CHECK_RESOLUTION( eUWQHD );
+			CHECK_RESOLUTION( eWQHD_PLUS );
+			CHECK_RESOLUTION( eULTRA_HD );
+
+#undef CHECK_RESOLUTION
+
+			outPreset = EPreset::eFULL_HD;
+		}
+	}
+
+	namespace camera
+	{
+		const Float NEAR_PLANE_DEFAULT = 0.02f;
+		const Float FAR_PLANE_DEFAULT = 16000.0f;
+		const Float WEAPON_PLANE_NEAR_DEFAULT = NEAR_PLANE_DEFAULT;
+		const Float WEAPON_PLANE_FAR_DEFAULT = 4000.0f;
+	}
+}

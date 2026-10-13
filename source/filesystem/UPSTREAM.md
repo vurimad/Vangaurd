@@ -1,7 +1,7 @@
 # Imported filesystem provenance
 
 - RED source: `D:/root/R6.Root/Mainline/dev/src/common/redFileSystem`
-- Vanguard image: `source/imported/common/redFileSystem`
+- Vanguard image: `imported/common/redFileSystem`
 - Imported inventory: 58 files, 190,204 bytes
 - Sorted `relative-path<TAB>file-SHA-256` manifest SHA-256:
   `ef3ac2eb4153d6396908c1534f9f78acdda9790e078f64ebae681d39459c124a`

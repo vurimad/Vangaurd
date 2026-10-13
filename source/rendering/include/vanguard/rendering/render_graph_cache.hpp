@@ -51,6 +51,51 @@ namespace vanguard::rendering
         [[nodiscard]] bool operator==(const RenderGraphKey& other) const noexcept;
     };
 
+    // Exact Layer-2 declaration-shape witness owned beside the compiled
+    // resource contract. `hash` is only a fast reject; equality always checks
+    // every semantic field so warm admission never relies on digest collision
+    // improbability.
+    struct RenderFlowResourceContractRevisionKey
+    {
+        u64 hash = 0;
+        u32 views = 0;
+        u32 visibleInstances = 0;
+        u32 geometryWorkItems = 0;
+        u32 geometryBins = 0;
+        u32 shellDraws = 0;
+        u32 shellsPerView = 0;
+        u32 indirectArgumentCapacity = 0;
+        u32 shellDrawCount = 0;
+        u32 outputRegionCount = 0;
+        containers::FixedArray<u32, MaximumRenderViewsPerFamily> outputRegionViews;
+        RenderViewportOutputKind outputKind = RenderViewportOutputKind::Headless;
+        RenderOutputColorEncoding outputEncoding = RenderOutputColorEncoding::SceneLinear;
+        rhi::ResourceState textureRestingState = rhi::ResourceState::Unknown;
+        rhi::QueueType textureRestingQueue = rhi::QueueType::Graphics;
+        RenderOutputPublicationReadinessKind texturePublicationReadiness = RenderOutputPublicationReadinessKind::SameQueueContinuation;
+        bool diagnosticReadback = false;
+        bool hasFrameOutput = false;
+        bool hasTextureOutput = false;
+
+        [[nodiscard]] bool operator==(const RenderFlowResourceContractRevisionKey& other) const noexcept
+        {
+            if (outputRegionCount > MaximumRenderViewsPerFamily || other.outputRegionCount > MaximumRenderViewsPerFamily)
+                return false;
+            if (hash != other.hash || views != other.views || visibleInstances != other.visibleInstances ||
+                geometryWorkItems != other.geometryWorkItems || geometryBins != other.geometryBins || shellDraws != other.shellDraws ||
+                shellsPerView != other.shellsPerView || indirectArgumentCapacity != other.indirectArgumentCapacity ||
+                shellDrawCount != other.shellDrawCount || outputRegionCount != other.outputRegionCount ||
+                outputKind != other.outputKind || outputEncoding != other.outputEncoding || textureRestingState != other.textureRestingState ||
+                textureRestingQueue != other.textureRestingQueue || texturePublicationReadiness != other.texturePublicationReadiness ||
+                diagnosticReadback != other.diagnosticReadback || hasFrameOutput != other.hasFrameOutput || hasTextureOutput != other.hasTextureOutput)
+                return false;
+            for (u32 index = 0; index < outputRegionCount; ++index)
+                if (outputRegionViews[index] != other.outputRegionViews[index])
+                    return false;
+            return true;
+        }
+    };
+
     class RenderGraphCache final
     {
     public:
@@ -81,6 +126,9 @@ namespace vanguard::rendering
             u64 lastUsedFrame = 0;
             RenderGraphKey graphKey;
             RenderNodeGraph graph;
+            RenderFlowResourceContract resourceContract;
+            RenderFlowResourceContractRevisionKey resourceContractRevision;
+            u64 resourceContractPublicationSerial = 0;
             containers::DynamicArray<CameraSetupData*> cameraBuildData;
             bool valid = false;
         };

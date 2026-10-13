@@ -8,6 +8,7 @@
 #include <vanguard/diagnostics/diagnostics.hpp>
 #include <vanguard/entities/static_mesh_component.hpp>
 #include <vanguard/entities/scene_components.hpp>
+#include <vanguard/entities/transform_component.hpp>
 #include <vanguard/jobs/jobs.hpp>
 #include <vanguard/memory/memory.hpp>
 #include <vanguard/prefabs/prefabs.hpp>
@@ -883,6 +884,7 @@ namespace
         {
             auto* const service = static_cast<ManagedGameWorldService*>(userData);
             return service != nullptr &&
+                   vanguard::entities::RegisterTransformComponent(registry) &&
                    vanguard::entities::RegisterStaticMeshComponent(registry) &&
                    vanguard::entities::RegisterLightComponent(registry) &&
                    vanguard::entities::RegisterCameraComponent(registry) &&

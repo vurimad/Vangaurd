@@ -6,7 +6,7 @@ untracked CRT block. RED thread behavior and explicit lifecycle remain
 unchanged.
 
 The complete concurrency image is retained in the shared imported `redSystem`
-snapshot at `source/imported/common/redSystem`.
+snapshot at `imported/common/redSystem`.
 
 - Authoritative source:
   `D:\root\R6.Root\Mainline\dev\src\common\redSystem`

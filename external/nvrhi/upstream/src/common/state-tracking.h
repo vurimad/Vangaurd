@@ -57,6 +57,7 @@ namespace nvrhi
         bool enableUavBarriers = true;
         bool firstUavBarrierPlaced = false;
         bool permanentTransition = false;
+        bool oversizedRetention = false;
     };
 
     struct BufferState
@@ -106,7 +107,12 @@ namespace nvrhi
         ResourceStates getBufferState(BufferStateExtension* buffer);
 
         // Internal interface
-        
+
+        // Starts a new recording epoch. Any state left by a command list that was
+        // closed but never submitted is abandoned without publishing permanent or
+        // keep-initial state to the resource extensions.
+        void beginRecording();
+
         void requireTextureState(TextureStateExtension* texture, TextureSubresourceSet subresources, ResourceStates state);
         void requireBufferState(BufferStateExtension* buffer, ResourceStates state);
 
@@ -119,19 +125,58 @@ namespace nvrhi
         void clearBarriers() { m_TextureBarriers.clear(); m_BufferBarriers.clear(); }
 
     private:
+        static constexpr uint32_t RetainedStateSlotCapacity = 512;
+        static constexpr size_t RetainedSubresourceStateCapacity = 256;
+
+        struct RetainedTextureStateSlot
+        {
+            TextureStateExtension* texture = nullptr;
+            TextureState tracking;
+            uint64_t epoch = 0;
+        };
+
+        struct RetainedBufferStateSlot
+        {
+            BufferStateExtension* buffer = nullptr;
+            BufferState tracking;
+            uint64_t epoch = 0;
+        };
+
         IMessageCallback* m_MessageCallback;
 
-        std::unordered_map<TextureStateExtension*, std::unique_ptr<TextureState>> m_TextureStates;
-        std::unordered_map<BufferStateExtension*, std::unique_ptr<BufferState>> m_BufferStates;
+        // The ordinary command-list working set is retained across submissions.
+        // Slot identity is recording-epoch qualified: stale keys are never compared
+        // or dereferenced before their epoch is rejected, preventing pointer ABA.
+        std::vector<RetainedTextureStateSlot> m_RetainedTextureStates;
+        std::vector<RetainedBufferStateSlot> m_RetainedBufferStates;
+        std::vector<uint32_t> m_ActiveTextureStateSlots;
+        std::vector<uint32_t> m_ActiveBufferStateSlots;
+
+        // Capacity overflow is deliberately transient so retained storage remains
+        // bounded without introducing a semantic resource limit.
+        std::unordered_map<TextureStateExtension*, std::unique_ptr<TextureState>> m_OverflowTextureStates;
+        std::unordered_map<BufferStateExtension*, std::unique_ptr<BufferState>> m_OverflowBufferStates;
+        uint64_t m_RecordingEpoch = 1;
 
         // Deferred transitions of textures and buffers to permanent states.
         // They are executed only when the command list is executed, not when the app calls setPermanentTextureState or setPermanentBufferState.
         std::vector<std::pair<TextureStateExtension*, ResourceStates>> m_PermanentTextureStates;
         std::vector<std::pair<BufferStateExtension*, ResourceStates>> m_PermanentBufferStates;
 
+        // Sparse submit witnesses replace the old whole-map initialization scan.
+        std::vector<TextureStateExtension*> m_InitialTextureStates;
+        std::vector<TextureState*> m_OversizedTextureStates;
+
         std::vector<TextureBarrier> m_TextureBarriers;
         std::vector<BufferBarrier> m_BufferBarriers;
 
+        void advanceRecordingEpoch();
+        void abandonRecordingState();
+        void releaseOversizedTextureStateStorage();
+        void trimTransientOverflowStorage();
+        void noteTextureStateStorage(TextureState* tracking);
+        static void resetTextureState(TextureState& tracking);
+        static void resetBufferState(BufferState& tracking);
         TextureState* getTextureStateTracking(TextureStateExtension* texture, bool allowCreate);
         BufferState* getBufferStateTracking(BufferStateExtension* buffer, bool allowCreate);
     };

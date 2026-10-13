@@ -35,6 +35,7 @@ namespace vanguard::mesh_tools
         Normal,
         Metalness,
         Roughness,
+        MetallicRoughness,
         Specular,
         Emissive,
         Occlusion,

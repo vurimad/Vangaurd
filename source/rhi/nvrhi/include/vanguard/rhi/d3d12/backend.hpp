@@ -90,6 +90,7 @@ namespace vanguard::rhi::d3d12
         [[nodiscard]] bool IsGpuFenceComplete(GpuFence) const noexcept override;
         [[nodiscard]] BackendStatus WaitForGpuFence(GpuFence, u64) noexcept override;
         [[nodiscard]] BackendStatus AddToResidencyWorkingSet(CommandListRef, ResourceRef) noexcept override;
+        [[nodiscard]] BackendStatus AdmitCommandListResources(CommandListRef, containers::ArraySpan<const ResourceRef>) noexcept override;
         [[nodiscard]] BackendStatus SetPipeline(CommandListRef, PipelineRef) noexcept override;
         [[nodiscard]] BackendStatus SetupRenderTargets(CommandListRef, const RenderTargetSetup&) noexcept override;
         [[nodiscard]] BackendStatus SetVariableRateShading(CommandListRef, const VariableRateShadingState&) noexcept override;
@@ -139,6 +140,7 @@ namespace vanguard::rhi::d3d12
 
         [[nodiscard]] BackendStatus AddCommandListWait(CommandListRef, GpuFence) noexcept override;
         [[nodiscard]] BackendStatus SeedCommandListStates(CommandListRef, containers::ArraySpan<const CommandListEntryState>) noexcept override;
+        [[nodiscard]] BackendStatus ExecuteCompiledBarriers(CommandListRef, containers::ArraySpan<const CompiledBarrier>) noexcept override;
         [[nodiscard]] BackendStatus TransitionTexture(CommandListRef, TextureRef, ResourceState, ResourceState, const SubresourceRange&) noexcept override;
         [[nodiscard]] BackendStatus TransitionBuffer(CommandListRef, BufferRef, ResourceState, ResourceState) noexcept override;
         [[nodiscard]] BackendStatus BarrierTextureUav(CommandListRef, TextureRef) noexcept override;

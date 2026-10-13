@@ -1573,12 +1573,31 @@ namespace vanguard::resources
 
     bool ResourcePipeline::UnregisterLoader(const ResourceTypeId type) noexcept
     {
-        if (m_impl == nullptr || !m_impl->registry->UnregisterLoader(type))
+        if (m_impl == nullptr)
         {
             return false;
         }
 
+        m_impl->CollectRetiredOperations();
         m_impl->lock.Acquire();
+        for (const PipelineOperation* const operation : m_impl->allOperations)
+        {
+            if (operation != nullptr && operation->reference.ExpectedType() == type)
+            {
+                m_impl->lock.Release();
+                return false;
+            }
+        }
+        // Keep the pipeline lock held through registry unregister and loader
+        // removal. PipelineOperation copies the loader descriptor, so successful
+        // unregister must prove every copied callback/userData descriptor of this
+        // type has been reclaimed and must prevent a new copy from being created
+        // between that proof and removal.
+        if (!m_impl->registry->UnregisterLoader(type))
+        {
+            m_impl->lock.Release();
+            return false;
+        }
         const bool removed = m_impl->loaders.Remove(type).IsSuccessful();
         for (u32 index = 0; index < m_impl->loaderTypes.Size(); ++index)
         {

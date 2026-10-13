@@ -2343,9 +2343,10 @@ int main()
                   files.FileExist(acceptedSnapshotPath),
               "E2.2 P4 missing snapshot conservatively bootstraps current catalog as New");
 
-        // A payload mutation keeps the header shape but breaks the payload
-        // checksum. The loader reports Corrupt, discards the entire image, and
-        // rebuilds from current source state rather than trusting a prefix.
+        // P5 makes VPAS safety-critical because it can contain the pre-VADI
+        // cohort cutover marker. A payload mutation must therefore fail closed
+        // and preserve the bad image for diagnosis instead of bootstrapping from
+        // current source state and potentially losing predecessor LKG evidence.
         Check(pipeline.Shutdown() == asset_streaming::ProjectAssetPipelineResult::Success,
               "E2.2 P4 shutdown before corrupt restart");
         containers::DynamicArray<u8> corruptSnapshot(memory::pools::Assets::GetInstance());
@@ -2358,20 +2359,32 @@ int main()
               "E2.2 P4 write checksum-corrupt snapshot");
         asset_streaming::ProjectAssetRestoreReport corruptRestart;
         Check(pipeline.Initialize(files, sources, streamer, compilerSpan, importerSpan, config, &corruptRestart) ==
-                  asset_streaming::ProjectAssetPipelineResult::Success &&
+                  asset_streaming::ProjectAssetPipelineResult::SnapshotLoadFailed &&
                   corruptRestart.acceptedSnapshot == asset_streaming::ProjectAssetSnapshotResult::Corrupt &&
-                  pipeline.GetAcceptedAssetGeneration() == 1u && HasAcceptedChange(pipeline, idA, asset_streaming::ProjectAssetChangeReason::New),
-              "E2.2 P4 corrupt snapshot is reported and conservatively rebuilt");
+                  files.FileExist(acceptedSnapshotPath),
+              "P5 corrupt VPAS fails closed and preserves possible cohort/LKG evidence");
+        if (!corruptSnapshot.Empty())
+            corruptSnapshot[corruptSnapshot.Size() - 1u] ^= 0x5au;
+        Check(WriteBytes(files, acceptedSnapshotPath, corruptSnapshot.TypedData(), corruptSnapshot.Size()) &&
+                  pipeline.Initialize(files, sources, streamer, compilerSpan, importerSpan, config) ==
+                      asset_streaming::ProjectAssetPipelineResult::Success,
+              "P5 restoring the exact VPAS image recovers normally after corruption");
 
-        // The payload checksum deliberately excludes the header so changing the
-        // major format version creates a checksum-valid but incompatible image.
+        // The payload checksum deliberately excludes the header. An incompatible
+        // major version must likewise be preserved and rejected, since an older
+        // or newer format may contain cohort safety evidence this binary cannot
+        // interpret.
         Check(pipeline.Shutdown() == asset_streaming::ProjectAssetPipelineResult::Success,
               "E2.2 P4 shutdown before incompatible restart");
         containers::DynamicArray<u8> incompatibleSnapshot(memory::pools::Assets::GetInstance());
         Check(ReadBytes(files, acceptedSnapshotPath, incompatibleSnapshot) && incompatibleSnapshot.Size() >= 6u,
               "E2.2 P4 read durable image for incompatibility coverage");
+        u8 originalMajorLow = 0u;
+        u8 originalMajorHigh = 0u;
         if (incompatibleSnapshot.Size() >= 6u)
         {
+            originalMajorLow = incompatibleSnapshot[4];
+            originalMajorHigh = incompatibleSnapshot[5];
             incompatibleSnapshot[4] = static_cast<u8>(asset_streaming::ProjectAssetSnapshotMajorVersion + 1u);
             incompatibleSnapshot[5] = 0u;
         }
@@ -2379,10 +2392,19 @@ int main()
               "E2.2 P4 write incompatible snapshot version");
         asset_streaming::ProjectAssetRestoreReport incompatibleRestart;
         Check(pipeline.Initialize(files, sources, streamer, compilerSpan, importerSpan, config, &incompatibleRestart) ==
-                  asset_streaming::ProjectAssetPipelineResult::Success &&
+                  asset_streaming::ProjectAssetPipelineResult::SnapshotLoadFailed &&
                   incompatibleRestart.acceptedSnapshot == asset_streaming::ProjectAssetSnapshotResult::Incompatible &&
-                  pipeline.GetAcceptedAssetGeneration() == 1u && HasAcceptedChange(pipeline, idA, asset_streaming::ProjectAssetChangeReason::New),
-              "E2.2 P4 incompatible snapshot is reported and conservatively rebuilt");
+                  files.FileExist(acceptedSnapshotPath),
+              "P5 incompatible VPAS fails closed and preserves possible cohort/LKG evidence");
+        if (incompatibleSnapshot.Size() >= 6u)
+        {
+            incompatibleSnapshot[4] = originalMajorLow;
+            incompatibleSnapshot[5] = originalMajorHigh;
+        }
+        Check(WriteBytes(files, acceptedSnapshotPath, incompatibleSnapshot.TypedData(), incompatibleSnapshot.Size()) &&
+                  pipeline.Initialize(files, sources, streamer, compilerSpan, importerSpan, config) ==
+                      asset_streaming::ProjectAssetPipelineResult::Success,
+              "P5 restoring the compatible VPAS header recovers normally after incompatibility");
 
         // Persistence itself is failure-atomic: an over-limit staged image fails
         // before replacement and cannot damage a previously committed target.
@@ -2416,6 +2438,113 @@ int main()
         Check(ReadBytes(files, asset_streaming::ProjectAssetSnapshotPath(atomicSnapshotRoot), atomicAfter) &&
                   SameBytes(atomicBefore, atomicAfter),
               "E2.2 P4 failed persistence staging preserves the previous durable accepted image");
+
+        // P5 write-ahead cohort intent: VPAS owns the bounded restart handoff
+        // between durable model metadata and the VADI retirement journal. Prove
+        // both a reimport marker with an exact predecessor and the first-import
+        // shape where no predecessor asset exists yet.
+        const filesystem::AbsolutePath cohortSnapshotRoot = root.AddDirPath("P5CohortIntentSnapshot");
+        Check(files.CreatePath(cohortSnapshotRoot), "P5 creates isolated cohort-intent snapshot root");
+        const asset_streaming::ProjectAssetState* const persistedAsset = persistenceBaseline.LookupAsset(idA);
+        if (persistedAsset != nullptr && !persistedAsset->outputs.Empty())
+        {
+            const resources::ResourceReference persistedOutput = persistedAsset->outputs[0].resource;
+            persistenceBaseline.cohortIntent.asset = idA;
+            persistenceBaseline.cohortIntent.sourceIdentity = persistedAsset->sourceIdentity;
+            persistenceBaseline.cohortIntent.reviewedAcceptedGeneration = persistenceBaseline.generation;
+            persistenceBaseline.cohortIntent.targetMetadataFingerprint = crypto::Sha256("p5-reimport-intent", 18u);
+            persistenceBaseline.cohortIntent.predecessorOutputs.PushBack(persistedOutput);
+            persistenceBaseline.cohortIntent.successorOutputs.PushBack(persistedOutput);
+            asset_streaming::ProjectAssetAcceptedBaseline loadedIntent(config.changeState);
+            Check(persistenceBaseline.cohortIntent.IsActive() &&
+                      asset_streaming::StageProjectAssetAcceptedSnapshot(files, cohortSnapshotRoot, persistenceBaseline) ==
+                          asset_streaming::ProjectAssetSnapshotResult::Success &&
+                      asset_streaming::CommitStagedProjectAssetAcceptedSnapshot(files, cohortSnapshotRoot) ==
+                          asset_streaming::ProjectAssetSnapshotResult::Success &&
+                      asset_streaming::LoadProjectAssetAcceptedSnapshot(files, cohortSnapshotRoot, config.changeState, loadedIntent) ==
+                          asset_streaming::ProjectAssetSnapshotResult::Success &&
+                      loadedIntent.cohortIntent.IsActive() && loadedIntent.cohortIntent.asset == idA &&
+                      loadedIntent.cohortIntent.sourceIdentity == persistedAsset->sourceIdentity &&
+                      loadedIntent.cohortIntent.predecessorOutputs.Size() == 1u &&
+                      loadedIntent.cohortIntent.predecessorOutputs[0] == persistedOutput &&
+                      loadedIntent.cohortIntent.successorOutputs.Size() == 1u &&
+                      loadedIntent.cohortIntent.successorOutputs[0] == persistedOutput,
+                  "P5 VPAS round-trips exact reimport predecessor/successor cohort intent");
+
+            // A predecessor-bearing intent cannot survive destructive VADI
+            // recovery: VPAS owns identities only, while the index owns the exact
+            // predecessor build/content/artifact evidence needed for LKG/VDDC.
+            // Prove a corrupt index is preserved and rejected on every restart,
+            // rather than being deleted on the first attempt and silently accepted
+            // as an empty index on the second.
+            const filesystem::AbsolutePath guardedRoot = root.AddDirPath("P5GuardedVadiRecovery");
+            const filesystem::AbsolutePath guardedIndexRoot = guardedRoot.AddDirPath("Index");
+            const filesystem::AbsolutePath guardedDerivedRoot = guardedRoot.AddDirPath("Derived");
+            const filesystem::AbsolutePath guardedLooseRoot = guardedRoot.AddDirPath("Loose");
+            const filesystem::AbsolutePath guardedJournal = assetsRoot.AddFilePath("p5_guarded_vadi_recovery.vtxn");
+            Check(files.CreatePath(guardedRoot) && files.CreatePath(guardedIndexRoot) && files.CreatePath(guardedDerivedRoot) &&
+                      files.CreatePath(guardedLooseRoot) &&
+                      asset_streaming::StageProjectAssetAcceptedSnapshot(files, guardedIndexRoot, persistenceBaseline) ==
+                          asset_streaming::ProjectAssetSnapshotResult::Success &&
+                      asset_streaming::CommitStagedProjectAssetAcceptedSnapshot(files, guardedIndexRoot) ==
+                          asset_streaming::ProjectAssetSnapshotResult::Success,
+                  "P5 creates predecessor-bearing restart snapshot for guarded VADI recovery");
+            const filesystem::AbsolutePath guardedVadi = guardedIndexRoot.AddFilePath("asset-dependencies.vadi");
+            u8 corruptVadi[] = {0x56u, 0x41u, 0x44u, 0x49u, 0x00u, 0x01u, 0x02u, 0x03u};
+            Check(WriteBytes(files, guardedVadi, corruptVadi, sizeof(corruptVadi)),
+                  "P5 writes corrupt VADI beside predecessor-bearing VPAS intent");
+            asset_streaming::ProjectAssetPipelineConfig guardedConfig = config;
+            guardedConfig.build.artifactCacheRoot = guardedDerivedRoot;
+            guardedConfig.build.dependencyIndexRoot = guardedIndexRoot;
+            guardedConfig.publication.artifactCacheRoot = guardedDerivedRoot;
+            guardedConfig.publication.looseRoot = guardedLooseRoot;
+            guardedConfig.operationJournalPath = guardedJournal;
+            asset_streaming::ProjectAssetPipeline guardedPipeline;
+            asset_streaming::ProjectAssetPipelineFailure guardedFailure;
+            Check(guardedPipeline.Initialize(files, sources, streamer, compilerSpan, importerSpan, guardedConfig, nullptr, &guardedFailure) ==
+                      asset_streaming::ProjectAssetPipelineResult::BuildInitializationFailed &&
+                      guardedFailure.build == assets::ProjectAssetBuildResult::DependencyIndexInitializationFailed &&
+                      files.FileExist(guardedVadi),
+                  "P5 predecessor-bearing restart fails closed and preserves corrupt VADI evidence");
+            guardedFailure = {};
+            Check(guardedPipeline.Initialize(files, sources, streamer, compilerSpan, importerSpan, guardedConfig, nullptr, &guardedFailure) ==
+                      asset_streaming::ProjectAssetPipelineResult::BuildInitializationFailed &&
+                      guardedFailure.build == assets::ProjectAssetBuildResult::DependencyIndexInitializationFailed &&
+                      files.FileExist(guardedVadi),
+                  "P5 repeated restart cannot erase corrupt VADI and fall through to an empty index");
+            Check(DeleteDirectoryTree(files, guardedRoot), "P5 removes guarded VADI recovery fixture");
+        }
+        else
+            Check(false, "P5 cohort-intent fixture resolves an accepted output");
+
+        asset_streaming::ProjectAssetAcceptedBaseline firstImportIntent(config.changeState);
+        Check(asset_streaming::CompareProjectAssetCandidate(
+                  asset_streaming::ProjectAssetAcceptedBaseline(config.changeState), sources,
+                  {persistenceEvidence.TypedData(), persistenceEvidence.Size()}, firstImportIntent) ==
+                  asset_streaming::ProjectAssetComparisonResult::Success,
+              "P5 first-import intent fixture builds a durable accepted baseline");
+        assets::AssetId futureAsset;
+        Check(assets::GenerateAssetId(futureAsset), "P5 first-import intent fixture generates future asset identity");
+        constexpr resources::ResourceId FutureSourcePath = 0x70352d736f757263ull;
+        constexpr resources::ResourceId FutureOutputPath = 0x70352d6f75747075ull;
+        firstImportIntent.cohortIntent.asset = futureAsset;
+        firstImportIntent.cohortIntent.sourceIdentity = resources::ResourcePath::FromId(FutureSourcePath);
+        firstImportIntent.cohortIntent.reviewedAcceptedGeneration = firstImportIntent.generation;
+        firstImportIntent.cohortIntent.targetMetadataFingerprint = crypto::Sha256("p5-first-intent", 15u);
+        firstImportIntent.cohortIntent.successorOutputs.PushBack(
+            resources::ResourceReference(resources::ResourcePath::FromId(FutureOutputPath), TestOutputType));
+        asset_streaming::ProjectAssetAcceptedBaseline loadedFirstIntent(config.changeState);
+        Check(firstImportIntent.cohortIntent.IsActive() && firstImportIntent.cohortIntent.predecessorOutputs.Empty() &&
+                  asset_streaming::StageProjectAssetAcceptedSnapshot(files, cohortSnapshotRoot, firstImportIntent) ==
+                      asset_streaming::ProjectAssetSnapshotResult::Success &&
+                  asset_streaming::CommitStagedProjectAssetAcceptedSnapshot(files, cohortSnapshotRoot) ==
+                      asset_streaming::ProjectAssetSnapshotResult::Success &&
+                  asset_streaming::LoadProjectAssetAcceptedSnapshot(files, cohortSnapshotRoot, config.changeState, loadedFirstIntent) ==
+                      asset_streaming::ProjectAssetSnapshotResult::Success &&
+                  loadedFirstIntent.cohortIntent.IsActive() && loadedFirstIntent.cohortIntent.asset == futureAsset &&
+                  loadedFirstIntent.cohortIntent.predecessorOutputs.Empty() && loadedFirstIntent.cohortIntent.successorOutputs.Size() == 1u,
+              "P5 VPAS round-trips first-import cohort intent without inventing a predecessor generation");
+        Check(DeleteDirectoryTree(files, cohortSnapshotRoot), "P5 removes isolated cohort-intent snapshot root");
 
         // A filesystem object at the snapshot path that cannot be opened as a
         // regular file is an I/O failure, not recoverable corruption/missing
@@ -5285,6 +5414,9 @@ int main()
         ArmResolveGate();
         Check(p5Pipeline.TickAutomaticRecook() == asset_streaming::ProjectAssetPipelineResult::Pending && WaitForResolveGate(),
               "E2.4 P5 settings publication reaches deterministic post-commit Resolve gate");
+        Check(p5Pipeline.CancelAutomaticRecook() == asset_streaming::ProjectAssetPipelineResult::Busy &&
+                  !p5Pipeline.GetAutomaticRecookStatus().cancellationRequested,
+              "E2.4 P5 committed publication rejects cancellation without leaking a later cancellation request");
         assets::AssetMetadata p5SettingsDrift = Metadata(p5PrimaryId);
         p5SettingsDrift.settings[0] = 11u;
         Check(WriteMetadata(files, p5PrimaryPath, p5SettingsDrift), "E2.4 P5 mutate settings only after B commit");
@@ -7700,6 +7832,8 @@ int main()
             asset_streaming::ProjectAssetObservationConfig nativeConfig = observationConfig;
             nativeConfig.settleTicks = 1;
             nativeConfig.maximumDeferralTicks = 2;
+            const filesystem::AbsolutePath stageFolder = assetsRoot.AddDirPath("obs_native_stage_folder");
+            Check(files.CreatePath(stageFolder), "E2.1 native source watcher creates stage-folder fixture before starting");
             Check(pipeline.EnableObservation(nativeConfig) == Success, "E2.1 native Windows observation starts");
             if (pipeline.IsObservingSources())
             {
@@ -7715,6 +7849,31 @@ int main()
                     nativeReady = WaitForSuppressedObservationHint(pipeline, suppressedBeforeReady, 100u);
                 }
                 Check(nativeReady, "E2.1 native watcher arms before physical source event");
+                // Large source transactions stage their bytes in adjacent
+                // .vtxn-stage siblings. The native watcher must not fabricate
+                // an authored FILE change for a directory MODIFIED notification
+                // on the containing folder, even while it suppresses the staged
+                // file's own notifications. Real sibling files still reconcile.
+                const filesystem::AbsolutePath stageOnlyPath =
+                    SuffixedPath(stageFolder.AddFilePath("obs_native_stage_only.tasset"), assets::AssetTransactionStageSuffix);
+                const u64 beforeStageSuppressed = pipeline.GetObservationStatus().hintsSuppressed;
+                const u8 stageMarker = 0x4bu;
+                Check(WriteBytes(files, stageOnlyPath, &stageMarker, 1u) &&
+                          WaitForSuppressedObservationHint(pipeline, beforeStageSuppressed, 100u),
+                      "E2.1 native watcher sees and suppresses an owned stage-file write in an existing subfolder");
+                concurrency::SleepOnCurrentThread(30);
+                const asset_streaming::ProjectAssetObservationStatus afterStageOnly = pipeline.GetObservationStatus();
+                Check(!afterStageOnly.overflow && !afterStageOnly.rescanRequired &&
+                          afterStageOnly.pendingPaths == 0u && afterStageOnly.readyPaths == 0u,
+                      "E2.1 stage-file writes and containing-directory metadata do not look like external source changes");
+                assets::AssetId stagedSiblingId;
+                Check(assets::GenerateAssetId(stagedSiblingId), "E2.1 native watcher sibling identity");
+                const filesystem::AbsolutePath stagedSibling = stageFolder.AddFilePath("obs_native_real_sibling.tasset");
+                const asset_streaming::ProjectAssetObservationStatus beforeSibling = pipeline.GetObservationStatus();
+                Check(WriteTextAsset(files, stagedSibling, containers::StringView(""), Metadata(stagedSiblingId)) &&
+                          WaitForObservationPathHint(pipeline, beforeSibling.pendingPaths, beforeSibling.hintsRejected) &&
+                          DrainObservation(pipeline) == Success && sources.LookupAsset(stagedSiblingId) != nullptr,
+                      "E2.1 normal source file next to a staged transaction still triggers authoritative reconciliation");
                 assets::AssetId nativeId;
                 Check(assets::GenerateAssetId(nativeId), "E2.1 native watcher identity");
                 const filesystem::AbsolutePath nativePath = assetsRoot.AddFilePath("obs_native.tasset");
@@ -7727,6 +7886,7 @@ int main()
                 Check(sources.LookupAsset(nativeId) != nullptr, "E2.1 native watcher catalogs the physical create");
                 Check(pipeline.DisableObservation() == Success, "E2.1 native Windows observation stops");
                 static_cast<void>(files.DeleteFile(readyPath));
+                static_cast<void>(files.DeleteFile(stageOnlyPath));
             }
 
             Check(pipeline.EnableObservation(nativeConfig) == Success, "E2.1 native Windows observation restarts");

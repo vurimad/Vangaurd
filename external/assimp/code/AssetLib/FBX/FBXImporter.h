@@ -47,6 +47,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <assimp/BaseImporter.h>
 #include <assimp/LogAux.h>
+#include <assimp/vanguard_model_provenance.h>
 
 #include "FBXImportSettings.h"
 
@@ -92,6 +93,7 @@ protected:
 
 private:
     FBX::ImportSettings mSettings;
+    aiVanguardModelProvenanceSink *mVanguardModelProvenance = nullptr;
 }; // !class FBXImporter
 
 } // end of namespace Assimp

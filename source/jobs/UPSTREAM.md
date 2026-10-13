@@ -12,7 +12,7 @@ dependency, and destruction semantics are unchanged.
 - Integration reference:
   `D:\RED Vanguard\dev\src\common\redJobs2`
 - Retained image:
-  `source/imported/common/redJobs2`
+  `imported/common/redJobs2`
 - Active platform: Windows x64
 
 The previous Vanguard image differed from upstream in three runtime files:
@@ -66,7 +66,7 @@ source dependencies but are not linked into the public jobs module.
 
 RED's Development/Debug profiler enables NVTX on Windows.
 
-- Retained path: `source/imported/external/nvToolsExt`
+- Retained path: `imported/external/nvToolsExt`
 - Header API version: `NVTX_VERSION 1`
 - Original integration source:
   `D:\RED Vanguard\dev\external\nvToolsExt`

@@ -166,6 +166,19 @@ namespace vanguard::rendering
         rhi::PipelineRef m_pipeline;
     };
 
+    class RenderNodeDrawTransparent final : public RenderNodeImpl
+    {
+    public:
+        explicit RenderNodeDrawTransparent(const FrameRenderer& renderer) noexcept;
+        const char* GetName() const noexcept override { return "DrawTransparent"; }
+        RenderNodeCommandListUsage GetCommandListUsage() const noexcept override { return RenderNodeCommandListUsage::Require; }
+        bool DeclareResources(const RenderNodeImplContext&, RenderFlowResourceFailure*) const noexcept override;
+        void Execute(const RenderNodeImplContext&, jobs::Builder*) const override;
+    private:
+        const FrameRenderer& m_renderer;
+        RenderPhaseId m_phase;
+    };
+
     class RenderNodeVisualizeGBuffer final : public RenderNodeImpl
     {
     public:

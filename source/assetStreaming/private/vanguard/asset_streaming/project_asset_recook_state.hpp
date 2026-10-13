@@ -108,6 +108,9 @@ namespace vanguard::asset_streaming
         containers::DynamicArray<resources::ResourceReference> outputs;
         containers::DynamicArray<assets::OwnedBuildRequest> currentRequests;
         containers::DynamicArray<ProjectAssetAutomaticForcedOutput> forcedOutputs;
+        // Physical bytes held by immutable source backings shared across currentRequests.
+        // Request-local metadata/settings remain charged by ComputeBytes per request.
+        u64 currentRequestSharedSourceBytes = 0;
         u64 capturedEvidenceBytes = 0;
         u64 lastAcceptedGeneration = 0;
         u32 diagnostics = 0;
@@ -157,7 +160,8 @@ namespace vanguard::asset_streaming
         const ProjectAssetAutomaticPendingState& existing, const ProjectAssetState& asset,
         u64 acceptedGeneration, const assets::SourceDatabase& sources,
         const assets::ProjectAssetBuildSystem& builds, assets::DependencyIndex& index,
-        const ProjectAssetAutomaticRecookConfig& config, ProjectAssetAutomaticPendingState& staged) noexcept;
+        const ProjectAssetAutomaticRecookConfig& config, ProjectAssetAutomaticPendingState& staged,
+        containers::ArraySpan<const assets::OwnedBuildRequest> alreadyResolved = {}) noexcept;
 
     // Rebuilds only current-session ExplicitReimport intent after an explicit-only
     // failed/cancelled/stale batch. Current accepted outputs are re-resolved, while

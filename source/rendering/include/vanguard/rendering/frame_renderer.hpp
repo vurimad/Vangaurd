@@ -80,6 +80,9 @@ namespace vanguard::rendering
         [[nodiscard]] bool DeclareGeometryArenaUses(const RenderNodeImplContext& context, RenderFlowResourceFailure* failure) const noexcept;
         [[nodiscard]] bool RecordGeometryPhase(const GeometryFrameWork& work, RenderPhaseId phase, const StaticSurfaceDrawContext& draw,
                                                const GeometryPhaseDrawBuffers& buffers, rhi::Failure* failure) const noexcept;
+        [[nodiscard]] bool RecordTransparentGeometryPhase(const GeometryFrameWork& work, RenderPhaseId phase,
+                                                          const StaticSurfaceDrawContext& draw, rhi::BufferRef instances,
+                                                          rhi::Failure* failure) const noexcept;
         // Joined shutdown: drop node borrows before releasing cache requests.
         void ClearPipelines() noexcept;
         [[nodiscard]] bool InitializeResourceAllocator(const RenderFlowResourceAllocatorConfig& config,
@@ -126,6 +129,8 @@ namespace vanguard::rendering
         [[nodiscard]] RenderFrameExecutionStatus PrepareViewFamily(const RenderFrameInfo& frame, PreparedRenderViewFamily& preparedFamily,
                                                                    const PreparedRenderViewFamily*& family) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus PrepareGeometryWork(RenderFrameContext& context, const PreparedRenderViewFamily& family) noexcept;
+        [[nodiscard]] RenderFrameExecutionStatus PrepareTransparentGeometry(GeometryFrameWork& work,
+                                                                           const PreparedRenderViewFamily& family) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus RenderPreparedFrame(RenderFrameContext& context) noexcept;
         void BeginFrameGpuTiming(const RenderNodeImplContext& context) noexcept;
         void BeginGeometryGpuTiming(const RenderNodeImplContext& context) noexcept;
@@ -138,7 +143,8 @@ namespace vanguard::rendering
         [[nodiscard]] bool RegisterGeometryImports(GeometryFrameWork& work, RenderFlowResourceFailure* failure) noexcept;
         [[nodiscard]] bool EnsureGeometryShellPlanBuffer(GeometryFrameWork& work, rhi::Failure* failure = nullptr) noexcept;
         [[nodiscard]] RenderFrameExecutionStatus ExecuteBuiltGraph(RenderFrameContext& context, RenderNodeGraph& graph,
-                                                                   const FrameResourcePolicy& resourcePolicy) noexcept;
+                                                                   const FrameResourcePolicy& resourcePolicy,
+                                                                   RenderGraphCache::CacheEntry* graphCacheEntry = nullptr) noexcept;
         void FinishBuiltGraph(RetainedRenderFrameRef& retainedFrame, RenderNodeGraph& graph) noexcept;
 
         RenderSceneManager& m_scenes;

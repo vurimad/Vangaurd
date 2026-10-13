@@ -1292,7 +1292,12 @@ public static class NativeUiTestNative {
     }
 }
 
-$testProcess = Start-Process -FilePath $Executable -ArgumentList ('"' + $Project + '"'), '--validate-editor-ui' -WorkingDirectory $Artifacts -WindowStyle Hidden -PassThru
+# The automated panel lifecycle oracle must start from the canonical default
+# presentation. Otherwise a prior run's durable per-project layout (the project
+# ID is intentionally fixed across scratch directories) can hide the fixture's
+# detached panel before its first Draw, even though its registration succeeds.
+# Interactive persistence modes above still exercise normal saved-layout restore.
+$testProcess = Start-Process -FilePath $Executable -ArgumentList ('"' + $Project + '"'), '--validate-editor-ui', '--force-default-layout' -WorkingDirectory $Artifacts -WindowStyle Hidden -PassThru
 $deadline = [DateTime]::UtcNow.AddSeconds(45)
 $captured = 0
 $captureAfter = [DateTime]::UtcNow.AddSeconds(4)

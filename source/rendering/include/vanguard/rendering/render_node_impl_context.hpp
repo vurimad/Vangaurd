@@ -5,6 +5,11 @@
 
 namespace vanguard::rendering
 {
+    namespace detail
+    {
+        struct ResourceContractNodeTemplate;
+    }
+
     class FrameRenderer;
     class GeometryFrameWork;
     class PreparedRenderViewFamily;
@@ -69,6 +74,17 @@ namespace vanguard::rendering
         CompiledExecutionRange execution;
     };
 
+    struct RenderNodeResourceUseView
+    {
+        FlowSpaceId flowSpace;
+        containers::StringView name;
+        u32 lookupHash = 0;
+        ResourceUseId use;
+        FrameResourceKind kind = FrameResourceKind::Invalid;
+        u32 nextDuplicate = InvalidRenderFlowResourceIndex;
+        u32 resolvedIndex = InvalidRenderFlowResourceIndex;
+    };
+
     // One frame-owned record per composed graph occurrence. A command-list
     // group appends one range for each ordered child Process() call.
     class RenderNodeResources final
@@ -78,6 +94,25 @@ namespace vanguard::rendering
         void Reset() noexcept;
 
     private:
+        [[nodiscard]] bool IsWarmContract() const noexcept { return m_warmTemplate != nullptr; }
+        void BindWarmContract(const detail::ResourceContractNodeTemplate& source, u32 generation) noexcept;
+        void ReleaseWarmContractView() noexcept;
+        [[nodiscard]] u32 UseCount() const noexcept;
+        [[nodiscard]] u32 DecisionCount() const noexcept;
+        [[nodiscard]] u32 RangeCount() const noexcept;
+        [[nodiscard]] u32 LookupBucketCount() const noexcept;
+        [[nodiscard]] u32 LookupGroupCount() const noexcept;
+        [[nodiscard]] u32 TextureBindingCount() const noexcept;
+        [[nodiscard]] u32 BufferBindingCount() const noexcept;
+        [[nodiscard]] RenderNodeResourceUseView GetUse(u32 index) const noexcept;
+        [[nodiscard]] DecisionId GetDecision(u32 index) const noexcept;
+        [[nodiscard]] RenderNodeResourceRange GetRange(u32 index) const noexcept;
+        [[nodiscard]] u32 GetLookupBucket(u32 index) const noexcept;
+        [[nodiscard]] RenderNodeResourceLookupGroup GetLookupGroup(u32 index) const noexcept;
+        void SetLookupGroupRuntimeNextUse(u32 index, u32 nextUse) noexcept;
+        void ClearRangeExecutions() noexcept;
+        void SetRangeExecution(u32 index, const CompiledExecutionRange& execution) noexcept;
+
         containers::DynamicArray<RenderNodeResourceUseBinding> m_uses;
         containers::DynamicArray<RenderNodeResourceDecisionBinding> m_decisions;
         containers::DynamicArray<RenderNodeResourceRange> m_ranges;
@@ -85,9 +120,14 @@ namespace vanguard::rendering
         containers::DynamicArray<RenderNodeResourceLookupGroup> m_lookupGroups;
         containers::DynamicArray<ResolvedTextureUse> m_resolvedTextures;
         containers::DynamicArray<ResolvedBufferUse> m_resolvedBuffers;
+        containers::DynamicArray<CompiledExecutionRange> m_warmRangeExecutions;
+        containers::DynamicArray<u32> m_warmLookupRuntimeNextUses;
+        const detail::ResourceContractNodeTemplate* m_warmTemplate = nullptr;
+        u32 m_warmGeneration = 0;
 
         friend struct RenderNodeImplContext;
         friend class RenderNodeGraph;
+        friend class RenderNodeResourceBindings;
     };
 
     class RenderNodeResourceBindings final
@@ -107,6 +147,7 @@ namespace vanguard::rendering
             RenderFlowNodeId node;
             RenderNodeResources resources;
             RenderNodeImplContext* executionContext = nullptr;
+            RenderNodeImpl* executionImpl = nullptr;
             CompiledExecutionPacketView packet;
             ExecutionPacketCursor cursor;
             RenderFlowResourceFailure executionFailure;
@@ -116,6 +157,7 @@ namespace vanguard::rendering
         void* m_executionContextStorage = nullptr;
         u32 m_executionContextCount = 0;
 
+        void ReleaseWarmContractViews() noexcept;
         void BlockExecution(RenderFlowResourceFailureCode code, const char* message) noexcept;
         [[nodiscard]] bool GetFirstExecutionFailure(RenderFlowResourceFailure& failure) const noexcept;
 
@@ -212,12 +254,16 @@ namespace vanguard::rendering
         {
             None,
             DeclareResources,
+            PatchResourceContract,
             Execute
         };
 
         void BeginResourceDeclaration(RenderFlowResourceAllocator& allocator, ResourcePlanningWriter* writer, RenderNodeResources& resources,
                                       RenderFlowResourceFailure& failure) noexcept;
         void EndResourceDeclaration() noexcept;
+        void BeginResourceContractPatch(RenderFlowResourceAllocator& allocator, RenderNodeResources& resources,
+                                        RenderFlowResourceFailure& failure) noexcept;
+        void EndResourceContractPatch() noexcept;
         void BeginResourceExecution(CompiledExecutionPacketView* packet, ExecutionPacketCursor& cursor, RenderNodeResources& resources, RenderFlowResourceFailure& failure) noexcept;
         [[nodiscard]] bool OpenResourceExecutionPacket() noexcept;
         void EndResourceExecution() noexcept;
@@ -228,6 +274,7 @@ namespace vanguard::rendering
         [[nodiscard]] RenderFlowNameTag ResolveNamedTag(const RenderFlowNameTag& tag) const noexcept;
         [[nodiscard]] RenderFlowNameTag MakeTemporaryTag(containers::StringView name, LogicalResourceId resource, FrameResourceKind kind) const noexcept;
         [[nodiscard]] bool IsDeclaringResources() const noexcept { return m_operation == Operation::DeclareResources; }
+        [[nodiscard]] bool IsPatchingResourceContract() const noexcept { return m_operation == Operation::PatchResourceContract; }
         [[nodiscard]] bool BeginResourceQueue(rhi::QueueType queue) const noexcept;
         [[nodiscard]] bool EndResourceQueue() const noexcept;
         [[nodiscard]] bool SyncResourceQueue(rhi::CommandListSyncType sync) const noexcept;
@@ -262,5 +309,6 @@ namespace vanguard::rendering
         friend class RenderNodeSynchronize;
         friend class RenderNodeJob;
         friend class RenderNodeImpl;
+        friend class RenderNodeGraph;
     };
 } // namespace vanguard::rendering

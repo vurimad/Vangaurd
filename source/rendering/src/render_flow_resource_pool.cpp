@@ -175,10 +175,23 @@ namespace vanguard::rendering::detail
             m_stats.reusableSlots -= slots;
     }
 
-    void AllocatorDescriptorLedger::RecordPublicationHit() noexcept
+    bool AllocatorDescriptorLedger::TryMarkNotReusable(const u32 slots) noexcept
     {
+        if (slots == 0)
+            return true;
         concurrency::ScopedLock<concurrency::SpinLock> guard(m_lock);
-        ++m_stats.publicationHits;
+        if (slots > m_stats.reusableSlots)
+            return false;
+        m_stats.reusableSlots -= slots;
+        return true;
+    }
+
+    void AllocatorDescriptorLedger::RecordPublicationHit(const u64 count) noexcept
+    {
+        if (count == 0)
+            return;
+        concurrency::ScopedLock<concurrency::SpinLock> guard(m_lock);
+        m_stats.publicationHits += count;
     }
 
     void AllocatorDescriptorLedger::RecordPublicationMiss() noexcept

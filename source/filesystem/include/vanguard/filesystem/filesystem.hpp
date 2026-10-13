@@ -10,24 +10,24 @@
 #pragma warning(disable : 4996)
 #endif
 
-#include "../../../../imported/common/redCore/include/redCorePublic.h"
-#include "../../../../imported/common/redFileSystem/include/redFileSystemPublic.h"
-#include "../../../../imported/common/redFileSystem/include/bufferedReader.h"
-#include "../../../../imported/common/redFileSystem/include/bufferedWriter.h"
-#include "../../../../imported/common/redFileSystem/include/fileStringReader.h"
-#include "../../../../imported/common/redFileSystem/include/fileStringWriter.h"
-#include "../../../../imported/common/redFileSystem/include/filePaths.h"
-#include "../../../../imported/common/redFileSystem/include/fileSys.h"
-#include "../../../../imported/common/redFileSystem/include/fileUtils.h"
-#include "../../../../imported/common/redFileSystem/include/memoryFileReader.h"
-#include "../../../../imported/common/redFileSystem/include/memoryFileWriter.h"
-#include "../../../../imported/common/redFileSystem/include/nullFile.h"
-#include "../../../../imported/common/redFileSystem/include/rawFileReader.h"
-#include "../../../../imported/common/redFileSystem/include/rawFileWriter.h"
-#include "../../../../imported/common/redFileSystem/include/system.h"
+#include "../../../../../imported/common/redCore/include/redCorePublic.h"
+#include "../../../../../imported/common/redFileSystem/include/redFileSystemPublic.h"
+#include "../../../../../imported/common/redFileSystem/include/bufferedReader.h"
+#include "../../../../../imported/common/redFileSystem/include/bufferedWriter.h"
+#include "../../../../../imported/common/redFileSystem/include/fileStringReader.h"
+#include "../../../../../imported/common/redFileSystem/include/fileStringWriter.h"
+#include "../../../../../imported/common/redFileSystem/include/filePaths.h"
+#include "../../../../../imported/common/redFileSystem/include/fileSys.h"
+#include "../../../../../imported/common/redFileSystem/include/fileUtils.h"
+#include "../../../../../imported/common/redFileSystem/include/memoryFileReader.h"
+#include "../../../../../imported/common/redFileSystem/include/memoryFileWriter.h"
+#include "../../../../../imported/common/redFileSystem/include/nullFile.h"
+#include "../../../../../imported/common/redFileSystem/include/rawFileReader.h"
+#include "../../../../../imported/common/redFileSystem/include/rawFileWriter.h"
+#include "../../../../../imported/common/redFileSystem/include/system.h"
 #if defined(RED_FILE_SYNC_SERVICE_ENABLED)
-#include "../../../../imported/common/redFileSystem/include/fileSyncFileManager.h"
-#include "../../../../imported/common/redFileSystem/include/fileSyncService.h"
+#include "../../../../../imported/common/redFileSystem/include/fileSyncFileManager.h"
+#include "../../../../../imported/common/redFileSystem/include/fileSyncService.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -114,6 +114,15 @@ namespace vanguard::filesystem
     // caller can inspect or remove staged while the previous target remains.
     [[nodiscard]] bool ReplaceFile(Manager& manager, const AbsolutePath& staged, const AbsolutePath& target) noexcept;
     [[nodiscard]] bool ReplaceFile(const AbsolutePath& staged, const AbsolutePath& target) noexcept;
+
+    // Atomically replaces an existing target with a completed sibling staging
+    // file while preserving the exact previous target as a sibling backup. The
+    // staged file is consumed only on success. This is the rollback-capable
+    // replacement primitive used by durable authored-file transactions.
+    [[nodiscard]] bool ReplaceFileWithBackup(Manager& manager, const AbsolutePath& staged,
+                                             const AbsolutePath& target, const AbsolutePath& backup) noexcept;
+    [[nodiscard]] bool ReplaceFileWithBackup(const AbsolutePath& staged, const AbsolutePath& target,
+                                             const AbsolutePath& backup) noexcept;
 
     enum class PublishNewFileResult : u8
     {

@@ -4,6 +4,7 @@
 #include <vanguard/rendering/gpu_scene_lifetime.hpp>
 #include <vanguard/rendering/gpu_scene_visibility.hpp>
 #include <vanguard/rendering/render_phase.hpp>
+#include <vanguard/rendering/renderer_draw_contract.hpp>
 #include <vanguard/rendering/render_command_system.hpp>
 #include <vanguard/rendering/render_view.hpp>
 #include <vanguard/rendering/visibility_feedback.hpp>
@@ -250,6 +251,28 @@ int main(const int argumentCount, char** const arguments)
         const rendering::RenderPhaseId opaque = phases.Find(rendering::standardRenderPhases::Opaque);
         const rendering::RenderPhaseId transparent = phases.Find("vanguard.render.transparent");
         Check(opaque.IsValid() && transparent.IsValid() && opaque != transparent, "stable render phase keys resolve to compact identities");
+        rendering::RenderPhaseDefinition transparentDefinition;
+        Check(phases.Get(transparent, transparentDefinition) &&
+                  transparentDefinition.sortMode == rendering::RenderPhaseSortMode::BackToFront,
+              "transparent render phase requires back-to-front ordering");
+        Check(rendering::StandardCameraMeshDrawPhaseCount == 3 &&
+                  rendering::StandardCameraMeshDrawPhases[0].phase == rendering::standardRenderPhases::DepthPrepass &&
+                  rendering::StandardCameraMeshDrawPhases[1].phase == rendering::standardRenderPhases::Opaque &&
+                  rendering::StandardCameraMeshDrawPhases[2].phase == rendering::standardRenderPhases::Transparent,
+              "standard camera mesh contract includes depth, opaque, and transparent phases");
+        const auto opaqueAttachments = rendering::MakeStandardOpaqueAttachments();
+        const auto transparentAttachments = rendering::MakeStandardTransparentAttachments();
+        Check(opaqueAttachments.colorCount == 5 &&
+                  opaqueAttachments.colors[0].format == vanguard::pipelines::Format::R8G8B8A8UNorm &&
+                  opaqueAttachments.colors[1].format == vanguard::pipelines::Format::R16G16B16A16Float &&
+                  opaqueAttachments.colors[2].format == vanguard::pipelines::Format::R16G16B16A16Float &&
+                  opaqueAttachments.colors[3].format == vanguard::pipelines::Format::R16G16B16A16Float &&
+                  opaqueAttachments.colors[4].format == vanguard::pipelines::Format::R16G16B16A16Float,
+              "opaque camera surface contract carries base, normal, emissive-metallic, specular, and view direction");
+        Check(transparentAttachments.colorCount == 1 &&
+                  transparentAttachments.colors[0].format == vanguard::pipelines::Format::R16G16B16A16Float &&
+                  transparentAttachments.depthStencilFormat == vanguard::pipelines::Format::D32Float,
+              "transparent camera surface contract targets HDR camera color with shared depth");
 
         rendering::RenderPhaseId duplicateOpaque;
         Check(phases.Register({"vanguard.render.opaque", 0, rendering::RenderPhaseSortMode::FrontToBack}, duplicateOpaque, &phaseFailure) &&

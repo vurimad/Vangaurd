@@ -338,6 +338,7 @@ namespace vanguard::editor
         EditorPanelInitialPlacement initialPlacement = EditorPanelInitialPlacement::Center;
         EditorPanelVisibilityChanged visibilityChanged = nullptr;
         EditorPanelPersistenceDesc persistence;
+        bool allowDocking = true;
     };
 
     struct EditorPanelDesc

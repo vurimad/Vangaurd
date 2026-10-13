@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+  <Type Name="TRenderPtr&lt;*&gt;">
+    <DisplayString Condition="m_pointee == 0">nullptr</DisplayString>
+    <DisplayString Condition="(m_pointee != 0)">TRenderPtr {*($T1*)m_pointee}</DisplayString>
+    <Expand>
+      <Item Condition="m_pointee != 0" Name="[pointer]" >($T1*)m_pointee</Item>
+    </Expand>
+  </Type>
+
+</AutoVisualizer>

@@ -58,6 +58,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/texture.h>
 #include <assimp/camera.h>
 #include <assimp/StringComparison.h>
+#include <assimp/vanguard_model_provenance.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -92,7 +93,8 @@ class Document;
  *  @param doc Parsed FBX document
  *  @param removeEmptyBones Will remove bones, which do not have any references to vertices.
  */
-void ConvertToAssimpScene(aiScene* out, const Document& doc, bool removeEmptyBones);
+void ConvertToAssimpScene(aiScene* out, const Document& doc, bool removeEmptyBones,
+                          aiVanguardModelProvenanceSink* vanguardModelProvenance = nullptr);
 
 /** Dummy class to encapsulate the conversion process */
 class FBXConverter {
@@ -123,7 +125,8 @@ public:
     };
 
 public:
-    FBXConverter(aiScene* out, const Document& doc, bool removeEmptyBones);
+    FBXConverter(aiScene* out, const Document& doc, bool removeEmptyBones,
+                 aiVanguardModelProvenanceSink* vanguardModelProvenance = nullptr);
     ~FBXConverter();
 
 private:
@@ -446,6 +449,16 @@ private:
 
     using MeshMap = std::fbx_unordered_map<const Geometry*, std::vector<unsigned int> >;
     MeshMap meshes_converted;
+    std::fbx_unordered_map<std::uint64_t, aiNode*> mVanguardModelNodes;
+    std::vector<std::pair<aiBone*, std::uint64_t>> mVanguardPendingBoneNodes;
+
+    struct VanguardGeometryBindingEvidence {
+        std::vector<std::uint64_t> materialBindings;
+        aiMatrix4x4 bindTransform;
+        bool hasSkin = false;
+    };
+    using VanguardGeometryBindingMap = std::fbx_unordered_map<const Geometry*, VanguardGeometryBindingEvidence>;
+    VanguardGeometryBindingMap mVanguardGeometryBindings;
 
     // fixed node name -> which trafo chain components have animations?
     using NodeAnimBitMap = std::fbx_unordered_map<std::string, unsigned int> ;
@@ -465,6 +478,10 @@ private:
     aiScene* const mSceneOut;
     const FBX::Document& doc;
     bool mRemoveEmptyBones;
+    aiVanguardModelProvenanceSink* mVanguardModelProvenance;
+    bool ValidateVanguardGeometryBinding(const MeshGeometry& mesh, const Model& model,
+                                         const aiMatrix4x4& absoluteTransform);
+    void ResolveVanguardBoneNodes();
     static void BuildBoneList(aiNode *current_node, const aiNode *root_node, const aiScene *scene,
                              std::vector<aiBone*>& bones);
 

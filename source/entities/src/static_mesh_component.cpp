@@ -7,41 +7,20 @@
 #include <vanguard/meshes/mesh_resource.hpp>
 #include <vanguard/system/assert.hpp>
 
-#include <cstddef>
 #include <cmath>
 
 namespace vanguard::entities
 {
-    namespace
-    {
-        using Data = StaticMeshComponentData;
-        const reflection::SchemaField Fields[]{
-            reflection::MakeField("mesh", reflection::builtin::ResourceReference, reflection::ValueKind::ResourceReference,
-                                  offsetof(Data, mesh), sizeof(Data::mesh), alignof(resources::ResourceReference), 1, 0,
-                                  reflection::FieldFlags::Required),
-            reflection::MakeField("scale_x", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleX), sizeof(f32), alignof(f32)),
-            reflection::MakeField("scale_y", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleY), sizeof(f32), alignof(f32)),
-            reflection::MakeField("scale_z", reflection::builtin::F32, reflection::ValueKind::F32, offsetof(Data, scaleZ), sizeof(f32), alignof(f32)),
-            reflection::MakeField("layer_mask", reflection::builtin::U64, reflection::ValueKind::U64, offsetof(Data, layerMask), sizeof(u64), alignof(u64)),
-            reflection::MakeField("visibility_mask", reflection::builtin::U32, reflection::ValueKind::U32, offsetof(Data, visibilityMask), sizeof(u32), alignof(u32)),
-            reflection::MakeField("casts_shadow", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(Data, castsShadow), sizeof(bool), alignof(bool)),
-            reflection::MakeField("receives_decals", reflection::builtin::Bool, reflection::ValueKind::Bool, offsetof(Data, receivesDecals), sizeof(bool), alignof(bool))
-        };
-        const reflection::Schema Schema{StaticMeshComponentType, "vanguard.static_mesh_component", sizeof(Data), alignof(Data), 1, 1,
-                                        Fields, static_cast<u32>(sizeof(Fields) / sizeof(Fields[0]))};
-    }
-
-    const reflection::Schema& GetStaticMeshComponentSchema() noexcept { return Schema; }
-
     bool RegisterStaticMeshComponent(ComponentRegistry& registry) noexcept
     {
-        const reflection::Schema* const registered = reflection::FindSchema(Schema.id);
-        if ((registered != nullptr && registered != &Schema) || (registered == nullptr && !reflection::RegisterSchema(Schema)))
+        const reflection::Schema& schema = GetStaticMeshComponentSchema();
+        const reflection::Schema* const registered = reflection::FindSchema(schema.id);
+        if ((registered != nullptr && registered != &schema) || (registered == nullptr && !reflection::RegisterSchema(schema)))
             return false;
-        return registry.RegisterObject<Data, StaticMeshComponent>(Schema);
+        return registry.RegisterObject<StaticMeshComponentData, StaticMeshComponent>(schema);
     }
 
-    StaticMeshComponent::StaticMeshComponent(const Data& data) noexcept : m_data(data) {}
+    StaticMeshComponent::StaticMeshComponent(const StaticMeshComponentData& data) noexcept : m_data(data) {}
 
     StaticMeshComponent::~StaticMeshComponent()
     {

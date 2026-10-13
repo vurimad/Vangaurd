@@ -1033,6 +1033,8 @@ namespace vanguard::material_tools
             request.source = parsed.source;
             request.entryPoints = parsed.entries;
             request.defines = parsed.defines;
+            request.loadSource = implementation.config.loadSource;
+            request.loadSourceUserData = implementation.config.loadSourceUserData;
             request.settings = parsed.settings;
             shader_tools::CompileOutput probe;
             shader_tools::Result result = implementation.shaderCompiler.Reflect(request, probe);
@@ -1273,7 +1275,9 @@ namespace vanguard::material_tools
     bool MaterialArtifactCompilers::Initialize(const MaterialArtifactCompilerConfig& config) noexcept
     {
         if (m_impl != nullptr || !config.offline.IsValid() || config.maximumEntryPoints == 0 || config.maximumSourceRanges == 0 || config.maximumProgramArtifactBytes == 0 ||
-            config.maximumPipelineArtifactBytes == 0 || config.maximumMaterialArtifactBytes == 0 || config.estimatedShaderTransientBytes == 0)
+            config.maximumPipelineArtifactBytes == 0 || config.maximumMaterialArtifactBytes == 0 || config.estimatedShaderTransientBytes == 0 ||
+            (config.loadSource == nullptr && (config.loadSourceUserData != nullptr || !config.sourceProviderFingerprint.IsEmpty())) ||
+            (config.loadSource != nullptr && config.sourceProviderFingerprint.IsEmpty()))
             return false;
         Impl* const implementation = VANGUARD_NEW(Impl, memory::pools::Tools);
         if (implementation == nullptr || implementation->shaderCompiler.Initialize() != shader_tools::Result::Success)
@@ -1293,6 +1297,12 @@ namespace vanguard::material_tools
         static_cast<void>(toolHash.Update(ToolPolicy, sizeof(ToolPolicy) - 1u));
         static_cast<void>(toolHash.Update(implementation->shaderCompiler.CompilerFingerprint().bytes, crypto::Digest256::ByteCount));
         static_cast<void>(toolHash.Update(implementation->offlineContractFingerprint.bytes, crypto::Digest256::ByteCount));
+        if (config.loadSource != nullptr)
+        {
+            constexpr char SourceProviderPolicy[] = "TrustedSourceProvider1";
+            static_cast<void>(toolHash.Update(SourceProviderPolicy, sizeof(SourceProviderPolicy) - 1u));
+            static_cast<void>(toolHash.Update(config.sourceProviderFingerprint.bytes, crypto::Digest256::ByteCount));
+        }
         if (!toolHash.Finalize(implementation->toolFingerprint))
         {
             implementation->shaderCompiler.Shutdown();

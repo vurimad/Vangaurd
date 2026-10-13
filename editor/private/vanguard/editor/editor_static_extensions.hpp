@@ -10,6 +10,7 @@ namespace vanguard::editor
     [[nodiscard]] containers::ArraySpan<const EditorExtensionDescriptor> GetEditorToolbarExtensions() noexcept;
     [[nodiscard]] containers::ArraySpan<const EditorExtensionDescriptor> GetEditorProjectAssetActivityExtensions() noexcept;
     [[nodiscard]] containers::ArraySpan<const EditorExtensionDescriptor> GetEditorAssetBrowserExtensions() noexcept;
+    [[nodiscard]] containers::ArraySpan<const EditorExtensionDescriptor> GetEditorModelImportExtensions() noexcept;
     [[nodiscard]] containers::ArraySpan<const EditorExtensionDescriptor> GetEditorDemonstrationExtensions() noexcept;
     [[nodiscard]] containers::ArraySpan<const EditorExtensionDescriptor> GetEditorProductionExtensions() noexcept;
 

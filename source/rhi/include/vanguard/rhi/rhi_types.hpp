@@ -834,6 +834,30 @@ namespace vanguard::rhi
         // One texture mip/slice; buffers use zero/zero and track the entire buffer.
         TextureSubresource subresource;
     };
+
+    enum class CompiledBarrierKind : u8
+    {
+        TextureTransition,
+        BufferTransition,
+        TextureUav,
+        BufferUav
+    };
+
+    // Compiler-only barrier request. resourceBinding indexes the immutable sorted
+    // table previously passed to AdmitCommandListResources. Transition states are
+    // explicit compiler proofs: Unknown is never accepted on this path. One native
+    // batch is an independent run and may contain at most one barrier per binding;
+    // dependent chains are split into ordered batches by the compiler.
+    struct CompiledBarrier
+    {
+        u32 resourceBinding = ~u32{0};
+        CompiledBarrierKind kind = CompiledBarrierKind::BufferTransition;
+        ResourceState before = ResourceState::Unknown;
+        ResourceState after = ResourceState::Unknown;
+        // Texture transitions carry an already-resolved non-empty range. Buffer
+        // transitions and UAV barriers ignore this field.
+        SubresourceRange textureSubresources;
+    };
     struct TextureCopyRegion
     {
         TextureSubresource source;

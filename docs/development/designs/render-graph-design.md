@@ -249,11 +249,11 @@ source/jobs/tests/jobs_tests.cpp
   lines: 363
   sha256: 8B96D82D4FF81A72DF55F68AC52B1A6E1770472F71DBA4290C2FC4A8A2399354
 
-source/imported/common/redJobs2/include/jobBuilder.h
+imported/common/redJobs2/include/jobBuilder.h
   lines: 325
   sha256: 4221D0FDC158AE549C8239B11BB2EA52D64E9D9FECA5A76C24A5D48357F46046
 
-source/imported/common/redJobs2/src/jobBuilder.cpp
+imported/common/redJobs2/src/jobBuilder.cpp
   lines: 142
   sha256: C8D45DE498D1044584BE33EBAE9B872B093E89F69E6A23463BC29AF05F71BD26
 ```

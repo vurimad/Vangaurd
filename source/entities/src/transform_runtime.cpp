@@ -112,6 +112,8 @@ namespace vanguard::entities
             u32 previousEntityBinding = ~u32{0};
             u32 nextEntityBinding = ~u32{0};
             u32 nextFree = ~u32{0};
+            u32 parentPlacedBinding = ~u32{0};
+            u32 attachedPlacedChildren = 0;
             u64 rootGeneration = 0;
             bool active = false;
         };
@@ -150,6 +152,28 @@ namespace vanguard::entities
         [[nodiscard]] const PlacedBindingSlot* FindPlacedBinding(const PlacedComponentBindingHandle binding) const noexcept
         {
             return const_cast<Impl*>(this)->FindPlacedBinding(binding);
+        }
+
+        [[nodiscard]] u32 FindOwnedPlacedComponent(const EntityRecord& record, const IPlacedComponent& component) const noexcept
+        {
+            u32 index = record.firstPlacedBinding;
+            while (index != ~u32{0})
+            {
+                if (index >= placedBindings.Size())
+                    return ~u32{0};
+                const PlacedBindingSlot& slot = placedBindings[index];
+                if (!slot.active || slot.entity != &record)
+                    return ~u32{0};
+                if (slot.component == &component)
+                    return index;
+                index = slot.nextEntityBinding;
+            }
+            return ~u32{0};
+        }
+
+        [[nodiscard]] bool HasPlacedChildren(const PlacedBindingSlot& parent) const noexcept
+        {
+            return parent.attachedPlacedChildren != 0u;
         }
 
         [[nodiscard]] bool AllocatePlacedBinding(u32& index, PlacedBindingSlot*& slot) noexcept
@@ -220,12 +244,41 @@ namespace vanguard::entities
             PlacedBindingSlot& slot = placedBindings[index];
             if (!slot.active || slot.component == nullptr || slot.attachment == nullptr)
                 return false;
+            // UnregisterComponent rejects a placed component that still owns outgoing
+            // transform attachments. Preflight the runtime-owned same-entity graph before
+            // mutating the incoming attachment so an out-of-order parent teardown remains
+            // fully retryable after its children are released.
+            if (HasPlacedChildren(slot))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = TransformFailureCode::InvalidComponent;
+                    failure->component = slot.component;
+                    failure->message = "placed component still has attached placed children";
+                }
+                return false;
+            }
+            if (slot.parentPlacedBinding != ~u32{0} &&
+                (slot.parentPlacedBinding >= placedBindings.Size() || !placedBindings[slot.parentPlacedBinding].active ||
+                 placedBindings[slot.parentPlacedBinding].entity != slot.entity ||
+                 placedBindings[slot.parentPlacedBinding].attachedPlacedChildren == 0u))
+            {
+                if (failure != nullptr)
+                {
+                    failure->code = TransformFailureCode::InvalidComponent;
+                    failure->component = slot.component;
+                    failure->message = "placed-component parent binding ownership is inconsistent";
+                }
+                return false;
+            }
             if (!transforms.Detach(*slot.attachment, failure))
                 return false;
             hardBinding.DestroyAttachment(slot.attachment);
             slot.attachment = nullptr;
             if (!transforms.UnregisterComponent(*slot.component, failure))
                 return false;
+            if (slot.parentPlacedBinding != ~u32{0})
+                --placedBindings[slot.parentPlacedBinding].attachedPlacedChildren;
             UnlinkPlacedBinding(index);
             ReleasePlacedBinding(index);
             --activePlacedBindings;
@@ -687,6 +740,12 @@ namespace vanguard::entities
     bool TransformRuntime::AttachPlacedComponent(const ecs::EntityId entity, IPlacedComponent& component,
                                                  PlacedComponentBindingHandle& binding, TransformRuntimeFailure* const failure) noexcept
     {
+        return AttachPlacedComponent(entity, component, nullptr, binding, failure);
+    }
+
+    bool TransformRuntime::AttachPlacedComponent(const ecs::EntityId entity, IPlacedComponent& component, IPlacedComponent* const parent,
+                                                 PlacedComponentBindingHandle& binding, TransformRuntimeFailure* const failure) noexcept
+    {
         ClearFailure(failure);
         binding = {};
         if (m_impl == nullptr)
@@ -703,6 +762,12 @@ namespace vanguard::entities
                         &component);
         if (component.IsRegistered())
             return Fail(failure, TransformRuntimeFailureCode::InvalidState, "placed component is already registered", nullptr, entity, {}, &component);
+        const u32 parentBindingIndex = parent != nullptr && parent != &component && parent->IsRegistered()
+                                           ? m_impl->FindOwnedPlacedComponent(*record, *parent)
+                                           : ~u32{0};
+        if (parent != nullptr && parentBindingIndex == ~u32{0})
+            return Fail(failure, TransformRuntimeFailureCode::InvalidState,
+                        "placed component parent must be a registered component on the same entity", nullptr, entity, {}, &component);
 
         u32 slotIndex = ~u32{0};
         Impl::PlacedBindingSlot* slot = nullptr;
@@ -718,7 +783,8 @@ namespace vanguard::entities
                         &component);
         }
 
-        ITransformAttachment* const attachment = m_impl->hardBinding.CreateAttachment(*record->placeholder, component);
+        IPlacedComponent& source = parent != nullptr ? *parent : static_cast<IPlacedComponent&>(*record->placeholder);
+        ITransformAttachment* const attachment = m_impl->hardBinding.CreateAttachment(source, component);
         if (attachment == nullptr)
         {
             TransformFailure rollbackFailure;
@@ -732,7 +798,7 @@ namespace vanguard::entities
             return Fail(failure, TransformRuntimeFailureCode::CapacityExceeded, "placed-component hard attachment allocation failed", nullptr, entity, {},
                         &component);
         }
-        attachment->SetFloatingBinding(true);
+        attachment->SetFloatingBinding(parent == nullptr);
         if (!m_impl->transforms.Attach(*attachment, &transformFailure))
         {
             m_impl->hardBinding.DestroyAttachment(attachment);
@@ -750,8 +816,11 @@ namespace vanguard::entities
 
         slot->component = &component;
         slot->attachment = attachment;
+        slot->parentPlacedBinding = parentBindingIndex;
         slot->rootGeneration = record->ownerGeneration;
         m_impl->LinkPlacedBinding(*record, slotIndex);
+        if (parentBindingIndex != ~u32{0})
+            ++m_impl->placedBindings[parentBindingIndex].attachedPlacedChildren;
         ++m_impl->activePlacedBindings;
         binding = {slotIndex, slot->generation};
         return true;

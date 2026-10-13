@@ -4,7 +4,13 @@
 #include <vanguard/asset_streaming/project_asset_pipeline.hpp>
 #include <vanguard/assets/project_source_data.hpp>
 #include <vanguard/crypto/crypto.hpp>
+#include <vanguard/material_tools/material_asset_compilers.hpp>
+#include <vanguard/material_tools/material_canonical_builder.hpp>
+#include <vanguard/mesh_tools/mesh_tools.hpp>
+#include <vanguard/mesh_tools/model_import.hpp>
+#include <vanguard/model_tools/model_project_build.hpp>
 #include <vanguard/projects/project_workspace.hpp>
+#include <vanguard/shader_tools/shader_compiler.hpp>
 #include <vanguard/texture_tools/texture_asset_compiler.hpp>
 #include <vanguard/texture_tools/texture_tools.hpp>
 
@@ -17,6 +23,9 @@
 #include <vanguard/rhi/rhi.hpp>
 #include <vanguard/system/assert.hpp>
 #include <vanguard/textures/texture_resource.hpp>
+#include <vanguard/meshes/meshes.hpp>
+#include <vanguard/materials/materials.hpp>
+#include <vanguard/prefabs/prefabs.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -29,6 +38,136 @@ namespace vanguard::editor
     namespace
     {
         using PipelineResult = asset_streaming::ProjectAssetPipelineResult;
+
+        // The imported static-surface canonical builder consumes exactly the
+        // same shader source witnesses in the Editor as in headless builds.
+        [[nodiscard]] bool ReadModelToolSource(const filesystem::AbsolutePath& path,
+                                               containers::DynamicArray<u8>& bytes) noexcept
+        {
+            filesystem::Manager& files = filesystem::GetManager();
+            if (!files.FileExist(path))
+                return false;
+            const u64 byteCount = files.GetFileSize(path);
+            if (byteCount > ~u32{0})
+                return false;
+            auto file = files.CreateFileReader(path, filesystem::FOF_Buffered);
+            if (!file)
+                return false;
+            bytes.Resize(static_cast<u32>(byteCount));
+            if (bytes.Size() != byteCount)
+                return false;
+            file->Serialize(bytes.Data(), bytes.Size());
+            return !file->HasErrors();
+        }
+
+        [[nodiscard]] bool ModelMetadataFingerprint(const assets::AssetMetadata& metadata,
+                                                    crypto::Digest256& digest) noexcept
+        {
+            containers::String encoded;
+            if (assets::EncodeMetadata(metadata, encoded) != assets::MetadataResult::Success)
+                return false;
+            digest = crypto::Sha256(encoded.AsChar(), encoded.Length());
+            return !digest.IsEmpty();
+        }
+
+        // Produce exact dependency evidence for both already-authored resources
+        // and writable, as-yet-unmanaged project-image adoption candidates.
+        // P5 validates these same witnesses again at durable plan commit.
+        [[nodiscard]] bool CaptureModelDependencyWitness(
+            const assets::SourceRecord& source, const assets::SourceDatabase& sources,
+            const asset_streaming::ProjectAssetPipeline& pipeline,
+            containers::DynamicArray<mesh_tools::ModelImportDependencyWitness>& witnesses,
+            const u32 maximum) noexcept
+        {
+            if (!source.sourceIdentity.IsValid() || !source.path.IsFilePath())
+                return false;
+            for (const mesh_tools::ModelImportDependencyWitness& previous : witnesses)
+                if (previous.sourceIdentity == source.sourceIdentity)
+                    return previous.physicalPath == source.path;
+            if (witnesses.Size() >= maximum)
+                return false;
+
+            mesh_tools::ModelImportDependencyWitness evidence;
+            evidence.sourceIdentity = source.sourceIdentity;
+            evidence.physicalPath = source.path;
+            evidence.sourceExists = true;
+            if (source.importState == assets::SourceImportState::MetadataSelected &&
+                source.metadataResult == assets::MetadataResult::Success && source.metadata.id.IsValid())
+            {
+                const asset_streaming::ProjectAssetState* const accepted =
+                    pipeline.LookupAcceptedAsset(source.metadata.id);
+                if (accepted == nullptr || accepted->presence != asset_streaming::ProjectAssetPresence::Present ||
+                    accepted->sourceIdentity != source.sourceIdentity || accepted->physicalPath != source.path ||
+                    !accepted->hasSourceContentFingerprint || accepted->sourceContentFingerprint.IsEmpty() ||
+                    !ModelMetadataFingerprint(source.metadata, evidence.metadataFingerprint))
+                    return false;
+                evidence.asset = source.metadata.id;
+                evidence.sourceContentFingerprint = accepted->sourceContentFingerprint;
+                evidence.metadataExists = true;
+                evidence.hasMetadataFingerprint = true;
+            }
+            else if (source.importState == assets::SourceImportState::Candidate &&
+                     (source.issues & assets::MetadataMissing) != 0u)
+            {
+                const containers::ArraySpan<const assets::SourceRoot> roots = sources.GetRoots();
+                if (source.root >= roots.Count() || roots[source.root].readOnly)
+                    return false;
+                containers::DynamicArray<u8> sourceBytes(memory::pools::Tools::GetInstance());
+                if (!ReadModelToolSource(source.path, sourceBytes) || sourceBytes.Empty())
+                    return false;
+                evidence.sourceContentFingerprint = crypto::Sha256(sourceBytes.TypedData(), sourceBytes.Size());
+            }
+            else
+                return false;
+
+            evidence.hasSourceContentFingerprint = !evidence.sourceContentFingerprint.IsEmpty();
+            if (!evidence.hasSourceContentFingerprint)
+                return false;
+            const u32 previous = witnesses.Size();
+            witnesses.PushBack(static_cast<mesh_tools::ModelImportDependencyWitness&&>(evidence));
+            return witnesses.Size() == previous + 1u;
+        }
+
+        [[nodiscard]] bool GatherModelDependencyWitnesses(
+            const mesh_tools::ModelImportManifest& manifest, const mesh_tools::ModelImportSettings& settings,
+            const assets::SourceDatabase& sources, const asset_streaming::ProjectAssetPipeline& pipeline,
+            const u32 maximum, containers::DynamicArray<mesh_tools::ModelImportDependencyWitness>& witnesses) noexcept
+        {
+            witnesses.Clear();
+            const auto appendReference = [&](const resources::ResourceReference reference) noexcept
+            {
+                if (!reference.IsValid())
+                    return true;
+                const assets::SourceRecord* const source = sources.LookupOutput(reference);
+                return source != nullptr && CaptureModelDependencyWitness(*source, sources, pipeline, witnesses, maximum);
+            };
+            if (!appendReference(settings.mesh.defaultMaterial) || !appendReference(settings.mesh.skeleton))
+                return false;
+            for (const mesh_tools::ModelImportTextureResolution& resolution : settings.textureResolutions)
+            {
+                if (resolution.resolution == mesh_tools::ModelImportTextureResolutionKind::ReuseManagedResource &&
+                    !appendReference(resolution.managedResource))
+                    return false;
+                if (resolution.resolution == mesh_tools::ModelImportTextureResolutionKind::AdoptProjectSource)
+                {
+                    const assets::SourceRecord* const candidate = sources.LookupSource(resolution.projectSourceIdentity);
+                    if (candidate == nullptr ||
+                        !CaptureModelDependencyWitness(*candidate, sources, pipeline, witnesses, maximum))
+                        return false;
+                }
+            }
+            for (const mesh_tools::ModelImportTextureReference& texture : manifest.textureReferences)
+            {
+                if (texture.storage != mesh_tools::ImportedTextureStorage::ExternalSource || texture.resolvedPath.Empty())
+                    continue;
+                const filesystem::AbsolutePath path = filesystem::AbsolutePath::ParseFilePath(texture.resolvedPath);
+                const assets::SourceRecord* const source = path.IsFilePath() ? sources.LookupResource(path) : nullptr;
+                if (source != nullptr &&
+                    !CaptureModelDependencyWitness(*source, sources, pipeline, witnesses, maximum))
+                    return false;
+            }
+            return witnesses.Size() <= maximum;
+        }
 
         [[nodiscard]] PipelineResult FailAssetAccess(
             asset_streaming::ProjectAssetPipelineFailure* const failure, const PipelineResult result,
@@ -318,6 +457,22 @@ namespace vanguard::editor
         return pipeline != nullptr && pipeline->CanStartAssetOperation();
     }
 
+    bool EditorProjectAssetAccess::CanRetryReviewedModelCommit(const mesh_tools::ModelImportPlan& plan) const noexcept
+    {
+        const asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        if (pipeline == nullptr || !pipeline->IsInitialized())
+            return false;
+        // A reviewed replacement of a persisted cohort intent is allowed by
+        // CommitPlannedImport's CanReconcileSources gate even while ordinary
+        // CanStartAssetOperation is false. Leave authoritative admission to
+        // the commit; only skip the expensive proof during watcher catch-up.
+        const asset_streaming::ProjectAssetObservationStatus observation = pipeline->GetObservationStatus();
+        const mesh_tools::ModelImportPlanWitnesses& witnesses = plan.GetWitnesses();
+        return !observation.rescanRequired && !observation.reconcilePending &&
+               pipeline->CanCommitPlannedImportNow(witnesses.parentAsset, witnesses.sourceIdentity);
+    }
+
     u32 EditorProjectAssetAccess::GetSourceRootCount() const noexcept
     {
         return m_workspace != nullptr ? m_workspace->GetSources().GetRoots().Count() : 0u;
@@ -463,6 +618,388 @@ namespace vanguard::editor
                                     : EditorProjectExternalImportFailureCode::PipelineRejected;
         }
         return result;
+    }
+
+    asset_streaming::ProjectAssetPipelineResult EditorProjectAssetAccess::PrepareModelImportPlan(
+        const filesystem::AbsolutePath& sourceOrigin, const containers::ArraySpan<const u8> sourceSnapshot,
+        const u32 destinationRoot, const containers::StringView rootRelativeFolder,
+        const containers::StringView sourceFileName, const assets::AssetId existingAsset,
+        const u64 expectedAcceptedGeneration, const u64 expectedSourceGeneration,
+        const mesh_tools::ModelImportManifest& manifest, const mesh_tools::ModelImportSettings& settings,
+        mesh_tools::ModelImportPlan& plan, mesh_tools::ModelImportPlanReport* const report,
+        assets::AssetId& plannedAsset, asset_streaming::ProjectAssetPipelineFailure* const failure) const noexcept
+    {
+        plan = {};
+        const assets::AssetId provisionalAsset = plannedAsset;
+        plannedAsset = {};
+        if (report != nullptr)
+            *report = {};
+        if (failure != nullptr)
+            *failure = {};
+        asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        if (pipeline == nullptr || !pipeline->IsInitialized())
+            return FailAssetAccess(failure, PipelineResult::InvalidState);
+        if (!sourceOrigin.IsFilePath() || sourceSnapshot.Empty() || sourceSnapshot.Data() == nullptr ||
+            sourceSnapshot.Size() > pipeline->GetMaximumExternalImportSourceBytes() ||
+            manifest.sourceFingerprint != crypto::Sha256(sourceSnapshot.Data(), sourceSnapshot.Size()))
+            return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+        if (!pipeline->CanStartAssetOperation())
+            return FailAssetAccess(failure, PipelineResult::Busy);
+
+        const assets::SourceDatabase& sources = m_workspace->GetSources();
+        const containers::ArraySpan<const assets::SourceRoot> roots = sources.GetRoots();
+        const assets::SourceRecord* persisted = nullptr;
+        const asset_streaming::ProjectAssetState* accepted = nullptr;
+        mesh_tools::ModelImportPlanningContext planning;
+        planning.database = &sources;
+        planning.acceptedStateGeneration = pipeline->GetAcceptedAssetGeneration();
+        planning.sourceOrigin = sourceOrigin;
+        planning.importer = assets::HashCompilerName("vanguard.model.importer");
+        planning.importerVersion = mesh_tools::ModelSourceImporterVersion;
+        planning.outputTypes.mesh = meshes::MeshResourceType;
+        planning.outputTypes.material = materials::MaterialResourceType;
+        planning.outputTypes.texture = textures::TextureResourceType;
+        planning.outputTypes.composition = prefabs::PrefabResourceType;
+
+        if (existingAsset.IsValid())
+        {
+            asset_streaming::ProjectAssetPipeline* verifiedPipeline = nullptr;
+            const PipelineResult verified = ResolveSelectedAsset(
+                m_workspace, existingAsset, expectedAcceptedGeneration, expectedSourceGeneration,
+                verifiedPipeline, accepted, persisted, failure);
+            if (verified != PipelineResult::Success)
+            {
+                // A model plan is a reviewed generation-fenced snapshot, not
+                // a generic asset mutation. Changed catalog/accepted evidence
+                // invalidates the plan and requires explicit Reinspect rather
+                // than presenting a candidate-settings validation failure.
+                if (verified == PipelineResult::OperationFailed)
+                    return FailAssetAccess(failure, PipelineResult::StalePlan);
+                return verified;
+            }
+            if (persisted->importer != planning.importer || persisted->metadata.importer != planning.importer ||
+                persisted->metadata.importerVersion != planning.importerVersion ||
+                persisted->metadata.settingsVersion != mesh_tools::ModelImportSettingsVersion ||
+                accepted->presence != asset_streaming::ProjectAssetPresence::Present ||
+                accepted->sourceRoot.Empty() || !(sourceOrigin == persisted->path))
+                return FailAssetAccess(failure, PipelineResult::StalePlan);
+            planning.persistedMetadata = &persisted->metadata;
+            planning.parentAsset = existingAsset;
+            planning.sourceRoot = accepted->sourceRoot;
+            planning.sourceDestination = persisted->path;
+            planning.sourceIdentity = persisted->sourceIdentity;
+            if (!ModelMetadataFingerprint(persisted->metadata, planning.persistedMetadataDigest))
+                return FailAssetAccess(failure, PipelineResult::StalePlan);
+            planning.hasPersistedMetadataDigest = true;
+        }
+        else
+        {
+            if (sourceFileName.Empty() ||
+                filesystem::paths::GetFileName(sourceFileName) != sourceFileName ||
+                rootRelativeFolder.Length() > resources::MaximumResourcePathBytes ||
+                destinationRoot >= roots.Count() || roots[destinationRoot].readOnly ||
+                !CanImportExternalSource(destinationRoot, rootRelativeFolder))
+                return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+            filesystem::AbsolutePath directory = roots[destinationRoot].directory;
+            if (!rootRelativeFolder.Empty())
+                directory = directory.AddDirPath(rootRelativeFolder);
+            const filesystem::AbsolutePath destination = directory.AddFilePath(sourceFileName);
+            if (filesystem::ValidateMutationPath(roots[destinationRoot].directory, destination) !=
+                filesystem::MutationPathResult::Success)
+                return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+
+            const containers::StringView rootPath = roots[destinationRoot].directory.AsStringView();
+            const containers::StringView destinationPath = destination.AsStringView();
+            if (destinationPath.Length() <= rootPath.Length())
+                return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+            planning.sourceIdentity = resources::ResourcePath::FromString(
+                destinationPath.Slice(rootPath.Length(), destinationPath.Length()));
+            planning.sourceRoot = roots[destinationRoot].directory;
+            planning.sourceDestination = destination;
+            if (!planning.sourceIdentity.IsValid())
+                return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+            if (provisionalAsset.IsValid())
+            {
+                if (sources.ContainsAssetIdentity(provisionalAsset))
+                    return FailAssetAccess(failure, PipelineResult::StalePlan);
+                planning.parentAsset = provisionalAsset;
+            }
+            else
+            {
+                const PipelineResult identity = pipeline->GenerateImportIdentityCandidate(planning.parentAsset, failure);
+                if (identity != PipelineResult::Success)
+                    return identity;
+            }
+        }
+        plannedAsset = planning.parentAsset;
+
+        containers::DynamicArray<mesh_tools::ModelImportDependencyWitness> dependencies(memory::pools::Tools::GetInstance());
+        if (!GatherModelDependencyWitnesses(manifest, settings, sources, *pipeline,
+                                            planning.limits.maximumDependencyWitnesses, dependencies))
+            return FailAssetAccess(failure, PipelineResult::StalePlan);
+        planning.dependencyWitnesses = {dependencies.TypedData(), dependencies.Size()};
+        const mesh_tools::ModelImportPlanResult planned =
+            mesh_tools::PlanModelImport(manifest, settings, planning, plan, report);
+        if (planned != mesh_tools::ModelImportPlanResult::Success)
+        {
+            // Keep the review's provisional identity through a temporarily
+            // invalid settings edit. Only an actual identity collision forces
+            // the caller to begin a new first-import identity selection.
+            if (!existingAsset.IsValid() && provisionalAsset.IsValid())
+                plannedAsset = provisionalAsset;
+            return FailAssetAccess(failure, planned == mesh_tools::ModelImportPlanResult::MetadataMismatch ||
+                                            planned == mesh_tools::ModelImportPlanResult::IdentityConflict
+                                                ? PipelineResult::StalePlan : PipelineResult::OperationFailed);
+        }
+        // A syntactically valid model plan is not necessarily buildable by the
+        // current production prefab/material backends. Reject known unsupported
+        // output semantics at review, before committing source/VMETA. This
+        // checker is pure; invoking createBuildRequest here would incorrectly
+        // publish compiler-generated dependencies during speculative planning.
+        const model_tools::ModelImportBuildabilityFailure unsupported =
+            model_tools::CheckReviewedModelBuildability(manifest, settings);
+        if (unsupported.reason != model_tools::ModelImportBuildability::Supported)
+        {
+            const char* explanation = "The selected model output cannot be built by the current compiler.";
+            switch (unsupported.reason)
+            {
+            case model_tools::ModelImportBuildability::CompositionNeedsRigidUnitScale:
+                explanation = "Composition prefab requires rigid unit-scale node transforms. Disable 'Generate composition prefab' or author a rigid hierarchy.";
+                break;
+            case model_tools::ModelImportBuildability::DefaultMaterialReferenceRequired:
+                explanation = "'Use default material' requires an existing managed VMAT default material reference.";
+                break;
+            case model_tools::ModelImportBuildability::UnsupportedBlendMaterial:
+                explanation = "Model-owned BLEND transparency is not supported by the current imported-surface renderer.";
+                break;
+            case model_tools::ModelImportBuildability::UnsupportedSpecularMaterial:
+                explanation = "Model-owned specular texture/color is not supported by the current imported-surface shader.";
+                break;
+            case model_tools::ModelImportBuildability::UnsupportedMaterialTextureSemantic:
+                explanation = "A model-owned material uses an unsupported texture semantic.";
+                break;
+            case model_tools::ModelImportBuildability::UnsupportedTextureUvSet:
+                explanation = "A model-owned material uses a texture UV set other than UV0.";
+                break;
+            case model_tools::ModelImportBuildability::Supported: break;
+            }
+            if (report != nullptr)
+            {
+                ++report->blockers;
+                report->diagnostic = containers::String::Printf("Unsupported reviewed output %u: %s",
+                                                                  unsupported.sourceIndex, explanation);
+            }
+            return FailAssetAccess(failure, PipelineResult::OperationFailed);
+        }
+        return PipelineResult::Success;
+    }
+
+    asset_streaming::ProjectAssetPipelineResult EditorProjectAssetAccess::CommitModelImportPlan(
+        const mesh_tools::ModelImportPlan& plan, const containers::ArraySpan<const u8> sourceSnapshot,
+        assets::AssetId& importedAsset, asset_streaming::ProjectAssetPipelineFailure* const failure) const noexcept
+    {
+        importedAsset = {};
+        asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        if (pipeline == nullptr || !pipeline->IsInitialized())
+            return FailAssetAccess(failure, PipelineResult::InvalidState);
+        if (plan.HasBlockingConflicts() || sourceSnapshot.Empty() || sourceSnapshot.Data() == nullptr)
+            return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+
+        // The transaction writes a large source into a same-directory .vtxn-stage
+        // file before its atomic cutover. With the native Windows watcher running,
+        // the many size/write notifications can overflow its finite kernel buffer
+        // even though normal .vtxn-stage path hints are ignored. The conservative
+        // overflow fence then rolls back this exact reviewed commit on *every*
+        // retry, after rewriting the entire stage file on the UI thread.
+        //
+        // Stop the watcher only at a quiescent source-reconciliation boundary for
+        // large reviewed commits. DisableObservation joins all callbacks and
+        // reconciles any last hint, or returns Busy without disabling admission.
+        // CommitPlannedImport still performs full source/metadata/catalog proof,
+        // per-file transaction assertions and post-commit authoritative Rescan.
+        // The Project Workspace frame driver restarts observation with its
+        // mandatory generation-zero catch-up, including after a failed commit.
+        containers::DynamicArray<assets::PlannedAssetDependencyWitness> dependencies(memory::pools::Tools::GetInstance());
+        assets::PlannedAssetImportRequest request;
+        if (!mesh_tools::BuildModelPlannedImportRequest(plan, sourceSnapshot, dependencies, request))
+            return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+
+        // Only an independent, create-only external first import may use the
+        // observer-free commit already supported by the pipeline. Reimports and
+        // adopted/borrowed project dependencies retain their stronger global
+        // watcher-generation fence until the transaction owner has a staged
+        // watcher-safe cutover for those dependent mutations.
+        constexpr u64 LargeWatchedSourceBytes = 8ull * 1024ull * 1024ull;
+        const bool independentLargeFirstImport = sourceSnapshot.Count() >= LargeWatchedSourceBytes &&
+                                                 request.copySourceToDestination &&
+                                                 !request.hasPersistedMetadataFingerprint &&
+                                                 request.dependencyWitnesses.Empty();
+        if (independentLargeFirstImport && pipeline->IsObservingSources())
+        {
+            const PipelineResult stopped = pipeline->DisableObservation(failure);
+            if (stopped != PipelineResult::Success)
+                return stopped;
+        }
+
+        u64 predecessorGeneration = 0u;
+        if (plan.GetWitnesses().hasPersistedMetadataFingerprint)
+        {
+            const asset_streaming::ProjectAssetState* const predecessor =
+                pipeline->LookupAcceptedAsset(plan.GetWitnesses().parentAsset);
+            if (predecessor == nullptr || predecessor->presence != asset_streaming::ProjectAssetPresence::Present)
+                return FailAssetAccess(failure, PipelineResult::StalePlan);
+            predecessorGeneration = predecessor->acceptedGeneration;
+        }
+
+        const PipelineResult committed = pipeline->CommitPlannedImport(
+            request, importedAsset, nullptr, failure,
+            independentLargeFirstImport && !pipeline->IsObservingSources());
+        if (committed != PipelineResult::Success && committed != PipelineResult::CommittedCleanupPending)
+            return committed;
+        const PipelineResult admission =
+            ResumeCommittedModelImport(plan, importedAsset, predecessorGeneration, failure);
+        if (admission != PipelineResult::Success)
+        {
+            // The source/VMETA commit is already durable. Return a committed
+            // pending status, but preserve the separate cohort-admission
+            // diagnostic from Resume (including BuildRequestFailed and the
+            // failing ProjectAssetBuildResult). Overwriting `failure` here
+            // would misrepresent an imported source as a mere reconciliation
+            // delay and erase the actionable build failure.
+            if (failure != nullptr && failure->result == PipelineResult::Success)
+                failure->result = admission;
+            return PipelineResult::CommittedReconciliationPending;
+        }
+        return committed;
+    }
+
+    asset_streaming::ProjectAssetPipelineResult EditorProjectAssetAccess::ResumeCommittedModelImport(
+        const mesh_tools::ModelImportPlan& reviewedPlan, const assets::AssetId asset,
+        const u64 previousAcceptedGeneration,
+        asset_streaming::ProjectAssetPipelineFailure* const failure, const bool validateOnly) const noexcept
+    {
+        asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        if (pipeline == nullptr || !pipeline->IsInitialized())
+            return FailAssetAccess(failure, PipelineResult::InvalidState);
+        const mesh_tools::ModelImportPlanWitnesses& witness = reviewedPlan.GetWitnesses();
+        if (!asset.IsValid() || asset != witness.parentAsset || witness.sourceFingerprint.IsEmpty() ||
+            witness.candidateSettingsFingerprint.IsEmpty())
+            return FailAssetAccess(failure, PipelineResult::InvalidArgument);
+        const asset_streaming::ProjectAssetState* const accepted = pipeline->LookupAcceptedAsset(asset);
+        // The old accepted row is allowed to remain readable while a durable
+        // VMETA publication is waiting for source reconciliation. NEVER admit
+        // an explicit cohort for that predecessor, even if reimport kept an
+        // identical output schema and source bytes.
+        if (accepted == nullptr || accepted->acceptedGeneration <= previousAcceptedGeneration)
+            return FailAssetAccess(failure, PipelineResult::CommittedReconciliationPending);
+        if (accepted->presence != asset_streaming::ProjectAssetPresence::Present ||
+            accepted->outputs.Empty() || accepted->sourceIdentity != witness.sourceIdentity ||
+            accepted->physicalPath != witness.sourceDestination || accepted->sourceRoot != witness.sourceRoot ||
+            !accepted->hasSourceContentFingerprint || accepted->sourceContentFingerprint != witness.sourceFingerprint ||
+            accepted->importer != witness.importer || accepted->authoredImporterVersion != witness.importerVersion ||
+            accepted->settingsVersion != witness.settingsVersion)
+            return FailAssetAccess(failure, PipelineResult::StalePlan);
+
+        bool requiresAdoptionFinalization = false;
+        for (const mesh_tools::ModelImportPlannedTextureResolution& resolution : reviewedPlan.GetTextureResolutions())
+            requiresAdoptionFinalization = requiresAdoptionFinalization ||
+                resolution.resolution == mesh_tools::ModelImportTextureResolutionKind::AdoptProjectSource;
+        // Planning reconciles candidate settings into the actual canonical
+        // authored settings (persistent output/slot correspondences). Compare
+        // against the *planned import description*, never against the earlier
+        // candidateSettingsFingerprint. P5 can further finalize adopted-image
+        // identities transactionally, so that one case has a different digest.
+        const containers::DynamicArray<u8>& proposedSettings = reviewedPlan.GetImportDescription().settings;
+        if (!requiresAdoptionFinalization &&
+            (proposedSettings.Empty() || accepted->settingsFingerprint !=
+                crypto::Sha256(proposedSettings.TypedData(), proposedSettings.Size())))
+            return FailAssetAccess(failure, PipelineResult::StalePlan);
+
+        const containers::ArraySpan<const assets::AssetOutput> proposedOutputs =
+            {reviewedPlan.GetImportDescription().outputs.TypedData(),
+             reviewedPlan.GetImportDescription().outputs.Size()};
+        if (proposedOutputs.Count() != accepted->outputs.Count())
+            return FailAssetAccess(failure, PipelineResult::StalePlan);
+
+        containers::DynamicArray<resources::ResourceReference> cohort(memory::pools::Tools::GetInstance());
+        containers::DynamicArray<resources::ResourceReference> expected(memory::pools::Tools::GetInstance());
+        cohort.Reserve(accepted->outputs.Count());
+        expected.Reserve(proposedOutputs.Count());
+        if (cohort.Capacity() < accepted->outputs.Count() || expected.Capacity() < proposedOutputs.Count())
+            return FailAssetAccess(failure, PipelineResult::HistoryLimitExceeded);
+        for (const asset_streaming::ProjectAssetOutputState& output : accepted->outputs)
+            cohort.PushBack(output.resource);
+        for (const assets::AssetOutput& output : proposedOutputs)
+            expected.PushBack(assets::GetAssetOutputReference(asset, output));
+        if (cohort.Size() != accepted->outputs.Count() || expected.Size() != proposedOutputs.Count())
+            return FailAssetAccess(failure, PipelineResult::HistoryLimitExceeded);
+        const auto compareReferences = [](const resources::ResourceReference left,
+                                          const resources::ResourceReference right) noexcept
+        {
+            return left.GetPath() != right.GetPath() ? left.GetPath() < right.GetPath()
+                                                     : left.ExpectedType() < right.ExpectedType();
+        };
+        std::sort(cohort.TypedData(), cohort.TypedData() + cohort.Size(), compareReferences);
+        std::sort(expected.TypedData(), expected.TypedData() + expected.Size(), compareReferences);
+        for (u32 index = 0u; index < cohort.Size(); ++index)
+            if (!cohort[index].IsTyped() || cohort[index] != expected[index])
+                return FailAssetAccess(failure, PipelineResult::StalePlan);
+        // A committed-but-not-yet-accepted source must never be mistaken for
+        // its predecessor, and a hidden-panel UI observation must not re-admit
+        // or restart an already in-flight cohort. This mode validates the exact
+        // accepted successor without mutating pipeline state.
+        if (validateOnly)
+            return PipelineResult::Success;
+        const asset_streaming::ProjectAssetCohortDeliveryRequest cohortRequest{
+            asset, accepted->acceptedGeneration, {cohort.TypedData(), cohort.Size()}};
+        return pipeline->RequestAssetCohortDelivery(cohortRequest, failure);
+    }
+
+    asset_streaming::ProjectAssetDeferredPlannedImportStatus
+    EditorProjectAssetAccess::GetDeferredModelImportStatus() const noexcept
+    {
+        const asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        return pipeline != nullptr ? pipeline->GetDeferredPlannedImportStatus()
+                                   : asset_streaming::ProjectAssetDeferredPlannedImportStatus{};
+    }
+
+    asset_streaming::ProjectAssetAutomaticRecookStatus EditorProjectAssetAccess::GetAutomaticRecookStatus() const noexcept
+    {
+        const asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        return pipeline != nullptr ? pipeline->GetAutomaticRecookStatus()
+                                   : asset_streaming::ProjectAssetAutomaticRecookStatus{};
+    }
+
+    asset_streaming::ProjectAssetPipelineResult EditorProjectAssetAccess::CancelAutomaticRecook(
+        asset_streaming::ProjectAssetPipelineFailure* const failure) const noexcept
+    {
+        asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        return pipeline != nullptr ? pipeline->CancelAutomaticRecook(failure)
+                                   : FailAssetAccess(failure, PipelineResult::InvalidState);
+    }
+
+    asset_streaming::ProjectAssetPipelineResult EditorProjectAssetAccess::RetryAutomaticRecook(
+        asset_streaming::ProjectAssetPipelineFailure* const failure) const noexcept
+    {
+        asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        return pipeline != nullptr ? pipeline->RetryAutomaticRecook(failure)
+                                   : FailAssetAccess(failure, PipelineResult::InvalidState);
+    }
+
+    asset_streaming::ProjectAssetPipelineResult EditorProjectAssetAccess::RetryAutomaticPublication(
+        const resources::ResourceReference output, asset_streaming::ProjectAssetPipelineFailure* const failure) const noexcept
+    {
+        asset_streaming::ProjectAssetPipeline* const pipeline =
+            m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+        return pipeline != nullptr ? pipeline->RetryAutomaticPublication(output, failure)
+                                   : FailAssetAccess(failure, PipelineResult::InvalidState);
     }
 
     bool EditorProjectAssetAccess::ResolveSourcePhysicalPath(
@@ -1196,22 +1733,48 @@ namespace
                 return app::LifecycleStatus::Failure("Project Workspace asset cache coordination limits disagree");
             if (!pipelineConfig.IsValid())
                 return app::LifecycleStatus::Failure("Project Workspace asset pipeline bounds are invalid");
+            pipelineConfig.build.resolveGeneratedFallback = vanguard::model_tools::ResolveGeneratedFallback;
+            pipelineConfig.build.resolveGeneratedFallbackUserData = &m_generated;
+            if (!InitializeModelBuildTools(pipelineConfig.build.target))
+            {
+                static_cast<void>(ShutdownModelBuildTools());
+                static_cast<void>(m_textureCompiler.Shutdown());
+                return app::LifecycleStatus::Failure("Project Workspace model/material compiler initialization failed");
+            }
             const vanguard::filesystem::AbsolutePath derivedOwner = m_workspace.derivedData.AddDirPath("ProjectAssets");
             const vanguard::filesystem::AbsolutePath intermediateOwner = m_workspace.intermediate.AddDirPath("ProjectAssets");
             vanguard::filesystem::Manager& mutableFiles = vanguard::filesystem::GetManager();
             if (!mutableFiles.CreatePath(derivedOwner) || !mutableFiles.CreatePath(intermediateOwner))
             {
+                static_cast<void>(ShutdownModelBuildTools());
                 static_cast<void>(m_textureCompiler.Shutdown());
                 m_renderingService = nullptr;
                 return app::LifecycleStatus::Failure("Project Workspace asset pipeline directories could not be created");
             }
 
-            const vanguard::assets::CompilerDescriptor compiler = m_textureCompiler.GetDescriptor();
-            const vanguard::assets::SourceImporterDescriptor importer = m_textureCompiler.GetImporterDescriptor();
+            const vanguard::assets::CompilerDescriptor compilers[]{
+                m_textureCompiler.GetDescriptor(),
+                m_modelCompiler.GetMeshDescriptor(),
+                vanguard::model_tools::PrefabCompilerDescriptor(),
+                m_materialCompilers.ProgramDescriptor(),
+                m_materialCompilers.PipelineDescriptor(),
+                m_materialCompilers.MaterialDescriptor()};
+            const vanguard::assets::SourceImporterDescriptor importers[]{
+                m_textureCompiler.GetImporterDescriptor(), m_modelCompiler.GetImporterDescriptor()};
             vanguard::asset_streaming::ProjectAssetPipelineFailure pipelineFailure;
             const vanguard::asset_streaming::ProjectAssetPipelineResult initialized = m_assetPipeline.Initialize(
-                mutableFiles, m_sources, streaming->GetStreamer(), {&compiler, 1}, {&importer, 1}, pipelineConfig, nullptr, &pipelineFailure);
-            if (initialized != vanguard::asset_streaming::ProjectAssetPipelineResult::Success)
+                mutableFiles, m_sources, streaming->GetStreamer(),
+                {compilers, static_cast<vanguard::u32>(sizeof(compilers) / sizeof(compilers[0]))},
+                {importers, static_cast<vanguard::u32>(sizeof(importers) / sizeof(importers[0]))},
+                pipelineConfig, nullptr, &pipelineFailure);
+            // P5 may complete its durable recovery boundary while a bounded
+            // cleanup/reconciliation step remains outstanding. The pipeline is
+            // live in both committed-pending cases, and normal Editor frames
+            // must be allowed to advance that recovery (as Nanovanguard does).
+            const bool committedStartupPending =
+                initialized == vanguard::asset_streaming::ProjectAssetPipelineResult::CommittedCleanupPending ||
+                initialized == vanguard::asset_streaming::ProjectAssetPipelineResult::CommittedReconciliationPending;
+            if (initialized != vanguard::asset_streaming::ProjectAssetPipelineResult::Success && !committedStartupPending)
             {
                 VG_LOG_ERROR(vanguard::diagnostics::Category::Resources,
                              "Project Workspace asset pipeline initialization failed: result=%u build=%u sources=%u operation=%u transaction=%u",
@@ -1226,6 +1789,7 @@ namespace
                 if (editor::ProjectAssetInitializeFailureOwnerPolicy(m_assetPipeline.IsInitialized()) ==
                     editor::ProjectAssetInitializeFailureOwnerAction::ReleaseCompilerImmediately)
                 {
+                    static_cast<void>(ShutdownModelBuildTools());
                     static_cast<void>(m_textureCompiler.Shutdown());
                     m_renderingService = nullptr;
                 }
@@ -1260,8 +1824,19 @@ namespace
             ResetResidentDeliveryDrive();
             vanguard::asset_streaming::ProjectAssetPipelineFailure failure;
             const vanguard::asset_streaming::ProjectAssetPipelineResult enabled = m_assetPipeline.EnableObservation({}, &failure);
-            if (enabled != vanguard::asset_streaming::ProjectAssetPipelineResult::Success)
+            if (enabled != vanguard::asset_streaming::ProjectAssetPipelineResult::Success &&
+                enabled != vanguard::asset_streaming::ProjectAssetPipelineResult::Busy)
+            {
+                VG_LOG_ERROR(vanguard::diagnostics::Category::Resources,
+                             "Project Workspace source observation start failed: result=%u build=%u sources=%u operation=%u transaction=%u",
+                             static_cast<vanguard::u32>(failure.result), static_cast<vanguard::u32>(failure.build),
+                             static_cast<vanguard::u32>(failure.sources), static_cast<vanguard::u32>(failure.operation.result),
+                             static_cast<vanguard::u32>(failure.operation.transaction));
                 return app::LifecycleStatus::Failure("Project Workspace source observation could not start");
+            }
+            if (enabled == vanguard::asset_streaming::ProjectAssetPipelineResult::Busy)
+                VG_LOG_INFO(vanguard::diagnostics::Category::Resources,
+                            "Project Workspace source observation deferred while asset coordination owns admission");
             m_previewAccepting = true;
             m_driveFrames = true;
             return app::LifecycleStatus::Success();
@@ -1270,6 +1845,14 @@ namespace
         app::LifecycleStatus OnQuiesce(app::ServiceContext&) noexcept override
         {
             m_previewAccepting = false;
+            // The asset-pipeline Prepare job must cancel/join before Jobs
+            // service OnDrain checks for outstanding dependent work. OnShutdown
+            // is too late for that lifecycle ordering. Publication remains
+            // owner-only and uncommitted staging is rolled back here.
+            vanguard::asset_streaming::ProjectAssetPipelineFailure prepareFailure;
+            if (m_assetPipeline.QuiesceDeferredPlannedImport(&prepareFailure) !=
+                vanguard::asset_streaming::ProjectAssetPipelineResult::Success)
+                return app::LifecycleStatus::Failure("Project Workspace could not quiesce reviewed import staging");
             DrainProjectTexturePreviewRequests();
             ResetProjectTexturePreviewState();
             m_driveFrames = false;
@@ -1306,6 +1889,8 @@ namespace
             if (m_assetPipeline.Shutdown() != vanguard::asset_streaming::ProjectAssetPipelineResult::Success)
                 return app::LifecycleStatus::Failure("Project Workspace asset pipeline shutdown failed");
             m_assetCatalog.Reset();
+            if (!ShutdownModelBuildTools())
+                return app::LifecycleStatus::Failure("Project Workspace model/material compiler shutdown failed");
             if (!m_textureCompiler.Shutdown())
                 return app::LifecycleStatus::Failure("Project Workspace texture compiler shutdown failed");
             m_framePipeline = nullptr;
@@ -1315,6 +1900,72 @@ namespace
         }
 
     private:
+        [[nodiscard]] bool InitializeModelBuildTools(const vanguard::assets::TargetPlatform target) noexcept
+        {
+            if (!vanguard::mesh_tools::Acquire())
+                return false;
+            m_modelToolsAcquired = true;
+
+            vanguard::containers::DynamicArray<vanguard::u8> surfacePrefix(vanguard::memory::pools::Tools::GetInstance());
+            vanguard::containers::DynamicArray<vanguard::u8> surfaceSuffix(vanguard::memory::pools::Tools::GetInstance());
+            vanguard::containers::DynamicArray<vanguard::u8> gpuSceneTypes(vanguard::memory::pools::Tools::GetInstance());
+            const vanguard::filesystem::AbsolutePath shaders =
+                vanguard::filesystem::paths::GetExecutableDirectory().AddDirPath("shaders");
+            if (!vanguard::editor::ReadModelToolSource(shaders.AddFilePath("static_surface_prefix.vsl"), surfacePrefix) ||
+                !vanguard::editor::ReadModelToolSource(shaders.AddFilePath("static_surface_suffix.vsl"), surfaceSuffix) ||
+                !vanguard::editor::ReadModelToolSource(shaders.AddFilePath("gpu_scene_types.hlsli"), gpuSceneTypes))
+                return false;
+
+            vanguard::material_tools::ImportedSurfaceMaterialContextDescription materialDescription;
+            materialDescription.prefix = {surfacePrefix.TypedData(), surfacePrefix.Size()};
+            materialDescription.suffix = {surfaceSuffix.TypedData(), surfaceSuffix.Size()};
+            materialDescription.gpuSceneTypes = {gpuSceneTypes.TypedData(), gpuSceneTypes.Size()};
+            materialDescription.target = target;
+            materialDescription.compileSettings.target =
+                target == vanguard::assets::TargetPlatform::WindowsD3D12
+                    ? vanguard::shader_tools::Target::D3D12Dxil
+                    : vanguard::shader_tools::Target::VulkanSpirV;
+            if (!m_materialContext.Initialize(materialDescription))
+                return false;
+            vanguard::material_tools::MaterialArtifactCompilerConfig materialCompilerConfig;
+            if (!m_materialContext.ConfigureArtifactCompiler(materialCompilerConfig) ||
+                !m_materialCompilers.Initialize(materialCompilerConfig))
+                return false;
+
+            m_modelAdapter.sources = &m_sources;
+            m_modelAdapter.materialContext = &m_materialContext;
+            m_modelAdapter.generated = &m_generated;
+            vanguard::mesh_tools::ModelAssetCompilerConfig modelConfig;
+            modelConfig.outputTypes.mesh = vanguard::meshes::MeshResourceType;
+            modelConfig.outputTypes.material = vanguard::materials::MaterialResourceType;
+            modelConfig.outputTypes.texture = vanguard::textures::TextureResourceType;
+            modelConfig.outputTypes.composition = vanguard::prefabs::PrefabResourceType;
+            modelConfig.composeMaterial = vanguard::model_tools::ComposeMaterial;
+            modelConfig.composeMaterialUserData = &m_modelAdapter;
+            modelConfig.composeEmbeddedTexture = vanguard::model_tools::ComposeEmbeddedTexture;
+            modelConfig.composeEmbeddedTextureUserData = &m_modelAdapter;
+            modelConfig.composeComposition = vanguard::model_tools::ComposeComposition;
+            return m_modelCompiler.Initialize(modelConfig);
+        }
+
+        [[nodiscard]] bool ShutdownModelBuildTools() noexcept
+        {
+            if (m_modelCompiler.IsInitialized() && !m_modelCompiler.Shutdown())
+                return false;
+            if (m_materialCompilers.IsInitialized() && !m_materialCompilers.Shutdown())
+                return false;
+            m_materialContext.Reset();
+            m_generated.Clear();
+            m_modelAdapter = {};
+            if (m_modelToolsAcquired)
+            {
+                if (!vanguard::mesh_tools::Release())
+                    return false;
+                m_modelToolsAcquired = false;
+            }
+            return true;
+        }
+
         [[nodiscard]] static bool IsProjectTexturePreviewPriority(const editor::ProjectTexturePreviewPriority priority) noexcept
         {
             return priority == editor::ProjectTexturePreviewPriority::Background ||
@@ -2718,7 +3369,37 @@ namespace
                 return engine::FrameParticipantStatus::Success();
 
             vanguard::asset_streaming::ProjectAssetPipelineFailure pipelineFailure;
-            const PipelineResult observation = m_assetPipeline.TickObservation(nullptr, &pipelineFailure);
+            // The large reviewed source transaction may have delegated only its
+            // reversible Prepare step to a worker. Settle it on the workspace
+            // owner before observation is re-enabled: ApplyPrepared, durable
+            // cohort intent, VPAS and publication never run on the worker.
+            // Terminal per-import failures are recorded in the pipeline's
+            // process-local status for the review session, not fatal to Editor.
+            const PipelineResult prepared = m_assetPipeline.TickDeferredPlannedImport(&pipelineFailure);
+            if (prepared != PipelineResult::Success && prepared != PipelineResult::Pending &&
+                prepared != PipelineResult::CommittedReconciliationPending)
+                VG_LOG_WARNING(vanguard::diagnostics::Category::Resources,
+                               "Project Workspace reviewed import staging stopped: result=%u transaction=%u staleSite=%u",
+                               static_cast<vanguard::u32>(prepared),
+                               static_cast<vanguard::u32>(pipelineFailure.operation.transaction),
+                               pipelineFailure.stalePlanSite);
+            PipelineResult observation = PipelineResult::Pending;
+            if (!m_assetPipeline.IsObservingSources())
+            {
+                const PipelineResult enabled = m_assetPipeline.EnableObservation({}, &pipelineFailure);
+                if (enabled != PipelineResult::Success && enabled != PipelineResult::Busy)
+                {
+                    VG_LOG_ERROR(vanguard::diagnostics::Category::Resources,
+                                 "Project Workspace deferred source observation start failed: result=%u build=%u sources=%u operation=%u transaction=%u",
+                                 static_cast<vanguard::u32>(pipelineFailure.result), static_cast<vanguard::u32>(pipelineFailure.build),
+                                 static_cast<vanguard::u32>(pipelineFailure.sources),
+                                 static_cast<vanguard::u32>(pipelineFailure.operation.result),
+                                 static_cast<vanguard::u32>(pipelineFailure.operation.transaction));
+                    return engine::FrameParticipantStatus::Failure("Project Workspace source observation could not start");
+                }
+            }
+            if (m_assetPipeline.IsObservingSources())
+                observation = m_assetPipeline.TickObservation(nullptr, &pipelineFailure);
             const bool observationRetryable =
                 observation == PipelineResult::ReconciliationFailed ||
                 observation == PipelineResult::SnapshotSaveFailed ||
@@ -2737,9 +3418,35 @@ namespace
                     return engine::FrameParticipantStatus::Failure("Project Workspace automatic recook could not start");
             }
 
-            if (m_assetPipeline.IsAutomaticRecookEnabled())
+            const vanguard::asset_streaming::ProjectAssetAutomaticRecookStatus automaticStatus =
+                m_assetPipeline.GetAutomaticRecookStatus();
+            const bool explicitCoordinationNeedsTick =
+                automaticStatus.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Pending ||
+                automaticStatus.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Planning ||
+                automaticStatus.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Building ||
+                automaticStatus.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Validating ||
+                automaticStatus.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Cancelling;
+            if (m_assetPipeline.IsAutomaticRecookEnabled() || explicitCoordinationNeedsTick)
             {
                 const PipelineResult automatic = m_assetPipeline.TickAutomaticRecook(&pipelineFailure);
+                const auto completedRecook = m_assetPipeline.GetAutomaticRecookStatus();
+                if (completedRecook.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Failed ||
+                    completedRecook.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                {
+                    if (!m_automaticRecookFailureLogged)
+                    {
+                        const auto& root = completedRecook.firstFailedRoot;
+                        VG_LOG_ERROR(vanguard::diagnostics::Category::Resources,
+                                     "Project automatic recook failed: reason=%s graph=%s compiler=%s rootIndex=%u failedRoots=%u message=%s",
+                                     vanguard::assets::ToString(completedRecook.lastRecookFailure),
+                                     vanguard::assets::ToString(root.graphFailure),
+                                     vanguard::assets::ToString(root.buildResult),
+                                     root.rootIndex, completedRecook.failedRootCount, root.message);
+                        m_automaticRecookFailureLogged = true;
+                    }
+                }
+                else
+                    m_automaticRecookFailureLogged = false;
                 if (automatic != PipelineResult::Success && automatic != PipelineResult::Pending &&
                     automatic != PipelineResult::BuildRequestFailed && automatic != PipelineResult::PublicationFailed &&
                     automatic != PipelineResult::CommittedReconciliationPending)
@@ -2791,8 +3498,14 @@ namespace
         vanguard::projects::ProjectWorkspace m_workspace;
         vanguard::filesystem::AbsolutePath m_projectFile;
         vanguard::texture_tools::TextureAssetCompiler m_textureCompiler;
-        // Declared after the compiler so destruction runs pipeline-first even if
-        // lifecycle shutdown failed and callback state must remain valid.
+        vanguard::model_tools::GeneratedRequestStore m_generated;
+        vanguard::material_tools::ImportedSurfaceMaterialContext m_materialContext;
+        vanguard::material_tools::MaterialArtifactCompilers m_materialCompilers;
+        vanguard::mesh_tools::ModelAssetCompiler m_modelCompiler;
+        vanguard::model_tools::ModelBuildAdapter m_modelAdapter;
+        bool m_modelToolsAcquired = false;
+        // Declared after all compiler/adapter owners: destruction is pipeline-first
+        // even after an unsuccessful lifecycle cleanup.
         vanguard::asset_streaming::ProjectAssetPipeline m_assetPipeline;
         vanguard::engine::FramePipelineService* m_framePipeline = nullptr;
         vanguard::engine::ResourceStreamingService* m_streamingService = nullptr;
@@ -2817,6 +3530,7 @@ namespace
         vanguard::u32 m_residentTargetGeneration = 0u;
         bool m_driveFrames = false;
         bool m_initialObservationCatchUpComplete = false;
+        bool m_automaticRecookFailureLogged = false;
         bool m_residentSweepComplete = false;
         bool m_residentRequestIsReplacement = false;
         bool m_residentAutomaticWorkObserved = false;

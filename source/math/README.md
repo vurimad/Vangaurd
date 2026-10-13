@@ -11,7 +11,7 @@ Include:
 ```
 
 Use types through `vanguard::math`; runtime and editor code must not include
-files from `source/imported` directly.
+files from `imported` directly.
 
 This phase preserves RED Math behavior and layout because the implementation is
 already mature, inline, and SIMD-heavy. The complete source image is

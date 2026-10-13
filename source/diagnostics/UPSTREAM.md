@@ -1,7 +1,7 @@
 # Imported logger provenance
 
 The RED logger is a coherent slice of the complete `redSystem` image already
-retained at `source/imported/common/redSystem`.
+retained at `imported/common/redSystem`.
 
 - Authoritative source:
   `D:\root\R6.Root\Mainline\dev\src\common\redSystem`

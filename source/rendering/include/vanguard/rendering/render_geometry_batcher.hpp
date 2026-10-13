@@ -67,6 +67,7 @@ namespace vanguard::rendering
         GeometryBinKey mirroredGeometry;
         GpuMaterialHandle material;
         u32 sourceSubmesh = InvalidGeometryIndex;
+        f32 sortCenter[3]{};
     };
 
     // Borrowed recording catalog entries. The batcher remains their only owner;

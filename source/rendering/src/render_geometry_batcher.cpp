@@ -490,6 +490,9 @@ namespace vanguard::rendering
         }
         placement.material = normal.material;
         placement.sourceSubmesh = preparation.sourceSubmesh;
+        placement.sortCenter[0] = preparation.sortCenter[0];
+        placement.sortCenter[1] = preparation.sortCenter[1];
+        placement.sortCenter[2] = preparation.sortCenter[2];
         batch->owner = this;
         batch->preparation = std::move(preparation);
         batch->next = m_impl->first;

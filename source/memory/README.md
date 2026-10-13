@@ -7,8 +7,8 @@ dependencies from becoming permanent Vanguard architecture.
 
 ## Current boundaries
 
-- `source/imported/common/redMemory` contains the complete working memory image.
-- `source/imported/common/redSystem` is a private compatibility dependency.
+- `imported/common/redMemory` contains the complete working memory image.
+- `imported/common/redSystem` is a private compatibility dependency.
 - `compat` owns direct backend integration.
 - `include/vanguard/memory/pool.hpp` is the single sanctioned public adaptation
   boundary for RED's compile-time pool and resolver machinery. Callers use only

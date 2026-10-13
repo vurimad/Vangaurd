@@ -1,27 +1,12 @@
 #pragma once
 
+#include <vanguard/entities/component_schemas.hpp>
 #include <vanguard/entities/visual_component.hpp>
 #include <vanguard/rendering/mesh_residency.hpp>
 
 namespace vanguard::entities
 {
     class ComponentRegistry;
-
-    inline constexpr reflection::SchemaTypeId StaticMeshComponentType = reflection::HashSchemaName("vanguard.static_mesh_component");
-
-    // Serialized values decoded by ComponentRegistry::RegisterObject. Transform placement
-    // remains in the existing prefab placement/attachment records.
-    struct StaticMeshComponentData
-    {
-        resources::ResourceReference mesh;
-        f32 scaleX = 1.0f;
-        f32 scaleY = 1.0f;
-        f32 scaleZ = 1.0f;
-        u64 layerMask = ~0ull;
-        u32 visibilityMask = ~0u;
-        bool castsShadow = true;
-        bool receivesDecals = true;
-    };
 
     enum class StaticMeshComponentState : u8
     {
@@ -32,7 +17,6 @@ namespace vanguard::entities
         Failed
     };
 
-    [[nodiscard]] const reflection::Schema& GetStaticMeshComponentSchema() noexcept;
     [[nodiscard]] bool RegisterStaticMeshComponent(ComponentRegistry& registry) noexcept;
 
     class StaticMeshComponent final : public VisualComponent

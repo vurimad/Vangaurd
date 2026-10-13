@@ -11,7 +11,7 @@ D:\root\R6.Root\Mainline\dev\src\common\redMath
 The quarantined repository image is:
 
 ```text
-source/imported/common/redMath
+imported/common/redMath
 ```
 
 The previous `D:\RED Vanguard` integration was consulted for the known Windows

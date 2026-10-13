@@ -981,8 +981,9 @@ namespace
             const rhi::ShaderStageMask staticSurfaceStages = rhi::ShaderStageBit(rhi::ShaderStage::Vertex) | rhi::ShaderStageBit(rhi::ShaderStage::Pixel);
             const rendering::RenderPhaseId depthPrepass = m_renderPhases.Find(rendering::standardRenderPhases::DepthPrepass);
             const rendering::RenderPhaseId opaque = m_renderPhases.Find(rendering::standardRenderPhases::Opaque);
-            if (!depthPrepass.IsValid() || !opaque.IsValid())
-                return app::LifecycleStatus::Failure("renderer draw interface requires registered depth-prepass and opaque phases");
+            const rendering::RenderPhaseId transparent = m_renderPhases.Find(rendering::standardRenderPhases::Transparent);
+            if (!depthPrepass.IsValid() || !opaque.IsValid() || !transparent.IsValid())
+                return app::LifecycleStatus::Failure("renderer draw interface requires registered depth-prepass, opaque and transparent phases");
             if (m_config.resourceDescriptors.kind != rhi::DescriptorDomainKind::Resources || m_config.samplerDescriptors.kind != rhi::DescriptorDomainKind::Samplers ||
                 (m_config.resourceDescriptors.visibility & staticSurfaceStages) != staticSurfaceStages || (m_config.samplerDescriptors.visibility & staticSurfaceStages) != staticSurfaceStages)
                 return app::LifecycleStatus::Failure("renderer draw interface descriptor-domain types do not match renderer configuration");
@@ -1010,7 +1011,8 @@ namespace
             }
 
             rendering::RenderPhaseSet defaultCameraPhases;
-            if (!defaultCameraPhases.Add(depthPrepass) || !defaultCameraPhases.Add(opaque))
+            if (!defaultCameraPhases.Add(depthPrepass) || !defaultCameraPhases.Add(opaque) ||
+                !defaultCameraPhases.Add(transparent))
             {
                 ResetRendererDrawInterface();
                 return app::LifecycleStatus::Failure("renderer draw interface could not resolve default camera phases");
@@ -1731,11 +1733,12 @@ namespace
                 {
                     std::sort(retireWindow, retireWindow + 256u);
                     const double microsecondsPerTick = 1'000'000.0 / static_cast<double>(vanguard::system::GetMonotonicFrequency());
-                    std::fprintf(stderr, "RF2_PROFILE_RHI_RETIRE samples=256 p50_us=%.3f p95_us=%.3f mean_us=%.3f max_us=%.3f\n",
-                                 static_cast<double>(retireWindow[127]) * microsecondsPerTick,
-                                 static_cast<double>(retireWindow[242]) * microsecondsPerTick,
-                                 static_cast<double>(accumulatedRetireTicks) * microsecondsPerTick / 256.0,
-                                 static_cast<double>(maximumRetireTicks) * microsecondsPerTick);
+                    VG_LOG_INFO(vanguard::diagnostics::Category::Rendering,
+                                "RF2_PROFILE_RHI_RETIRE samples=256 p50_us=%.3f p95_us=%.3f mean_us=%.3f max_us=%.3f",
+                                static_cast<double>(retireWindow[127]) * microsecondsPerTick,
+                                static_cast<double>(retireWindow[242]) * microsecondsPerTick,
+                                static_cast<double>(accumulatedRetireTicks) * microsecondsPerTick / 256.0,
+                                static_cast<double>(maximumRetireTicks) * microsecondsPerTick);
                     accumulatedRetireTicks = 0;
                     maximumRetireTicks = 0;
                     retireSamples = 0;
@@ -1915,7 +1918,25 @@ namespace
                 if (!rhi::RetireResources(&rhiFailure) || !rhi::FlushRetiredResources(&rhiFailure))
                     return FailureMessage(rhiFailure.message, "renderer owner quiesce native retirement flush failed");
             }
-            return QuiesceOwnerWorkCount() == 0 ? nullptr : "renderer owner quiesce did not settle after device idle";
+            if (QuiesceOwnerWorkCount() != 0)
+                return "renderer owner quiesce did not settle after device idle";
+
+            // ProgressRendererOwners may submit its final GPU Scene/texture retirement
+            // batch after the initial idle wait. Project Workspace's later Drain must
+            // observe the completed native-release evidence, not a still-in-flight
+            // receipt which becomes deliverable only after the workspace is gone.
+            if (!rhi::WaitIdle(&rhiFailure))
+            {
+                if (rhiFailure.code == rhi::FailureCode::DeviceLost)
+                {
+                    AbandonRendererDevice();
+                    return nullptr;
+                }
+                return FailureMessage(rhiFailure.message, "RHI final idle wait failed during renderer quiesce");
+            }
+            if (!rhi::RetireResources(&rhiFailure) || !rhi::FlushRetiredResources(&rhiFailure))
+                return FailureMessage(rhiFailure.message, "renderer final owner quiesce native retirement flush failed");
+            return nullptr;
         }
 
         [[nodiscard]] bool StageFrameContributions(bool& contributionStaged, engine::RenderingProgressFailure* const failure) noexcept

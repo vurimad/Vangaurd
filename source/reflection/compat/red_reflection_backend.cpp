@@ -2,10 +2,10 @@
 
 #include <vanguard/memory/memory.hpp>
 
-#include "../../imported/common/redReflection/include/redReflectionPublic.h"
-#include "../../imported/common/redReflection/include/rttiSystem.h"
-#include "../../imported/common/redReflection/include/rttiType.h"
-#include "../../imported/common/redSystem/include/module.h"
+#include "../../../imported/common/redReflection/include/redReflectionPublic.h"
+#include "../../../imported/common/redReflection/include/rttiSystem.h"
+#include "../../../imported/common/redReflection/include/rttiType.h"
+#include "../../../imported/common/redSystem/include/module.h"
 
 extern void InitializeModule_redConfig();
 extern void InitializeModule_commProtocol();

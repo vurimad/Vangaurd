@@ -26,6 +26,7 @@ namespace vanguard::engine::tests
             rendering::PipelineInterfaceResources interfaces;
             pipelines::AttachmentSignature depthAttachments = rendering::MakeStandardDepthPrepassAttachments();
             pipelines::AttachmentSignature opaqueAttachments = rendering::MakeStandardOpaqueAttachments();
+            pipelines::AttachmentSignature transparentAttachments = rendering::MakeStandardTransparentAttachments();
             u32 proofs = 0;
         } context;
         const rhi::BindingLayoutRef layoutRef = layout.GetRef();
@@ -53,6 +54,18 @@ namespace vanguard::engine::tests
                     request.attachments = &context.depthAttachments;
                 else if (colorCount == context.opaqueAttachments.colorCount)
                     request.attachments = &context.opaqueAttachments;
+                else if (colorCount == context.transparentAttachments.colorCount)
+                {
+                    const auto& graphics = pipeline.GetGraphics();
+                    const auto& blend = graphics.blend.attachments[0];
+                    if (!graphics.depthStencil.depthTest || graphics.depthStencil.depthWrite || graphics.depthStencil.stencilTest ||
+                        graphics.depthStencil.depthBoundsTest || !blend.blendEnable || blend.sourceColor != pipelines::BlendFactor::SourceAlpha ||
+                        blend.destinationColor != pipelines::BlendFactor::OneMinusSourceAlpha || blend.colorOperation != pipelines::BlendOperation::Add ||
+                        blend.sourceAlpha != pipelines::BlendFactor::One || blend.destinationAlpha != pipelines::BlendFactor::OneMinusSourceAlpha ||
+                        blend.alphaOperation != pipelines::BlendOperation::Add || blend.writeMask != 0x0f)
+                        return false;
+                    request.attachments = &context.transparentAttachments;
+                }
                 else
                     return false;
                 for (u32 variant = 0; variant < 3; ++variant)

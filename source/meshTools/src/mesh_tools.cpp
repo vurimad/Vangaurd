@@ -4,6 +4,7 @@
 #include <meshoptimizer.h>
 
 #include <cmath>
+#include <new>
 
 namespace
 {
@@ -20,7 +21,8 @@ namespace
     using vanguard::u8;
     using vanguard::usize;
 
-    bool g_initialized = false;
+    bool g_rootInitialized = false;
+    u32 g_acquisitionReferences = 0;
     bool g_profileRegistrySealed = false;
     constexpr u32 MaximumRegisteredProfiles = 32;
     constexpr u32 MaximumRulesPerProfile = 32;
@@ -183,6 +185,24 @@ namespace
         auto* allocation = reinterpret_cast<MeshoptimizerAllocation*>(reinterpret_cast<usize>(address) - sizeof(MeshoptimizerAllocation));
         memory::MemoryBlock block = allocation->block;
         memory::Free(block);
+    }
+
+    void* MESHOPTIMIZER_ALLOC_CALLCONV DefaultMeshoptimizerAllocate(const size_t size)
+    {
+        return ::operator new(size);
+    }
+
+    void MESHOPTIMIZER_ALLOC_CALLCONV DefaultMeshoptimizerFree(void* const address)
+    {
+        ::operator delete(address);
+    }
+
+    void ResetProfileRegistry() noexcept
+    {
+        for (u32 index = 0; index < g_profileCount; ++index)
+            g_profiles[index] = {};
+        g_profileCount = 0;
+        g_profileRegistrySealed = false;
     }
 
     template <typename T> containers::ArraySpan<const T> Span(const containers::DynamicArray<T>& values)
@@ -956,6 +976,26 @@ namespace
         }
         return true;
     }
+
+    bool InitializeGlobalState() noexcept
+    {
+        if (!memory::IsInitialized() || !containers::IsInitialized())
+            return false;
+        meshopt_setAllocator(&MeshoptimizerAllocate, &MeshoptimizerFree);
+        if (!RegisterBuiltInProfiles())
+        {
+            ResetProfileRegistry();
+            meshopt_setAllocator(&DefaultMeshoptimizerAllocate, &DefaultMeshoptimizerFree);
+            return false;
+        }
+        return true;
+    }
+
+    void ShutdownGlobalState() noexcept
+    {
+        ResetProfileRegistry();
+        meshopt_setAllocator(&DefaultMeshoptimizerAllocate, &DefaultMeshoptimizerFree);
+    }
 } // namespace
 
 namespace vanguard::mesh_tools
@@ -990,41 +1030,97 @@ namespace vanguard::mesh_tools
 
     bool Initialize() noexcept
     {
-        if (g_initialized)
-        {
+        if (g_rootInitialized)
             return true;
-        }
-        if (!memory::IsInitialized() || !containers::IsInitialized())
-        {
+        if (g_acquisitionReferences == 0 && !InitializeGlobalState())
             return false;
-        }
-        meshopt_setAllocator(&MeshoptimizerAllocate, &MeshoptimizerFree);
-        if (!RegisterBuiltInProfiles())
-        {
+        g_rootInitialized = true;
+        return true;
+    }
+
+    bool Shutdown() noexcept
+    {
+        if (!g_rootInitialized)
             return false;
-        }
-        g_initialized = true;
+        g_rootInitialized = false;
+        if (g_acquisitionReferences == 0)
+            ShutdownGlobalState();
+        return true;
+    }
+
+    bool Acquire() noexcept
+    {
+        if (g_acquisitionReferences == ~u32{0})
+            return false;
+        if (!g_rootInitialized && g_acquisitionReferences == 0 && !InitializeGlobalState())
+            return false;
+        ++g_acquisitionReferences;
+        return true;
+    }
+
+    bool Release() noexcept
+    {
+        if (g_acquisitionReferences == 0)
+            return false;
+        --g_acquisitionReferences;
+        if (!g_rootInitialized && g_acquisitionReferences == 0)
+            ShutdownGlobalState();
         return true;
     }
 
     bool IsInitialized() noexcept
     {
-        return g_initialized;
+        return g_rootInitialized || g_acquisitionReferences != 0;
     }
 
     ProfileRegistrationResult RegisterMeshCookingProfile(const MeshCookingProfile& profile) noexcept
     {
-        return g_initialized ? RegisterProfileInternal(profile) : ProfileRegistrationResult::InvalidArgument;
+        return IsInitialized() ? RegisterProfileInternal(profile) : ProfileRegistrationResult::InvalidArgument;
     }
 
     const MeshCookingProfile* FindMeshCookingProfile(const MeshCookingProfileId id) noexcept
     {
-        return g_initialized ? FindProfileInternal(id) : nullptr;
+        return IsInitialized() ? FindProfileInternal(id) : nullptr;
+    }
+
+    bool GetMeshCookingProfileFingerprint(const MeshCookingProfileId id, crypto::Digest256& fingerprint) noexcept
+    {
+        fingerprint = {};
+        const MeshCookingProfile* const profile = FindMeshCookingProfile(id);
+        if (profile == nullptr)
+            return false;
+
+        constexpr char Policy[] = "VanguardMeshCookingProfile/v1";
+        crypto::Sha256Builder builder;
+        const auto update = [&builder](const void* const data, const usize size) noexcept { return builder.Update(data, size); };
+        const u8 meshKind = static_cast<u8>(profile->meshKind);
+        const u8 flags = static_cast<u8>(profile->flags);
+        const u8 unmatched = static_cast<u8>(profile->unmatchedStreams);
+        const u32 ruleCount = profile->rules.Size();
+        if (!update(Policy, sizeof(Policy) - 1u) || !update(&profile->id, sizeof(profile->id)) ||
+            !update(&profile->version, sizeof(profile->version)) || !update(&profile->baseProfile, sizeof(profile->baseProfile)) ||
+            !update(&meshKind, sizeof(meshKind)) || !update(&flags, sizeof(flags)) || !update(&unmatched, sizeof(unmatched)) ||
+            !update(&ruleCount, sizeof(ruleCount)))
+            return false;
+        for (const VertexPackingRule& rule : profile->rules)
+        {
+            const u8 semantic = static_cast<u8>(rule.semantic);
+            const u8 sourceFormat = static_cast<u8>(rule.sourceFormat);
+            const u8 storedFormat = static_cast<u8>(rule.storedFormat);
+            const u8 ruleFlags = static_cast<u8>(rule.flags);
+            const u8 hasPackCallback = rule.pack != nullptr ? 1u : 0u;
+            if (!update(&semantic, sizeof(semantic)) || !update(&rule.semanticIndex, sizeof(rule.semanticIndex)) ||
+                !update(&sourceFormat, sizeof(sourceFormat)) || !update(&storedFormat, sizeof(storedFormat)) ||
+                !update(&rule.bindingGroup, sizeof(rule.bindingGroup)) || !update(&ruleFlags, sizeof(ruleFlags)) ||
+                !update(&hasPackCallback, sizeof(hasPackCallback)))
+                return false;
+        }
+        return builder.Finalize(fingerprint) && !fingerprint.IsEmpty();
     }
 
     Result CookMesh(const SourceMesh& source, filesystem::IFile& output, const CookSettings& settings, CookReport* const report) noexcept
     {
-        if (!g_initialized)
+        if (!IsInitialized())
         {
             return Result::InvalidState;
         }

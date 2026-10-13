@@ -132,7 +132,13 @@ namespace vanguard::rendering
 
     void RenderGraphCache::CacheEntry::Reset() noexcept
     {
+        // Graph teardown owns the update/execution synchronization boundary.
+        // Only after it is quiescent may the cache entry discard the immutable
+        // semantic resource contract borrowed by warm frames.
         graph.Reset();
+        resourceContract.Reset();
+        resourceContractRevision = {};
+        resourceContractPublicationSerial = 0;
         DeleteCameraBuildData(cameraBuildData);
         graphKey = {};
         lastUsedFrame = 0;

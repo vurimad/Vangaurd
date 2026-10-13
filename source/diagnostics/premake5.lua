@@ -18,8 +18,8 @@ project "diagnosticsCompat"
         "include",
         "private",
         "../system/include",
-        "../imported/common/redSystem/include",
-        "../imported/common/redSystem/src"
+        "../../imported/common/redSystem/include",
+        "../../imported/common/redSystem/src"
     }
 
     defines {

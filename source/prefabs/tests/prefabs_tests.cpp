@@ -103,12 +103,16 @@ int main()
     const std::array<prefab::EntityBuildRecord, 2> entities{
         {{20, 10, 0x2000, prefab::EntityFlags::DisabledByDefault}, {10, prefab::InvalidStableId, 0x1000, prefab::EntityFlags::None}}};
     const std::array<prefab::ComponentBuildRecord, 2> components{
-        {{200, 20, &RenderSchema, &render, prefab::ComponentFlags::None}, {100, 10, &TransformSchema, &transform, prefab::ComponentFlags::None}}};
+        {{200, 10, &RenderSchema, &render, prefab::ComponentFlags::None}, {100, 10, &TransformSchema, &transform, prefab::ComponentFlags::None}}};
+    const std::array<prefab::PlacedComponentBuildRecord, 2> placedComponents{{
+        {100, prefab::InvalidStableId, {1.0f, 2.0f, 3.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {200, 100, {4.0f, 5.0f, 6.0f}, {0.0f, 0.0f, 0.0f, 1.0f}}}};
     const std::array<prefab::ExplicitDependency, 1> explicitDependencies{{{mesh, resources::DependencyKind::Soft}}};
     prefab::CookDescription description;
     description.name = 0x12345678;
     description.entities = {entities.data(), static_cast<vanguard::u32>(entities.size())};
     description.components = {components.data(), static_cast<vanguard::u32>(components.size())};
+    description.placedComponents = {placedComponents.data(), static_cast<vanguard::u32>(placedComponents.size())};
     description.explicitDependencies = {explicitDependencies.data(), static_cast<vanguard::u32>(explicitDependencies.size())};
     description.sourceFingerprint = vanguard::crypto::Sha256("prefab source", 13);
 
@@ -118,9 +122,11 @@ int main()
 
     const std::array<prefab::EntityBuildRecord, 2> reorderedEntities{{entities[1], entities[0]}};
     const std::array<prefab::ComponentBuildRecord, 2> reorderedComponents{{components[1], components[0]}};
+    const std::array<prefab::PlacedComponentBuildRecord, 2> reorderedPlacedComponents{{placedComponents[1], placedComponents[0]}};
     prefab::CookDescription reordered = description;
     reordered.entities = {reorderedEntities.data(), static_cast<vanguard::u32>(reorderedEntities.size())};
     reordered.components = {reorderedComponents.data(), static_cast<vanguard::u32>(reorderedComponents.size())};
+    reordered.placedComponents = {reorderedPlacedComponents.data(), static_cast<vanguard::u32>(reorderedPlacedComponents.size())};
     ByteArray second(memory::pools::World::GetInstance());
     filesystem::MemoryFileWriter secondWriter(second);
     Check(prefab::CookPrefab(reordered, secondWriter) == prefab::Result::Success, "cook reordered prefab");
@@ -131,11 +137,16 @@ int main()
     Check(file.Open(reader) == prefab::Result::Success, "open cooked prefab");
     Check(file.IsOpen() && file.GetName() == description.name, "prefab identity");
     Check(file.GetEntities().Size() == 2 && file.GetComponents().Size() == 2, "entity and component counts");
-    Check(file.GetEntities()[0].stableId == 10 && file.GetEntities()[0].componentCount == 1, "root entity and grouped component");
+    Check(file.GetPlacedComponents().Size() == 2, "placed component relationship count");
+    Check(file.GetEntities()[0].stableId == 10 && file.GetEntities()[0].componentCount == 2, "root entity and grouped components");
     Check(file.GetEntities()[1].parentStableId == 10, "child hierarchy");
     Check(file.GetDependencies().Size() == 1 && file.GetDependencies()[0].resource == mesh && file.GetDependencies()[0].kind == resources::DependencyKind::Required,
           "schema dependency extraction and strongest-kind coalescing");
     Check(file.FindEntity(20) != nullptr && file.FindComponent(200) != nullptr, "stable identity lookup");
+    const prefab::PlacedComponentRecord* const placedRender = file.FindPlacedComponent(200);
+    Check(placedRender != nullptr && placedRender->parentComponentStableId == 100 && placedRender->translation[0] == 4.0f &&
+              placedRender->translation[1] == 5.0f && placedRender->translation[2] == 6.0f,
+          "placed component hierarchy round trip uses stable component identity");
 
     const prefab::ComponentRecord* const transformRecord = file.FindComponent(100);
     Check(transformRecord != nullptr && transformRecord->schema == TransformType, "component schema identity");
@@ -205,6 +216,35 @@ int main()
     scratch.Clear();
     filesystem::MemoryFileWriter cycleWriter(scratch);
     Check(prefab::CookPrefab(invalid, cycleWriter) == prefab::Result::HierarchyCycle, "reject hierarchy cycle");
+
+    auto missingPlacedParent = placedComponents;
+    missingPlacedParent[1].parentComponentStableId = 999;
+    invalid = description;
+    invalid.placedComponents = {missingPlacedParent.data(), static_cast<vanguard::u32>(missingPlacedParent.size())};
+    scratch.Clear();
+    filesystem::MemoryFileWriter missingPlacedWriter(scratch);
+    Check(prefab::CookPrefab(invalid, missingPlacedWriter) == prefab::Result::MissingParent, "reject missing placed-component parent");
+
+    auto selfPlacedParent = placedComponents;
+    selfPlacedParent[1].parentComponentStableId = 200;
+    invalid.placedComponents = {selfPlacedParent.data(), static_cast<vanguard::u32>(selfPlacedParent.size())};
+    scratch.Clear();
+    filesystem::MemoryFileWriter selfPlacedWriter(scratch);
+    Check(prefab::CookPrefab(invalid, selfPlacedWriter) == prefab::Result::InvalidArgument, "reject placed-component self parent");
+
+    auto cyclicPlaced = placedComponents;
+    cyclicPlaced[0].parentComponentStableId = 200;
+    invalid.placedComponents = {cyclicPlaced.data(), static_cast<vanguard::u32>(cyclicPlaced.size())};
+    scratch.Clear();
+    filesystem::MemoryFileWriter cyclicPlacedWriter(scratch);
+    Check(prefab::CookPrefab(invalid, cyclicPlacedWriter) == prefab::Result::HierarchyCycle, "reject placed-component hierarchy cycle");
+
+    auto invalidRotation = placedComponents;
+    invalidRotation[0].rotation[3] = 2.0f;
+    invalid.placedComponents = {invalidRotation.data(), static_cast<vanguard::u32>(invalidRotation.size())};
+    scratch.Clear();
+    filesystem::MemoryFileWriter invalidRotationWriter(scratch);
+    Check(prefab::CookPrefab(invalid, invalidRotationWriter) == prefab::Result::InvalidArgument, "reject non-normalized placed-component rotation");
 
     ByteArray corrupted(memory::pools::World::GetInstance());
     corrupted = first;

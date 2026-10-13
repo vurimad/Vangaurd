@@ -114,6 +114,11 @@ namespace vanguard::entities
         [[nodiscard]] bool AttachPlacedComponent(ecs::EntityId entity, IPlacedComponent& component,
                                                  PlacedComponentBindingHandle& binding,
                                                  TransformRuntimeFailure* failure = nullptr) noexcept;
+        /// Registers a placed component and hard-attaches it to another placed component on
+        /// the same entity. A null parent uses the entity's runtime PlaceholderComponent root.
+        [[nodiscard]] bool AttachPlacedComponent(ecs::EntityId entity, IPlacedComponent& component, IPlacedComponent* parent,
+                                                 PlacedComponentBindingHandle& binding,
+                                                 TransformRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool DetachPlacedComponent(PlacedComponentBindingHandle binding,
                                                  TransformRuntimeFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool GetPlacedComponentBinding(PlacedComponentBindingHandle binding,

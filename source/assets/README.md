@@ -63,41 +63,21 @@ independent local builders. Editor notifications, distributed cache transport,
 disk-budget maintenance, and advanced package partitioning are later phases
 built on the contracts established here.
 
-## RED-derived architecture
+## RED authority migration
 
-The implementation was designed after studying `backendData`'s generator,
-cooker, dependency, output collector, data cache, task, and task-system
-implementation.
-Retained principles include dependency discovery before expensive work,
-content-based prerequisite hashes, tool-version invalidation, target-platform
-identity, explicit output lists, exact cache lookup, and generation only after
-dependencies have been resolved.
+The current module is production Vanguard code and remains valid until a domain
+is cut over. It is no longer the target authority model.
 
-Vanguard uses explicit registration instead of RTTI class enumeration, SHA-256
-instead of RED's SHA-1, Vanguard resource identities, and Vanguard memory and
-container services.
+The approved direction is to adopt the actual RED authored-resource and
+`backendData` implementation. For migrated domains, RED uncooked resources and
+embedded import metadata become source truth, and RED `Task`/`TaskSystem` owns
+dependency freshness, cooking and cleanup. `SourceDatabase`, VMETA, VDDC, VADI,
+BuildGraph and `IncrementalRecooker` are migration-era authorities that are to
+retire after a proven cutover rather than become a permanent shell around RED.
 
-The persistent cache preserves RED's split between exact prerequisite lookup
-and content retrieval, plus its fan-out loose-file organization and lazy
-loading. It deliberately does not use RED dependency database, resource, or
-archive formats. The record wire contract is documented in
-`docs/formats/vddc-format.md`.
+The canonical decision, durability gate and migration constraints are in
+[`docs/architecture/red-asset-execution-kernel.md`](../../docs/architecture/red-asset-execution-kernel.md).
 
-The asynchronous graph preserves RED `backendData`'s separate dependency and
-execution phases, one task per generated resource, shared dependency tasks,
-cycle failure, Jobs counters for fan-in, and terminal failure propagation.
-Vanguard owns the public API, identities, memory, containers, Jobs boundary,
-and cancellation contract. See `docs/architecture/asset-build-graph.md`.
-
-The persistent index adapts RED `dependency::ResourceInfo` and
-`BinaryDatabase` behavior while replacing `.binary_deps` with Vanguard's
-integrity-protected `VADI` contract. See
-`docs/architecture/asset-dependency-index.md`.
-
-The incremental recooker adapts RED `dataTask` and `dataTaskSystem` phase
-transitions into Vanguard change planning, Jobs graph submission, and atomic
-index transactions. See `docs/architecture/incremental-recooking.md`.
-
-The packaging layer adapts RED archive content selection and ordered archive
-building while emitting only Vanguard `VPMF` and VPAK contracts. See
-`docs/architecture/package-assembly.md`.
+Vanguard runtime streaming, VPAK packaging, `.vproject`, telemetry and useful
+low-level storage/transaction primitives may remain. A retained primitive must
+not become a second freshness or dependency authority beside RED.

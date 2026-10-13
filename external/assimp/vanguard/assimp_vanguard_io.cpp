@@ -1,14 +1,34 @@
 #include "assimp_vanguard_io.hpp"
 
 #include <assimp/DefaultIOSystem.h>
+#include <assimp/Importer.hpp>
 #include <assimp/IOStream.hpp>
 #include <assimp/IOSystem.hpp>
+#include <assimp/ProgressHandler.hpp>
 
 #include <filesystem>
 #include <string>
 
 namespace
 {
+    class VanguardProgressHandler final : public Assimp::ProgressHandler
+    {
+    public:
+        VanguardProgressHandler(const vanguard_assimp::ProgressCallback callback, void* const userData) noexcept
+            : m_callback(callback), m_userData(userData)
+        {
+        }
+
+        bool Update(const float progress = -1.0f) override
+        {
+            return m_callback == nullptr || m_callback(progress, m_userData);
+        }
+
+    private:
+        vanguard_assimp::ProgressCallback m_callback = nullptr;
+        void* m_userData = nullptr;
+    };
+
     class TrackingIOSystem final : public Assimp::IOSystem
     {
     public:
@@ -63,5 +83,10 @@ namespace vanguard_assimp
     Assimp::IOSystem* CreateTrackingIOSystem(const char* sourceDirectory, const OpenedFileCallback callback, void* userData)
     {
         return new TrackingIOSystem(sourceDirectory, callback, userData);
+    }
+
+    void InstallProgressHandler(Assimp::Importer& importer, const ProgressCallback callback, void* const userData)
+    {
+        importer.SetProgressHandler(callback != nullptr ? new VanguardProgressHandler(callback, userData) : nullptr);
     }
 } // namespace vanguard_assimp

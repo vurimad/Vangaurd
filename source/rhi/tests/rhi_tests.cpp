@@ -1090,6 +1090,11 @@ int main()
 
     const gpu::CommandListRef commandList = gpu::CreateCommandList(gpu::CommandListType::Default, 0x1234, &failure);
     Check(gpu::BindCommandList(commandList, &failure) && gpu::GetBoundCommandListType() == gpu::CommandListType::Default, "GpuApi-style command-list binding is thread local");
+    const gpu::ResourceRef compilerResources[]{gpu::ResourceRef(buffer)};
+    const gpu::CompiledBarrier compilerBarrier{0, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, {}};
+    Check(gpu::AdmitCommandListResources({compilerResources, 1}, &failure) &&
+              !gpu::ExecuteCompiledBarriers({&compilerBarrier, 1}, &failure) && failure.code == gpu::FailureCode::Unsupported,
+          "generic backends report compiler-owned native barrier batches as a non-mutating unsupported fast path");
     Check(!gpu::DispatchRays({}, {}, &failure) && failure.code == gpu::FailureCode::Unsupported && !gpu::BuildBottomLevelAccelerationStructure({}, {}, gpu::AccelerationStructureBuildMode::Build, &failure) &&
               failure.code == gpu::FailureCode::Unsupported,
           "dormant ray-tracing recording APIs remain explicit unsupported operations");

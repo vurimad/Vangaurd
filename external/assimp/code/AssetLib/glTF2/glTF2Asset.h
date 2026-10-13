@@ -61,6 +61,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //#if !defined(ASSIMP_BUILD_NO_GLTF_IMPORTER) && !defined(ASSIMP_BUILD_NO_GLTF2_IMPORTER)
 
 #include <assimp/Exceptional.h>
+#include <assimp/vanguard_model_provenance.h>
 
 #include <algorithm>
 #include <list>
@@ -1175,7 +1176,8 @@ public:
     Ref<Scene> scene;
 
 public:
-    Asset(IOSystem *io = nullptr, rapidjson::IRemoteSchemaDocumentProvider *schemaDocumentProvider = nullptr) :
+    Asset(IOSystem *io = nullptr, rapidjson::IRemoteSchemaDocumentProvider *schemaDocumentProvider = nullptr,
+            aiVanguardModelProvenanceSink *vanguardModelProvenance = nullptr) :
             mDicts(),
             extensionsUsed(),
             extensionsRequired(),
@@ -1196,7 +1198,8 @@ public:
             skins(*this, "skins"),
             textures(*this, "textures") ,
             mIOSystem(io),
-            mSchemaDocumentProvider(schemaDocumentProvider) {
+            mSchemaDocumentProvider(schemaDocumentProvider),
+            mVanguardModelProvenance(vanguardModelProvenance) {
         // empty
     }
 
@@ -1233,6 +1236,7 @@ private:
 private:
     IOSystem *mIOSystem;
     rapidjson::IRemoteSchemaDocumentProvider *mSchemaDocumentProvider;
+    aiVanguardModelProvenanceSink *mVanguardModelProvenance;
     std::string mCurrentAssetDir;
     size_t mSceneLength;
     size_t mBodyOffset;

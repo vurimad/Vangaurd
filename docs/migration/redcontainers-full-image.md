@@ -8,7 +8,7 @@ reimplementing individual containers before their transitive users arrive.
 
 ## Ownership
 
-- `source/imported/common/redContainers` is the quarantined source image.
+- `imported/common/redContainers` is the quarantined source image.
 - `redContainersCompat` compiles every RED Containers implementation and
   debugger integration file.
 - `source/containers/compat` owns initialization translation.

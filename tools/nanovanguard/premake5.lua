@@ -1,8 +1,9 @@
-local importedRoot = "../../source/imported/common"
-local nvToolsRoot = path.getabsolute("../../source/imported/external/nvToolsExt")
-local oodleRoot = path.getabsolute("../../source/imported/external/oodle")
-local fileSyncRoot = path.getabsolute("../../source/imported/internal/FileSync")
-local udtRoot = path.getabsolute("../../source/imported/external/udt")
+local importedRoot = "../../imported/common"
+local nvToolsRoot = path.getabsolute("../../imported/external/nvToolsExt")
+local oodleRoot = path.getabsolute("../../imported/external/oodle")
+local fileSyncRoot = path.getabsolute("../../imported/internal/FileSync")
+local udtRoot = path.getabsolute("../../imported/external/udt")
+local renderingShaderRoot = path.getabsolute("../../source/rendering/shaders")
 
 local function configureProjectAssetClosure()
     disablewarnings { "4324" }
@@ -10,6 +11,16 @@ local function configureProjectAssetClosure()
     includedirs {
         "../../source/assetStreaming/include",
         "../../source/streaming/include",
+        "../../source/meshTools/include",
+        "../../source/modelTools/include",
+        "../../source/meshes/include",
+        "../../source/entities/include",
+        "../../source/prefabs/include",
+        "../../source/materialTools/include",
+        "../../source/materials/include",
+        "../../source/pipelines/include",
+        "../../source/shaderTools/include",
+        "../../source/shaders/include",
         "../../source/textureTools/include",
         "../../source/textures/include",
         "../../source/assets/include",
@@ -49,10 +60,20 @@ local function configureProjectAssetClosure()
         path.join(importedRoot, "redIO/include"),
         path.join(importedRoot, "redCore/include")
     }
-    libdirs { path.join(nvToolsRoot, "lib/x64.Release") }
+    libdirs { path.join(nvToolsRoot, "lib/x64.Release"), path.join(slang_root, "lib") }
     links {
         "assetStreaming",
         "streaming",
+        "meshTools",
+        "meshes",
+        "prefabs",
+        "meshoptimizer",
+        "assimp",
+        "materialTools",
+        "shaderTools",
+        "shaders",
+        "pipelines",
+        "materials",
         "textureTools",
         "assets",
         "textures",
@@ -103,7 +124,19 @@ local function configureProjectAssetClosure()
         "Shlwapi",
         "Shell32",
         "Version",
-        "ws2_32"
+        "ws2_32",
+        "slang-compiler"
+    }
+    postbuildcommands {
+        '{COPYFILE} "' .. path.join(slang_root, "bin/slang-compiler.dll") .. '" "%{cfg.targetdir}/slang-compiler.dll"',
+        '{COPYFILE} "' .. path.join(slang_root, "bin/slang-glslang.dll") .. '" "%{cfg.targetdir}/slang-glslang.dll"',
+        '{COPYFILE} "' .. path.join(slang_root, "bin/slang-glsl-module.dll") .. '" "%{cfg.targetdir}/slang-glsl-module.dll"',
+        '{COPYFILE} "' .. path.join(dxc_root, "bin/dxcompiler.dll") .. '" "%{cfg.targetdir}/dxcompiler.dll"',
+        '{COPYFILE} "' .. path.join(dxc_root, "bin/dxil.dll") .. '" "%{cfg.targetdir}/dxil.dll"',
+        '{MKDIR} "%{cfg.targetdir}/shaders"',
+        '{COPYFILE} "' .. path.join(renderingShaderRoot, "static_surface_prefix.vsl") .. '" "%{cfg.targetdir}/shaders/static_surface_prefix.vsl"',
+        '{COPYFILE} "' .. path.join(renderingShaderRoot, "static_surface_suffix.vsl") .. '" "%{cfg.targetdir}/shaders/static_surface_suffix.vsl"',
+        '{COPYFILE} "' .. path.join(renderingShaderRoot, "gpu_scene_types.hlsli") .. '" "%{cfg.targetdir}/shaders/gpu_scene_types.hlsli"'
     }
     filter "configurations:Debug"
         libdirs { path.join(oodleRoot, "lib/x64.Debug") }

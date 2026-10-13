@@ -338,6 +338,56 @@ namespace
         observation.found = true;
     }
 
+    struct DockingPolicyObservation final
+    {
+        u32 seen = 0;
+        bool isFloating = false;
+        bool allowDocking = true;
+    };
+
+    void ObserveDockingPolicy(const detail::EditorPanelAuthoringView& panel, void* const data) noexcept
+    {
+        auto& observation = *static_cast<DockingPolicyObservation*>(data);
+        ++observation.seen;
+        observation.isFloating = panel.initialPlacement == editor::EditorPanelInitialPlacement::Floating;
+        observation.allowDocking = panel.allowDocking;
+    }
+
+    void TestStandalonePanelPolicy() noexcept
+    {
+        editor::EditorUiState state = editor::EditorUiState::Ready;
+        LocalGenerationSource generations;
+        detail::EditorPanelRegistryCore registry(state, generations.Get());
+        editor::EditorUiFailure failure;
+        editor::EditorPanelTypeToken token;
+
+        auto invalid = MultipleType(8, "undocked placement required");
+        invalid.allowDocking = false;
+        Check(!registry.RegisterType(invalid, token, &failure) &&
+                  failure.code == editor::EditorUiFailureCode::InvalidPolicy,
+              "non-dockable types cannot request default docking placement");
+
+        auto standalone = MultipleType(9, "standalone");
+        standalone.initialPlacement = editor::EditorPanelInitialPlacement::Floating;
+        standalone.allowDocking = false;
+        editor::EditorPanelHandle panel;
+        Check(registry.RegisterType(standalone, token, &failure) &&
+                  registry.CreatePanel({900, 9, "standalone panel", true}, panel, &failure),
+              "floating non-dockable panel registers and opens through ordinary ownership");
+        DockingPolicyObservation observation;
+        registry.VisitOpenForAuthoring(ObserveDockingPolicy, &observation);
+        Check(observation.seen == 1 && observation.isFloating && !observation.allowDocking,
+              "non-dockable policy survives registry authoring to ImGui rendering");
+        Check(registry.SetOpen(panel, false, &failure) && registry.SetOpen(panel, true, &failure),
+              "non-dockable panel still supports normal close/reopen");
+        observation = {};
+        registry.VisitOpenForAuthoring(ObserveDockingPolicy, &observation);
+        Check(observation.seen == 1 && observation.isFloating && !observation.allowDocking,
+              "close/reopen preserves the non-dockable policy");
+        Check(registry.DestroyPanel(panel, &failure) && registry.UnregisterType(token, &failure),
+              "non-dockable panel respects normal panel teardown");
+    }
+
     void TestDescriptorTokenAndLifetime() noexcept
     {
         editor::EditorUiState state = editor::EditorUiState::Ready;
@@ -1099,6 +1149,7 @@ int main()
     Check(vanguard::containers::Initialize(), "containers initialization");
 
     TestDescriptorTokenAndLifetime();
+    TestStandalonePanelPolicy();
     TestSingletonAndMultiPolicy();
     TestDeferredVisibilityTransaction();
     TestPlaceholderSeam();

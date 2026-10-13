@@ -1,4 +1,5 @@
 #include <vanguard/rhi/d3d12/backend.hpp>
+#include "../../../profiling/include/vanguard/profiling/profiling.hpp"
 #include <d3d12/d3d12-backend.h>
 
 #include <vanguard/diagnostics/diagnostics.hpp>
@@ -392,7 +393,11 @@ namespace vanguard::rhi::d3d12
             const UINT interval = parameters.mode == PresentMode::Fifo ? parameters.synchronizationInterval : 0u;
             const UINT flags = interval == 0 && parameters.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
             const u64 presentStart = system::GetMonotonicTicks();
-            const HRESULT result = payload.native->Present(interval, flags);
+            HRESULT result;
+            {
+                VG_PROFILE_ZONE_NAMED("RFCPU/DXGI/NativePresent");
+                result = payload.native->Present(interval, flags);
+            }
             const u64 presentElapsedTicks = system::GetMonotonicTicks() - presentStart;
             const u64 presentFrequency = system::GetMonotonicFrequency();
             const u64 presentElapsedNanoseconds = presentFrequency != 0
@@ -707,6 +712,7 @@ namespace vanguard::rhi::d3d12
         ResourceRef policyResources[MaximumResidencyBatchSize]{};
         ID3D12Pageable* policyPageables[MaximumResidencyBatchSize]{};
         u64 residencyUseOrdinal = 0;
+        bool enhancedBarriers = false;
         bool initialized = false;
 
         [[nodiscard]] static u32 ResidencyRecordIndex(const ResourceRef allocation) noexcept
@@ -810,18 +816,37 @@ namespace vanguard::rhi::d3d12
         static BackendStatus PrepareWorkingSet(void* const context, const containers::ArraySpan<const ResourceRef> resources) noexcept
         {
             auto& impl = *static_cast<Impl*>(context);
+            if (resources.Size() == 0 || resources.Size() > MaximumResidencyBatchSize)
+                return BackendStatus::Failure(FailureCode::CapacityExceeded, 0, "GPU residency batch capacity is invalid");
             ID3D12Pageable** const resolved = impl.submissionResidencyPageables;
-            u32 resolvedCount = 0;
-            const BackendStatus resolution = ResolveResidencyBatch(impl.common, resources, resolved, resolvedCount);
-            if (!resolution)
-                return resolution;
+            // SubmitCommandLists supplies canonical physical allocations: placed
+            // textures/buffers are already represented by their owning heap, and
+            // dedicated resources by themselves. Keep this path 1:1 so residency
+            // record lookup cannot drift from a pointer-deduplicated output index.
+            for (u32 index = 0; index < resources.Size(); ++index)
+            {
+                const ResourceRef allocation = resources[index];
+                ID3D12Pageable* pageable = nullptr;
+                if (allocation.GetKind() == ResourceKind::Heap)
+                {
+                    auto* const heap = static_cast<nvrhi::d3d12::Heap*>(impl.common.GetNativeHeap(CastResourceRef<HeapRef>(allocation)));
+                    pageable = heap != nullptr ? heap->heap.Get() : nullptr;
+                }
+                else if (allocation.GetKind() == ResourceKind::Texture || allocation.GetKind() == ResourceKind::Buffer)
+                    pageable = impl.common.GetNativeObject(allocation, nvrhi::ObjectTypes::D3D12_Resource);
+                else
+                    return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "only textures, buffers and heaps have explicit residency");
+                if (pageable == nullptr)
+                    return BackendStatus::Failure(FailureCode::InvalidReference, 0, "GPU residency batch contains a stale or unsupported physical allocation");
+                resolved[index] = pageable;
+            }
 
             ID3D12Pageable** const evicted = impl.submissionEvictedPageables;
             u32 evictedCount = 0;
             {
                 concurrency::ScopedLock guard(impl.residencyLock);
                 ++impl.residencyStats.automaticWorkingSetChecks;
-                for (u32 index = 0; index < resolvedCount; ++index)
+                for (u32 index = 0; index < resources.Size(); ++index)
                 {
                     const ResidencyRecord* const record = impl.FindResidencyRecord(resources[index]);
                     if (record != nullptr && record->state == AllocationResidency::Evicted)
@@ -1155,6 +1180,7 @@ namespace vanguard::rhi::d3d12
             ReleaseNative(factory);
             ReleaseResidencyPolicy();
             capabilities = {};
+            enhancedBarriers = false;
             initialized = false;
         }
 
@@ -1207,6 +1233,271 @@ namespace vanguard::rhi::d3d12
             const DWORD waitResult = WaitForSingleObject(eventHandle, timeoutMilliseconds);
             CloseHandle(eventHandle);
             return waitResult == WAIT_OBJECT_0;
+        }
+
+        [[nodiscard]] static bool ToNvrhiBarrierState(const ResourceState state, nvrhi::ResourceStates& native) noexcept
+        {
+            constexpr u32 KnownStateMask = (1u << 19u) - 1u;
+            const u32 stateBits = static_cast<u32>(state);
+            if (stateBits == 0 || (stateBits & ~KnownStateMask) != 0)
+                return false;
+            u32 result = 0;
+            const auto include = [&result, stateBits](const ResourceState flag, const nvrhi::ResourceStates mapped) noexcept
+            {
+                if ((stateBits & static_cast<u32>(flag)) != 0)
+                    result |= static_cast<u32>(mapped);
+            };
+            include(ResourceState::Common, nvrhi::ResourceStates::Common);
+            include(ResourceState::CopySource, nvrhi::ResourceStates::CopySource);
+            include(ResourceState::CopyDestination, nvrhi::ResourceStates::CopyDest);
+            include(ResourceState::ShaderResourceGraphics, nvrhi::ResourceStates::PixelShaderResource);
+            include(ResourceState::ShaderResourceCompute, nvrhi::ResourceStates::NonPixelShaderResource);
+            include(ResourceState::UnorderedAccess, nvrhi::ResourceStates::UnorderedAccess);
+            include(ResourceState::RenderTarget, nvrhi::ResourceStates::RenderTarget);
+            include(ResourceState::DepthWrite, nvrhi::ResourceStates::DepthWrite);
+            include(ResourceState::DepthRead, nvrhi::ResourceStates::DepthRead);
+            include(ResourceState::VertexBuffer, nvrhi::ResourceStates::VertexBuffer);
+            include(ResourceState::IndexBuffer, nvrhi::ResourceStates::IndexBuffer);
+            include(ResourceState::ConstantBuffer, nvrhi::ResourceStates::ConstantBuffer);
+            include(ResourceState::IndirectArgument, nvrhi::ResourceStates::IndirectArgument);
+            include(ResourceState::AccelerationStructureRead, nvrhi::ResourceStates::AccelStructRead);
+            include(ResourceState::AccelerationStructureWrite, nvrhi::ResourceStates::AccelStructWrite);
+            include(ResourceState::Present, nvrhi::ResourceStates::Present);
+            include(ResourceState::ResolveSource, nvrhi::ResourceStates::ResolveSource);
+            include(ResourceState::ResolveDestination, nvrhi::ResourceStates::ResolveDest);
+            include(ResourceState::ShadingRate, nvrhi::ResourceStates::ShadingRateSurface);
+            native = static_cast<nvrhi::ResourceStates>(result);
+            return result != 0;
+        }
+
+        [[nodiscard]] static BackendStatus CompiledBarrierBatch(void* const context, nvrhi::ICommandList* const commandList,
+                                                                 const containers::ArraySpan<const CompiledBarrier> barriers,
+                                                                 const containers::ArraySpan<const backend::AdmittedCommandResource> resources) noexcept
+        {
+            Impl& impl = *static_cast<Impl*>(context);
+            if (commandList == nullptr)
+                return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "compiled barrier batch lost its native command list");
+            ID3D12GraphicsCommandList* const nativeCommandList = commandList->getNativeObject(nvrhi::ObjectTypes::D3D12_GraphicsCommandList);
+            if (nativeCommandList == nullptr)
+                return BackendStatus::Failure(FailureCode::BackendFailure, 0, "compiled barrier batch cannot access the native D3D12 command list");
+
+            ID3D12GraphicsCommandList7* enhancedCommandList = nullptr;
+            if (impl.enhancedBarriers && FAILED(nativeCommandList->QueryInterface(IID_PPV_ARGS(&enhancedCommandList))))
+                return BackendStatus::Failure(FailureCode::BackendFailure, 0, "enhanced-barrier device exposed no D3D12 command-list-7 interface");
+
+            // Prevalidate the entire run before issuing the first D3D call. Once
+            // native emission begins there are deliberately no fallible lookups.
+            for (const CompiledBarrier& barrier : barriers)
+            {
+                if (barrier.resourceBinding >= resources.Size())
+                {
+                    ReleaseNative(enhancedCommandList);
+                    return BackendStatus::Failure(FailureCode::InvalidReference, 0, "compiled barrier binding escaped its admitted resource table");
+                }
+                const backend::AdmittedCommandResource& admitted = resources[barrier.resourceBinding];
+                ID3D12Resource* const nativeResource = admitted.native != nullptr ? admitted.native->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource) : nullptr;
+                if (nativeResource == nullptr)
+                {
+                    ReleaseNative(enhancedCommandList);
+                    return BackendStatus::Failure(FailureCode::BackendFailure, 0, "compiled barrier resource has no native D3D12 object");
+                }
+                if (barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::BufferTransition)
+                {
+                    nvrhi::ResourceStates before;
+                    nvrhi::ResourceStates after;
+                    if (!ToNvrhiBarrierState(barrier.before, before) || !ToNvrhiBarrierState(barrier.after, after))
+                    {
+                        ReleaseNative(enhancedCommandList);
+                        return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "compiled barrier contains an unrepresentable resource state");
+                    }
+                    if (impl.enhancedBarriers)
+                    {
+                        static_cast<void>(nvrhi::d3d12::convertResourceStatesForEnhancedBarriers(before, barrier.kind == CompiledBarrierKind::TextureTransition));
+                        static_cast<void>(nvrhi::d3d12::convertResourceStatesForEnhancedBarriers(after, barrier.kind == CompiledBarrierKind::TextureTransition));
+                    }
+                    else
+                    {
+                        static_cast<void>(nvrhi::d3d12::convertResourceStates(before));
+                        static_cast<void>(nvrhi::d3d12::convertResourceStates(after));
+                    }
+                }
+            }
+
+            constexpr u32 NativeBatchCapacity = 128u;
+            if (impl.enhancedBarriers)
+            {
+                D3D12_TEXTURE_BARRIER textureBarriers[NativeBatchCapacity]{};
+                D3D12_BUFFER_BARRIER bufferBarriers[NativeBatchCapacity]{};
+                u32 textureCount = 0;
+                u32 bufferCount = 0;
+                const auto flush = [&]() noexcept
+                {
+                    D3D12_BARRIER_GROUP groups[2]{};
+                    u32 groupCount = 0;
+                    if (textureCount != 0)
+                    {
+                        groups[groupCount].Type = D3D12_BARRIER_TYPE_TEXTURE;
+                        groups[groupCount].NumBarriers = textureCount;
+                        groups[groupCount].pTextureBarriers = textureBarriers;
+                        ++groupCount;
+                    }
+                    if (bufferCount != 0)
+                    {
+                        groups[groupCount].Type = D3D12_BARRIER_TYPE_BUFFER;
+                        groups[groupCount].NumBarriers = bufferCount;
+                        groups[groupCount].pBufferBarriers = bufferBarriers;
+                        ++groupCount;
+                    }
+                    if (groupCount != 0)
+                        enhancedCommandList->Barrier(groupCount, groups);
+                    textureCount = 0;
+                    bufferCount = 0;
+                };
+
+                for (const CompiledBarrier& barrier : barriers)
+                {
+                    const backend::AdmittedCommandResource& admitted = resources[barrier.resourceBinding];
+                    ID3D12Resource* const nativeResource = admitted.native->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource);
+                    const bool texture = barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::TextureUav;
+                    nvrhi::ResourceStates before = nvrhi::ResourceStates::UnorderedAccess;
+                    nvrhi::ResourceStates after = nvrhi::ResourceStates::UnorderedAccess;
+                    if (barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::BufferTransition)
+                    {
+                        static_cast<void>(ToNvrhiBarrierState(barrier.before, before));
+                        static_cast<void>(ToNvrhiBarrierState(barrier.after, after));
+                    }
+                    const nvrhi::d3d12::EnhancedResourceStateMapping beforeMapping = nvrhi::d3d12::convertResourceStatesForEnhancedBarriers(before, texture);
+                    const nvrhi::d3d12::EnhancedResourceStateMapping afterMapping = nvrhi::d3d12::convertResourceStatesForEnhancedBarriers(after, texture);
+                    if (texture)
+                    {
+                        if (textureCount == NativeBatchCapacity)
+                            flush();
+                        D3D12_TEXTURE_BARRIER& nativeBarrier = textureBarriers[textureCount++];
+                        nativeBarrier.SyncBefore = beforeMapping.sync;
+                        nativeBarrier.SyncAfter = afterMapping.sync;
+                        nativeBarrier.AccessBefore = beforeMapping.access;
+                        nativeBarrier.AccessAfter = afterMapping.access;
+                        nativeBarrier.LayoutBefore = beforeMapping.layout;
+                        nativeBarrier.LayoutAfter = afterMapping.layout;
+                        nativeBarrier.pResource = nativeResource;
+                        nativeBarrier.Subresources.FirstPlane = 0;
+                        nativeBarrier.Subresources.NumPlanes = admitted.texturePlaneCount != 0 ? admitted.texturePlaneCount : 1u;
+                        if (barrier.kind == CompiledBarrierKind::TextureUav)
+                        {
+                            nativeBarrier.Subresources.IndexOrFirstMipLevel = 0;
+                            nativeBarrier.Subresources.NumMipLevels = admitted.textureMipCount;
+                            nativeBarrier.Subresources.FirstArraySlice = 0;
+                            nativeBarrier.Subresources.NumArraySlices = admitted.textureArraySize;
+                        }
+                        else
+                        {
+                            const SubresourceRange& range = barrier.textureSubresources;
+                            nativeBarrier.Subresources.IndexOrFirstMipLevel = range.firstMip;
+                            nativeBarrier.Subresources.NumMipLevels = range.mipCount;
+                            nativeBarrier.Subresources.FirstArraySlice = range.firstSlice;
+                            nativeBarrier.Subresources.NumArraySlices = range.sliceCount;
+                        }
+                    }
+                    else
+                    {
+                        if (bufferCount == NativeBatchCapacity)
+                            flush();
+                        D3D12_BUFFER_BARRIER& nativeBarrier = bufferBarriers[bufferCount++];
+                        nativeBarrier.SyncBefore = beforeMapping.sync;
+                        nativeBarrier.SyncAfter = afterMapping.sync;
+                        nativeBarrier.AccessBefore = beforeMapping.access;
+                        nativeBarrier.AccessAfter = afterMapping.access;
+                        nativeBarrier.pResource = nativeResource;
+                        nativeBarrier.Offset = 0;
+                        nativeBarrier.Size = nativeResource->GetDesc().Width;
+                    }
+                }
+                flush();
+                ReleaseNative(enhancedCommandList);
+                return BackendStatus::Success();
+            }
+
+            D3D12_RESOURCE_BARRIER nativeBarriers[NativeBatchCapacity]{};
+            u32 nativeBarrierCount = 0;
+            const auto flush = [&]() noexcept
+            {
+                if (nativeBarrierCount != 0)
+                {
+                    nativeCommandList->ResourceBarrier(nativeBarrierCount, nativeBarriers);
+                    nativeBarrierCount = 0;
+                }
+            };
+            const auto append = [&](const D3D12_RESOURCE_BARRIER& barrier) noexcept
+            {
+                if (nativeBarrierCount == NativeBatchCapacity)
+                    flush();
+                nativeBarriers[nativeBarrierCount++] = barrier;
+            };
+
+            for (const CompiledBarrier& barrier : barriers)
+            {
+                const backend::AdmittedCommandResource& admitted = resources[barrier.resourceBinding];
+                ID3D12Resource* const nativeResource = admitted.native->getNativeObject(nvrhi::ObjectTypes::D3D12_Resource);
+                nvrhi::ResourceStates beforeState = nvrhi::ResourceStates::UnorderedAccess;
+                nvrhi::ResourceStates afterState = nvrhi::ResourceStates::UnorderedAccess;
+                if (barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::BufferTransition)
+                {
+                    static_cast<void>(ToNvrhiBarrierState(barrier.before, beforeState));
+                    static_cast<void>(ToNvrhiBarrierState(barrier.after, afterState));
+                }
+                const D3D12_RESOURCE_STATES before = nvrhi::d3d12::convertResourceStates(beforeState);
+                const D3D12_RESOURCE_STATES after = nvrhi::d3d12::convertResourceStates(afterState);
+
+                const bool accelState = (before & D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE) != 0 ||
+                                        (after & D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE) != 0;
+                const bool explicitUav = barrier.kind == CompiledBarrierKind::TextureUav || barrier.kind == CompiledBarrierKind::BufferUav;
+                const bool accelOrdering =
+                    (beforeState == nvrhi::ResourceStates::AccelStructWrite && (static_cast<u32>(afterState) & static_cast<u32>(nvrhi::ResourceStates::AccelStructRead)) != 0) ||
+                    (afterState == nvrhi::ResourceStates::AccelStructWrite && (static_cast<u32>(beforeState) & static_cast<u32>(nvrhi::ResourceStates::AccelStructRead)) != 0);
+                if (explicitUav || accelOrdering ||
+                    ((before == after || accelState) && (after & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) != 0))
+                {
+                    D3D12_RESOURCE_BARRIER nativeBarrier{};
+                    nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    nativeBarrier.UAV.pResource = nativeResource;
+                    append(nativeBarrier);
+                    continue;
+                }
+                if (before == after || accelState)
+                    continue;
+
+                D3D12_RESOURCE_BARRIER nativeBarrier{};
+                nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                nativeBarrier.Transition.pResource = nativeResource;
+                nativeBarrier.Transition.StateBefore = before;
+                nativeBarrier.Transition.StateAfter = after;
+                if (barrier.kind == CompiledBarrierKind::BufferTransition)
+                {
+                    nativeBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    append(nativeBarrier);
+                    continue;
+                }
+
+                const SubresourceRange& range = barrier.textureSubresources;
+                if (range.firstMip == 0 && range.mipCount == admitted.textureMipCount && range.firstSlice == 0 && range.sliceCount == admitted.textureArraySize)
+                {
+                    nativeBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    append(nativeBarrier);
+                    continue;
+                }
+                const u32 mipCount = admitted.textureMipCount;
+                const u32 arraySize = admitted.textureArraySize;
+                const u32 planeCount = admitted.texturePlaneCount != 0 ? admitted.texturePlaneCount : 1u;
+                for (u32 plane = 0; plane < planeCount; ++plane)
+                    for (u32 slice = range.firstSlice; slice < static_cast<u32>(range.firstSlice) + range.sliceCount; ++slice)
+                        for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
+                        {
+                            nativeBarrier.Transition.Subresource = mip + slice * mipCount + plane * mipCount * arraySize;
+                            append(nativeBarrier);
+                        }
+            }
+            flush();
+            return BackendStatus::Success();
         }
 
         [[nodiscard]] static bool AliasingBarrier(void*, nvrhi::ICommandList* const commandList, nvrhi::IResource* const resourceAfter) noexcept
@@ -1441,8 +1732,10 @@ namespace vanguard::rhi::d3d12
             m_impl->ReleaseDeviceObjects();
             return BackendStatus::Failure(FailureCode::BackendFailure, 0, "NVRHI failed to create its D3D12 device");
         }
-        const bool commonInitialized = m_impl->common.Initialize(static_cast<nvrhi::DeviceHandle&&>(device), &Impl::IsFenceComplete, &Impl::SignalFence, &Impl::WaitFence, &Impl::QueueWait, &Impl::AliasingBarrier, &Impl::RectColorClear,
-                                       &Impl::RectDepthStencilClear, &Impl::DiscardTexture, &Impl::PrepareWorkingSet, &Impl::CommitWorkingSet, &Impl::ReleaseResidencyRecord, m_impl);
+        m_impl->enhancedBarriers = device->queryFeatureSupport(nvrhi::Feature::EnhancedBarriers);
+        const bool commonInitialized = m_impl->common.Initialize(static_cast<nvrhi::DeviceHandle&&>(device), &Impl::IsFenceComplete, &Impl::SignalFence, &Impl::WaitFence, &Impl::QueueWait,
+                                       &Impl::CompiledBarrierBatch, &Impl::AliasingBarrier, &Impl::RectColorClear, &Impl::RectDepthStencilClear, &Impl::DiscardTexture,
+                                       &Impl::PrepareWorkingSet, &Impl::CommitWorkingSet, &Impl::ReleaseResidencyRecord, m_impl);
         if (!commonInitialized)
         {
             m_impl->ReleaseDeviceObjects();
@@ -2266,6 +2559,16 @@ namespace vanguard::rhi::d3d12
         return m_impl != nullptr && m_impl->common.RetainCommandResource(commandList, resource) ? BackendStatus::Success()
                                                                                                 : BackendStatus::Failure(FailureCode::InvalidReference, 0, "could not retain a command-list residency resource");
     }
+    BackendStatus Backend::AdmitCommandListResources(const CommandListRef commandList, const containers::ArraySpan<const ResourceRef> resources) noexcept
+    {
+        return m_impl != nullptr ? m_impl->common.AdmitCommandListResources(commandList, resources)
+                                 : BackendStatus::Failure(FailureCode::NotInitialized, 0, "command-list resource admission requires an initialized backend");
+    }
+    BackendStatus Backend::ExecuteCompiledBarriers(const CommandListRef commandList, const containers::ArraySpan<const CompiledBarrier> barriers) noexcept
+    {
+        return m_impl != nullptr ? m_impl->common.ExecuteCompiledBarriers(commandList, barriers)
+                                 : BackendStatus::Failure(FailureCode::NotInitialized, 0, "compiled barrier execution requires an initialized backend");
+    }
     BackendStatus Backend::SetPipeline(const CommandListRef commandList, const PipelineRef pipeline) noexcept
     {
         return m_impl->common.SetPipeline(commandList, pipeline);
@@ -2839,6 +3142,7 @@ namespace vanguard::rhi::d3d12
 
     BackendStatus Backend::Present(const AcquiredBackBuffer& acquisition) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("RFCPU/DXGI/PresentRequest");
         if (m_impl == nullptr || !m_impl->initialized)
             return BackendStatus::Failure(FailureCode::NotInitialized, 0, "D3D12 backend is not initialized");
         auto* const payload = static_cast<SwapChainPayload*>(m_impl->common.GetResourcePayload(ResourceRef(acquisition.swapChain)));

@@ -44,6 +44,7 @@ namespace vanguard::editor::detail
         void* factoryData = nullptr;
         bool placeholder = false;
         EditorPanelInitialPlacement initialPlacement = EditorPanelInitialPlacement::Center;
+        bool allowDocking = true;
     };
 
     using EditorPanelAuthoringVisitor = void (*)(const EditorPanelAuthoringView& panel, void* userData) noexcept;

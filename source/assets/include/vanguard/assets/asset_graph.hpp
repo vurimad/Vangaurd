@@ -137,6 +137,9 @@ namespace vanguard::assets
         // Dependency discovery and topological classification occur before
         // this returns. Compilation, cache access, and fan-in run on Jobs.
         [[nodiscard]] GraphRequest Request(const BuildRequest& request, BuildPriority priority = BuildPriority::Normal) noexcept;
+        // Opt-in source-sharing entry for an already-owned immutable request.
+        // Ordinary borrowed requests preserve their deep-copy admission path.
+        [[nodiscard]] GraphRequest Request(const OwnedBuildRequest& request, BuildPriority priority = BuildPriority::Normal) noexcept;
         [[nodiscard]] BuildGraphStats GetStats() const noexcept;
         // Captures retained successful exact outputs only while the graph is
         // quiescent. Active operations are rejected so worker-owned BuildOutput

@@ -31,6 +31,7 @@ namespace
         bool failShared = false;
         bool failRoot = false;
         bool blockShared = false;
+        bool historicalRetired = false;
     };
 
     struct ValidationProbe
@@ -121,6 +122,9 @@ namespace
     [[nodiscard]] bool ResolveOutput(const resources::ResourceReference output, assets::OwnedBuildRequest& request, void* const userData) noexcept
     {
         auto& fixture = *static_cast<Fixture*>(userData);
+        if (fixture.historicalRetired &&
+            (output == fixture.sharedOutput || output == fixture.leftOutput || output == fixture.rootOutput))
+            return false;
         if (output == fixture.sharedOutput)
         {
             return request.CopyFrom(MakeRequest(fixture.sharedSource, fixture.sharedOutput, fixture.sharedByte));
@@ -138,6 +142,13 @@ namespace
             return request.CopyFrom(MakeRequest(fixture.firstSource, fixture.firstOutput, fixture.firstByte));
         }
         return false;
+    }
+
+    [[nodiscard]] bool ConfirmHistoricalOutput(const resources::ResourceReference output, void* const userData) noexcept
+    {
+        const auto& fixture = *static_cast<Fixture*>(userData);
+        return fixture.historicalRetired &&
+               (output == fixture.sharedOutput || output == fixture.leftOutput || output == fixture.rootOutput);
     }
 
     [[nodiscard]] bool ResolveGenerated(const assets::BuildDependency& dependency, assets::OwnedBuildRequest& request, void* const userData) noexcept
@@ -289,6 +300,9 @@ int main()
                   index.Find(fixture.leftOutput, refreshedLeft) == assets::IndexResult::Success && refreshedLeft.dependencies.Size() == 1u &&
                   refreshedLeft.dependencies[0].content == sharedRecord.contentFingerprint,
               "P2 recooker dirty planning matches committed Generated materialization");
+        Check(stats.buildOperations >= stats.rootRequests &&
+                  stats.completedBuildOperations == stats.buildOperations,
+              "recooker exposes complete BuildGraph operation progress including generated dependencies");
         leftRecord = refreshedLeft;
         dependencyChanged.Reset();
     }
@@ -355,6 +369,7 @@ int main()
         fixture.failRoot = true;
         assets::RecookBatch failed = recooker.Request({&sharedChange, 1});
         failed.Wait();
+        const assets::RecookRootFailureDetail failedRoot = failed.GetRootFailureDetail();
         assets::DependencyRecord afterFailure;
         assets::DependencyRecord leftAfterFailure;
         containers::DynamicArray<assets::DependencyRecord> failedCommitted(memory::pools::Assets::GetInstance());
@@ -364,6 +379,12 @@ int main()
                   leftAfterFailure.contentFingerprint == committedLeftContent && !index.HasActiveTransaction() && !index.HasChanges() &&
                   !failed.TakeCommittedRecords(failedCommitted) && failedCommitted.Empty(),
               "P1 failed root rolls back staged publications and exposes no committed-delivery handoff");
+        Check(failedRoot.rootIndex == 0u && failedRoot.output == fixture.rootOutput &&
+                  failedRoot.graphFailure == assets::BuildFailure::BuildFailed &&
+                  failedRoot.buildResult == assets::Result::CompileFailed &&
+                  std::strcmp(assets::ToString(failed.GetError()), "Graph root build failed") == 0 &&
+                  std::strcmp(assets::ToString(failedRoot.graphFailure), "Compiler failed") == 0,
+              "failed recook retains first graph root, compiler error and readable reason across rollback");
         failed.Reset();
         fixture.failRoot = false;
     }
@@ -484,6 +505,35 @@ int main()
     Check(recooker.GetStats().completedBatches == 6 && recooker.GetStats().failedBatches == 4 && recooker.GetStats().cancelledBatches == 1,
           "recook lifetime telemetry");
     Check(recooker.Shutdown(), "recooker shutdown");
+    {
+        // A deleted model's committed dependency edges are useful as historical
+        // invalidation evidence, but are no longer eligible compiler roots.
+        // Only an explicit current-absence witness may turn that closure into
+        // a validated no-work completion. Explicit demand remains a hard error.
+        fixture.historicalRetired = true;
+        fixture.sharedByte = 24u;
+        assets::RecookConfig historicalConfig;
+        historicalConfig.isConfirmedHistoricalOutput = &ConfirmHistoricalOutput;
+        historicalConfig.historicalOutputUserData = &fixture;
+        assets::IncrementalRecooker historical;
+        Check(historical.Initialize(buildSystem, graph, index, &ResolveOutput, &fixture, historicalConfig),
+              "historical output recooker initialization");
+        assets::RecookBatch oldOnly = historical.Request({&sharedChange, 1}, assets::BuildPriority::High);
+        const assets::RecookStats oldOnlyStats = oldOnly.GetStats();
+        Check(oldOnly && oldOnly.HasFinished() && oldOnly.GetStatus() == assets::RecookState::Succeeded &&
+                  oldOnlyStats.rootRequests == 0u && !index.HasActiveTransaction(),
+              "deleted source's indexed dependency closure is not promoted to a compiler root");
+        oldOnly.Reset();
+        const resources::ResourceReference demanded[] = {fixture.rootOutput};
+        assets::RecookBatch stillDemanded = historical.Request({}, {demanded, 1}, assets::BuildPriority::High);
+        Check(stillDemanded && stillDemanded.HasFinished() &&
+                  stillDemanded.GetStatus() == assets::RecookState::Failed &&
+                  stillDemanded.GetError() == assets::RecookFailure::RequestResolutionFailed,
+              "a removed output explicitly demanded by current authored truth remains a hard failure");
+        stillDemanded.Reset();
+        Check(historical.Shutdown(), "historical recooker shutdown");
+        fixture.historicalRetired = false;
+    }
     Check(graph.Shutdown(), "graph shutdown");
     Check(index.Shutdown(), "index shutdown");
 

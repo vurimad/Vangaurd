@@ -309,6 +309,35 @@ namespace vanguard::crypto
 
     Digest256 Sha256(const void* const data, const usize size) noexcept
     {
+#if VG_PLATFORM_WINDOWS
+        // Large model/source fingerprints are hashed repeatedly during durable
+        // authoring. Keep the allocation-free portable incremental builder as
+        // the baseline, but use Windows CNG's optimized SHA-256 for large
+        // one-shot inputs. Any provider/hash failure falls back to that exact
+        // reference implementation; the on-disk fingerprint format is unchanged.
+        if (data != nullptr && size >= (1u << 20u) && size <= 0xffffffffull)
+        {
+            BCRYPT_ALG_HANDLE algorithm = nullptr;
+            if (::BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0u) >= 0)
+            {
+                BCRYPT_HASH_HANDLE hash = nullptr;
+                if (::BCryptCreateHash(algorithm, &hash, nullptr, 0u, nullptr, 0u, 0u) >= 0)
+                {
+                    Digest256 accelerated;
+                    const bool hashed =
+                        ::BCryptHashData(hash, static_cast<PUCHAR>(const_cast<void*>(data)),
+                                         static_cast<ULONG>(size), 0u) >= 0 &&
+                        ::BCryptFinishHash(hash, accelerated.bytes, Digest256::ByteCount, 0u) >= 0;
+                    ::BCryptDestroyHash(hash);
+                    ::BCryptCloseAlgorithmProvider(algorithm, 0u);
+                    if (hashed)
+                        return accelerated;
+                }
+                else
+                    ::BCryptCloseAlgorithmProvider(algorithm, 0u);
+            }
+        }
+#endif
         Sha256Builder builder;
         Digest256 digest;
         if (!builder.Update(data, size) || !builder.Finalize(digest))

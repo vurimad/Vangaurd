@@ -1,10 +1,10 @@
 /**
- * Copyright © 2007 CD Projekt Red. All Rights Reserved.
+ * Copyright ï¿½ 2007 CD Projekt Red. All Rights Reserved.
  */
 
 #pragma once
 
-#include "../../../imported/common/redSystem/include/compilerExtensions.h"
+#include "../../../../imported/common/redSystem/include/compilerExtensions.h"
 
 namespace vanguard::math
 {

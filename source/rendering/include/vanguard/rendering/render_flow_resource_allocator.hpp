@@ -135,6 +135,23 @@ namespace vanguard::rendering
         [[nodiscard]] friend constexpr bool operator==(const ExternalResourceToken&, const ExternalResourceToken&) noexcept = default;
     };
 
+    // Stable semantic patch identity for an external input/output site in a
+    // revision-compiled resource contract. Unlike ExternalResourceToken this
+    // must not encode the current native RHI resource generation: a warm graph
+    // revision is allowed to bind resource A this frame and resource B next
+    // frame when both satisfy the same immutable contract.
+    struct ResourceContractPatchId
+    {
+        u64 value = 0;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            return value != 0;
+        }
+
+        [[nodiscard]] friend constexpr bool operator==(const ResourceContractPatchId&, const ResourceContractPatchId&) noexcept = default;
+    };
+
     struct PlanPosition
     {
         GpuFlowGroupId flowGroup;
@@ -281,6 +298,7 @@ namespace vanguard::rendering
     struct RetainedTextureImportDesc
     {
         ExternalResourceToken token;
+        ResourceContractPatchId contractPatch;
         rhi::TextureRef texture;
         rhi::TextureDesc expected;
         rhi::ResourceState initialState = rhi::ResourceState::Common;
@@ -294,6 +312,7 @@ namespace vanguard::rendering
     struct RetainedBufferImportDesc
     {
         ExternalResourceToken token;
+        ResourceContractPatchId contractPatch;
         rhi::BufferRef buffer;
         rhi::BufferDesc expected;
         rhi::ResourceState initialState = rhi::ResourceState::Common;
@@ -528,11 +547,11 @@ namespace vanguard::rendering
     struct RenderFlowResourceAllocatorConfig
     {
         u32 maximumPlanningWriters = 4096;
-        // RED keeps a hard request cap per parallel group independently from
-        // its aggregate request cap. Keep the same two-level bound here so one
+        // Keep a hard request cap per parallel group independently from the
+        // aggregate request cap so one
         // writer cannot transiently consume the whole allocator-wide budget.
         // The default is 12x the aggregate-per-writer average (262144 / 4096),
-        // closely matching RED's fixed-storage/global-request ratio.
+        // preserving the intended fixed-storage/global-request ratio.
         u32 maximumOperationsPerPlanningWriter = 768;
         u32 maximumOperations = 262'144;
         u32 maximumLogicalResources = 65'536;
@@ -581,6 +600,10 @@ namespace vanguard::rendering
         u64 rejectedOperations = 0;
         u64 compiledOperations = 0;
         u64 compiledResourceActions = 0;
+        // Exact RF17 barrier records authored by Resolve. These are independent
+        // of sparse semantic actions: ordinary use-state transitions now live in
+        // the packet-local compiled barrier program instead of runtime replay.
+        u64 compiledBarriers = 0;
         u32 planningWriters = 0;
         u32 logicalAllocations = 0;
         u32 compiledPackets = 0;
@@ -602,6 +625,10 @@ namespace vanguard::rendering
         u64 dedicatedResourcePoolMisses = 0;
         u64 persistentDedicatedPlanHits = 0;
         u64 persistentDedicatedPlanBuilds = 0;
+        // Native state programs are compiler-certified dedicated variants.
+        u64 persistentStateProgramHits = 0;
+        u64 persistentStateProgramBuilds = 0;
+        u64 persistentStateProgramMisses = 0;
         u64 persistentDedicatedLeaseHits = 0;
         u64 persistentDedicatedLeaseFallbacks = 0;
         u64 structuralPlanHits = 0;
@@ -658,7 +685,33 @@ namespace vanguard::rendering
     class ExecutionGenerationRef;
     class CompiledExecutionPacketView;
     class PublishedResourceExport;
+    class RenderFlowResourceContract;
     struct TerminalExecutionReceipt;
+
+    // Cache-entry-owned immutable Layer-2 contract. The implementation stores
+    // only normalized semantic declarations/topology plus normalized render-node
+    // binding templates; current native resources, descriptor handles, imported
+    // ids, export slots and execution generations are patched per frame.
+    class RenderFlowResourceContract final
+    {
+    public:
+        RenderFlowResourceContract() noexcept = default;
+        ~RenderFlowResourceContract();
+        RenderFlowResourceContract(RenderFlowResourceContract&& other) noexcept;
+        RenderFlowResourceContract& operator=(RenderFlowResourceContract&& other) noexcept;
+
+        RenderFlowResourceContract(const RenderFlowResourceContract&) = delete;
+        RenderFlowResourceContract& operator=(const RenderFlowResourceContract&) = delete;
+
+        [[nodiscard]] bool IsValid() const noexcept;
+        [[nodiscard]] u64 GetPublicationSerial() const noexcept;
+        void Reset() noexcept;
+
+    private:
+        void* m_storage = nullptr;
+        friend class RenderFlowResourceAllocator;
+        friend class RenderNodeGraph;
+    };
 
     class ResourcePlanningWriter final
     {
@@ -742,11 +795,23 @@ namespace vanguard::rendering
         // Native bytes stay charged internally until destruction is observed.
         [[nodiscard]] bool ClearPersistentCaches(RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool BeginFrame(u64 frameSerial, const FrameResourcePolicy& policy, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Overloads without an explicit ResourceContractPatchId remain cold-path
+        // compatible, but their fallback patch is session-scoped. Cross-frame
+        // resource-contract reuse requires an explicit stable semantic patch.
         [[nodiscard]] bool RegisterPresentationImport(const rhi::AcquiredBackBuffer& acquisition, ImportedResourceId& imported,
                                                       RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool RegisterPresentationImport(const rhi::AcquiredBackBuffer& acquisition, ResourceContractPatchId contractPatch,
+                                                      ImportedResourceId& imported, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool RegisterImport(const RetainedTextureImportDesc& desc, ImportedResourceId& imported, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool RegisterImport(const RetainedBufferImportDesc& desc, ImportedResourceId& imported, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool ReserveExportSlot(ExportSlotId& slot, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool ReserveExportSlot(ResourceContractPatchId contractPatch, ExportSlotId& slot, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        // Cold graph revisions call BeginResourceContractCompilation before
+        // declaration replay. Warm graph hits call BindResourceContract instead;
+        // that path transitions directly to CandidatesSealed and therefore owns
+        // no planning writers or duplicate candidate tape.
+        [[nodiscard]] bool BeginResourceContractCompilation(RenderFlowResourceContract& contract, RenderFlowResourceFailure* failure = nullptr) noexcept;
+        [[nodiscard]] bool BindResourceContract(const RenderFlowResourceContract& contract, RenderFlowResourceFailure* failure = nullptr) noexcept;
         // Each writer owns a stable publication slot. The renderer creates writers before dispatch;
         // declaration, Close and Abandon remain exclusive to that writer's job chain.
         [[nodiscard]] bool CreatePlanningWriter(RenderFlowNodeId node, GpuFlowGroupId flowGroup, CommandScopeId commandScope, ResourcePlanningWriter& writer,
@@ -770,6 +835,7 @@ namespace vanguard::rendering
         [[nodiscard]] bool TakeExport(ExportSlotId slot, PublishedResourceExport& resource, RenderFlowResourceFailure* failure = nullptr) noexcept;
 
     private:
+        [[nodiscard]] bool PatchResourceContractDecision(DecisionId decision, bool value, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool PreparePlanningGroups(u32 groupCount, RenderFlowResourceFailure* failure = nullptr) noexcept;
         [[nodiscard]] containers::ArraySpan<const CompiledCommandScope> GetExecutionCommandScopes() const noexcept;
         [[nodiscard]] containers::ArraySpan<const CompiledQueueDependency> GetExecutionQueueDependencies() const noexcept;
@@ -780,6 +846,7 @@ namespace vanguard::rendering
         friend class FrameRenderer;
         friend class ResourcePlanningWriter;
         friend class RenderNodeGraph;
+        friend struct RenderNodeImplContext;
         friend struct detail::DedicatedResourceProviderTestAccess;
         friend struct detail::RenderFlowResourceShutdownTestAccess;
     };

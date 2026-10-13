@@ -1,6 +1,6 @@
-local importedRoot = "../../source/imported/common"
-local nvToolsRoot = path.getabsolute("../../source/imported/external/nvToolsExt")
-local oodleRoot = path.getabsolute("../../source/imported/external/oodle")
+local importedRoot = "../../imported/common"
+local nvToolsRoot = path.getabsolute("../../imported/external/nvToolsExt")
+local oodleRoot = path.getabsolute("../../imported/external/oodle")
 
 group "Tools/Bootstrap"
 

@@ -26,17 +26,20 @@ the concrete boundary.
 ## Vellum game UI - agent entry points
 
 1. [Vellum program roadmap](plans/vellum-program-roadmap.md): program-level V0-V9 decomposition.
-   **V0 is CLOSED** as of 2026-10-01; V1-V9 remain unauthorized.
+   **V0 is CLOSED** and **V1 Runtime Kernel is ACTIVE** as of 2026-10-10; V2-V9 remain unauthorized.
 2. [V0 architecture plan](plans/vellum-v0-architecture-plan.md): closed architecture-only phase and
-   exact V1 implementation-entry boundary. V0 Definition plus P0-P6 are closed; V1 has not started.
-3. [Vellum system plan](plans/vellum-ui-system-plan.md): closed architectural constitution that
+   exact V1 implementation-entry boundary. V0 Definition plus P0-P6 are closed.
+3. [V1 runtime-kernel plan](plans/vellum-v1-runtime-kernel-plan.md): active production runtime-kernel
+   phase. Its Definition starts from the closed V0 entry contract; V2 is not authorized.
+4. [Vellum system plan](plans/vellum-ui-system-plan.md): closed architectural constitution that
    locks REDengine ink as the game-UI capability floor, selected Slate/UMG mechanisms, compact
    cooked runtime direction, semantic invalidation and the broad layout/data/input/text/render/
    surface constraints inherited by every later phase.
-4. [Vellum reference study](studies/vellum-ui-reference-study.md): source-level comparison
+5. [Vellum reference study](studies/vellum-ui-reference-study.md): source-level comparison
    against the local REDengine ink and Unreal Slate/UMG implementations, including the
    anti-naive constraints that must hold before the first runtime implementation.
-5. Closed V0 task triplet: `.planning/vellum-v0-architecture/{task_plan,findings,progress}.md`.
+6. Active V1 task triplet: `.planning/vellum-v1-runtime-kernel/{task_plan,findings,progress}.md`.
+7. Closed V0 task triplet: `.planning/vellum-v0-architecture/{task_plan,findings,progress}.md`.
    The former `.planning/vellum-ui-system/` triplet records the closed pre-roadmap Definition.
 
 Vellum is the game-facing UI system for Vanguard titles. It is intentionally separate from the

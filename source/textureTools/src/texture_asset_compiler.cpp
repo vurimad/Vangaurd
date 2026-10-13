@@ -504,7 +504,7 @@ namespace vanguard::texture_tools
                 CookSettings cook;
                 cook.profile = settings.profile;
                 // BuildGraph executes compilers inside Vanguard Jobs. CookTexture's parallel mode synchronously joins its
-                // child block jobs, which RED Jobs explicitly forbids from dispatcher work. The graph already supplies
+                // child block jobs, which the dispatcher contract forbids from dispatcher work. The graph already supplies
                 // outer asset-level concurrency, so compiler-owned texture cooking stays serial until it is made continuation-based.
                 cook.execution = CookSettings::Execution::Serial;
                 cook.maximumSubresources = artifacts.GetRemainingArtifactCount() - 1u;

@@ -25,8 +25,8 @@ memory public facade
       +--> private imported redSystem compatibility image
 ```
 
-- `source/imported/common/redMemory` retains the complete upstream snapshot.
-- `source/imported/common/redSystem` supplies private dependencies required by
+- `imported/common/redMemory` retains the complete upstream snapshot.
+- `imported/common/redSystem` supplies private dependencies required by
   that snapshot.
 - `source/memory/compat` is the quarantined adapter and the only integration
   area permitted to include RED headers or name `red::` symbols.

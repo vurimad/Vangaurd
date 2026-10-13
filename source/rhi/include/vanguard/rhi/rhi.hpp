@@ -9,6 +9,10 @@ namespace vanguard::rhi
     /// Terminal device-loss teardown. Always detaches global RHI state and never waits for GPU completion.
     [[nodiscard]] bool AbandonDevice(Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
+    // Monotonic identity of the active RHI/device lifetime. Resource-reference
+    // generations are backend-local and may repeat after a full reinitialize;
+    // persistent higher-level caches must include this incarnation in ABA keys.
+    [[nodiscard]] u64 GetDeviceIncarnation() noexcept;
     [[nodiscard]] const Capabilities& GetCapabilities() noexcept;
     [[nodiscard]] DeviceState TestDeviceState() noexcept;
     [[nodiscard]] bool WaitIdle(Failure* failure = nullptr) noexcept;
@@ -161,6 +165,10 @@ namespace vanguard::rhi
     // Direct command operands are tracked automatically; graph and resource-table infrastructure uses this
     // entry point for indirect references before submission.
     [[nodiscard]] bool AddToResidencyWorkingSet(ResourceRef resource, Failure* failure = nullptr) noexcept;
+    // Admit one immutable sorted/unique texture+buffer table before resource
+    // recording. Admission retains resources and deduplicates residency once;
+    // later operations on admitted resources reuse that command-list-local proof.
+    [[nodiscard]] bool AdmitCommandListResources(containers::ArraySpan<const ResourceRef> resources, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetPipeline(PipelineRef pipeline, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetupRenderTargets(const RenderTargetSetup& setup, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SetVariableRateShading(const VariableRateShadingState& state, Failure* failure = nullptr) noexcept;
@@ -220,6 +228,16 @@ namespace vanguard::rhi
     // by producer queue and inserts GPU waits; this never waits on the CPU.
     [[nodiscard]] bool AddCommandListWait(GpuFence fence, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool SeedCommandListStates(containers::ArraySpan<const CommandListEntryState> entries, Failure* failure = nullptr) noexcept;
+    // Internal compiler path. The command list must have an admitted resource table
+    // and seeded entry-state proof. The backend validates the compiled before-state
+    // against command-list tracking, emits one native batch, then advances tracking
+    // without generating a duplicate barrier. Unsupported callers stay on the
+    // generic tracked path. Each batch is dependency-free and contains at most one
+    // barrier per admitted resource; order dependent work into separate calls.
+    // Unsupported is guaranteed non-mutating so the caller may replay the same run
+    // through generic transitions. After any other backend failure the command list
+    // is not recoverable and must be discarded.
+    [[nodiscard]] bool ExecuteCompiledBarriers(containers::ArraySpan<const CompiledBarrier> barriers, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool TransitionTexture(TextureRef texture, ResourceState before, ResourceState after, const SubresourceRange& range = {}, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool TransitionBuffer(BufferRef buffer, ResourceState before, ResourceState after, Failure* failure = nullptr) noexcept;
     [[nodiscard]] bool BarrierTextureUav(TextureRef texture, Failure* failure = nullptr) noexcept;

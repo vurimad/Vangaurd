@@ -103,6 +103,7 @@ namespace vanguard::assets
     namespace detail
     {
         class PersistentCacheAuthorityAccess;
+        struct OwnedBuildRequestSourceBacking;
     }
 
     class BuildGraph;
@@ -201,16 +202,29 @@ namespace vanguard::assets
     };
 
     // Ownership-safe form of BuildRequest for resolver boundaries. BuildRequest
-    // intentionally remains a lightweight borrowed view; this value deep-copies
+    // intentionally remains a lightweight borrowed view; CopyFrom deep-copies
     // every byte span so callers can retain the request after importer/source
-    // temporaries have expired.
+    // temporaries have expired. Recook may explicitly promote only the immutable
+    // source content to shared backing after ownership has been established.
     struct OwnedBuildRequest
     {
         OwnedBuildRequest() noexcept;
 
         [[nodiscard]] bool CopyFrom(const BuildRequest& request) noexcept;
+        // Recook-only retention optimization. Ordinary resolver boundaries keep
+        // CopyFrom's deep-copy semantics; callers opt in only after ownership is
+        // already established. Sharing requires exact source identity and bytes.
+        [[nodiscard]] bool MakeSourceShared() noexcept;
+        [[nodiscard]] bool CopyFromSharingSource(const OwnedBuildRequest& request) noexcept;
+        [[nodiscard]] bool CopyFromSharingSource(const BuildRequest& request, const OwnedBuildRequest& sourceOwner) noexcept;
+        [[nodiscard]] bool SourceContentEquals(const BuildRequest& request) const noexcept;
+        [[nodiscard]] bool SharesSourceStorage(const OwnedBuildRequest& other) const noexcept;
         [[nodiscard]] BuildRequest View() const noexcept;
         [[nodiscard]] u64 ByteCount() const noexcept;
+        [[nodiscard]] u64 SourceByteCount() const noexcept;
+        [[nodiscard]] u64 PrivateByteCount() const noexcept;
+        [[nodiscard]] u64 SharedSourceStorageByteCount() const noexcept;
+        [[nodiscard]] static u64 SharedSourceStorageOverhead() noexcept;
         void Reset() noexcept;
         void ReleasePayload() noexcept;
 
@@ -220,6 +234,24 @@ namespace vanguard::assets
         containers::DynamicArray<u8> source;
         containers::DynamicArray<u8> metadata;
         containers::DynamicArray<u8> settings;
+
+    private:
+        struct SharedSourceHandle final
+        {
+            SharedSourceHandle() noexcept = default;
+            SharedSourceHandle(const SharedSourceHandle& other) noexcept;
+            SharedSourceHandle& operator=(const SharedSourceHandle& other) noexcept;
+            SharedSourceHandle(SharedSourceHandle&& other) noexcept;
+            SharedSourceHandle& operator=(SharedSourceHandle&& other) noexcept;
+            ~SharedSourceHandle() noexcept;
+
+            void Adopt(detail::OwnedBuildRequestSourceBacking* value) noexcept;
+            void Reset() noexcept;
+
+            detail::OwnedBuildRequestSourceBacking* value = nullptr;
+        };
+
+        SharedSourceHandle m_sharedSource;
     };
 
     struct BuildDependency

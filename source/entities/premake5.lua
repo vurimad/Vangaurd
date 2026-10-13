@@ -18,7 +18,7 @@ project "entities"
         "../world/include", "../concurrency/include", "../ecs/include", "../gameWorld/include",
         "../streaming/include", "../packages/include", "../jobs/include",
         "../meshes/include", "../rendering/include", "../rhi/include", "../window/include", "../pipelines/include", "../shaders/include",
-        "../materials/include", "../textures/include", "../pipelineCache/include", "../imported/common/redMath/include", "../math/adapted/include",
+        "../materials/include", "../textures/include", "../pipelineCache/include", "../../imported/common/redMath/include", "../math/adapted/include",
         path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
@@ -47,7 +47,7 @@ project "entitiesTests"
         "../resources/include", "../reflection/include", "../schemas/include", "../prefabs/include",
         "../world/include", "../concurrency/include", "../ecs/include", "../gameWorld/include",
         "../streaming/include", "../packages/include", "../jobs/include",
-        "../meshes/include", "../rendering/include", "../imported/common/redMath/include", "../math/adapted/include", "../rhi/include", "../window/include", "../pipelines/include", "../shaders/include",
+        "../meshes/include", "../rendering/include", "../../imported/common/redMath/include", "../math/adapted/include", "../rhi/include", "../window/include", "../pipelines/include", "../shaders/include",
         "../materials/include", "../textures/include", "../pipelineCache/include",
         path.join(flecs_root, "distr")
     }

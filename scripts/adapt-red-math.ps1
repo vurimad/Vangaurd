@@ -2,7 +2,7 @@ param(
     [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
 )
 
-$sourceRoot = Join-Path $RepositoryRoot "source\imported\common\redMath"
+$sourceRoot = Join-Path $RepositoryRoot "imported\common\redMath"
 $targetRoot = Join-Path $RepositoryRoot "source\math\adapted"
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot "include\redMathPublic.h")))

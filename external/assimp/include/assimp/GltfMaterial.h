@@ -57,6 +57,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define AI_MATKEY_GLTF_ALPHAMODE "$mat.gltf.alphaMode", 0, 0
 #define AI_MATKEY_GLTF_ALPHACUTOFF "$mat.gltf.alphaCutoff", 0, 0
 
+// KHR_materials_specular: Assimp texture slots are dense. If a material supplies
+// specularColorTexture without specularTexture, the color texture occupies slot 0.
+// Record that compacted slot so glTF export can restore the original semantic.
+#define AI_MATKEY_GLTF_SPECULAR_COLOR_TEXTURE_SLOT "$mat.gltf.specularColorTextureSlot", 0, 0
+
 #define _AI_MATKEY_GLTF_MAPPINGNAME_BASE "$tex.mappingname"
 #define _AI_MATKEY_GLTF_MAPPINGID_BASE "$tex.mappingid"
 #define _AI_MATKEY_GLTF_MAPPINGFILTER_MAG_BASE "$tex.mappingfiltermag"

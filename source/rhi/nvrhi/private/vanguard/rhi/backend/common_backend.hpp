@@ -18,6 +18,20 @@ namespace vanguard::rhi::backend
     using SignalFenceCallback = bool (*)(void* context, QueueType queue, u64 value) noexcept;
     using WaitFenceCallback = bool (*)(void* context, QueueType queue, u64 value, u64 timeoutNanoseconds) noexcept;
     using QueueWaitCallback = bool (*)(void* context, QueueType consumer, GpuFence producer) noexcept;
+    struct AdmittedCommandResource
+    {
+        ResourceRef resource;
+        ResourceRef residency;
+        void* payload = nullptr;
+        nvrhi::IResource* native = nullptr;
+        u16 textureMipCount = 0;
+        u16 textureArraySize = 0;
+        u8 texturePlaneCount = 0;
+        u32 compiledBarrierEpoch = 0;
+    };
+    using CompiledBarrierBatchCallback = BackendStatus (*)(void* context, nvrhi::ICommandList* commandList,
+                                                            containers::ArraySpan<const CompiledBarrier> barriers,
+                                                            containers::ArraySpan<const AdmittedCommandResource> resources) noexcept;
     using AliasingBarrierCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::IResource* resourceAfter) noexcept;
     using RectColorClearCallback = bool (*)(void* context, nvrhi::ICommandList* commandList, nvrhi::ITexture* texture, const ColorValue& value,
                                             const SubresourceRange& range, const Rect& rectangle) noexcept;
@@ -39,7 +53,8 @@ namespace vanguard::rhi::backend
         CommonBackend& operator=(const CommonBackend&) = delete;
 
         [[nodiscard]] bool Initialize(nvrhi::DeviceHandle&& device, FenceCompleteCallback fenceComplete, SignalFenceCallback signalFence,
-                                      WaitFenceCallback waitFence, QueueWaitCallback queueWait, AliasingBarrierCallback aliasingBarrier, RectColorClearCallback rectColorClear,
+                                      WaitFenceCallback waitFence, QueueWaitCallback queueWait, CompiledBarrierBatchCallback compiledBarrierBatch,
+                                      AliasingBarrierCallback aliasingBarrier, RectColorClearCallback rectColorClear,
                                       RectDepthStencilClearCallback rectDepthStencilClear, DiscardTextureCallback discardTexture,
                                       PrepareResidencyCallback prepareResidency, CommitResidencyCallback commitResidency,
                                       ReleaseResidencyCallback releaseResidency, void* fenceContext) noexcept;
@@ -147,7 +162,9 @@ namespace vanguard::rhi::backend
         void UnlockBuffer(BufferRef) noexcept;
 
         [[nodiscard]] BackendStatus AddCommandListWait(CommandListRef, GpuFence) noexcept;
+        [[nodiscard]] BackendStatus AdmitCommandListResources(CommandListRef, containers::ArraySpan<const ResourceRef>) noexcept;
         [[nodiscard]] BackendStatus SeedCommandListStates(CommandListRef, containers::ArraySpan<const CommandListEntryState>) noexcept;
+        [[nodiscard]] BackendStatus ExecuteCompiledBarriers(CommandListRef, containers::ArraySpan<const CompiledBarrier>) noexcept;
         [[nodiscard]] BackendStatus TransitionTexture(CommandListRef, TextureRef, ResourceState, ResourceState, const SubresourceRange&) noexcept;
         [[nodiscard]] BackendStatus TransitionBuffer(CommandListRef, BufferRef, ResourceState, ResourceState) noexcept;
         [[nodiscard]] BackendStatus BarrierTextureUav(CommandListRef, TextureRef) noexcept;
@@ -254,6 +271,7 @@ namespace vanguard::rhi::backend
         SignalFenceCallback m_signalFence = nullptr;
         WaitFenceCallback m_waitFence = nullptr;
         QueueWaitCallback m_queueWait = nullptr;
+        CompiledBarrierBatchCallback m_compiledBarrierBatch = nullptr;
         AliasingBarrierCallback m_aliasingBarrier = nullptr;
         RectColorClearCallback m_rectColorClear = nullptr;
         RectDepthStencilClearCallback m_rectDepthStencilClear = nullptr;

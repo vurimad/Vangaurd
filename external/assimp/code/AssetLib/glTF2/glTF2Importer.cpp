@@ -291,7 +291,14 @@ static aiMaterial *ImportMaterial(std::vector<int> &embeddedTexIdxs, Asset &r, M
                 SetMaterialColorProperty(r, specular.specularColorFactor, aimat, AI_MATKEY_COLOR_SPECULAR);
                 aimat->AddProperty(&specular.specularFactor, 1, AI_MATKEY_SPECULAR_FACTOR);
                 SetMaterialTextureProperty(embeddedTexIdxs, r, specular.specularTexture, aimat, aiTextureType_SPECULAR, 0);
-                SetMaterialTextureProperty(embeddedTexIdxs, r, specular.specularColorTexture, aimat, aiTextureType_SPECULAR, 1);
+                // glTF permits either texture independently. Keep Assimp's texture indices
+                // dense when only the color map is supplied: ValidateDataStructure and
+                // aiMaterial::GetTextureCount/GetTexture both assume slots start at zero.
+                const int colorSlot = specular.specularTexture.texture && specular.specularTexture.texture->source ? 1 : 0;
+                if (specular.specularColorTexture.texture && specular.specularColorTexture.texture->source) {
+                    aimat->AddProperty(&colorSlot, 1, AI_MATKEY_GLTF_SPECULAR_COLOR_TEXTURE_SLOT);
+                }
+                SetMaterialTextureProperty(embeddedTexIdxs, r, specular.specularColorTexture, aimat, aiTextureType_SPECULAR, colorSlot);
             }
         }
         // pbrSpecularGlossiness
@@ -479,6 +486,7 @@ void glTF2Importer::ImportMeshes(glTF2::Asset &r) {
     meshOffsets.clear();
     meshOffsets.reserve(r.meshes.Size() + 1);
     mVertexRemappingTables.clear();
+    mVanguardAppliedSkinKeys.assign(r.meshes.Size(), ~std::uint64_t{ 0 });
 
     // Count the number of aiMeshes
     unsigned int num_aiMeshes = 0;
@@ -545,6 +553,17 @@ void glTF2Importer::ImportMeshes(glTF2::Asset &r) {
 
             aiMesh *aim = new aiMesh();
             meshes.push_back(std::unique_ptr<aiMesh>(aim));
+
+            if (mVanguardModelProvenance != nullptr && mVanguardModelProvenance->recordPrimitive != nullptr) {
+                const aiVanguardPrimitiveProvenance provenance{
+                        aiVanguardModelSourceKind::Gltf2,
+                        static_cast<std::uint64_t>(m) + 1u,
+                        p,
+                        static_cast<std::uint32_t>(meshes.size() - 1u) };
+                if (!mVanguardModelProvenance->recordPrimitive(mVanguardModelProvenance->userData, provenance)) {
+                    throw DeadlyImportError("GLTF: Vanguard model provenance primitive sink rejected source geometry");
+                }
+            }
 
             aim->mName = mesh.name.empty() ? mesh.id : mesh.name;
 
@@ -1137,6 +1156,16 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
     Node &node = *ptr;
 
     aiNode *ainode = new aiNode(GetNodeName(node));
+    const unsigned int sourceNodeIndex = ptr.GetIndex();
+    if (sourceNodeIndex >= mVanguardNodePointers.size()) {
+        delete ainode;
+        throw DeadlyImportError("GLTF: source node index exceeds Vanguard node map");
+    }
+    if (mVanguardNodePointers[sourceNodeIndex] != nullptr) {
+        delete ainode;
+        throw DeadlyImportError("GLTF: source node is referenced more than once in the selected scene");
+    }
+    mVanguardNodePointers[sourceNodeIndex] = ainode;
 
     try {
         if (!node.children.empty()) {
@@ -1173,10 +1202,33 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
             int mesh_idx = node.meshes[0].GetIndex();
             int count = meshOffsets[mesh_idx + 1] - meshOffsets[mesh_idx];
 
+            const bool hasSkin = static_cast<bool>(node.skin);
+            const std::uint64_t skinKey = hasSkin ? static_cast<std::uint64_t>(node.skin.GetIndex()) + 1u : 0u;
+            bool applySkin = hasSkin;
+            if (mVanguardModelProvenance != nullptr && mVanguardModelProvenance->recordGeometryUse != nullptr) {
+                const aiVanguardGeometryUseProvenance use{
+                        aiVanguardModelSourceKind::Gltf2,
+                        static_cast<std::uint64_t>(mesh_idx) + 1u,
+                        skinKey,
+                        hasSkin ? aiVanguardGeometryUse_HasSkin : aiVanguardGeometryUse_None };
+                if (!mVanguardModelProvenance->recordGeometryUse(mVanguardModelProvenance->userData, use)) {
+                    throw DeadlyImportError("GLTF: Vanguard model provenance geometry-use sink rejected source geometry");
+                }
+                std::uint64_t &appliedSkinKey = mVanguardAppliedSkinKeys[mesh_idx];
+                if (appliedSkinKey != ~std::uint64_t{ 0 } && appliedSkinKey != skinKey) {
+                    throw DeadlyImportError("GLTF: one source mesh is referenced with conflicting skin bindings");
+                }
+                if (appliedSkinKey == skinKey && hasSkin) {
+                    applySkin = false;
+                } else {
+                    appliedSkinKey = skinKey;
+                }
+            }
+
             ainode->mNumMeshes = count;
             ainode->mMeshes = new unsigned int[count];
 
-            if (node.skin) {
+            if (node.skin && applySkin) {
                 for (int primitiveNo = 0; primitiveNo < count; ++primitiveNo) {
                     unsigned int aiMeshIdx = meshOffsets[mesh_idx] + primitiveNo;
                     aiMesh *mesh = mScene->mMeshes[aiMeshIdx];
@@ -1201,13 +1253,19 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
                     // mapping which makes things doubly-slow.
 
                     mat4 *pbindMatrices = nullptr;
-                    node.skin->inverseBindMatrices->ExtractData(pbindMatrices, nullptr);
+                    if (node.skin->inverseBindMatrices) {
+                        if (node.skin->inverseBindMatrices->count != numBones) {
+                            throw DeadlyImportError("GLTF: skin inverseBindMatrices count does not match joints count");
+                        }
+                        node.skin->inverseBindMatrices->ExtractData(pbindMatrices, nullptr);
+                    }
 
                     for (uint32_t i = 0; i < numBones; ++i) {
                         const std::vector<aiVertexWeight> &weights = weighting[i];
                         aiBone *bone = new aiBone();
 
                         Ref<Node> joint = node.skin->jointNames[i];
+                        const unsigned int jointNodeIndex = joint.GetIndex();
                         if (!joint->name.empty()) {
                             bone->mName = joint->name;
                         } else {
@@ -1217,8 +1275,21 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
                             ASSIMP_itoa10(postfix, i);
                             bone->mName = (kDefaultName + postfix);
                         }
+                        if (jointNodeIndex >= mVanguardNodePointers.size()) {
+                            delete bone;
+                            throw DeadlyImportError("GLTF: skin joint node index exceeds Vanguard node map");
+                        }
+                        if (mVanguardNodePointers[jointNodeIndex] != nullptr) {
+                            bone->mNode = mVanguardNodePointers[jointNodeIndex];
+                        } else {
+                            mVanguardPendingBoneNodes.emplace_back(bone, jointNodeIndex);
+                        }
                         GetNodeTransform(bone->mOffsetMatrix, *joint);
-                        CopyValue(pbindMatrices[i], bone->mOffsetMatrix);
+                        if (pbindMatrices != nullptr) {
+                            CopyValue(pbindMatrices[i], bone->mOffsetMatrix);
+                        } else {
+                            bone->mOffsetMatrix = aiMatrix4x4();
+                        }
                         bone->mNumWeights = static_cast<uint32_t>(weights.size());
 
                         if (bone->mNumWeights > 0) {
@@ -1277,6 +1348,8 @@ void glTF2Importer::ImportNodes(glTF2::Asset &r) {
         throw DeadlyImportError("GLTF: No scene");
     }
     ASSIMP_LOG_DEBUG("Importing nodes");
+    mVanguardNodePointers.assign(r.nodes.Size(), nullptr);
+    mVanguardPendingBoneNodes.clear();
 
     std::vector<Ref<Node>> rootNodes = r.scene->nodes;
 
@@ -1298,6 +1371,18 @@ void glTF2Importer::ImportNodes(glTF2::Asset &r) {
     } else {
         mScene->mRootNode = new aiNode("ROOT");
     }
+    ResolveVanguardBoneNodes();
+}
+
+void glTF2Importer::ResolveVanguardBoneNodes() {
+    for (const auto &pending : mVanguardPendingBoneNodes) {
+        if (pending.first == nullptr || pending.second >= mVanguardNodePointers.size() ||
+                mVanguardNodePointers[pending.second] == nullptr) {
+            throw DeadlyImportError("GLTF: skin joint is not present in the selected scene hierarchy");
+        }
+        pending.first->mNode = mVanguardNodePointers[pending.second];
+    }
+    mVanguardPendingBoneNodes.clear();
 }
 
 struct AnimationSamplers {
@@ -1793,7 +1878,8 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     this->mScene = pScene;
 
     // read the asset file
-    glTF2::Asset asset(pIOHandler, static_cast<rapidjson::IRemoteSchemaDocumentProvider *>(mSchemaDocumentProvider));
+    glTF2::Asset asset(pIOHandler, static_cast<rapidjson::IRemoteSchemaDocumentProvider *>(mSchemaDocumentProvider),
+            mVanguardModelProvenance);
     asset.Load(pFile,
                CheckMagicToken(
                    pIOHandler, pFile, AI_GLB_MAGIC_NUMBER, 1, 0,
@@ -1824,6 +1910,7 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
 
 void glTF2Importer::SetupProperties(const Importer *pImp) {
     mSchemaDocumentProvider = static_cast<rapidjson::IRemoteSchemaDocumentProvider *>(pImp->GetPropertyPointer(AI_CONFIG_IMPORT_SCHEMA_DOCUMENT_PROVIDER));
+    mVanguardModelProvenance = static_cast<aiVanguardModelProvenanceSink *>(pImp->GetPropertyPointer(AI_CONFIG_VANGUARD_MODEL_PROVENANCE));
 }
 
 #endif // ASSIMP_BUILD_NO_GLTF_IMPORTER

@@ -11,6 +11,12 @@ namespace vanguard::rendering::detail
     {
         u64 minimumHeapBytes = 64ull * 1024ull * 1024ull;
         u64 heapAlignment = 64ull * 1024ull;
+        u32 maximumPredecessorFragments = 1'048'576;
+        // Resolve can provide its already-monotonic first-touch stream plus dense
+        // semantic ordinals. Standalone planner callers leave these disabled and
+        // retain the deterministic sort/release-heap path.
+        u32 semanticEventCount = 0;
+        bool requestsPreordered = false;
     };
 
     struct PlacedRangeRequest
@@ -20,6 +26,8 @@ namespace vanguard::rendering::detail
         rhi::QueueType queue = rhi::QueueType::Graphics;
         PlanPosition firstAcquire;
         PlanPosition lastRelease;
+        u32 firstAcquireSemanticOrdinal = InvalidRenderFlowResourceIndex;
+        u32 lastReleaseSemanticOrdinal = InvalidRenderFlowResourceIndex;
         rhi::MemoryRequirements requirements;
     };
 
@@ -93,6 +101,7 @@ namespace vanguard::rendering::detail
         u64 size = 0;
         u32 heap = InvalidRenderFlowResourceIndex;
         u32 allocation = InvalidRenderFlowResourceIndex;
+        u32 next = InvalidRenderFlowResourceIndex;
     };
 
     struct PlacedPlannerSeenSet
@@ -412,7 +421,7 @@ namespace vanguard::rendering::detail
     {
         PlacedRangePlannerScratch() noexcept
             : order(memory::pools::Rendering::GetInstance()), heaps(memory::pools::Rendering::GetInstance()), groups(memory::pools::Rendering::GetInstance()),
-              releaseEvents(memory::pools::Rendering::GetInstance()), candidateFragments(memory::pools::Rendering::GetInstance())
+              releaseEvents(memory::pools::Rendering::GetInstance()), releaseHeads(memory::pools::Rendering::GetInstance()), candidateFragments(memory::pools::Rendering::GetInstance())
         {
         }
 
@@ -420,6 +429,7 @@ namespace vanguard::rendering::detail
         {
             order.Clear();
             releaseEvents.Clear();
+            releaseHeads.Clear();
             candidateFragments.Clear();
             seenAllocations.Reset();
             compatibleHeaps.Reset();
@@ -452,9 +462,8 @@ namespace vanguard::rendering::detail
             return group;
         }
 
-        void Finish() noexcept
+        void Finish(const u32 requestCount) noexcept
         {
-            const u32 requestCount = order.Size();
             for (u32 index = 0; index < activeHeapCount; ++index)
                 heaps[index].TrimAfterUse();
             for (u32 index = 0; index < activeGroupCount; ++index)
@@ -478,10 +487,14 @@ namespace vanguard::rendering::detail
             }
             constexpr u32 minimumRetainedTransientCapacity = 32;
             const u32 retainedTransientFloor = requestCount > minimumRetainedTransientCapacity ? requestCount : minimumRetainedTransientCapacity;
+            const u32 releaseHeadCount = releaseHeads.Size();
+            const u32 retainedReleaseHeadFloor = releaseHeadCount > minimumRetainedTransientCapacity ? releaseHeadCount : minimumRetainedTransientCapacity;
             if (static_cast<u64>(order.Capacity()) > static_cast<u64>(retainedTransientFloor) * 4u)
                 order.Shrink();
             if (static_cast<u64>(releaseEvents.Capacity()) > static_cast<u64>(retainedTransientFloor) * 4u)
                 releaseEvents.Shrink();
+            if (static_cast<u64>(releaseHeads.Capacity()) > static_cast<u64>(retainedReleaseHeadFloor) * 4u)
+                releaseHeads.Shrink();
             if (static_cast<u64>(candidateFragments.Capacity()) > static_cast<u64>(retainedTransientFloor) * 4u)
                 candidateFragments.Shrink();
             seenAllocations.TrimAfterUse(requestCount);
@@ -508,13 +521,14 @@ namespace vanguard::rendering::detail
             // ResolveScratch::ResetFrame has already cleared logical contents.
             // If placement is skipped entirely, still age a bounded amount of
             // retained planner backing so a past spike cannot persist forever.
-            Finish();
+            Finish(0);
         }
 
         containers::DynamicArray<u32> order;
         containers::DynamicArray<PlacedPlannerHeapState> heaps;
         containers::DynamicArray<PlacedPlannerCompatibilityGroup> groups;
         containers::DynamicArray<PlacedPlannerReleaseEvent> releaseEvents;
+        containers::DynamicArray<u32> releaseHeads;
         containers::DynamicArray<PlacedPredecessorFragment> candidateFragments;
         PlacedPlannerSeenSet seenAllocations;
         PlacedPlannerCompatibilityIndex compatibleHeaps;

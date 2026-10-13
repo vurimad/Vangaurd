@@ -60,6 +60,8 @@ namespace nvrhi::vulkan
 
     void CommandList::open()
     {
+        // Discard the previous recording's unsubmitted state before reuse.
+        m_StateTracker.beginRecording();
         m_CurrentCmdBuf = m_Device->getQueue(m_CommandListParameters.queueType)->getOrCreateCommandBuffer();
 
         auto beginInfo = vk::CommandBufferBeginInfo()

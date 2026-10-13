@@ -72,6 +72,28 @@ int main()
                                                                         "f1809a48a497200e046d39ccc7112cd0"),
           "SHA-256 million-a NIST vector");
 
+    // Cross the accelerated one-shot threshold with data whose reference
+    // digest is independently fixed. Chunk boundaries are intentionally not
+    // block-aligned so the allocation-free portable builder also checks the
+    // exact same 2 MiB input under incremental updates.
+    static u8 patterned[2u * 1024u * 1024u]{};
+    for (u32 index = 0u; index < sizeof(patterned); ++index)
+        patterned[index] = static_cast<u8>((index * 37u + 13u) & 255u);
+    crypto::Sha256Builder reference;
+    bool referenceUpdated = true;
+    for (u32 offset = 0u; offset < sizeof(patterned); offset += 13007u)
+    {
+        const u32 remaining = static_cast<u32>(sizeof(patterned)) - offset;
+        const u32 count = remaining < 13007u ? remaining : 13007u;
+        referenceUpdated = referenceUpdated && reference.Update(patterned + offset, count);
+    }
+    crypto::Digest256 referenceDigest;
+    const crypto::Digest256 largeDigest = crypto::Sha256(patterned, sizeof(patterned));
+    Check(referenceUpdated && reference.Finalize(referenceDigest) && largeDigest == referenceDigest &&
+              largeDigest == DigestFromHex("8c433b7252b622d106539462420783f4"
+                                           "b581f292cee63862135dba9df5859a9e"),
+          "SHA-256 2 MiB accelerated/portable/reference equivalence");
+
     if (g_failures == 0)
     {
         VG_LOG_INFO(diagnostics::Category::FunctionalTests, "[cryptoTests] Vanguard SHA-256 checks passed");

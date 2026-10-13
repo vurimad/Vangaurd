@@ -66,6 +66,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <iterator>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 
 namespace Assimp {
 namespace FBX {
@@ -75,6 +76,50 @@ using namespace Util;
 #define MAGIC_NODE_TAG "_$AssimpFbx$"
 
 #define CONVERT_FBX_TIME(time) static_cast<double>(time) / 46186158000LL
+
+namespace {
+std::uint64_t VanguardHashBytes(std::uint64_t hash, const void *data, const std::size_t size) {
+    static constexpr std::uint64_t Prime = 1099511628211ull;
+    const unsigned char *bytes = static_cast<const unsigned char *>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= Prime;
+    }
+    return hash;
+}
+
+std::uint64_t VanguardGeometryBindingKey(const MeshGeometry &mesh, const Model &model,
+        const aiMatrix4x4 &absoluteTransform, const Document &document) {
+    std::uint64_t hash = 1469598103934665603ull;
+    const MatIndexArray &materialIndices = mesh.GetMaterialIndices();
+    if (document.Settings().readMaterials && !materialIndices.empty()) {
+        std::set<MatIndexArray::value_type> seen;
+        const std::vector<const Material *> &materials = model.GetMaterials();
+        for (const MatIndexArray::value_type materialIndex : materialIndices) {
+            if (!seen.insert(materialIndex).second) {
+                continue;
+            }
+            hash = VanguardHashBytes(hash, &materialIndex, sizeof(materialIndex));
+            std::uint64_t materialId = 0;
+            if (materialIndex >= 0 && static_cast<std::size_t>(materialIndex) < materials.size() &&
+                    materials[materialIndex] != nullptr) {
+                materialId = materials[materialIndex]->ID();
+            }
+            hash = VanguardHashBytes(hash, &materialId, sizeof(materialId));
+        }
+    }
+
+    if (document.Settings().readWeights && mesh.DeformerSkin() != nullptr) {
+        const ai_real matrixValues[16] = {
+                absoluteTransform.a1, absoluteTransform.a2, absoluteTransform.a3, absoluteTransform.a4,
+                absoluteTransform.b1, absoluteTransform.b2, absoluteTransform.b3, absoluteTransform.b4,
+                absoluteTransform.c1, absoluteTransform.c2, absoluteTransform.c3, absoluteTransform.c4,
+                absoluteTransform.d1, absoluteTransform.d2, absoluteTransform.d3, absoluteTransform.d4 };
+        hash = VanguardHashBytes(hash, matrixValues, sizeof(matrixValues));
+    }
+    return hash != 0 ? hash : 1;
+}
+} // namespace
 
 static void correctRootTransform(const aiScene *scene) {
     if (scene == nullptr) {
@@ -123,7 +168,8 @@ static void correctRootTransform(const aiScene *scene) {
     scene->mRootNode->mTransformation *= mat;
 }
 
-FBXConverter::FBXConverter(aiScene *out, const Document &doc, bool removeEmptyBones) :
+FBXConverter::FBXConverter(aiScene *out, const Document &doc, bool removeEmptyBones,
+        aiVanguardModelProvenanceSink *vanguardModelProvenance) :
         defaultMaterialIndex(),
         mMeshes(),
         lights(),
@@ -132,12 +178,16 @@ FBXConverter::FBXConverter(aiScene *out, const Document &doc, bool removeEmptyBo
         materials_converted(),
         textures_converted(),
         meshes_converted(),
+        mVanguardModelNodes(),
+        mVanguardPendingBoneNodes(),
+        mVanguardGeometryBindings(),
         node_anim_chain_bits(),
         mNodeNames(),
         anim_fps(),
         mSceneOut(out),
         doc(doc),
-        mRemoveEmptyBones(removeEmptyBones) {
+        mRemoveEmptyBones(removeEmptyBones),
+        mVanguardModelProvenance(vanguardModelProvenance) {
 
 
     // animations need to be converted first since this will
@@ -152,6 +202,7 @@ FBXConverter::FBXConverter(aiScene *out, const Document &doc, bool removeEmptyBo
         ConvertOrphanedEmbeddedTextures();
     }
     ConvertRootNode();
+    ResolveVanguardBoneNodes();
 
     if (doc.Settings().readAllMaterials) {
         // unfortunately this means we have to evaluate all objects
@@ -194,6 +245,69 @@ FBXConverter::~FBXConverter() {
     std::for_each(lights.begin(), lights.end(), Util::delete_fun<aiLight>());
     std::for_each(cameras.begin(), cameras.end(), Util::delete_fun<aiCamera>());
     std::for_each(textures.begin(), textures.end(), Util::delete_fun<aiTexture>());
+}
+
+void FBXConverter::ResolveVanguardBoneNodes() {
+    for (const auto &pending : mVanguardPendingBoneNodes) {
+        const auto target = mVanguardModelNodes.find(pending.second);
+        if (pending.first == nullptr || target == mVanguardModelNodes.end() || target->second == nullptr) {
+            throw std::runtime_error("FBX: skin cluster target node is not present in the converted hierarchy");
+        }
+        pending.first->mNode = target->second;
+    }
+    mVanguardPendingBoneNodes.clear();
+}
+
+bool FBXConverter::ValidateVanguardGeometryBinding(const MeshGeometry &mesh, const Model &model,
+        const aiMatrix4x4 &absoluteTransform) {
+    if (mVanguardModelProvenance == nullptr) {
+        return true;
+    }
+
+    VanguardGeometryBindingEvidence candidate;
+    candidate.hasSkin = doc.Settings().readWeights && mesh.DeformerSkin() != nullptr;
+    if (candidate.hasSkin) {
+        candidate.bindTransform = absoluteTransform;
+    }
+
+    const MatIndexArray &materialIndices = mesh.GetMaterialIndices();
+    if (doc.Settings().readMaterials && !materialIndices.empty()) {
+        std::set<MatIndexArray::value_type> seen;
+        const std::vector<const Material *> &materials = model.GetMaterials();
+        for (const MatIndexArray::value_type materialIndex : materialIndices) {
+            if (!seen.insert(materialIndex).second) {
+                continue;
+            }
+            candidate.materialBindings.push_back(static_cast<std::uint64_t>(static_cast<std::int64_t>(materialIndex)));
+            std::uint64_t materialId = 0;
+            if (materialIndex >= 0 && static_cast<std::size_t>(materialIndex) < materials.size() &&
+                    materials[materialIndex] != nullptr) {
+                materialId = materials[materialIndex]->ID();
+            }
+            candidate.materialBindings.push_back(materialId);
+        }
+    }
+
+    const auto existing = mVanguardGeometryBindings.find(&mesh);
+    if (existing == mVanguardGeometryBindings.end()) {
+        mVanguardGeometryBindings.emplace(&mesh, std::move(candidate));
+        return true;
+    }
+
+    const VanguardGeometryBindingEvidence &accepted = existing->second;
+    if (accepted.materialBindings != candidate.materialBindings || accepted.hasSkin != candidate.hasSkin) {
+        return false;
+    }
+    if (!candidate.hasSkin) {
+        return true;
+    }
+
+    const aiMatrix4x4 &a = accepted.bindTransform;
+    const aiMatrix4x4 &b = candidate.bindTransform;
+    return a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3 && a.a4 == b.a4 &&
+           a.b1 == b.b1 && a.b2 == b.b2 && a.b3 == b.b3 && a.b4 == b.b4 &&
+           a.c1 == b.c1 && a.c2 == b.c2 && a.c3 == b.c3 && a.c4 == b.c4 &&
+           a.d1 == b.d1 && a.d2 == b.d2 && a.d3 == b.d3 && a.d4 == b.d4;
 }
 
 void FBXConverter::ConvertRootNode() {
@@ -298,6 +412,7 @@ void FBXConverter::ConvertNodes(uint64_t id, aiNode *parent, aiNode *root_node, 
 
             //setup metadata on newest node
             SetupNodeMetadata(*model, *nodes_chain.back().mNode);
+            mVanguardModelNodes[model->ID()] = nodes_chain.back().mNode;
 
             // link all nodes in a row
             aiNode *last_parent = parent;
@@ -973,6 +1088,20 @@ void FBXConverter::ConvertModel(const Model &model, aiNode *parent, aiNode *root
         const MeshGeometry *const mesh = dynamic_cast<const MeshGeometry *>(geo);
         const LineGeometry *const line = dynamic_cast<const LineGeometry *>(geo);
         if (mesh) {
+            if (!ValidateVanguardGeometryBinding(*mesh, model, absolute_transform)) {
+                throw std::runtime_error("FBX: one source geometry is referenced with conflicting material or skin bindings");
+            }
+            if (mVanguardModelProvenance != nullptr && mVanguardModelProvenance->recordGeometryUse != nullptr) {
+                const bool hasSkin = doc.Settings().readWeights && mesh->DeformerSkin() != nullptr;
+                const aiVanguardGeometryUseProvenance use{
+                        aiVanguardModelSourceKind::Fbx,
+                        mesh->ID(),
+                        VanguardGeometryBindingKey(*mesh, model, absolute_transform, doc),
+                        hasSkin ? aiVanguardGeometryUse_HasSkin : aiVanguardGeometryUse_None };
+                if (!mVanguardModelProvenance->recordGeometryUse(mVanguardModelProvenance->userData, use)) {
+                    throw std::runtime_error("FBX: Vanguard model provenance geometry-use sink rejected source geometry");
+                }
+            }
             const std::vector<unsigned int> &indices = ConvertMesh(*mesh, model, parent, root_node, absolute_transform);
             std::copy(indices.begin(), indices.end(), std::back_inserter(meshes));
         } else if (line) {
@@ -1075,6 +1204,17 @@ aiMesh *FBXConverter::SetupEmptyMesh(const Geometry &mesh, aiNode *parent) {
     aiMesh *const out_mesh = new aiMesh();
     mMeshes.push_back(out_mesh);
     meshes_converted[&mesh].push_back(static_cast<unsigned int>(mMeshes.size() - 1));
+
+    if (mVanguardModelProvenance != nullptr && mVanguardModelProvenance->recordPrimitive != nullptr) {
+        const aiVanguardPrimitiveProvenance provenance{
+                aiVanguardModelSourceKind::Fbx,
+                mesh.ID(),
+                static_cast<std::uint32_t>(meshes_converted[&mesh].size() - 1u),
+                static_cast<std::uint32_t>(mMeshes.size() - 1u) };
+        if (!mVanguardModelProvenance->recordPrimitive(mVanguardModelProvenance->userData, provenance)) {
+            throw std::runtime_error("FBX: Vanguard model provenance primitive sink rejected source geometry");
+        }
+    }
 
     // set name
     std::string name = mesh.Name();
@@ -1695,6 +1835,15 @@ void FBXConverter::ConvertCluster(std::vector<aiBone*> &local_mesh_bones, const 
         ASSIMP_LOG_VERBOSE_DEBUG("created new bone ", bone_name.C_Str(), ". Deformer: ", deformer_name);
         bone = new aiBone();
         bone->mName = bone_name;
+        const Model *const targetNode = cluster->TargetNode();
+        if (targetNode != nullptr) {
+            const auto convertedTarget = mVanguardModelNodes.find(targetNode->ID());
+            if (convertedTarget != mVanguardModelNodes.end()) {
+                bone->mNode = convertedTarget->second;
+            } else {
+                mVanguardPendingBoneNodes.emplace_back(bone, targetNode->ID());
+            }
+        }
 
         //bone->mOffsetMatrix = cluster->Transform();
         // store local transform link for post processing
@@ -3830,8 +3979,9 @@ void FBXConverter::ConvertOrphanedEmbeddedTextures() {
 }
 
 // ------------------------------------------------------------------------------------------------
-void ConvertToAssimpScene(aiScene *out, const Document &doc, bool removeEmptyBones) {
-    FBXConverter converter(out, doc, removeEmptyBones);
+void ConvertToAssimpScene(aiScene *out, const Document &doc, bool removeEmptyBones,
+        aiVanguardModelProvenanceSink *vanguardModelProvenance) {
+    FBXConverter converter(out, doc, removeEmptyBones, vanguardModelProvenance);
 }
 
 } // namespace FBX

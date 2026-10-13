@@ -450,7 +450,8 @@ namespace
             const FormatTraits format = GetVertexFormatTraits(attribute.format);
             if (attribute.semantic == 0 || attribute.numericClass > shaders::NumericClass::UnsignedInteger || attribute.componentCount == 0 ||
                 attribute.componentCount > 4 ||
-                (attribute.componentBits != 8 && attribute.componentBits != 16 && attribute.componentBits != 32 && attribute.componentBits != 64) ||
+                (attribute.componentBits != 8 && attribute.componentBits != 10 && attribute.componentBits != 11 &&
+                 attribute.componentBits != 16 && attribute.componentBits != 32 && attribute.componentBits != 64) ||
                 format.byteSize == 0 || format.numericClass != attribute.numericClass || format.componentCount != attribute.componentCount ||
                 format.componentBits != attribute.componentBits || StringLength(attribute.semanticName, pipeline::MaximumVertexSemanticNameLength) == 0 ||
                 StringLength(attribute.semanticName, pipeline::MaximumVertexSemanticNameLength) >= pipeline::MaximumVertexSemanticNameLength ||

@@ -3,6 +3,9 @@
 #include <vanguard/concurrency/concurrency.hpp>
 #include <vanguard/memory/pool.hpp>
 
+#include <algorithm>
+#include <cstring>
+
 namespace
 {
     using namespace vanguard;
@@ -48,12 +51,54 @@ namespace
 
 namespace vanguard::assets
 {
+    const char* ToString(const RecookFailure failure) noexcept
+    {
+        switch (failure)
+        {
+        case RecookFailure::None: return "None";
+        case RecookFailure::InvalidChange: return "Invalid change";
+        case RecookFailure::UntrackedChange: return "Untracked change";
+        case RecookFailure::RequestResolutionFailed: return "Request resolution failed";
+        case RecookFailure::DependencyPreparationFailed: return "Dependency preparation failed";
+        case RecookFailure::IndexQueryFailed: return "Dependency index query failed";
+        case RecookFailure::TransactionFailed: return "Dependency transaction failed";
+        case RecookFailure::PreCommitRejected: return "Precommit freshness rejected";
+        case RecookFailure::PreCommitValidationFailed: return "Precommit validation failed";
+        case RecookFailure::BuildFailed: return "Graph root build failed";
+        case RecookFailure::Cancelled: return "Cancelled";
+        case RecookFailure::OutOfMemory: return "Out of memory";
+        case RecookFailure::LimitExceeded: return "Limit exceeded";
+        }
+        return "Unknown";
+    }
+
+    const char* ToString(const BuildFailure failure) noexcept
+    {
+        switch (failure)
+        {
+        case BuildFailure::None: return "None";
+        case BuildFailure::InvalidRequest: return "Invalid request";
+        case BuildFailure::ResolutionFailed: return "Dependency resolution failed";
+        case BuildFailure::DependencyCycle: return "Dependency cycle";
+        case BuildFailure::DependencyFailed: return "Dependency failed";
+        case BuildFailure::Cancelled: return "Cancelled";
+        case BuildFailure::BuildFailed: return "Compiler failed";
+        case BuildFailure::OutOfMemory: return "Out of memory";
+        case BuildFailure::LimitExceeded: return "Limit exceeded";
+        case BuildFailure::SchedulingFailed: return "Scheduling failed";
+        case BuildFailure::IndexPublicationFailed: return "Index publication failed";
+        }
+        return "Unknown";
+    }
+
     struct RecookOperation
     {
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
 
         RecookOperation() noexcept
-            : requests(memory::pools::Assets::GetInstance()), committedRecords(memory::pools::Assets::GetInstance())
+            : requests(memory::pools::Assets::GetInstance()), committedRecords(memory::pools::Assets::GetInstance()),
+              retirements(memory::pools::Assets::GetInstance()), retiredRecords(memory::pools::Assets::GetInstance()),
+              retirementSuccessors(memory::pools::Assets::GetInstance())
         {
         }
 
@@ -62,8 +107,18 @@ namespace vanguard::assets
         concurrency::Atomic<u32> state{static_cast<u32>(RecookState::Building)};
         concurrency::Atomic<u32> failure{static_cast<u32>(RecookFailure::None)};
         RecookStats stats;
+        RecookRootFailureDetail rootFailure;
+        containers::DynamicArray<resources::ResourceReference> requestRoots{memory::pools::Assets::GetInstance()};
         RecookPreCommitValidator validator;
         containers::DynamicArray<DependencyRecord> committedRecords;
+        containers::DynamicArray<resources::ResourceReference> retirements;
+        containers::DynamicArray<DependencyRecord> retiredRecords;
+        containers::DynamicArray<resources::ResourceReference> retirementSuccessors;
+        u64 graphCompletedBase = 0u;
+        u64 graphFailedBase = 0u;
+        u64 graphCancelledBase = 0u;
+        bool retirementsTaken = false;
+        bool retiredRecordsTaken = false;
         bool cancelRequested = false;
     };
 
@@ -197,6 +252,14 @@ namespace vanguard::assets
         return m_operation->stats;
     }
 
+    RecookRootFailureDetail RecookBatch::GetRootFailureDetail() const noexcept
+    {
+        if (m_operation == nullptr)
+            return {};
+        concurrency::ScopedLock guard(m_operation->lock);
+        return m_operation->rootFailure;
+    }
+
     bool RecookBatch::TakeCommittedRecords(containers::DynamicArray<DependencyRecord>& records) noexcept
     {
         if (m_operation == nullptr || !records.Empty())
@@ -207,6 +270,33 @@ namespace vanguard::assets
             return false;
         records.Swap(m_operation->committedRecords);
         return !records.Empty();
+    }
+
+    bool RecookBatch::TakeCommittedRetirements(
+        containers::DynamicArray<resources::ResourceReference>& retirements) noexcept
+    {
+        if (m_operation == nullptr || !retirements.Empty())
+            return false;
+        concurrency::ScopedLock guard(m_operation->lock);
+        if (static_cast<RecookState>(m_operation->state.GetValue()) != RecookState::Succeeded ||
+            m_operation->retirements.Empty() || m_operation->retirementsTaken)
+            return false;
+        retirements.Swap(m_operation->retirements);
+        m_operation->retirementsTaken = true;
+        return true;
+    }
+
+    bool RecookBatch::TakeCommittedRetirementRecords(containers::DynamicArray<DependencyRecord>& records) noexcept
+    {
+        if (m_operation == nullptr || !records.Empty())
+            return false;
+        concurrency::ScopedLock guard(m_operation->lock);
+        if (static_cast<RecookState>(m_operation->state.GetValue()) != RecookState::Succeeded ||
+            m_operation->retiredRecords.Empty() || m_operation->retiredRecordsTaken)
+            return false;
+        records.Swap(m_operation->retiredRecords);
+        m_operation->retiredRecordsTaken = true;
+        return true;
     }
 
     void RecookBatch::Reset() noexcept
@@ -276,7 +366,7 @@ namespace vanguard::assets
 
     RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes, const BuildPriority priority) noexcept
     {
-        return RequestInternal(changes, {}, {}, true, priority, {});
+        return RequestInternal(changes, {}, {}, {}, {}, true, priority, {});
     }
 
     RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes,
@@ -284,7 +374,7 @@ namespace vanguard::assets
                                              const BuildPriority priority,
                                              const RecookPreCommitValidator& validator) noexcept
     {
-        return RequestInternal(changes, explicitOutputs, {}, false, priority, validator);
+        return RequestInternal(changes, explicitOutputs, {}, {}, {}, false, priority, validator);
     }
 
     RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes,
@@ -293,12 +383,25 @@ namespace vanguard::assets
                                              const BuildPriority priority,
                                              const RecookPreCommitValidator& validator) noexcept
     {
-        return RequestInternal(changes, explicitOutputs, forcedOutputs, false, priority, validator);
+        return RequestInternal(changes, explicitOutputs, forcedOutputs, {}, {}, false, priority, validator);
+    }
+
+    RecookBatch IncrementalRecooker::Request(const containers::ArraySpan<const AssetChange> changes,
+                                             const containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
+                                             const containers::ArraySpan<const resources::ResourceReference> forcedOutputs,
+                                             const containers::ArraySpan<const resources::ResourceReference> retiredOutputs,
+                                             const containers::ArraySpan<const resources::ResourceReference> retirementSuccessors,
+                                             const BuildPriority priority,
+                                             const RecookPreCommitValidator& validator) noexcept
+    {
+        return RequestInternal(changes, explicitOutputs, forcedOutputs, retiredOutputs, retirementSuccessors, false, priority, validator);
     }
 
     RecookBatch IncrementalRecooker::RequestInternal(const containers::ArraySpan<const AssetChange> changes,
                                                      const containers::ArraySpan<const resources::ResourceReference> explicitOutputs,
                                                      const containers::ArraySpan<const resources::ResourceReference> forcedOutputs,
+                                                     const containers::ArraySpan<const resources::ResourceReference> retiredOutputs,
+                                                     const containers::ArraySpan<const resources::ResourceReference> retirementSuccessors,
                                                      const bool rejectUntrackedChanges, const BuildPriority priority,
                                                      const RecookPreCommitValidator& validator) noexcept
     {
@@ -329,13 +432,46 @@ namespace vanguard::assets
             SetTerminal(*operation, RecookState::Failed, failure);
             return RecookBatch(this, operation);
         };
-        if ((changes.Empty() && explicitOutputs.Empty()) ||
+        if ((changes.Empty() && explicitOutputs.Empty() && retirementSuccessors.Empty()) ||
             (!changes.Empty() && changes.Data() == nullptr) ||
             (!explicitOutputs.Empty() && explicitOutputs.Data() == nullptr) ||
-            (!forcedOutputs.Empty() && forcedOutputs.Data() == nullptr))
+            (!forcedOutputs.Empty() && forcedOutputs.Data() == nullptr) ||
+            (!retiredOutputs.Empty() && retiredOutputs.Data() == nullptr) ||
+            (!retirementSuccessors.Empty() && (retirementSuccessors.Data() == nullptr || explicitOutputs.Empty() ||
+                                               validator.validateRetirements == nullptr)) ||
+            (retirementSuccessors.Empty() != retiredOutputs.Empty() && retirementSuccessors.Empty()) ||
+            retiredOutputs.Count() > m_impl->config.maximumValidationRecordsPerBatch ||
+            retirementSuccessors.Count() > m_impl->config.maximumValidationRecordsPerBatch)
         {
             return fail(RecookFailure::InvalidChange);
         }
+        for (u32 index = 0; index < retiredOutputs.Count(); ++index)
+        {
+            const resources::ResourceReference retired = retiredOutputs[index];
+            if (!retired.IsValid() || !retired.IsTyped() || Contains(explicitOutputs, retired))
+                return fail(RecookFailure::InvalidChange);
+            for (u32 previous = 0; previous < index; ++previous)
+                if (retiredOutputs[previous] == retired)
+                    return fail(RecookFailure::InvalidChange);
+        }
+        for (u32 index = 0u; index < retirementSuccessors.Count(); ++index)
+        {
+            const resources::ResourceReference successor = retirementSuccessors[index];
+            if (!successor.IsValid() || !successor.IsTyped() || !Contains(explicitOutputs, successor))
+                return fail(RecookFailure::InvalidChange);
+            for (u32 previous = 0u; previous < index; ++previous)
+                if (retirementSuccessors[previous] == successor)
+                    return fail(RecookFailure::InvalidChange);
+        }
+        operation->retirements.Resize(retiredOutputs.Count());
+        operation->retirementSuccessors.Resize(retirementSuccessors.Count());
+        if (operation->retirements.Size() != retiredOutputs.Count() ||
+            operation->retirementSuccessors.Size() != retirementSuccessors.Count())
+            return fail(RecookFailure::OutOfMemory);
+        for (u32 index = 0; index < retiredOutputs.Count(); ++index)
+            operation->retirements[index] = retiredOutputs[index];
+        for (u32 index = 0; index < operation->retirementSuccessors.Size(); ++index)
+            operation->retirementSuccessors[index] = retirementSuccessors[index];
         for (u32 index = 0; index < forcedOutputs.Count(); ++index)
         {
             const resources::ResourceReference output = forcedOutputs[index];
@@ -496,7 +632,7 @@ namespace vanguard::assets
         }
 
         operation->stats.affectedOutputs = dirty.Size();
-        if (dirty.Empty())
+        if (dirty.Empty() && retiredOutputs.Empty())
         {
             if (operation->validator.validate != nullptr)
             {
@@ -546,7 +682,7 @@ namespace vanguard::assets
                 return fail(RecookFailure::LimitExceeded);
             }
         }
-        if (roots.Empty())
+        if (roots.Empty() && !dirty.Empty())
         {
             return fail(RecookFailure::IndexQueryFailed);
         }
@@ -558,21 +694,59 @@ namespace vanguard::assets
         {
             return fail(RecookFailure::OutOfMemory);
         }
-        for (u32 index = 0; index < roots.Size(); ++index)
+        for (u32 index = 0; index < roots.Size();)
         {
             if (!ResolveOwnedRequest(*m_impl, roots[index], rootRequests[index]))
             {
+                // Historical VADI edges may remain after a source is deleted.
+                // Keep them as invalidation evidence, but never issue an
+                // unbuildable retired output as a new compiler root. Only the
+                // project owner's authoritative source database can prove its
+                // absence. A current explicit/forced output always fails closed.
+                DependencyRecord historical;
+                const IndexResult found = m_impl->index->Find(roots[index], historical);
+                if (found == IndexResult::Success &&
+                    !Contains(explicitOutputs, roots[index]) &&
+                    !Contains(forcedOutputs, roots[index]) &&
+                    m_impl->config.isConfirmedHistoricalOutput != nullptr &&
+                    m_impl->config.isConfirmedHistoricalOutput(roots[index], m_impl->config.historicalOutputUserData))
+                {
+                    // Compact roots/requests together to preserve request-to-
+                    // identity correspondence in failure reports and rollback.
+                    static_cast<void>(roots.RemoveAt(index));
+                    static_cast<void>(rootRequests.RemoveAt(index));
+                    continue;
+                }
                 return fail(RecookFailure::RequestResolutionFailed);
             }
+            ++index;
+        }
+        operation->stats.rootRequests = roots.Size();
+        if (roots.Empty() && retiredOutputs.Empty())
+        {
+            if (operation->validator.validate != nullptr)
+            {
+                const RecookPreCommitValidationResult validated = operation->validator.validate({}, operation->validator.userData);
+                if (validated != RecookPreCommitValidationResult::Accept)
+                    return fail(validated == RecookPreCommitValidationResult::Reject
+                                    ? RecookFailure::PreCommitRejected : RecookFailure::PreCommitValidationFailed);
+            }
+            SetTerminal(*operation, RecookState::Succeeded, RecookFailure::None);
+            return RecookBatch(this, operation);
         }
         if (m_impl->index->BeginTransaction() != IndexResult::Success)
         {
             return fail(RecookFailure::TransactionFailed);
         }
 
+        const BuildGraphStats graphBefore = m_impl->graph->GetStats();
+        operation->graphCompletedBase = graphBefore.completedOperations;
+        operation->graphFailedBase = graphBefore.failedOperations;
+        operation->graphCancelledBase = graphBefore.cancelledOperations;
+
         for (const OwnedBuildRequest& request : rootRequests)
         {
-            GraphRequest graphRequest = m_impl->graph->Request(request.View(), priority);
+            GraphRequest graphRequest = m_impl->graph->Request(request, priority);
             if (!graphRequest)
             {
                 for (GraphRequest& issued : operation->requests)
@@ -598,6 +772,18 @@ namespace vanguard::assets
                 return fail(RecookFailure::OutOfMemory);
             }
         }
+        const BuildGraphStats graphAfterIssue = m_impl->graph->GetStats();
+        const u64 issuedTerminal =
+            (graphAfterIssue.completedOperations - operation->graphCompletedBase) +
+            (graphAfterIssue.failedOperations - operation->graphFailedBase) +
+            (graphAfterIssue.cancelledOperations - operation->graphCancelledBase);
+        const u64 batchOperations = issuedTerminal + graphAfterIssue.activeOperations;
+        operation->stats.buildOperations = static_cast<u32>(std::min<u64>(batchOperations, ~u32{0}));
+        operation->stats.completedBuildOperations =
+            static_cast<u32>(std::min<u64>(issuedTerminal, operation->stats.buildOperations));
+        // Reuse the already allocated root identities: the first failing graph
+        // request can now be reported without a second per-root allocation.
+        operation->requestRoots.Swap(roots);
         return RecookBatch(this, operation);
     }
 
@@ -621,7 +807,14 @@ namespace vanguard::assets
             }
         }
 
+        const BuildGraphStats graphProgress = m_impl->graph->GetStats();
         concurrency::ScopedLock guard(operation.lock);
+        const u64 terminalProgress =
+            (graphProgress.completedOperations - operation.graphCompletedBase) +
+            (graphProgress.failedOperations - operation.graphFailedBase) +
+            (graphProgress.cancelledOperations - operation.graphCancelledBase);
+        operation.stats.completedBuildOperations = static_cast<u32>(
+            std::min<u64>(terminalProgress, operation.stats.buildOperations));
         const RecookState current = static_cast<RecookState>(operation.state.GetValue());
         if (IsTerminal(current))
         {
@@ -637,8 +830,9 @@ namespace vanguard::assets
 
         bool cancelled = operation.cancelRequested;
         bool failed = false;
-        for (const GraphRequest& request : operation.requests)
+        for (u32 rootIndex = 0u; rootIndex < operation.requests.Size(); ++rootIndex)
         {
+            const GraphRequest& request = operation.requests[rootIndex];
             if (request.GetStatus() == BuildState::Succeeded)
             {
                 ++operation.stats.succeededRoots;
@@ -648,6 +842,32 @@ namespace vanguard::assets
                 ++operation.stats.failedRoots;
                 cancelled = cancelled || request.GetStatus() == BuildState::Cancelled;
                 failed = failed || request.GetStatus() == BuildState::Failed;
+                if (request.GetStatus() == BuildState::Failed &&
+                    operation.rootFailure.rootIndex == ~u32{0})
+                {
+                    RecookRootFailureDetail& detail = operation.rootFailure;
+                    detail.rootIndex = rootIndex;
+                    if (rootIndex < operation.requestRoots.Size())
+                        detail.output = operation.requestRoots[rootIndex];
+                    detail.graphFailure = request.GetError();
+                    detail.buildResult = request.BuildError();
+                    BuildReport report;
+                    if (request.CopyReport(report))
+                    {
+                        for (const BuildDiagnostic& diagnostic : report.GetDiagnostics())
+                        {
+                            if (diagnostic.severity != BuildDiagnosticSeverity::Error)
+                                continue;
+                            const containers::StringView message = report.GetMessage(diagnostic);
+                            const u32 count = std::min<u32>(message.Length(),
+                                                              static_cast<u32>(sizeof(detail.message) - 1u));
+                            if (count != 0u)
+                                std::memcpy(detail.message, message.Data(), count);
+                            detail.message[count] = '\0';
+                            break;
+                        }
+                    }
+                }
             }
         }
         if (cancelled)
@@ -660,55 +880,127 @@ namespace vanguard::assets
             static_cast<void>(m_impl->index->RollbackTransaction());
             SetTerminal(operation, RecookState::Failed, RecookFailure::BuildFailed);
         }
-        else if (operation.validator.validate != nullptr)
+        else
         {
-            containers::DynamicArray<DependencyRecord> evidence(memory::pools::Assets::GetInstance());
-            const IndexResult captured = m_impl->index->CaptureTransactionRecords(
-                evidence, m_impl->config.maximumValidationRecordsPerBatch, m_impl->config.maximumValidationEvidenceBytes);
-            if (captured != IndexResult::Success)
+            bool staged = true;
+            RecookFailure retirementFailure = RecookFailure::TransactionFailed;
+            u64 retirementEvidenceBytes = 0u;
+            for (u32 index = 0u; index < operation.retirements.Size();)
+            {
+                DependencyRecord previous;
+                const IndexResult found = m_impl->index->Find(operation.retirements[index], previous);
+                if (found == IndexResult::NotFound)
+                {
+                    // A previously declared output may never have compiled.
+                    // There is no committed record to retire or hand off.
+                    static_cast<void>(operation.retirements.RemoveAt(index));
+                    continue;
+                }
+                if (found != IndexResult::Success)
+                {
+                    retirementFailure = found == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                                                                         : RecookFailure::TransactionFailed;
+                    staged = false;
+                    break;
+                }
+                const u64 bytes = sizeof(DependencyRecord) +
+                                  static_cast<u64>(previous.dependencies.Size()) * sizeof(BuildDependency) +
+                                  static_cast<u64>(previous.artifacts.Size()) * sizeof(IndexedArtifact);
+                if (retirementEvidenceBytes > m_impl->config.maximumValidationEvidenceBytes ||
+                    bytes > m_impl->config.maximumValidationEvidenceBytes - retirementEvidenceBytes)
+                {
+                    retirementFailure = RecookFailure::LimitExceeded;
+                    staged = false;
+                    break;
+                }
+                retirementEvidenceBytes += bytes;
+                const u32 oldCount = operation.retiredRecords.Size();
+                operation.retiredRecords.PushBack(static_cast<DependencyRecord&&>(previous));
+                if (operation.retiredRecords.Size() != oldCount + 1u)
+                {
+                    retirementFailure = RecookFailure::OutOfMemory;
+                    staged = false;
+                    break;
+                }
+                const IndexResult removal = m_impl->index->StageRemoval(operation.retirements[index]);
+                if (removal != IndexResult::Success)
+                {
+                    retirementFailure = removal == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                                                                           : RecookFailure::TransactionFailed;
+                    staged = false;
+                    break;
+                }
+                ++index;
+            }
+            if (staged && !operation.retirementSuccessors.Empty())
+            {
+                const IndexResult successors = m_impl->index->StageRetirementSuccessors(
+                    {operation.retirementSuccessors.TypedData(), operation.retirementSuccessors.Size()});
+                if (successors != IndexResult::Success)
+                {
+                    retirementFailure = successors == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                                                                               : RecookFailure::TransactionFailed;
+                    staged = false;
+                }
+            }
+            if (!staged)
             {
                 static_cast<void>(m_impl->index->RollbackTransaction());
-                SetTerminal(operation, RecookState::Failed,
-                            captured == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
-                            : captured == IndexResult::LimitExceeded ? RecookFailure::LimitExceeded
-                                                                    : RecookFailure::PreCommitValidationFailed);
+                SetTerminal(operation, RecookState::Failed, retirementFailure);
             }
-            else
+            else if (operation.validator.validate != nullptr || operation.validator.validateRetirements != nullptr)
             {
-                const RecookPreCommitValidationResult validated = operation.validator.validate(
-                    {evidence.TypedData(), evidence.Size()}, operation.validator.userData);
-                if (validated != RecookPreCommitValidationResult::Accept)
+                containers::DynamicArray<DependencyRecord> evidence(memory::pools::Assets::GetInstance());
+                const IndexResult captured = m_impl->index->CaptureTransactionRecords(
+                    evidence, m_impl->config.maximumValidationRecordsPerBatch, m_impl->config.maximumValidationEvidenceBytes);
+                if (captured != IndexResult::Success)
                 {
                     static_cast<void>(m_impl->index->RollbackTransaction());
                     SetTerminal(operation, RecookState::Failed,
-                                validated == RecookPreCommitValidationResult::Reject
-                                    ? RecookFailure::PreCommitRejected
-                                    : RecookFailure::PreCommitValidationFailed);
-                }
-                else if (m_impl->index->CommitTransaction() != IndexResult::Success)
-                {
-                    static_cast<void>(m_impl->index->RollbackTransaction());
-                    SetTerminal(operation, RecookState::Failed, RecookFailure::TransactionFailed);
+                                captured == IndexResult::OutOfMemory ? RecookFailure::OutOfMemory
+                                : captured == IndexResult::LimitExceeded ? RecookFailure::LimitExceeded
+                                                                        : RecookFailure::PreCommitValidationFailed);
                 }
                 else
                 {
-                    // The same deep-copied snapshot that was validated is now
-                    // authoritative committed-delivery evidence. Retain it on
-                    // the batch by O(1) swap so integration owners can move it
-                    // before releasing/resetting the completed operation.
-                    operation.committedRecords.Swap(evidence);
-                    SetTerminal(operation, RecookState::Succeeded, RecookFailure::None);
+                    const containers::ArraySpan<const DependencyRecord> records{evidence.TypedData(), evidence.Size()};
+                    RecookPreCommitValidationResult validated = RecookPreCommitValidationResult::Accept;
+                    if (operation.validator.validate != nullptr)
+                        validated = operation.validator.validate(records, operation.validator.userData);
+                    if (validated == RecookPreCommitValidationResult::Accept && operation.validator.validateRetirements != nullptr)
+                        validated = operation.validator.validateRetirements(
+                            records, {operation.retirements.TypedData(), operation.retirements.Size()},
+                            operation.validator.userData);
+                    if (validated != RecookPreCommitValidationResult::Accept)
+                    {
+                        static_cast<void>(m_impl->index->RollbackTransaction());
+                        SetTerminal(operation, RecookState::Failed,
+                                    validated == RecookPreCommitValidationResult::Reject
+                                        ? RecookFailure::PreCommitRejected
+                                        : RecookFailure::PreCommitValidationFailed);
+                    }
+                    else if (m_impl->index->CommitTransaction() != IndexResult::Success)
+                    {
+                        static_cast<void>(m_impl->index->RollbackTransaction());
+                        SetTerminal(operation, RecookState::Failed, RecookFailure::TransactionFailed);
+                    }
+                    else
+                    {
+                        // Evidence is exactly the accepted committed generation.
+                        operation.committedRecords.Swap(evidence);
+                        SetTerminal(operation, RecookState::Succeeded, RecookFailure::None);
+                    }
                 }
             }
-        }
-        else if (m_impl->index->CommitTransaction() != IndexResult::Success)
-        {
-            static_cast<void>(m_impl->index->RollbackTransaction());
-            SetTerminal(operation, RecookState::Failed, RecookFailure::TransactionFailed);
-        }
-        else
-        {
-            SetTerminal(operation, RecookState::Succeeded, RecookFailure::None);
+            else if (m_impl->index->CommitTransaction() != IndexResult::Success)
+            {
+                static_cast<void>(m_impl->index->RollbackTransaction());
+                SetTerminal(operation, RecookState::Failed, RecookFailure::TransactionFailed);
+            }
+            else
+            {
+                SetTerminal(operation, RecookState::Succeeded, RecookFailure::None);
+            }
         }
         return true;
     }
@@ -748,6 +1040,8 @@ namespace vanguard::assets
             m_impl->stats.rootRequests += operation.stats.rootRequests;
             m_impl->stats.succeededRoots += operation.stats.succeededRoots;
             m_impl->stats.failedRoots += operation.stats.failedRoots;
+            m_impl->stats.buildOperations += operation.stats.buildOperations;
+            m_impl->stats.completedBuildOperations += operation.stats.completedBuildOperations;
             m_impl->stats.completedBatches += operation.stats.completedBatches;
             m_impl->stats.failedBatches += operation.stats.failedBatches;
             m_impl->stats.cancelledBatches += operation.stats.cancelledBatches;

@@ -27,7 +27,7 @@ project "runtime"
         "../source/resources/include", "../source/world/include", "../source/meshes/include", "../source/prefabs/include",
         "../source/crypto/include", "../source/math/include", "../source/io/include", "../source/packages/include",
         "../source/serialization/include", "../source/schemas/include", "../source/reflection/include",
-        "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include", "../source/imported/common/redMath/include",
+        "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include", "../imported/common/redMath/include",
         path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
@@ -67,7 +67,7 @@ project "runtimeViewportTests"
         "../source/world/include", "../source/meshes/include", "../source/textures/include", "../source/streaming/include", "../source/prefabs/include", "../source/materials/include",
         "../source/pipelineCache/include", "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include",
         "../source/input/include", "../source/gameInput/include", "../source/crypto/include", "../source/math/include",
-        "../source/imported/common/redMath/include", "../source/math/adapted/include", path.join(flecs_root, "distr")
+        "../imported/common/redMath/include", "../source/math/adapted/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
@@ -119,7 +119,7 @@ project "runtimeWorldFrameIntegrationTest"
         "../source/resources/include", "../source/world/include", "../source/meshes/include", "../source/prefabs/include",
         "../source/crypto/include", "../source/math/include", "../source/io/include", "../source/packages/include",
         "../source/serialization/include", "../source/schemas/include", "../source/reflection/include",
-        "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include", "../source/imported/common/redMath/include",
+        "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include", "../imported/common/redMath/include",
         path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }

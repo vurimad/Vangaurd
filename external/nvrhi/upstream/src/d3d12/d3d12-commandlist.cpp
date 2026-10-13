@@ -21,6 +21,7 @@
 */
 
 #include "d3d12-backend.h"
+#include "../../../../../source/profiling/include/vanguard/profiling/profiling.hpp"
 #include <pix.h>
 #include <sstream>
 
@@ -236,6 +237,9 @@ namespace nvrhi::d3d12
 
     void CommandList::open()
     {
+        // A closed command list may be reopened without being submitted.
+        // Never carry its speculative state or deferred publications forward.
+        m_StateTracker.beginRecording();
         uint64_t completedInstance = m_Queue->updateLastCompletedInstance();
 
         std::shared_ptr<InternalCommandList> chunk;
@@ -331,6 +335,7 @@ namespace nvrhi::d3d12
 
     std::shared_ptr<CommandListInstance> CommandList::executed(Queue* pQueue)
     {
+        VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/ExecutedList");
         std::shared_ptr<CommandListInstance> instance = m_Instance;
         instance->fence = pQueue->fence;
         instance->submittedInstance = pQueue->lastSubmittedInstance;
@@ -360,17 +365,23 @@ namespace nvrhi::d3d12
             it->fenceCounter = instance->submittedInstance;
         }
 
-        m_StateTracker.commandListSubmitted();
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/ExecutedTracker");
+            m_StateTracker.commandListSubmitted();
+        }
 
         uint64_t submittedVersion = MakeVersion(instance->submittedInstance, m_Desc.queueType, true);
         m_UploadManager.submitChunks(m_RecordingVersion, submittedVersion);
         m_DxrScratchManager.submitChunks(m_RecordingVersion, submittedVersion);
         m_RecordingVersion = 0;
 
-        if (m_LifetimeTracker)
-            checked_cast<CommandListLifetimeTracker*>(m_LifetimeTracker.Get())->push(instance);
-        else
-			checked_cast<CommandListLifetimeTracker*>(pQueue->lifetimeTracker.Get())->push(instance);
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/LifetimePush");
+            if (m_LifetimeTracker)
+                checked_cast<CommandListLifetimeTracker*>(m_LifetimeTracker.Get())->push(instance);
+            else
+                checked_cast<CommandListLifetimeTracker*>(pQueue->lifetimeTracker.Get())->push(instance);
+        }
         return instance;
     }
 

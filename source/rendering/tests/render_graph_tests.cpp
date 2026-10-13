@@ -344,6 +344,40 @@ namespace
         rendering::RenderGraphCache::CacheEntry* const hit = cache.GetGraph(2, firstKey, 1, needsRebuild);
         check(hit == first && !needsRebuild && hit->lastUsedFrame == 2, "graph cache hit preserves the completed entry and updates recency");
 
+        // RF12 contracts are owned by the exact graph-cache revision. A renderer
+        // revision or dependency-topology change must therefore select a cold
+        // entry instead of reusing the prior resource contract.
+        {
+            rendering::RenderGraphCache structuralCache;
+            rendering::RenderGraphKey structuralKey = MakeGraphKey(0x52463132ull);
+            structuralKey.viewCount = 2;
+            structuralKey.views[0] = MakeViewKey(0x10);
+            structuralKey.views[1] = MakeViewKey(0x11);
+            structuralKey.dependencyCount = 1;
+            structuralKey.dependencies[0] = {0, 1, rendering::RenderCameraDependencyOutputs::Color};
+            structuralKey.RebuildHash();
+            rendering::RenderGraphCache::CacheEntry* const structural = structuralCache.GetGraph(20, structuralKey, 2, needsRebuild);
+            check(structural != nullptr && needsRebuild, "RF12 structural graph baseline allocates a cold cache entry");
+            if (structural != nullptr)
+                structural->PostBuildClear();
+
+            rendering::RenderGraphKey rendererRevision = structuralKey;
+            ++rendererRevision.rendererRevision;
+            rendererRevision.RebuildHash();
+            rendering::RenderGraphCache::CacheEntry* const revised = structuralCache.GetGraph(21, rendererRevision, 2, needsRebuild);
+            check(revised != nullptr && revised != structural && needsRebuild,
+                  "RF12 renderer revision change cannot warm-hit a cache-entry-owned resource contract");
+            if (revised != nullptr)
+                revised->PostBuildClear();
+
+            rendering::RenderGraphKey dependencyTopology = structuralKey;
+            dependencyTopology.dependencies[0].outputs = rendering::RenderCameraDependencyOutputs::Final;
+            dependencyTopology.RebuildHash();
+            rendering::RenderGraphCache::CacheEntry* const topology = structuralCache.GetGraph(22, dependencyTopology, 2, needsRebuild);
+            check(topology != nullptr && topology != structural && needsRebuild,
+                  "RF12 graph dependency topology change cannot warm-hit a cache-entry-owned resource contract");
+        }
+
         rendering::RenderGraphKey collisionKey = firstKey;
         collisionKey.featureMask = 2;
         rendering::RenderGraphCache::CacheEntry* const collision = cache.GetGraph(3, collisionKey, 1, needsRebuild);
@@ -393,6 +427,64 @@ namespace
         check(evictionJoined && replacement == entries[1] && replacementNeedsRebuild, "graph cache evicts the least-recently-used entry after execution releases it");
         cache.Clear();
         check(cache.GetGraph(12, firstKey, 1, needsRebuild) != nullptr && needsRebuild, "graph cache invalidation forces reconstruction");
+    }
+
+    void CheckResourceContractRevisionKey(CheckFunction check)
+    {
+        rendering::RenderFlowResourceContractRevisionKey baseline;
+        baseline.hash = 0x5246313252455631ull;
+        baseline.views = 2;
+        baseline.visibleInstances = 17;
+        baseline.geometryWorkItems = 31;
+        baseline.geometryBins = 7;
+        baseline.shellDraws = 5;
+        baseline.shellsPerView = 3;
+        baseline.indirectArgumentCapacity = 11;
+        baseline.shellDrawCount = 4;
+        baseline.outputRegionCount = 2;
+        baseline.outputRegionViews[0] = 1;
+        baseline.outputRegionViews[1] = 0;
+        baseline.outputKind = rendering::RenderViewportOutputKind::Texture;
+        baseline.outputEncoding = rendering::RenderOutputColorEncoding::DisplaySrgb;
+        baseline.textureRestingState = vanguard::rhi::ResourceState::ShaderResourceGraphics;
+        baseline.textureRestingQueue = vanguard::rhi::QueueType::Graphics;
+        baseline.texturePublicationReadiness = rendering::RenderOutputPublicationReadinessKind::ExplicitFence;
+        baseline.diagnosticReadback = true;
+        baseline.hasFrameOutput = true;
+        baseline.hasTextureOutput = true;
+
+        const auto rejectsCollision = [&](auto mutate, const char* const message)
+        {
+            rendering::RenderFlowResourceContractRevisionKey changed = baseline;
+            mutate(changed);
+            changed.hash = baseline.hash;
+            check(!(baseline == changed), message);
+        };
+        check(baseline == baseline, "resource-contract revision key accepts identical exact declaration-shape witnesses");
+        rejectsCollision([](auto& key) { ++key.views; }, "resource-contract revision equality does not trust a digest collision for view capacity");
+        rejectsCollision([](auto& key) { ++key.visibleInstances; }, "resource-contract revision equality witnesses visible-instance capacity");
+        rejectsCollision([](auto& key) { ++key.geometryWorkItems; }, "resource-contract revision equality witnesses geometry-work capacity");
+        rejectsCollision([](auto& key) { ++key.geometryBins; }, "resource-contract revision equality witnesses geometry-bin capacity");
+        rejectsCollision([](auto& key) { ++key.shellDraws; }, "resource-contract revision equality witnesses shell-draw capacity");
+        rejectsCollision([](auto& key) { ++key.shellsPerView; }, "resource-contract revision equality witnesses per-view shell capacity");
+        rejectsCollision([](auto& key) { ++key.indirectArgumentCapacity; }, "resource-contract revision equality witnesses indirect-argument capacity");
+        rejectsCollision([](auto& key) { ++key.shellDrawCount; }, "resource-contract revision equality witnesses authored shell-draw count");
+        rejectsCollision([](auto& key) { key.outputRegionViews[0] ^= 1u; }, "resource-contract revision equality witnesses ordered output-region view membership");
+        rejectsCollision([](auto& key) { key.outputRegionCount = 1; }, "resource-contract revision equality witnesses output-region cardinality");
+        rejectsCollision([](auto& key) { key.outputKind = rendering::RenderViewportOutputKind::Presentation; }, "resource-contract revision equality witnesses frame-output kind");
+        rejectsCollision([](auto& key) { key.outputEncoding = rendering::RenderOutputColorEncoding::SceneLinear; }, "resource-contract revision equality witnesses frame-output encoding");
+        rejectsCollision([](auto& key) { key.textureRestingState = vanguard::rhi::ResourceState::Common; }, "resource-contract revision equality witnesses texture terminal state");
+        rejectsCollision([](auto& key) { key.textureRestingQueue = vanguard::rhi::QueueType::Compute; }, "resource-contract revision equality witnesses texture terminal queue");
+        rejectsCollision([](auto& key) { key.texturePublicationReadiness = rendering::RenderOutputPublicationReadinessKind::SameQueueContinuation; },
+                         "resource-contract revision equality witnesses texture publication readiness");
+        rejectsCollision([](auto& key) { key.diagnosticReadback = false; }, "resource-contract revision equality witnesses diagnostic-readback presence");
+        rejectsCollision([](auto& key) { key.hasFrameOutput = false; }, "resource-contract revision equality witnesses frame-output presence");
+        rejectsCollision([](auto& key) { key.hasTextureOutput = false; }, "resource-contract revision equality witnesses texture-output presence");
+
+        rendering::RenderFlowResourceContractRevisionKey malformed = baseline;
+        malformed.outputRegionCount = rendering::MaximumRenderViewsPerFamily + 1u;
+        malformed.hash = baseline.hash;
+        check(!(baseline == malformed), "resource-contract revision equality rejects malformed output-region cardinality before fixed-array access");
     }
 
     void CheckDeclarationPermutation(const u32 nodeCount, CheckFunction check)
@@ -676,6 +768,7 @@ void RunRenderGraphTests(void (*check)(bool condition, const char* message) noex
     CheckCpuBridgeTopology(check);
     CheckGraphComposition(check);
     CheckGraphCache(check);
+    CheckResourceContractRevisionKey(check);
     CheckDeclarationPermutation(1021, check);
     CheckDeclarationPermutation(2042, check);
     CheckPreSchedulingCapacityFailure(check);

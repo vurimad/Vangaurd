@@ -4,8 +4,9 @@
 
 namespace vanguard::rendering
 {
-    /// Non-owning access to one proxy while its scene is sealed for GPU publication.
-    /// Every pointer addresses authoritative RenderScene storage; no proxy payload is copied.
+    /// Non-owning access to one proxy while its completed scene epoch remains under
+    /// the renderer owner boundary. Every pointer addresses authoritative
+    /// RenderScene storage; no proxy payload is copied.
     struct RenderSceneGpuReadView
     {
         const RenderProxyTransform* transform = nullptr;
@@ -14,6 +15,11 @@ namespace vanguard::rendering
         const u64* layerMask = nullptr;
         const u32* visibilityMask = nullptr;
         const RenderProxySpatialMode* spatialMode = nullptr;
+        const GpuInstanceIndex* gpuInstanceIndex = nullptr;
+        // Borrowed from the exact completed scene epoch. Render-frame owner
+        // completion fences the next scene mutation, matching the common-data
+        // pointer lifetime above. Never Retain/Reset this binding on a worker.
+        const MeshDrawableBinding* meshDrawable = nullptr;
         RenderProxyPayloadKind payloadKind = RenderProxyPayloadKind::None;
 
         const RenderLightKind* lightKind = nullptr;

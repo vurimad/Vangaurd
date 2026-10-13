@@ -220,7 +220,7 @@ namespace
         CompiledShader vertex;
         CompiledShader pixel;
         if (!Compile("struct VSInput { float3 p : POSITION; uint2 draw0 : VG_DRAW0; uint2 draw1 : VG_DRAW1; }; cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; float4 main(VSInput input) : SV_Position { float offset = float((input.draw0.x ^ input.draw1.x) & 1u) * 0.000001; return float4(input.p * drawScale.xyz + float3(offset, 0.0, 0.0), 1.0); }", "vs_5_0", vertex) ||
-            !Compile("cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; struct PSOut { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; }; PSOut main() { PSOut o; o.c0=float4(0.25,0.5,0.75,worldCellSize); o.c1=float4(0,0,1,0.5); o.c2=float4(0,0,0,0); return o; }", "ps_5_0", pixel) ||
+            !Compile("cbuffer DrawContext : register(b0) { float4 drawScale; float worldCellSize; uint reserved; }; struct PSOut { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3; float4 c4 : SV_Target4; }; PSOut main() { PSOut o; o.c0=float4(0.25,0.5,0.75,worldCellSize); o.c1=float4(0,0,1,0.5); o.c2=float4(0,0,0,0); o.c3=float4(0.04,0.04,0.04,0); o.c4=float4(0,0,1,0); return o; }", "ps_5_0", pixel) ||
             !BuildTexture(output.textureBytes, variant + 1u))
             return false;
 
@@ -256,7 +256,9 @@ namespace
                                            {shader::HashInterfaceName("VG_DRAW"), 1, 2, shader::NumericClass::UnsignedInteger, 2, 32}};
         const shader::FragmentOutput fragmentOutputs[]{{0x3c040400ull, 0, 0, shader::NumericClass::FloatingPoint, 0x0f},
                                                        {0x3c040401ull, 1, 0, shader::NumericClass::FloatingPoint, 0x0f},
-                                                       {0x3c040402ull, 2, 0, shader::NumericClass::FloatingPoint, 0x0f}};
+                                                       {0x3c040402ull, 2, 0, shader::NumericClass::FloatingPoint, 0x0f},
+                                                       {0x3c040403ull, 3, 0, shader::NumericClass::FloatingPoint, 0x0f},
+                                                       {0x3c040404ull, 4, 0, shader::NumericClass::FloatingPoint, 0x0f}};
 
         shader::MaterialContractBuildDescription contract;
         contract.domain.name = 0x3c040500ull;
@@ -328,8 +330,7 @@ namespace
 
         for (vanguard::u32 index = 0; index < output.parameters.size(); ++index)
             output.parameters[index] = static_cast<vanguard::u8>(variant * 37u + index * 11u + 5u);
-        const material::TechniqueBuildRecord techniques[]{{MaterialTechnique, output.pipelineReference, &pipelineFile},
-                                                          {rendering::standardRenderPhases::Transparent.value, output.pipelineReference, &pipelineFile}};
+        const material::TechniqueBuildRecord technique{MaterialTechnique, output.pipelineReference, &pipelineFile};
         const material::ConstantValueBuildRecord constant{MaterialParameters, output.parameters.data(), static_cast<vanguard::u32>(output.parameters.size())};
         const std::array<material::ResourceValueBuildRecord, 2> resources{{
             {MaterialTextureRole, 0, output.requiredTexture, resources::DependencyKind::Required},
@@ -340,7 +341,7 @@ namespace
         materialDescription.name = 0x3c040800ull + variant;
         materialDescription.shader = output.shaderReference;
         materialDescription.shaderReflection = &shaderFile;
-        materialDescription.techniques = techniques;
+        materialDescription.techniques = {&technique, 1};
         materialDescription.constants = {&constant, 1};
         materialDescription.resources = {resources.data(), static_cast<vanguard::u32>(resources.size())};
         materialDescription.resourceTypeCompatibility = {&compatibility, 1};
@@ -736,8 +737,10 @@ namespace
         const rendering::RenderPhaseSet phases = service != nullptr ? service->GetDefaultCameraPhases() : rendering::RenderPhaseSet{};
         const rendering::RenderPhaseId depthPrepass = service != nullptr ? service->GetRenderPhases().Find(rendering::standardRenderPhases::DepthPrepass) : rendering::RenderPhaseId{};
         const rendering::RenderPhaseId opaque = service != nullptr ? service->GetRenderPhases().Find(rendering::standardRenderPhases::Opaque) : rendering::RenderPhaseId{};
+        const rendering::RenderPhaseId transparent = service != nullptr ? service->GetRenderPhases().Find(rendering::standardRenderPhases::Transparent) : rendering::RenderPhaseId{};
         const auto& depthContext = rendering::StandardCameraMeshDrawPhases[0];
         const auto& opaqueContext = rendering::StandardCameraMeshDrawPhases[1];
+        const auto& transparentContext = rendering::StandardCameraMeshDrawPhases[2];
         bool worldSeamReady = false;
         if (service != nullptr)
         {
@@ -748,12 +751,19 @@ namespace
                              worldRendering.GetDefaultCameraPhases() == phases;
         }
         const bool ready = service != nullptr && service->GetMeshResidency().IsInitialized() && phases.Contains(depthPrepass) && phases.Contains(opaque) &&
+                           phases.Contains(transparent) &&
                            worldSeamReady &&
                            depthContext.phase == rendering::standardRenderPhases::DepthPrepass && opaqueContext.phase == rendering::standardRenderPhases::Opaque &&
                            depthContext.attachments.depthStencilFormat == pipeline::Format::D32Float && depthContext.attachments.colorCount == 0 &&
-                           opaqueContext.attachments.colorCount == 3 && opaqueContext.attachments.colors[0].format == pipeline::Format::R8G8B8A8UNorm &&
+                           opaqueContext.attachments.colorCount == 5 && opaqueContext.attachments.colors[0].format == pipeline::Format::R8G8B8A8UNorm &&
                            opaqueContext.attachments.colors[1].format == pipeline::Format::R16G16B16A16Float && opaqueContext.attachments.colors[2].format == pipeline::Format::R16G16B16A16Float &&
-                           opaqueContext.attachments.depthStencilFormat == pipeline::Format::D32Float;
+                           opaqueContext.attachments.colors[3].format == pipeline::Format::R16G16B16A16Float &&
+                           opaqueContext.attachments.colors[4].format == pipeline::Format::R16G16B16A16Float &&
+                           opaqueContext.attachments.depthStencilFormat == pipeline::Format::D32Float &&
+                           transparentContext.phase == rendering::standardRenderPhases::Transparent &&
+                           transparentContext.attachments.colorCount == 1 &&
+                           transparentContext.attachments.colors[0].format == pipeline::Format::R16G16B16A16Float &&
+                           transparentContext.attachments.depthStencilFormat == pipeline::Format::D32Float;
         const bool shutdown = host.Shutdown(&failure);
         return ready && shutdown && !rhi::IsInitialized();
     }
@@ -938,7 +948,9 @@ int main(const int argc, char** const argv)
     const rendering::RenderPhaseSet defaultCameraPhases = renderingService != nullptr ? renderingService->GetDefaultCameraPhases() : rendering::RenderPhaseSet{};
     const rendering::RenderPhaseId defaultDepthPrepass = renderingService != nullptr ? renderingService->GetRenderPhases().Find(rendering::standardRenderPhases::DepthPrepass) : rendering::RenderPhaseId{};
     const rendering::RenderPhaseId defaultOpaque = renderingService != nullptr ? renderingService->GetRenderPhases().Find(rendering::standardRenderPhases::Opaque) : rendering::RenderPhaseId{};
-    Check(renderingService != nullptr && renderingService->GetMeshResidency().IsInitialized() && defaultCameraPhases.Contains(defaultDepthPrepass) && defaultCameraPhases.Contains(defaultOpaque),
+    const rendering::RenderPhaseId defaultTransparent = renderingService != nullptr ? renderingService->GetRenderPhases().Find(rendering::standardRenderPhases::Transparent) : rendering::RenderPhaseId{};
+    Check(renderingService != nullptr && renderingService->GetMeshResidency().IsInitialized() && defaultCameraPhases.Contains(defaultDepthPrepass) && defaultCameraPhases.Contains(defaultOpaque) &&
+              defaultCameraPhases.Contains(defaultTransparent),
           "RenderingService resolves the standard default camera phases and owns mesh draw policy in shared residency");
     Check(renderingService != nullptr && engine::tests::RunStaticSurfaceNativeProof(),
           "generated float/quantized static-surface GBuffer/depth pipeline variants create through the low-level native pipeline-interface path");

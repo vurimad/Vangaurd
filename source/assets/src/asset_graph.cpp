@@ -228,7 +228,8 @@ namespace vanguard::assets
         }
 
         [[nodiscard]] BuildOperation* CreateOperation(const BuildRequest& request, const BuildFingerprint& key, const BuildPriority priority,
-                                                      BuildFailure& failure) noexcept
+                                                      BuildFailure& failure,
+                                                      const OwnedBuildRequest* const sourceOwner = nullptr) noexcept
         {
             if (operations.Size() >= config.maximumKnownOperations)
             {
@@ -256,7 +257,10 @@ namespace vanguard::assets
             operation->requestKey = key;
             operation->priority = priority;
             operation->requestBytes = requestBytes;
-            if (!operation->request.CopyFrom(request) || !CreateCompletion(*operation))
+            const bool copied = sourceOwner != nullptr && sourceOwner->SharedSourceStorageByteCount() != 0u
+                                    ? operation->request.CopyFromSharingSource(request, *sourceOwner)
+                                    : operation->request.CopyFrom(request);
+            if (!copied || !CreateCompletion(*operation))
             {
                 stats.queuedRequestBytes -= requestBytes;
                 VANGUARD_DELETE(operation);
@@ -451,7 +455,8 @@ namespace vanguard::assets
             }
         }
 
-        [[nodiscard]] BuildOperation* ResolveRequest(const BuildRequest& request, const BuildPriority priority, BuildFailure& failure) noexcept
+        [[nodiscard]] BuildOperation* ResolveRequest(const BuildRequest& request, const BuildPriority priority, BuildFailure& failure,
+                                                     const OwnedBuildRequest* const sourceOwner = nullptr) noexcept
         {
             const BuildFingerprint key = RequestKey(request);
             lock.Acquire();
@@ -471,7 +476,7 @@ namespace vanguard::assets
                 }
                 return operation;
             }
-            operation = CreateOperation(request, key, priority, failure);
+            operation = CreateOperation(request, key, priority, failure, sourceOwner);
             if (operation == nullptr)
             {
                 lock.Release();
@@ -1129,6 +1134,28 @@ namespace vanguard::assets
         {
             static_cast<void>(m_impl->Schedule(*operation));
         }
+        return GraphRequest(this, operation);
+    }
+
+    GraphRequest BuildGraph::Request(const OwnedBuildRequest& owned, const BuildPriority priority) noexcept
+    {
+        const BuildRequest request = owned.View();
+        if (m_impl == nullptr || !request.IsValid())
+            return {};
+        concurrency::ScopedLock requestGuard(m_impl->requestLock);
+        m_impl->lock.Acquire();
+        ++m_impl->stats.issuedRequests;
+        m_impl->lock.Release();
+        BuildFailure failure = BuildFailure::None;
+        BuildOperation* const operation = m_impl->ResolveRequest(request, priority, failure, &owned);
+        if (operation == nullptr)
+            return {};
+        m_impl->lock.Acquire();
+        ++operation->externalInterests;
+        ++m_impl->stats.externalRequests;
+        m_impl->lock.Release();
+        if (!operation->scheduled && !operation->finished.TryWait())
+            static_cast<void>(m_impl->Schedule(*operation));
         return GraphRequest(this, operation);
     }
 

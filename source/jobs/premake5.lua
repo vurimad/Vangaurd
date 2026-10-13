@@ -1,4 +1,4 @@
-local importedRoot = "../imported/common"
+local importedRoot = "../../imported/common"
 local redSystemRoot = path.join(importedRoot, "redSystem")
 local redMemoryRoot = path.join(importedRoot, "redMemory")
 local redMathRoot = path.join(importedRoot, "redMath")
@@ -6,7 +6,7 @@ local redContainersRoot = path.join(importedRoot, "redContainers")
 local redIORoot = path.join(importedRoot, "redIO")
 local redCoreRoot = path.join(importedRoot, "redCore")
 local redJobsRoot = path.join(importedRoot, "redJobs2")
-local nvToolsRoot = path.getabsolute("../imported/external/nvToolsExt")
+local nvToolsRoot = path.getabsolute("../../imported/external/nvToolsExt")
 
 local function applyRedCompatibilitySettings()
     language "C++"

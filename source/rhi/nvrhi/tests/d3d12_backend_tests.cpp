@@ -28,9 +28,11 @@
 #include <vanguard/materials/materials.hpp>
 #include <vanguard/meshes/meshes.hpp>
 #include <vanguard/window/window_manager.hpp>
+#include "../../../../external/nvrhi/upstream/src/common/state-tracking.h"
 
 #include <cstdio>
 #include <d3dcompiler.h>
+#include <new>
 #include <thread>
 #include <Windows.h>
 
@@ -511,6 +513,90 @@ namespace
         return config;
     }
 
+    // Exercises the common tracker without a native command list. In particular,
+    // close/open without execution must abandon deferred publications and all
+    // pointer-keyed state from the preceding recording.
+    [[nodiscard]] bool TestNvrhiTrackerRecordingEpoch()
+    {
+        struct Messages final : nvrhi::IMessageCallback
+        {
+            unsigned errors = 0;
+            void message(nvrhi::MessageSeverity severity, const char*) override
+            {
+                if (severity == nvrhi::MessageSeverity::Error)
+                    ++errors;
+            }
+        } messages;
+
+        nvrhi::CommandListResourceStateTracker tracker(&messages);
+        nvrhi::BufferDesc bufferDesc{};
+        nvrhi::BufferStateExtension buffer(bufferDesc);
+        nvrhi::TextureDesc textureDesc{};
+        textureDesc.keepInitialState = true;
+        textureDesc.initialState = nvrhi::ResourceStates::Common;
+        nvrhi::TextureStateExtension texture(textureDesc);
+
+        tracker.beginRecording();
+        tracker.beginTrackingBufferState(&buffer, nvrhi::ResourceStates::Common);
+        tracker.setPermanentBufferState(&buffer, nvrhi::ResourceStates::CopyDest);
+        tracker.requireTextureState(&texture, nvrhi::AllSubresources, nvrhi::ResourceStates::CopyDest);
+        tracker.keepTextureInitialStates();
+        tracker.keepBufferInitialStates();
+        // Abandon this closed, never-executed recording and then submit an
+        // unrelated recording: neither global resource may be modified.
+        tracker.beginRecording();
+        if (tracker.getBufferState(&buffer) != nvrhi::ResourceStates::Unknown)
+            return false;
+        tracker.commandListSubmitted();
+        if (buffer.permanentState != nvrhi::ResourceStates::Unknown || texture.stateInitialized)
+            return false;
+
+        tracker.beginRecording();
+        tracker.beginTrackingBufferState(&buffer, nvrhi::ResourceStates::Common);
+        tracker.setPermanentBufferState(&buffer, nvrhi::ResourceStates::CopyDest);
+        tracker.requireTextureState(&texture, nvrhi::AllSubresources, nvrhi::ResourceStates::CopyDest);
+        tracker.keepTextureInitialStates();
+        tracker.keepBufferInitialStates();
+        tracker.commandListSubmitted();
+        if (buffer.permanentState != nvrhi::ResourceStates::CopyDest || !texture.stateInitialized)
+            return false;
+
+        // Recycle exactly the same address with a different logical buffer.
+        // A retained stale key must not make the new recording inherit state.
+        alignas(nvrhi::BufferStateExtension) unsigned char slot[sizeof(nvrhi::BufferStateExtension)];
+        tracker.beginRecording();
+        auto* first = new (slot) nvrhi::BufferStateExtension(bufferDesc);
+        tracker.beginTrackingBufferState(first, nvrhi::ResourceStates::CopySource);
+        first->~BufferStateExtension();
+        tracker.beginRecording();
+        auto* second = new (slot) nvrhi::BufferStateExtension(bufferDesc);
+        const bool pristine = tracker.getBufferState(second) == nvrhi::ResourceStates::Unknown;
+        tracker.beginTrackingBufferState(second, nvrhi::ResourceStates::Common);
+        const bool reset = tracker.getBufferState(second) == nvrhi::ResourceStates::Common;
+        second->~BufferStateExtension();
+        tracker.beginRecording();
+        if (!pristine || !reset)
+            return false;
+
+        // Exercise the bounded-table overflow path without imposing a
+        // semantic limit on the number of resources in one recording.
+        constexpr size_t StressBuffers = 4096;
+        std::vector<nvrhi::BufferStateExtension> extensions;
+        extensions.reserve(StressBuffers);
+        for (size_t i = 0; i < StressBuffers; ++i)
+        {
+            extensions.emplace_back(bufferDesc);
+            tracker.beginTrackingBufferState(&extensions.back(), nvrhi::ResourceStates::Common);
+        }
+        for (auto& extension : extensions)
+        {
+            if (tracker.getBufferState(&extension) != nvrhi::ResourceStates::Common)
+                return false;
+        }
+        tracker.commandListSubmitted();
+        return messages.errors == 0;
+    }
+
     [[nodiscard]] bool TestResourceLifetimeManager() noexcept
     {
         FenceHarness fences{};
@@ -614,6 +700,57 @@ namespace
             return false;
         emergencyLifetime.ForceShutdownAfterGpuIdle();
         return destructions.destroyed.GetValue() == 5;
+    }
+
+    [[nodiscard]] bool TestOwnedSubmissionFencePublication() noexcept
+    {
+        // A closed command-list payload owns every reference through fence
+        // publication and Release. Its owned fast path must be equivalent to
+        // RecordUse without an extra transient AddRef/Release for each use.
+        FenceHarness fences{};
+        DestructionHarness destructions{};
+        gpu::backend::ResourceLifetimeManager lifetime;
+        if (!lifetime.Initialize(SmallLifetimeConfig(), &IsFenceComplete, &fences))
+            return false;
+
+        const gpu::ResourceRef resource = lifetime.Create(gpu::ResourceKind::Buffer, nullptr, &DestroyResource, &destructions);
+        if (!resource || lifetime.GetRefCount(resource) != 1 ||
+            !lifetime.RecordOwnedUse(resource, gpu::QueueType::Graphics, 4) ||
+            !lifetime.RecordOwnedUse(resource, gpu::QueueType::Graphics, 3) ||
+            !lifetime.RecordOwnedUse(resource, gpu::QueueType::Compute, 7) ||
+            !lifetime.RecordOwnedUse(resource, gpu::QueueType::Copy, 2) ||
+            lifetime.GetRefCount(resource) != 1)
+            return false;
+        const gpu::backend::FenceSet lastUse = lifetime.GetLastUse(resource);
+        if (lastUse.graphics != 4 || lastUse.compute != 7 || lastUse.copy != 2 ||
+            lifetime.RecordOwnedUse(resource, gpu::QueueType::Graphics, 0) ||
+            lifetime.RecordOwnedUse(resource, static_cast<gpu::QueueType>(3), 8) ||
+            lifetime.GetRefCount(resource) != 1 || lifetime.Release(resource) != 0)
+            return false;
+
+        lifetime.SealRetirementEpoch({4, 7, 2});
+        fences.completed[0].SetValue(4);
+        fences.completed[1].SetValue(6);
+        fences.completed[2].SetValue(2);
+        lifetime.CollectGarbage();
+        lifetime.WaitForReclamation();
+        if (destructions.destroyed.GetValue() != 0)
+            return false;
+        fences.completed[1].SetValue(7);
+        lifetime.CollectGarbage();
+        lifetime.WaitForReclamation();
+        if (destructions.destroyed.GetValue() != 1 || !lifetime.IsNativeReleaseComplete(resource))
+            return false;
+
+        const gpu::ResourceRef replacement = lifetime.Create(gpu::ResourceKind::Buffer, nullptr, &DestroyResource, &destructions);
+        if (!replacement || replacement.Index() != resource.Index() || replacement.GetGeneration() == resource.GetGeneration() ||
+            lifetime.RecordOwnedUse(resource, gpu::QueueType::Graphics, 10) || lifetime.GetLastUse(replacement).graphics != 0 ||
+            lifetime.Release(replacement) != 0)
+            return false;
+        lifetime.SealRetirementEpoch({4, 7, 2});
+        lifetime.CollectGarbage();
+        lifetime.WaitForReclamation();
+        return destructions.destroyed.GetValue() == 2 && lifetime.ShutdownAfterGpuIdle();
     }
 
     [[nodiscard]] bool TestRetirementBucketPressure() noexcept
@@ -833,6 +970,94 @@ namespace
         return !clean.IsValid() && !gpu::BindCommandList(cleanStale, &staleFailure) && staleFailure.code == gpu::FailureCode::InvalidCommandList;
     }
 
+    [[nodiscard]] bool TestNativeCommandListSubmissionBatchSizes(gpu::Failure& failure) noexcept
+    {
+        // RF18: the common native submission uses inline pointer storage, but
+        // batches larger than that inline capacity must retain identical order,
+        // submission, and retirement semantics through the dynamic fallback.
+        // The physical residency allocation is deliberately shared by every
+        // command list: the submit-wide union must prepare it exactly once.
+        constexpr vanguard::u32 MaximumTestBatch = 32;
+        constexpr vanguard::u32 BatchSizes[]{1, 16, 17, MaximumTestBatch};
+        gpu::BufferDesc desc{};
+        desc.size = 256;
+        desc.usage = gpu::BufferUsage::CopyDestination | gpu::BufferUsage::CopySource;
+        desc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer shared(gpu::AdoptReference, gpu::CreateBuffer(desc, {}, &failure));
+        if (!shared)
+            return false;
+        const gpu::ResourceRef residencyResource(shared.GetRef());
+        for (const vanguard::u32 batchSize : BatchSizes)
+        {
+            gpu::CommandListRef commands[MaximumTestBatch]{};
+            for (vanguard::u32 index = 0; index < batchSize; ++index)
+            {
+                commands[index] = gpu::CreateCommandList(gpu::CommandListType::Default,
+                                                          0x5246313842415443ull + batchSize * MaximumTestBatch + index, &failure);
+                if (!commands[index] || !gpu::BindCommandList(commands[index], &failure) ||
+                    !gpu::AdmitCommandListResources({&residencyResource, 1}, &failure))
+                {
+                    gpu::UnbindCommandList();
+                    for (gpu::CommandListRef& command : commands)
+                        gpu::DiscardCommandList(command);
+                    return false;
+                }
+                gpu::UnbindCommandList();
+            }
+            const gpu::CommandListRef stale = commands[batchSize - 1];
+            const gpu::ResidencyStats before = gpu::GetResidencyStats();
+            gpu::GpuFence completion{};
+            if (!gpu::CloseAndSubmitCommandLists("RF18 native command-list batch", {commands, batchSize}, gpu::CommandListSyncType::None,
+                                                 completion, &failure) || !completion.IsValid() ||
+                !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
+                return false;
+            const gpu::ResidencyStats after = gpu::GetResidencyStats();
+            if (after.automaticWorkingSetChecks != before.automaticWorkingSetChecks + 1u)
+            {
+                std::printf("[rhiNvrhiTests] residency union expected one physical working-set check for %u command lists; observed %llu\n",
+                            batchSize, static_cast<unsigned long long>(after.automaticWorkingSetChecks - before.automaticWorkingSetChecks));
+                return false;
+            }
+            gpu::Failure staleFailure{};
+            if (gpu::BindCommandList(stale, &staleFailure) || staleFailure.code != gpu::FailureCode::InvalidCommandList)
+                return false;
+        }
+        // A physical allocation referenced by graphics and async compute is
+        // prepared once globally, but each queue still must publish its own
+        // completion fence so neither queue's lifetime evidence is lost.
+        gpu::CommandListRef crossQueue[] = {
+            gpu::CreateCommandList(gpu::CommandListType::Default, 0x524643524f535347ull, &failure),
+            gpu::CreateCommandList(gpu::CommandListType::Compute, 0x524643524f535343ull, &failure)};
+        for (gpu::CommandListRef command : crossQueue)
+        {
+            if (!command || !gpu::BindCommandList(command, &failure) ||
+                !gpu::AdmitCommandListResources({&residencyResource, 1}, &failure))
+            {
+                gpu::UnbindCommandList();
+                for (gpu::CommandListRef discarded : crossQueue)
+                    gpu::DiscardCommandList(discarded);
+                return false;
+            }
+            gpu::UnbindCommandList();
+        }
+        const gpu::ResidencyStats beforeCrossQueue = gpu::GetResidencyStats();
+        gpu::SubmissionReceipt crossQueueReceipt{};
+        if (!gpu::CloseAndSubmitCommandLists("RF residency graphics+compute union", {crossQueue, 2},
+                                             gpu::CommandListSyncType::ForkAsyncCompute, crossQueueReceipt, &failure) ||
+            !crossQueueReceipt.IsValid() || crossQueueReceipt.residency.graphics == 0 || crossQueueReceipt.residency.compute == 0 ||
+            crossQueueReceipt.completion.queue != gpu::QueueType::Compute ||
+            !gpu::WaitForGpuFence({gpu::QueueType::Graphics, crossQueueReceipt.residency.graphics}, 5'000'000'000ull, &failure) ||
+            !gpu::WaitForGpuFence(crossQueueReceipt.completion, 5'000'000'000ull, &failure))
+            return false;
+        const gpu::ResidencyStats afterCrossQueue = gpu::GetResidencyStats();
+        if (afterCrossQueue.automaticWorkingSetChecks != beforeCrossQueue.automaticWorkingSetChecks + 1u)
+        {
+            std::printf("[rhiNvrhiTests] graphics+compute shared allocation was prepared more than once\n");
+            return false;
+        }
+        return true;
+    }
+
     [[nodiscard]] bool TestManualTextureUploadTransition(gpu::Failure& failure) noexcept
     {
         // Streaming candidate textures declare keepInitialState with a shader-read entry state. With NVRHI
@@ -979,6 +1204,230 @@ namespace
         const bool result = gpu::GetQueryResult(timestamps.GetRef(), 0, timestamp, &failure);
         gpu::ReleaseQueries(timestamps.GetRef());
         return result || failed("query result");
+    }
+
+    [[nodiscard]] bool TestCompiledNativeBarrierBatch(gpu::Failure& failure) noexcept
+    {
+        const auto failed = [&failure](const char* const stage) noexcept
+        {
+            std::fprintf(stderr, "[rhiNvrhiTests] compiled native barrier batch failed at %s: code=%u message=%s\n", stage,
+                         static_cast<unsigned>(failure.code), failure.message);
+            return false;
+        };
+
+        gpu::BufferDesc bufferDesc{};
+        bufferDesc.size = 256;
+        bufferDesc.usage = gpu::BufferUsage::CopySource | gpu::BufferUsage::CopyDestination | gpu::BufferUsage::UnorderedAccess;
+        bufferDesc.initialState = gpu::ResourceState::Common;
+        gpu::Buffer buffer(gpu::AdoptReference, gpu::CreateBuffer(bufferDesc, {}, &failure));
+
+        gpu::TextureDesc textureDesc{};
+        textureDesc.extent = {8, 8, 1};
+        textureDesc.mipCount = 2;
+        textureDesc.format = gpu::Format::R8G8B8A8UNorm;
+        textureDesc.usage = gpu::TextureUsage::CopySource | gpu::TextureUsage::CopyDestination | gpu::TextureUsage::UnorderedAccess;
+        textureDesc.initialState = gpu::ResourceState::Common;
+        gpu::Texture texture(gpu::AdoptReference, gpu::CreateTexture(textureDesc, {}, &failure));
+        if (!buffer || !texture)
+            return failed("resource creation");
+
+        gpu::ResourceRef admitted[]{gpu::ResourceRef(buffer.GetRef()), gpu::ResourceRef(texture.GetRef())};
+        if (admitted[1].value < admitted[0].value)
+        {
+            const gpu::ResourceRef swap = admitted[0];
+            admitted[0] = admitted[1];
+            admitted[1] = swap;
+        }
+        const vanguard::u32 bufferBinding = admitted[0] == gpu::ResourceRef(buffer.GetRef()) ? 0u : 1u;
+        const vanguard::u32 textureBinding = 1u - bufferBinding;
+
+        gpu::CommandListRef commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246313642415443ull, &failure);
+        if (!commands || !gpu::BindCommandList(commands, &failure))
+            return failed("command-list bind");
+
+        const gpu::CompiledBarrier preAdmissionBarrier{
+            0u, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, {}};
+        if (gpu::ExecuteCompiledBarriers({&preAdmissionBarrier, 1}, &failure) || failure.code != gpu::FailureCode::InvalidCommandList)
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("pre-admission rejection");
+        }
+
+        if (!gpu::AdmitCommandListResources({admitted, 2}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("resource admission");
+        }
+
+        const gpu::SubresourceRange mipZero{0, 1, 0, 1};
+        const gpu::SubresourceRange wholeTexture{0, 2, 0, 1};
+        gpu::CommandListEntryState entryStates[3]{};
+        if (bufferBinding == 0)
+        {
+            entryStates[0] = {gpu::ResourceRef(buffer.GetRef()), gpu::ResourceState::Common, {}};
+            entryStates[1] = {gpu::ResourceRef(texture.GetRef()), gpu::ResourceState::Common, {0, 0}};
+            entryStates[2] = {gpu::ResourceRef(texture.GetRef()), gpu::ResourceState::Common, {1, 0}};
+        }
+        else
+        {
+            entryStates[0] = {gpu::ResourceRef(texture.GetRef()), gpu::ResourceState::Common, {0, 0}};
+            entryStates[1] = {gpu::ResourceRef(texture.GetRef()), gpu::ResourceState::Common, {1, 0}};
+            entryStates[2] = {gpu::ResourceRef(buffer.GetRef()), gpu::ResourceState::Common, {}};
+        }
+        if (!gpu::SeedCommandListStates({entryStates, 3}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("entry-state seed");
+        }
+
+        const gpu::CompiledBarrier badBefore[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::CopySource, gpu::ResourceState::CopyDestination, {}}};
+        if (gpu::ExecuteCompiledBarriers({badBefore, 1}, &failure) || failure.code != gpu::FailureCode::ResourceStateMismatch)
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("before-state rejection");
+        }
+
+        const gpu::CompiledBarrier firstBatch[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, {}},
+            {textureBinding, gpu::CompiledBarrierKind::TextureTransition, gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, mipZero}};
+        const gpu::CompiledBarrier secondBatch[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::CopyDestination, gpu::ResourceState::UnorderedAccess, {}},
+            {textureBinding, gpu::CompiledBarrierKind::TextureTransition, gpu::ResourceState::CopyDestination, gpu::ResourceState::Common, mipZero}};
+        const gpu::CompiledBarrier bufferUav[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferUav, gpu::ResourceState::Unknown, gpu::ResourceState::Unknown, {}}};
+        const gpu::CompiledBarrier bufferRestore[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::UnorderedAccess, gpu::ResourceState::Common, {}}};
+        const gpu::CompiledBarrier textureToUav[]{
+            {textureBinding, gpu::CompiledBarrierKind::TextureTransition, gpu::ResourceState::Common, gpu::ResourceState::UnorderedAccess, wholeTexture}};
+        const gpu::CompiledBarrier textureUav[]{
+            {textureBinding, gpu::CompiledBarrierKind::TextureUav, gpu::ResourceState::Unknown, gpu::ResourceState::Unknown, {}}};
+        const gpu::CompiledBarrier textureRestore[]{
+            {textureBinding, gpu::CompiledBarrierKind::TextureTransition, gpu::ResourceState::UnorderedAccess, gpu::ResourceState::Common, wholeTexture}};
+        if (!gpu::ExecuteCompiledBarriers({firstBatch, 2}, &failure) || !gpu::ExecuteCompiledBarriers({secondBatch, 2}, &failure) ||
+            !gpu::ExecuteCompiledBarriers({bufferUav, 1}, &failure) || !gpu::ExecuteCompiledBarriers({bufferRestore, 1}, &failure) ||
+            !gpu::ExecuteCompiledBarriers({textureToUav, 1}, &failure) || !gpu::ExecuteCompiledBarriers({textureUav, 1}, &failure) ||
+            !gpu::ExecuteCompiledBarriers({textureRestore, 1}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("native batch execution");
+        }
+
+        // Generic tracked work remains valid after the native batch because RF16
+        // republishes each result into NVRHI's tracker without adding a barrier.
+        if (!gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopySource, &failure) ||
+            !gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::CopySource, gpu::ResourceState::Common, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("compiled-to-tracked interoperability");
+        }
+        gpu::UnbindCommandList();
+        gpu::GpuFence completion{};
+        const gpu::CommandListRef submissions[]{commands};
+        if (!gpu::CloseAndSubmitCommandLists("compiled native barrier batch", {submissions, 1}, gpu::CommandListSyncType::None, completion, &failure) ||
+            !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
+            return failed("compiled batch submission");
+
+        commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x524631364d49584full, &failure);
+        if (!commands || !gpu::BindCommandList(commands, &failure) || !gpu::AdmitCommandListResources({admitted, 2}, &failure) ||
+            !gpu::SeedCommandListStates({entryStates, 3}, &failure) ||
+            !gpu::TransitionBuffer(buffer.GetRef(), gpu::ResourceState::Common, gpu::ResourceState::CopySource, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("tracked-mode setup");
+        }
+        const gpu::CompiledBarrier trackedToCompiled[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::CopySource, gpu::ResourceState::Common, {}}};
+        if (!gpu::ExecuteCompiledBarriers({trackedToCompiled, 1}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("tracked-to-compiled interoperability");
+        }
+        gpu::UnbindCommandList();
+        const gpu::CommandListRef secondSubmissions[]{commands};
+        if (!gpu::CloseAndSubmitCommandLists("tracked to compiled native barrier", {secondSubmissions, 1}, gpu::CommandListSyncType::None, completion, &failure) ||
+            !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
+            return failed("tracked-to-compiled submission");
+
+        // A native run is intentionally dependency-free. Prove the backend rejects
+        // two barriers for one binding and then discard the failed command list.
+        commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x5246313644455044ull, &failure);
+        if (!commands || !gpu::BindCommandList(commands, &failure) || !gpu::AdmitCommandListResources({admitted, 2}, &failure) ||
+            !gpu::SeedCommandListStates({entryStates, 3}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("dependent-run setup");
+        }
+        const gpu::CompiledBarrier dependentBarriers[]{
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::Common, gpu::ResourceState::CopyDestination, {}},
+            {bufferBinding, gpu::CompiledBarrierKind::BufferTransition, gpu::ResourceState::CopyDestination, gpu::ResourceState::UnorderedAccess, {}}};
+        const bool rejected = !gpu::ExecuteCompiledBarriers({dependentBarriers, 2}, &failure) && failure.code == gpu::FailureCode::InvalidArgument;
+        gpu::UnbindCommandList();
+        gpu::DiscardCommandList(commands);
+        if (!rejected)
+            return failed("dependent-run rejection");
+
+        // RF17 can emit a UAV ordering barrier as the first operation for an
+        // automatic resource whose immutable initial state is already UAV. NVRHI
+        // deliberately leaves that automatic state implicit/Unknown until first
+        // use; compiled validation must resolve it from the descriptor rather than
+        // reject a correct packet-local before-state proof.
+        gpu::TextureDesc implicitTextureDesc{};
+        implicitTextureDesc.extent = {8, 8, 1};
+        implicitTextureDesc.mipCount = 2;
+        implicitTextureDesc.format = gpu::Format::R8G8B8A8UNorm;
+        implicitTextureDesc.usage = gpu::TextureUsage::UnorderedAccess;
+        implicitTextureDesc.initialState = gpu::ResourceState::UnorderedAccess;
+        gpu::Texture implicitTexture(gpu::AdoptReference, gpu::CreateTexture(implicitTextureDesc, {}, &failure));
+        gpu::BufferDesc implicitBufferDesc{};
+        implicitBufferDesc.size = 256;
+        implicitBufferDesc.usage = gpu::BufferUsage::UnorderedAccess;
+        implicitBufferDesc.initialState = gpu::ResourceState::UnorderedAccess;
+        gpu::Buffer implicitBuffer(gpu::AdoptReference, gpu::CreateBuffer(implicitBufferDesc, {}, &failure));
+        if (!implicitTexture || !implicitBuffer)
+            return failed("implicit UAV resource creation");
+
+        gpu::ResourceRef implicitAdmitted[]{gpu::ResourceRef(implicitTexture.GetRef()), gpu::ResourceRef(implicitBuffer.GetRef())};
+        if (implicitAdmitted[1].value < implicitAdmitted[0].value)
+        {
+            const gpu::ResourceRef swap = implicitAdmitted[0];
+            implicitAdmitted[0] = implicitAdmitted[1];
+            implicitAdmitted[1] = swap;
+        }
+        const vanguard::u32 implicitTextureBinding = implicitAdmitted[0] == gpu::ResourceRef(implicitTexture.GetRef()) ? 0u : 1u;
+        const vanguard::u32 implicitBufferBinding = 1u - implicitTextureBinding;
+        commands = gpu::CreateCommandList(gpu::CommandListType::Default, 0x52463137494d5055ull, &failure);
+        if (!commands || !gpu::BindCommandList(commands, &failure) || !gpu::AdmitCommandListResources({implicitAdmitted, 2}, &failure) ||
+            !gpu::SeedCommandListStates({}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("implicit UAV setup");
+        }
+        const gpu::CompiledBarrier implicitUavBarriers[]{
+            {implicitTextureBinding, gpu::CompiledBarrierKind::TextureUav, gpu::ResourceState::Unknown, gpu::ResourceState::Unknown, {}},
+            {implicitBufferBinding, gpu::CompiledBarrierKind::BufferUav, gpu::ResourceState::Unknown, gpu::ResourceState::Unknown, {}}};
+        if (!gpu::ExecuteCompiledBarriers({implicitUavBarriers, 2}, &failure))
+        {
+            gpu::UnbindCommandList();
+            gpu::DiscardCommandList(commands);
+            return failed("implicit UAV batch");
+        }
+        gpu::UnbindCommandList();
+        const gpu::CommandListRef implicitSubmission[]{commands};
+        if (!gpu::CloseAndSubmitCommandLists("compiled implicit UAV barrier batch", {implicitSubmission, 1}, gpu::CommandListSyncType::None, completion, &failure) ||
+            !gpu::WaitForGpuFence(completion, 5'000'000'000ull, &failure))
+            return failed("implicit UAV submission");
+        return true;
     }
 
     [[nodiscard]] bool TestBlockCompressedWholeMipCopy(gpu::Failure& failure) noexcept
@@ -3564,7 +4013,7 @@ int main()
         std::printf("[rhiNvrhiTests] jobs initialization failed\n");
         return 1;
     }
-    if (!TestResourceLifetimeManager() || !TestRetirementBucketPressure() || !TestConcurrentRetirementPublication())
+    if (!TestNvrhiTrackerRecordingEpoch() || !TestResourceLifetimeManager() || !TestOwnedSubmissionFencePublication() || !TestRetirementBucketPressure() || !TestConcurrentRetirementPublication())
     {
         std::printf("[rhiNvrhiTests] resource lifetime tests failed\n");
         static_cast<void>(vanguard::jobs::Shutdown());
@@ -3605,7 +4054,9 @@ int main()
         static_cast<void>(vanguard::jobs::Shutdown());
         return 1;
     }
-    if (!TestCommandListLeaseLifecycle(failure) || !TestManualTextureUploadTransition(failure) || !TestLazyBarrierCommitFence(failure) || !TestBlockCompressedWholeMipCopy(failure) ||
+    if (!TestCommandListLeaseLifecycle(failure) || !TestNativeCommandListSubmissionBatchSizes(failure) || !TestManualTextureUploadTransition(failure) ||
+        !TestLazyBarrierCommitFence(failure) || !TestCompiledNativeBarrierBatch(failure) ||
+        !TestBlockCompressedWholeMipCopy(failure) ||
         !TestFlushRetiredResourcesWaitsSubmissionFence(failure) || !TestDescriptorDomainReclaim(failure))
     {
         std::printf("[rhiNvrhiTests] NVRHI state/lifetime regression test failed: %s\n", failure.message);

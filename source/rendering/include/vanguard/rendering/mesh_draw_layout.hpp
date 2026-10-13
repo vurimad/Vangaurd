@@ -41,7 +41,9 @@ namespace vanguard::rendering
         u32 viewDescriptor;
         u32 viewIndex;
         f32 worldCellSize;
-        u32 reserved = 0;
+        // Only the forward transparent entry consumes this descriptor. Opaque and
+        // depth entries leave it invalid while preserving the same 24-byte ABI.
+        u32 directionalLightSelectionDescriptor = 0xffffffffu;
     };
     static_assert(sizeof(StaticSurfaceDrawContext) == 24);
 

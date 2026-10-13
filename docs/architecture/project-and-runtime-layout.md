@@ -42,13 +42,25 @@ The normative grammar, validation levels, identity rules, and transactional crea
 
 ### Assets
 
-`Assets` is the authoritative source-data tree. It contains original files such as PNG, TIFF, OpenEXR, FBX, glTF, WAV, shader source, and authored world or prefab documents. Cooked `.vxxx` resources must not be written beside these sources.
+`Assets` is the current Vanguard production source-data tree and remains
+authoritative for domains that have not yet migrated to RED. The approved RED
+asset-authority migration changes this ownership per domain: migrated assets use
+canonical uncooked RED resources in a `ResourceEditorDepot`, including embedded
+RED resource/import metadata. `.vproject` supplies the project/depot mapping;
+the exact on-disk RED source layout is an AssetHost migration concern rather
+than a shipped-runtime contract.
+
+During migration, external files such as PNG, TIFF, OpenEXR, FBX, glTF/GLB, WAV
+and shader source may remain import inputs. They must not silently become a
+second metadata/freshness database once the corresponding domain is RED-owned.
+Cooked `.vxxx` resources must not be written beside authored sources.
 
 Authorable creative asset sources must not use `.v*` extensions. The `.v*` asset-resource namespace is reserved for generated/cooked Vanguard outputs such as `.vworld`, `.vcell`, `.vprefab`, `.vmesh`, `.vtex`, `.vmat`, `.vshader`, `.vinput`, and future package-facing resource formats. The source-side exception is `.vmeta`, which is always a sidecar for one exact source filename and includes that source extension in its own name. Vanguard-owned project, index, cache, transaction, package-manifest, editor-state and other tool/system files may also use `.v*` extensions, but they are not creative asset sources.
 
 Use plain authoring extensions for editable asset documents: for example `.scene` for scene/world source, `.prefab` for prefab source, `.material` for material source, `.inputmap` for input mapping source, `.anim` for animation source, and `.shader` for shader source. Their cooked outputs use the generated `.v*` resource extensions.
 
-Every independently managed source asset has a sidecar whose name includes the source extension:
+For the current Vanguard path, every independently managed source asset has a
+sidecar whose name includes the source extension:
 
 ```text
 tower.fbx
@@ -58,13 +70,29 @@ tower_albedo.png
 tower_albedo.png.vmeta
 ```
 
-Including the source extension avoids collisions between different source formats with the same stem. A `.vmeta` sidecar owns the stable `AssetId`, selected importer and importer version, authored import settings, labels, explicit cooking overrides, and other source-control-relevant editor metadata. Generated fingerprints and transient build state belong in `DerivedData`, not in `.vmeta`.
+Including the source extension avoids collisions between different source
+formats with the same stem. A `.vmeta` sidecar currently owns the stable
+`AssetId`, selected importer and importer version, authored import settings,
+labels, explicit cooking overrides, and other source-control-relevant editor
+metadata. Generated fingerprints and transient build state belong in
+`DerivedData`, not in `.vmeta`.
+
+VMETA is **not** the long-term canonical metadata model for a domain after RED
+authority cutover. RED `ResourceMetadata` / `ResourceImportMetadata` becomes
+canonical there, and VMETA is retired as an authority after migration/recovery
+requirements are proved.
 
 Moving a source file together with its `.vmeta` preserves its `AssetId`. Worlds, prefabs, materials, and other resources refer to stable identity rather than the current source path.
 
 ### DerivedData
 
-`DerivedData` is generated, disposable, and reconstructable from `Assets`, metadata, project configuration, and tools. It is the physical home of the local derived-data cache and contains successfully cooked `.vworld`, `.vcell`, `.vprefab`, `.vmesh`, `.vtex`, `.vmat`, `.vshader`, `.vaudio`, and future Vanguard resource artifacts.
+`DerivedData` is generated, disposable, and reconstructable from authored
+assets, metadata, project configuration, and tools. For the current Vanguard
+path it is the physical home of the local derived-data cache. For RED-migrated
+domains, RED backendData dependency/cache/cooked-depot state is likewise
+derived, and a deterministic runtime export bridge may materialize current
+Vanguard `.vworld`, `.vcell`, `.vprefab`, `.vmesh`, `.vtex`, `.vmat`, `.vshader`,
+`.vaudio`, and future runtime artifacts here.
 
 Artifacts should be content-addressed rather than physically mirror source paths. A representative physical path is:
 
@@ -78,7 +106,10 @@ The shared source asset registry maintains the following mapping; the editor ass
 AssetId -> current source path and metadata -> build fingerprint -> current derived artifact
 ```
 
-Deleting `DerivedData` may cause a full recook but must never lose authored work. `Intermediate` is reserved for incomplete or temporary compiler output, while `DerivedData` contains only successfully published cache records and artifacts.
+Deleting `DerivedData` or other rebuildable RED derived databases/caches may
+cause a full rescan/recook but must never lose authored work. `Intermediate` is
+reserved for incomplete or temporary compiler output, while derived storage
+contains only rebuildable state and successfully published runtime artifacts.
 
 ### Builds
 
@@ -165,10 +196,11 @@ The installed runtime image is treated as immutable and may reside in a read-onl
 ```text
 VanguardEditor.exe MyGame.vproject
     -> read the project definition
-    -> establish Assets and DerivedData roots
-    -> load and validate the asset metadata/index
-    -> detect missing or stale derived artifacts
-    -> cook required assets
+    -> establish project/runtime roots and RED depot mappings
+    -> connect to/start VanguardAssetHost
+    -> AssetHost initializes RED resource DB/backendData state
+    -> AssetHost evaluates/cooks required RED-owned resources
+    -> runtime bridge exposes current development artifacts
     -> open the configured editor world
 ```
 
@@ -184,9 +216,9 @@ This permits an incrementally recooked resource to replace a packaged version im
 ## End-to-end ownership
 
 ```text
-Assets + .vmeta
-        -> import and cook
-DerivedData/*.vxxx
+current Vanguard source OR canonical RED authored resources
+        -> authoritative import/cook path for that domain
+derived runtime artifacts (*.vxxx)
         -> deterministic package assembly
 DATA000.vpak + DATA001...N.vpak
         -> runtime resource and world streaming

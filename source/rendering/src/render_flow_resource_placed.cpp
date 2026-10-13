@@ -424,9 +424,11 @@ namespace vanguard::rendering::detail
         }
 
         [[nodiscard]] bool FindFirstFit(const HeapState& heap, const PlacedRangeRequest& request, u32& runIndex, u64& offset,
-                                        containers::DynamicArray<PlacedPredecessorFragment>& fragments, ProvenanceConsumeWindow& provenanceWindow) noexcept
+                                        containers::DynamicArray<PlacedPredecessorFragment>& fragments, const u32 maximumFragments,
+                                        bool& fragmentCapacityExceeded, ProvenanceConsumeWindow& provenanceWindow) noexcept
         {
             fragments.Clear();
+            fragmentCapacityExceeded = false;
             provenanceWindow = {};
             const u32 slot = AlignmentSlot(heap.alignmentMask, request.requirements.alignment);
             u32 current = heap.freeRunRoot;
@@ -466,6 +468,13 @@ namespace vanguard::rendering::detail
                             if (provenanceWindow.first == InvalidRenderFlowResourceIndex)
                                 provenanceWindow.first = pieceIndex;
                             provenanceWindow.last = pieceIndex;
+                            if (fragments.Size() >= maximumFragments)
+                            {
+                                fragments.Clear();
+                                fragmentCapacityExceeded = true;
+                                provenanceWindow = {};
+                                return false;
+                            }
                             fragments.PushBack({piece.predecessor, overlapStart, overlapEnd - overlapStart});
                             covered = overlapEnd;
                         }
@@ -738,6 +747,30 @@ namespace vanguard::rendering::detail
                 UpdateHeapCompatibilityFit(scratch, event.heap);
             }
         }
+
+        [[nodiscard]] bool ReleaseBeforeDense(PlacedRangePlannerScratch& scratch, u32& cursor, const u32 acquire) noexcept
+        {
+            if (acquire < cursor || acquire > scratch.releaseHeads.Size())
+                return false;
+            while (cursor < acquire)
+            {
+                u32 eventIndex = scratch.releaseHeads[cursor];
+                scratch.releaseHeads[cursor] = InvalidRenderFlowResourceIndex;
+                while (eventIndex != InvalidRenderFlowResourceIndex)
+                {
+                    if (eventIndex >= scratch.releaseEvents.Size())
+                        return false;
+                    const PlacedPlannerReleaseEvent event = scratch.releaseEvents[eventIndex];
+                    eventIndex = event.next;
+                    if (event.heap >= scratch.activeHeapCount)
+                        return false;
+                    InsertReleasedRange(scratch.heaps[event.heap], event.offset, event.size, event.allocation);
+                    UpdateHeapCompatibilityFit(scratch, event.heap);
+                }
+                ++cursor;
+            }
+            return true;
+        }
     } // namespace
 
     void PlacedRangePlan::Clear() noexcept
@@ -757,20 +790,24 @@ namespace vanguard::rendering::detail
         const auto reject = [&](const RenderFlowResourceFailureCode code, const char* const message) noexcept
         {
             plan.Clear();
-            scratch.Finish();
+            scratch.Finish(requests.Size());
             return PlannerFail(failure, code, message);
         };
-        if (config.minimumHeapBytes == 0 || !IsPowerOfTwo(config.heapAlignment))
+        if (config.minimumHeapBytes == 0 || !IsPowerOfTwo(config.heapAlignment) ||
+            (config.requestsPreordered && config.semanticEventCount == 0))
             return reject(RenderFlowResourceFailureCode::InvalidConfiguration, "placed-range planner requires a nonzero heap size and power-of-two heap alignment");
 
         containers::DynamicArray<u32>& order = scratch.order;
         containers::DynamicArray<PlacedPredecessorFragment>& candidateFragments = scratch.candidateFragments;
         ProvenanceConsumeWindow provenanceWindow;
-        order.Reserve(requests.Size());
+        if (!config.requestsPreordered)
+            order.Reserve(requests.Size());
         scratch.releaseEvents.Reserve(requests.Size());
         scratch.seenAllocations.Reserve(requests.Size());
         scratch.compatibleHeaps.Reserve(requests.Size());
         plan.assignments.Reserve(requests.Size());
+        PlanPosition previousAcquire;
+        u32 previousAcquireOrdinal = InvalidRenderFlowResourceIndex;
         for (u32 index = 0; index < requests.Size(); ++index)
         {
             const PlacedRangeRequest& request = requests[index];
@@ -783,31 +820,53 @@ namespace vanguard::rendering::detail
                 request.requirements.alignment > config.heapAlignment || request.requirements.compatibilityClass == 0 || request.requirements.memoryType != rhi::MemoryType::DeviceLocal || !validCategory)
                 return reject(validQueue ? RenderFlowResourceFailureCode::BackendContractViolation : RenderFlowResourceFailureCode::UnsupportedCapability,
                               validQueue ? "placed-range request violates the Stage 3 placement profile" : "placed-range planning supports only graphics or compute queues");
+            if (config.requestsPreordered)
+            {
+                if (request.firstAcquireSemanticOrdinal == InvalidRenderFlowResourceIndex || request.lastReleaseSemanticOrdinal == InvalidRenderFlowResourceIndex ||
+                    request.firstAcquireSemanticOrdinal > request.lastReleaseSemanticOrdinal || request.lastReleaseSemanticOrdinal >= config.semanticEventCount ||
+                    (index != 0 && (request.firstAcquireSemanticOrdinal <= previousAcquireOrdinal || !PositionBefore(previousAcquire, request.firstAcquire))))
+                    return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                  "preordered placed-range requests disagree with the sealed semantic order");
+                previousAcquire = request.firstAcquire;
+                previousAcquireOrdinal = request.firstAcquireSemanticOrdinal;
+            }
             if (!scratch.seenAllocations.Insert(request.allocation))
                 return reject(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "placed-range request duplicates a logical allocation");
             scratch.alignmentMask |= request.requirements.alignment;
-            order.PushBack(index);
+            if (!config.requestsPreordered)
+                order.PushBack(index);
         }
         scratch.alignmentLevelCount = CountAlignmentLevels(scratch.alignmentMask);
 
-        std::sort(order.Begin(), order.End(),
-                  [&requests](const u32 leftIndex, const u32 rightIndex) noexcept
-                  {
-                      const PlacedRangeRequest& left = requests[leftIndex];
-                      const PlacedRangeRequest& right = requests[rightIndex];
-                      if (left.firstAcquire != right.firstAcquire)
-                          return PositionBefore(left.firstAcquire, right.firstAcquire);
-                      if (left.requirements.size != right.requirements.size)
-                          return left.requirements.size > right.requirements.size;
-                      if (left.requirements.alignment != right.requirements.alignment)
-                          return left.requirements.alignment > right.requirements.alignment;
-                      return left.allocation < right.allocation;
-                  });
+        if (!config.requestsPreordered)
+            std::sort(order.Begin(), order.End(),
+                      [&requests](const u32 leftIndex, const u32 rightIndex) noexcept
+                      {
+                          const PlacedRangeRequest& left = requests[leftIndex];
+                          const PlacedRangeRequest& right = requests[rightIndex];
+                          if (left.firstAcquire != right.firstAcquire)
+                              return PositionBefore(left.firstAcquire, right.firstAcquire);
+                          if (left.requirements.size != right.requirements.size)
+                              return left.requirements.size > right.requirements.size;
+                          if (left.requirements.alignment != right.requirements.alignment)
+                              return left.requirements.alignment > right.requirements.alignment;
+                          return left.allocation < right.allocation;
+                      });
+        else
+            scratch.releaseHeads.Resize(config.semanticEventCount, InvalidRenderFlowResourceIndex);
 
-        for (const u32 requestIndex : order)
+        u32 denseReleaseCursor = 0;
+        for (u32 orderedIndex = 0; orderedIndex < requests.Size(); ++orderedIndex)
         {
+            const u32 requestIndex = config.requestsPreordered ? orderedIndex : order[orderedIndex];
             const PlacedRangeRequest& request = requests[requestIndex];
-            ReleaseBefore(scratch, request.firstAcquire);
+            if (config.requestsPreordered)
+            {
+                if (!ReleaseBeforeDense(scratch, denseReleaseCursor, request.firstAcquireSemanticOrdinal))
+                    return reject(RenderFlowResourceFailureCode::BackendContractViolation, "placed-range dense release stream is not monotonic");
+            }
+            else
+                ReleaseBefore(scratch, request.firstAcquire);
             u32 selectedHeap = InvalidRenderFlowResourceIndex;
             u32 selectedRun = InvalidRenderFlowResourceIndex;
             u64 selectedOffset = 0;
@@ -818,6 +877,10 @@ namespace vanguard::rendering::detail
             PlacedPlannerCompatibilityGroup& group = scratch.groups[groupIndex];
             const u32 alignmentSlot = AlignmentSlot(scratch.alignmentMask, request.requirements.alignment);
             selectedHeap = FindCompatibilityGroupHeap(group, alignmentSlot, request.requirements.size);
+            if (plan.predecessors.Size() > config.maximumPredecessorFragments)
+                return reject(RenderFlowResourceFailureCode::CapacityExceeded, "placed-range alias predecessor fragments exceed planner capacity");
+            const u32 remainingPredecessorCapacity = config.maximumPredecessorFragments - plan.predecessors.Size();
+            bool fragmentCapacityExceeded = false;
 
             if (selectedHeap == InvalidRenderFlowResourceIndex)
             {
@@ -840,14 +903,20 @@ namespace vanguard::rendering::detail
                 heap.freeRuns[freeRun].virgin = true;
                 InsertFreeRun(heap, freeRun);
                 AddHeapToCompatibilityGroup(scratch, groupIndex, selectedHeap);
-                if (!FindFirstFit(heap, request, selectedRun, selectedOffset, candidateFragments, provenanceWindow))
-                    return reject(RenderFlowResourceFailureCode::BackendContractViolation, "fresh placed heap cannot satisfy the request used to size it");
+                if (!FindFirstFit(heap, request, selectedRun, selectedOffset, candidateFragments, remainingPredecessorCapacity, fragmentCapacityExceeded, provenanceWindow))
+                    return reject(fragmentCapacityExceeded ? RenderFlowResourceFailureCode::CapacityExceeded : RenderFlowResourceFailureCode::BackendContractViolation,
+                                  fragmentCapacityExceeded ? "placed-range alias predecessor fragments exceed planner capacity"
+                                                           : "fresh placed heap cannot satisfy the request used to size it");
             }
             else
             {
                 HeapState& heap = scratch.heaps[selectedHeap];
-                if (!HeapCompatible(heap.plan, request) || !FindFirstFit(heap, request, selectedRun, selectedOffset, candidateFragments, provenanceWindow))
-                    return reject(RenderFlowResourceFailureCode::BackendContractViolation, "placed-range compatibility index selected an incompatible or undersized heap");
+                if (!HeapCompatible(heap.plan, request))
+                    return reject(RenderFlowResourceFailureCode::BackendContractViolation, "placed-range compatibility index selected an incompatible heap");
+                if (!FindFirstFit(heap, request, selectedRun, selectedOffset, candidateFragments, remainingPredecessorCapacity, fragmentCapacityExceeded, provenanceWindow))
+                    return reject(fragmentCapacityExceeded ? RenderFlowResourceFailureCode::CapacityExceeded : RenderFlowResourceFailureCode::BackendContractViolation,
+                                  fragmentCapacityExceeded ? "placed-range alias predecessor fragments exceed planner capacity"
+                                                           : "placed-range compatibility index selected an undersized heap");
             }
 
             HeapState& heap = scratch.heaps[selectedHeap];
@@ -863,15 +932,33 @@ namespace vanguard::rendering::detail
                 plan.predecessors.PushBack(fragment);
             ConsumeFreeRange(heap, selectedRun, selectedOffset, request.requirements.size, provenanceWindow);
             UpdateHeapCompatibilityFit(scratch, selectedHeap);
-            scratch.releaseEvents.PushBack({request.lastRelease, selectedOffset, request.requirements.size, selectedHeap, request.allocation});
-            std::push_heap(scratch.releaseEvents.Begin(), scratch.releaseEvents.End(), ReleaseEventAfter);
+            PlacedPlannerReleaseEvent release;
+            release.release = request.lastRelease;
+            release.offset = selectedOffset;
+            release.size = request.requirements.size;
+            release.heap = selectedHeap;
+            release.allocation = request.allocation;
+            if (config.requestsPreordered)
+            {
+                if (request.lastReleaseSemanticOrdinal >= scratch.releaseHeads.Size())
+                    return reject(RenderFlowResourceFailureCode::BackendContractViolation, "placed-range release exceeds the sealed semantic range");
+                const u32 releaseIndex = scratch.releaseEvents.Size();
+                release.next = scratch.releaseHeads[request.lastReleaseSemanticOrdinal];
+                scratch.releaseEvents.PushBack(release);
+                scratch.releaseHeads[request.lastReleaseSemanticOrdinal] = releaseIndex;
+            }
+            else
+            {
+                scratch.releaseEvents.PushBack(release);
+                std::push_heap(scratch.releaseEvents.Begin(), scratch.releaseEvents.End(), ReleaseEventAfter);
+            }
             plan.assignments.PushBack(assignment);
         }
 
         plan.heaps.Reserve(scratch.activeHeapCount);
         for (u32 heapIndex = 0; heapIndex < scratch.activeHeapCount; ++heapIndex)
             plan.heaps.PushBack(scratch.heaps[heapIndex].plan);
-        scratch.Finish();
+        scratch.Finish(requests.Size());
         return true;
     }
 

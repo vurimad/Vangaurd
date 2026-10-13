@@ -52,6 +52,12 @@ namespace vanguard::mesh_tools
         ResolveMeshDependencyFunction resolveDependency = nullptr;
         void* resolveDependencyUserData = nullptr;
         u32 maximumDependencies = 4096;
+        // BuildGraph requires every asynchronous compiler to provide a bounded
+        // admission estimate. These are policy caps rather than predictions;
+        // projects with deliberately larger mesh cooks can raise them together
+        // with the graph/build-system byte limits.
+        u64 maximumArtifactBytes = 2ull * 1024ull * 1024ull * 1024ull;
+        u64 estimatedCompilerTransientBytes = 4ull * 1024ull * 1024ull * 1024ull;
     };
 
     class MeshAssetCompiler final

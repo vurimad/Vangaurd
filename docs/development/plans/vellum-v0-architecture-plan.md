@@ -2279,8 +2279,11 @@ No major capability from the RED ink parity ledger is designed out. Implementati
 - **V1 Runtime kernel** receives the P1/P2 core tree/handle/property/mutation/invalidation/basic layout/
   cooked-resource contracts.
 - **V2 Rendering foundation** receives P4 display-list/lowering/final-2D/clipping/image-shape/cache base.
-- **V3 Text** receives P3 shaping/fallback/BiDi/localization/rich/editing semantic contracts and P4 glyph
-  renderer ownership.
+- **V2.5 Text Backend** receives the low-level P3 font/shaping/fallback/BiDi service contracts and P4
+  glyph renderer ownership: font faces, shaping backend, glyph representation/cache population and
+  renderer-facing `GlyphRun` lowering.
+- **V3 Text** receives the higher-level P3 text semantics: text nodes/paragraphs, line layout,
+  localization, rich runs/inline content and shaped-layout cache orchestration.
 - **V4 Interaction** receives routed pointer/focus/navigation/per-user/virtual-cursor/editable-input
   behavior, including the required Vanguard composition-event extension before full IME parity.
 - **V5 Styling / behavior / animation** receives compiled styles/themes/state machines, behavior/controller

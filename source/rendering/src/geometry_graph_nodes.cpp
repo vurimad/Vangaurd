@@ -14,7 +14,7 @@ namespace vanguard::rendering
         enum Resource : u32
         {
             Views, VisibilityResults, VisibilityCounters, Visible,
-            Work, Results, Counters, Bins, ActiveBins, Instances, Arguments,
+            Work, Results, Counters, Bins, ActiveBins, Instances, TransparentInstances, Arguments,
             ShellPlans, ShellRanges, ShellCounters, DirectionalLights, ResourceCount
         };
         constexpr u32 Bit(Resource r) noexcept { return 1u << r; }
@@ -45,9 +45,11 @@ namespace vanguard::rendering
             VG_RENDER_FLOW_NAME("Geometry.VisibilityCounters"), VG_RENDER_FLOW_NAME("Geometry.Visible"),
             VG_RENDER_FLOW_NAME("Geometry.Work"), VG_RENDER_FLOW_NAME("Geometry.Results"), VG_RENDER_FLOW_NAME("Geometry.Counters"),
             VG_RENDER_FLOW_NAME("Geometry.Bins"), VG_RENDER_FLOW_NAME("Geometry.ActiveBins"),
-            VG_RENDER_FLOW_NAME("Geometry.Instances"), VG_RENDER_FLOW_NAME("Geometry.Arguments"), VG_RENDER_FLOW_NAME("Geometry.ShellPlans"),
+            VG_RENDER_FLOW_NAME("Geometry.Instances"), VG_RENDER_FLOW_NAME("Geometry.TransparentInstances"),
+            VG_RENDER_FLOW_NAME("Geometry.Arguments"), VG_RENDER_FLOW_NAME("Geometry.ShellPlans"),
             VG_RENDER_FLOW_NAME("Geometry.ShellRanges"), VG_RENDER_FLOW_NAME("Geometry.ShellCounters"), VG_RENDER_FLOW_NAME("Lighting.DirectionalSelections")
         };
+        static_assert(sizeof(Names) / sizeof(Names[0]) == ResourceCount);
         constexpr LogicalResourceName CameraColorName = VG_RENDER_FLOW_NAME("CameraColor");
         constexpr LogicalResourceName DepthName = VG_RENDER_FLOW_NAME("Depth");
         constexpr LogicalResourceName FrameOutputName = VG_RENDER_FLOW_NAME("FrameOutput");
@@ -59,7 +61,7 @@ namespace vanguard::rendering
             &GeometryFrameGraphResources::geometryWork, &GeometryFrameGraphResources::geometryResults,
             &GeometryFrameGraphResources::geometryCounters, &GeometryFrameGraphResources::binItems,
             &GeometryFrameGraphResources::activeBins, &GeometryFrameGraphResources::drawInstances,
-            &GeometryFrameGraphResources::indirectArguments, &GeometryFrameGraphResources::shellPlans,
+            &GeometryFrameGraphResources::transparentInstances, &GeometryFrameGraphResources::indirectArguments, &GeometryFrameGraphResources::shellPlans,
             &GeometryFrameGraphResources::shellRanges, &GeometryFrameGraphResources::shellCounters, &GeometryFrameGraphResources::directionalLights
         };
         static_assert(sizeof(ResourceIds) / sizeof(ResourceIds[0]) == ResourceCount);
@@ -82,6 +84,7 @@ namespace vanguard::rendering
             case Bins: return {capacity.geometryBins, sizeof(GpuGeometryBinItem)};
             case ActiveBins: return {capacity.geometryBins, sizeof(u32)};
             case Instances: return {capacity.geometryWorkItems, sizeof(MeshDrawInstance)};
+            case TransparentInstances: return Upload(work.GetAllTransparentInstances());
             case Arguments: return {work.GetIndirectArgumentCapacity(), sizeof(GpuGeometryIndirectArguments)};
             case ShellPlans: return Upload(work.GetShellDraws());
             case ShellRanges: return {capacity.views * capacity.shellsPerView, sizeof(GpuGeometryShellRange)};
@@ -90,7 +93,7 @@ namespace vanguard::rendering
             default: VG_FATAL("unknown geometry graph resource");
             }
         }
-        constexpr u32 UploadMask = Bit(Views)|Bit(VisibilityResults)|Bit(Results)|Bit(DirectionalLights);
+        constexpr u32 UploadMask = Bit(Views)|Bit(VisibilityResults)|Bit(Results)|Bit(TransparentInstances)|Bit(DirectionalLights);
         constexpr u32 ClearMask = Bit(VisibilityCounters)|Bit(Bins)|Bit(ShellRanges);
         RenderFlowNameTag Tag(Resource resource) noexcept { return RenderNodeImplContext::RTSharedNameTag(Names[resource]); }
         void Use(const RenderNodeImplContext& context, Resource resource, rhi::ResourceState state,
@@ -107,13 +110,18 @@ namespace vanguard::rendering
             return *work;
         }
         constexpr LogicalResourceName Colors[] = {VG_RENDER_FLOW_NAME("GBuffer.BaseColor"), VG_RENDER_FLOW_NAME("GBuffer.NormalRoughness"),
-                                                  VG_RENDER_FLOW_NAME("GBuffer.EmissiveMetallic")};
+                                                  VG_RENDER_FLOW_NAME("GBuffer.EmissiveMetallic"), VG_RENDER_FLOW_NAME("GBuffer.SpecularColor"),
+                                                  VG_RENDER_FLOW_NAME("GBuffer.ViewDirection")};
         constexpr pipelines::AttachmentSignature DepthPrepassAttachments = MakeStandardDepthPrepassAttachments();
         constexpr pipelines::AttachmentSignature OpaqueAttachments = MakeStandardOpaqueAttachments();
+        constexpr pipelines::AttachmentSignature TransparentAttachments = MakeStandardTransparentAttachments();
         static_assert(OpaqueAttachments.colorCount == sizeof(Colors) / sizeof(Colors[0]));
         static_assert(DepthPrepassAttachments.depthStencilFormat == OpaqueAttachments.depthStencilFormat);
         static_assert(DepthPrepassAttachments.depthStencilClass == OpaqueAttachments.depthStencilClass);
         static_assert(DepthPrepassAttachments.sampleCount == OpaqueAttachments.sampleCount);
+        static_assert(TransparentAttachments.colorCount == 1u);
+        static_assert(TransparentAttachments.depthStencilFormat == OpaqueAttachments.depthStencilFormat);
+        static_assert(TransparentAttachments.sampleCount == OpaqueAttachments.sampleCount);
         void TextureUse(const RenderNodeImplContext& context, const LogicalResourceName name, rhi::ResourceState state, LogicalAccessIntent access,
                         ResourceContentIntent content = ResourceContentIntent::Preserve) noexcept
         {
@@ -263,6 +271,15 @@ namespace vanguard::rendering
             return true;
         }
 
+        bool DeclareGeometryDirectDrawInputs(const FrameRenderer& renderer, const RenderNodeImplContext& context,
+                                             RenderFlowResourceFailure* failure) noexcept
+        {
+            if (!renderer.DeclareGeometrySceneUses(context, failure) || !renderer.DeclareGeometryArenaUses(context, failure))
+                return false;
+            Use(context, Views, rhi::ResourceState::ShaderResourceGraphics);
+            return true;
+        }
+
         void RecordGeometryDraw(const FrameRenderer& renderer, const RenderNodeImplContext& context, RenderPhaseId phase)
         {
             VG_PROFILE_ZONE_NAMED("CameraGeometry/RecordGeometryDraw");
@@ -348,8 +365,8 @@ namespace vanguard::rendering
         if (!sceneDeclared)
             return false;
         Use(context, DirectionalLights, rhi::ResourceState::ShaderResourceGraphics);
-        TextureUse(context, Colors[0], rhi::ResourceState::ShaderResourceGraphics, LogicalAccessIntent::Read);
-        TextureUse(context, Colors[1], rhi::ResourceState::ShaderResourceGraphics, LogicalAccessIntent::Read);
+        for (const LogicalResourceName name : Colors)
+            TextureUse(context, name, rhi::ResourceState::ShaderResourceGraphics, LogicalAccessIntent::Read);
         TextureUse(context, CameraColorName, rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Discard);
         return true;
     }
@@ -365,12 +382,17 @@ namespace vanguard::rendering
         const auto selections = context.RTBuffer(Tag(DirectionalLights)).GetShaderResourceDescriptor();
         const auto baseColor = context.RTTexture(Colors[0]).GetShaderResourceDescriptor();
         const auto normal = context.RTTexture(Colors[1]).GetShaderResourceDescriptor();
-        if (!selections.IsValid() || !baseColor.IsValid() || !normal.IsValid())
+        const auto emissiveMetallic = context.RTTexture(Colors[2]).GetShaderResourceDescriptor();
+        const auto specularColor = context.RTTexture(Colors[3]).GetShaderResourceDescriptor();
+        const auto viewDirection = context.RTTexture(Colors[4]).GetShaderResourceDescriptor();
+        if (!selections.IsValid() || !baseColor.IsValid() || !normal.IsValid() || !emissiveMetallic.IsValid() ||
+            !specularColor.IsValid() || !viewDirection.IsValid())
             VG_FATAL("directional lighting input descriptors are unavailable");
         const u32 constants[]{directory.tableDirectoryDescriptor, directory.pageDirectoryDescriptor,
                               selections.GpuIndex(), viewIndex, baseColor.GpuIndex(), normal.GpuIndex(),
-                              view->visibilityMask, 0u};
-        static_assert(sizeof(constants) == 32);
+                              emissiveMetallic.GpuIndex(), specularColor.GpuIndex(), viewDirection.GpuIndex(),
+                              view->visibilityMask, 0u, 0u};
+        static_assert(sizeof(constants) == 48);
         rhi::RenderTargetSetup targets;
         targets.colorTargetCount = 1;
         targets.colorTargets[0] = {context.RTTexture(CameraColorName).GetTexture(), rhi::Format::R16G16B16A16Float};
@@ -384,6 +406,51 @@ namespace vanguard::rendering
         const bool drawn = rhi::DrawPrimitive({3, 1, 0, 0});
         if (!drawn)
             VG_FATAL("directional diffuse fullscreen recording failed");
+    }
+
+    RenderNodeDrawTransparent::RenderNodeDrawTransparent(const FrameRenderer& renderer) noexcept
+        : m_renderer(renderer), m_phase(renderer.GetGeometryPhase(standardRenderPhases::Transparent)) {}
+
+    bool RenderNodeDrawTransparent::DeclareResources(const RenderNodeImplContext& context, RenderFlowResourceFailure* failure) const noexcept
+    {
+        const auto* view = context.GetView();
+        if (view == nullptr || context.GetCameraIndex() < 0)
+            return false;
+        if (!view->phases.Contains(m_phase) || WorkFor(context).GetTransparentInstances(static_cast<u32>(context.GetCameraIndex())).Empty())
+            return true;
+        if (!DeclareGeometryDirectDrawInputs(m_renderer, context, failure))
+            return false;
+        Use(context, DirectionalLights, rhi::ResourceState::ShaderResourceGraphics);
+        Use(context, TransparentInstances, rhi::ResourceState::VertexBuffer);
+        TextureUse(context, DepthName, rhi::ResourceState::DepthRead, LogicalAccessIntent::Read);
+        TextureUse(context, CameraColorName, rhi::ResourceState::RenderTarget, LogicalAccessIntent::Write, ResourceContentIntent::Preserve);
+        return true;
+    }
+
+    void RenderNodeDrawTransparent::Execute(const RenderNodeImplContext& context, jobs::Builder*) const
+    {
+        const auto* view = context.GetView();
+        const u32 viewIndex = static_cast<u32>(context.GetCameraIndex());
+        const auto instances = WorkFor(context).GetTransparentInstances(viewIndex);
+        if (view == nullptr || !view->phases.Contains(m_phase) || instances.Empty())
+            return;
+        const auto directory = m_renderer.GetGeometryDirectoryBinding();
+        const auto viewDescriptor = context.RTBuffer(Tag(Views)).GetShaderResourceDescriptor();
+        const auto lightDescriptor = context.RTBuffer(Tag(DirectionalLights)).GetShaderResourceDescriptor();
+        if (!viewDescriptor.IsValid() || !lightDescriptor.IsValid())
+            VG_FATAL("transparent geometry graphics bindings are unavailable");
+        const StaticSurfaceDrawContext draw{directory.tableDirectoryDescriptor, directory.pageDirectoryDescriptor,
+                                            viewDescriptor.GpuIndex(), viewIndex, m_renderer.GetGeometryWorldCellSize(),
+                                            lightDescriptor.GpuIndex()};
+        rhi::RenderTargetSetup targets;
+        targets.depthStencilTarget = {context.RTTexture(DepthName).GetTexture(), ToRhiFormat(TransparentAttachments.depthStencilFormat)};
+        targets.colorTargetCount = 1;
+        targets.colorTargets[0] = {context.RTTexture(CameraColorName).GetTexture(), ToRhiFormat(TransparentAttachments.colors[0].format)};
+        SetupCamera(context, targets);
+        rhi::Failure drawFailure;
+        if (!m_renderer.RecordTransparentGeometryPhase(WorkFor(context), m_phase, draw,
+                                                       context.RTBuffer(Tag(TransparentInstances)).GetBuffer(), &drawFailure))
+            VG_FATAL("sorted transparent geometry phase recording failed");
     }
 
     RenderNodeVisualizeGBuffer::RenderNodeVisualizeGBuffer(const FrameRenderer& renderer) noexcept
@@ -619,7 +686,7 @@ namespace vanguard::rendering
                 desc.active.usage = desc.active.usage | rhi::BufferUsage::CopyDestination;
             else
                 desc.active.usage = desc.active.usage | rhi::BufferUsage::UnorderedAccess;
-            if (resource == Instances) desc.active.usage = desc.active.usage | rhi::BufferUsage::Vertex;
+            if (resource == Instances || resource == TransparentInstances) desc.active.usage = desc.active.usage | rhi::BufferUsage::Vertex;
             if (resource == Arguments || resource == ShellCounters) desc.active.usage = desc.active.usage | rhi::BufferUsage::IndirectArguments;
             context.GetGeometryFrameWork()->GetGraphResources().*ResourceIds[index] = context.RTSharedAlloc(Names[index], desc).resource;
         }

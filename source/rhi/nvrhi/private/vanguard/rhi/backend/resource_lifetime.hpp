@@ -72,6 +72,11 @@ namespace vanguard::rhi::backend
 
         // Recording holds a reference until submission, then records the returned queue fence before releasing it.
         [[nodiscard]] bool RecordUse(ResourceRef resource, QueueType queue, u64 submissionFence) noexcept;
+        // Submission-private fast path: caller already owns a live reference
+        // continuously through this call (for example, a closed command-list
+        // payload's retained resource). Do not call with an unowned handle:
+        // unlike RecordUse, this does not temporarily AddRef/Release the slot.
+        [[nodiscard]] bool RecordOwnedUse(ResourceRef resource, QueueType queue, u64 submissionFence) noexcept;
         [[nodiscard]] FenceSet GetLastUse(ResourceRef resource) const noexcept;
 
         // Seals the current retirement bucket, advances the producer epoch, and schedules reclamation.

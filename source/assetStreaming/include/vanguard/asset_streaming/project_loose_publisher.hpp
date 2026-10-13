@@ -86,7 +86,17 @@ namespace vanguard::asset_streaming
         // the project owner can route repair into its existing recook scheduler.
         [[nodiscard]] ProjectLoosePublicationResult ValidateExact(
             const assets::DependencyRecord& expected, ProjectLoosePublicationFailure* failure = nullptr) noexcept;
+        // P5 restart/LKG path. The caller supplies an exact record loaded from the
+        // DependencyIndex retirement-protection journal. It is intentionally not
+        // required to still be the current VADI row, but the immutable VDDC
+        // artifact set and target are validated exactly before use.
+        [[nodiscard]] ProjectLoosePublicationResult ValidateRetainedExact(
+            const assets::DependencyRecord& expected, ProjectLoosePublicationFailure* failure = nullptr) noexcept;
         [[nodiscard]] ProjectLoosePublicationResult PrepareExact(
+            const assets::DependencyRecord& expected, containers::DynamicArray<streaming::DependencyDescriptor>& dependencies,
+            u64& expectedContentCrc64, ProjectLoosePublicationFailure* failure = nullptr,
+            ProjectLoosePublicationInfo* publication = nullptr) noexcept;
+        [[nodiscard]] ProjectLoosePublicationResult PrepareRetainedExact(
             const assets::DependencyRecord& expected, containers::DynamicArray<streaming::DependencyDescriptor>& dependencies,
             u64& expectedContentCrc64, ProjectLoosePublicationFailure* failure = nullptr,
             ProjectLoosePublicationInfo* publication = nullptr) noexcept;

@@ -75,6 +75,18 @@ namespace vanguard::rendering
             }
             return;
         }
+        if (context.IsPatchingResourceContract())
+        {
+            context.BeginNewNode();
+            RenderFlowResourceFailure& failure = context.GetResourceFailure();
+            if (!PatchResourceContract(context, &failure) && failure.code == RenderFlowResourceFailureCode::None)
+            {
+                failure.code = RenderFlowResourceFailureCode::IncompletePlanning;
+                failure.phase = RenderFlowResourceSessionState::Planning;
+                failure.message = "render node resource-contract patch failed without failure evidence";
+            }
+            return;
+        }
 
         RenderNodeImplContext& executionContext = const_cast<RenderNodeImplContext&>(context);
         if (executionContext.m_operation != RenderNodeImplContext::Operation::Execute)
@@ -191,7 +203,11 @@ namespace vanguard::rendering
         return m_dependencies[static_cast<u32>(relation)][static_cast<u32>(dependencyType)] != InvalidItemId;
     }
 
-    RenderNodeGraph::RenderNodeGraph() : m_nodes(0, 250), m_dependencies(0, 500) {}
+    RenderNodeGraph::RenderNodeGraph()
+        : m_nodes(0, 250), m_dependencies(0, 500), m_cpuOrderedNodes(memory::pools::Rendering::GetInstance()),
+          m_cpuParentOffsets(memory::pools::Rendering::GetInstance()), m_cpuParentUsageIndices(memory::pools::Rendering::GetInstance())
+    {
+    }
 
     bool RenderNodeGraph::IsAllocated(const ItemId id) const noexcept
     {
@@ -576,28 +592,67 @@ namespace vanguard::rendering
                 --levelNodeCounts[level];
             }
         }
+        CompileCpuExecutionTopology(levelNodeCounts);
         m_isBuilt = true;
     }
 
-    void RenderNodeGraph::BuildFlattenedNodesArray(containers::DynamicArray<ItemId>& nodes, const RenderNodeDependencyType dependencyType) const
+    void RenderNodeGraph::CompileCpuExecutionTopology(containers::DynamicArray<u32>& scratch) noexcept
     {
-        VG_ASSERT(m_isBuilt);
-        nodes.Resize(m_nodes.GetNumItems());
-        for (ItemId& node : nodes)
-            node = InvalidItemId;
-        for (u32 usageIndex = 0; usageIndex < m_nodes.GetNumItems(); ++usageIndex)
+        const u32 nodeCount = m_nodes.GetNumItems();
+        m_cpuOrderedNodes.Resize(nodeCount, InvalidItemId);
+        m_cpuParentOffsets.Resize(nodeCount + 1u, 0u);
+        m_cpuParentUsageIndices.Clear();
+        m_cpuRootCount = 0;
+        m_cpuLeafCount = 0;
+        m_cpuTerminalLeafUsageIndex = InvalidRenderFlowResourceIndex;
+
+        for (u32 usageIndex = 0; usageIndex < nodeCount; ++usageIndex)
         {
             const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(usageIndex);
-            const RenderFlowGroup flowGroup = m_nodes[nodeId].m_renderNodeContext.m_renderFlowGroups[static_cast<u32>(dependencyType)];
-            if (flowGroup >= nodes.Size())
-                VG_FATAL("render-node flow group lies outside the flattened graph");
-            if (nodes[flowGroup] != InvalidItemId)
-                VG_FATAL("multiple render nodes occupy the same flattened flow group");
-            nodes[flowGroup] = nodeId;
+            const RenderFlowGroup flowGroup = m_nodes[nodeId].m_renderNodeContext.m_renderFlowGroups[static_cast<u32>(RenderNodeDependencyType::Cpu)];
+            if (flowGroup >= nodeCount || m_cpuOrderedNodes[flowGroup] != InvalidItemId)
+                VG_FATAL("compiled render-node CPU topology has an invalid flattened order");
+            m_cpuOrderedNodes[flowGroup] = nodeId;
+            if (!m_nodes[nodeId].HasAnyDependency(RelationType::Parent, RenderNodeDependencyType::Cpu))
+                ++m_cpuRootCount;
+            if (!m_nodes[nodeId].HasAnyDependency(RelationType::Child, RenderNodeDependencyType::Cpu))
+            {
+                ++m_cpuLeafCount;
+                m_cpuTerminalLeafUsageIndex = usageIndex;
+            }
         }
-        for (const ItemId node : nodes)
+        for (const ItemId node : m_cpuOrderedNodes)
             if (node == InvalidItemId)
-                VG_FATAL("flattened render-node graph contains an unfilled flow group");
+                VG_FATAL("compiled render-node CPU topology contains an unfilled flow group");
+
+        u32 cpuDependencyCount = 0;
+        for (u32 dependencyIndex = 0; dependencyIndex < m_dependencies.GetNumItems(); ++dependencyIndex)
+        {
+            const DependencyData& dependency = m_dependencies[m_dependencies.GetItemIdByUsageIndex(dependencyIndex)];
+            if (dependency.m_type != RenderNodeDependencyType::Cpu)
+                continue;
+            const u32 child = GetNodeIndex(dependency.m_nodes[static_cast<u32>(RelationType::Child)]);
+            ++m_cpuParentOffsets[child + 1u];
+            ++cpuDependencyCount;
+        }
+        for (u32 index = 1; index < m_cpuParentOffsets.Size(); ++index)
+            m_cpuParentOffsets[index] += m_cpuParentOffsets[index - 1u];
+        m_cpuParentUsageIndices.Resize(cpuDependencyCount, InvalidRenderFlowResourceIndex);
+
+        scratch.Resize(nodeCount);
+        for (u32 index = 0; index < nodeCount; ++index)
+            scratch[index] = m_cpuParentOffsets[index];
+        for (u32 dependencyIndex = 0; dependencyIndex < m_dependencies.GetNumItems(); ++dependencyIndex)
+        {
+            const DependencyData& dependency = m_dependencies[m_dependencies.GetItemIdByUsageIndex(dependencyIndex)];
+            if (dependency.m_type != RenderNodeDependencyType::Cpu)
+                continue;
+            const u32 parent = GetNodeIndex(dependency.m_nodes[static_cast<u32>(RelationType::Parent)]);
+            const u32 child = GetNodeIndex(dependency.m_nodes[static_cast<u32>(RelationType::Child)]);
+            const u32 write = scratch[child]++;
+            VG_ASSERT(write < m_cpuParentUsageIndices.Size());
+            m_cpuParentUsageIndices[write] = parent;
+        }
     }
 
     bool RenderNodeGraph::PrepareResourceBindings(RenderNodeResourceBindings& resourceBindings, RenderNodeResourcePreparationFailures& failures) const
@@ -629,6 +684,130 @@ namespace vanguard::rendering
             entry.node = RenderFlowNodeId{m_nodes.GetItemIdByUsageIndex(usageIndex)};
             entry.resources.Reset();
             entry.executionContext = new (executionContexts + usageIndex) RenderNodeImplContext();
+        }
+        return true;
+    }
+
+    bool RenderNodeGraph::CaptureResourceContract(RenderFlowResourceContract& contract, const RenderNodeResourceBindings& resourceBindings,
+                                                  RenderFlowResourceAllocator& allocator, RenderFlowResourceFailure* const failure) const noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        auto fail = [&](const RenderFlowResourceFailureCode code, const char* const message, const RenderFlowNodeId node = {}) noexcept
+        {
+            if (failure != nullptr)
+            {
+                failure->code = code;
+                failure->phase = allocator.GetState();
+                failure->node = node;
+                failure->message = message;
+            }
+            return false;
+        };
+        if (!m_isBuilt || allocator.m_impl == nullptr || allocator.m_impl->state != RenderFlowResourceSessionState::Planning)
+            return fail(RenderFlowResourceFailureCode::InvalidPhase, "resource-contract capture requires a built graph in allocator planning state");
+        auto* const storage = static_cast<detail::ResourceContractStorage*>(contract.m_storage);
+        if (storage == nullptr || allocator.m_impl->contractCompileTarget != storage || resourceBindings.m_entries.Size() != m_nodes.GetNumItems())
+            return fail(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource-contract capture target does not match the active cold compilation");
+
+        storage->candidateNodes.Clear();
+        storage->candidateNodes.Reserve(resourceBindings.m_entries.Size());
+        for (u32 usageIndex = 0; usageIndex < m_nodes.GetNumItems(); ++usageIndex)
+        {
+            const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(usageIndex);
+            const RenderNodeResourceBindings::Entry& entry = resourceBindings.m_entries[usageIndex];
+            if (entry.node != RenderFlowNodeId{nodeId})
+                return fail(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource-contract capture bindings do not match the built graph", RenderFlowNodeId{nodeId});
+            detail::ResourceContractNodeTemplate& target = storage->candidateNodes.EmplaceBack();
+            target.node = entry.node;
+            target.uses.Reserve(entry.resources.m_uses.Size());
+            for (const RenderNodeResourceUseBinding& source : entry.resources.m_uses)
+            {
+                if (!source.use.IsValid() || source.use.generation != allocator.m_impl->sessionGeneration)
+                    return fail(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource-contract capture observed a stale resource-use generation", entry.node);
+                detail::ResourceContractUseTemplate& use = target.uses.EmplaceBack();
+                use.flowSpace = source.flowSpace;
+                use.name.Set(containers::StringView(source.name));
+                use.lookupHash = source.lookupHash;
+                use.flowGroup = source.use.flowGroup;
+                use.ordinal = source.use.ordinal;
+                use.kind = source.kind;
+                use.nextDuplicate = source.nextDuplicate;
+                use.resolvedIndex = source.resolvedIndex;
+            }
+            target.decisions.Reserve(entry.resources.m_decisions.Size());
+            for (const RenderNodeResourceDecisionBinding& source : entry.resources.m_decisions)
+            {
+                if (!source.decision.IsValid() || source.decision.generation != allocator.m_impl->sessionGeneration)
+                    return fail(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource-contract capture observed a stale decision generation", entry.node);
+                target.decisions.PushBack({source.decision.flowGroup, source.decision.ordinal});
+            }
+            target.ranges.Reserve(entry.resources.m_ranges.Size());
+            for (const RenderNodeResourceRange& source : entry.resources.m_ranges)
+            {
+                detail::ResourceContractRangeTemplate range;
+                range.firstUse = source.firstUse;
+                range.useCount = source.useCount;
+                range.firstDecision = source.firstDecision;
+                range.decisionCount = source.decisionCount;
+                range.lookupBucketOffset = source.lookupBucketOffset;
+                range.lookupBucketCount = source.lookupBucketCount;
+                range.lookupGroupOffset = source.lookupGroupOffset;
+                range.lookupGroupCount = source.lookupGroupCount;
+                target.ranges.PushBack(range);
+            }
+            target.lookupBuckets.Reserve(entry.resources.m_lookupBuckets.Size());
+            for (const u32 bucket : entry.resources.m_lookupBuckets)
+                target.lookupBuckets.PushBack(bucket);
+            target.lookupGroups.Reserve(entry.resources.m_lookupGroups.Size());
+            for (const RenderNodeResourceLookupGroup& source : entry.resources.m_lookupGroups)
+                target.lookupGroups.PushBack({source.lookupHash, source.firstUse, source.lastUse, source.nextBucketGroup});
+            target.textureBindingCount = entry.resources.m_resolvedTextures.Size();
+            target.bufferBindingCount = entry.resources.m_resolvedBuffers.Size();
+            if (target.textureBindingCount + target.bufferBindingCount != target.uses.Size())
+                return fail(RenderFlowResourceFailureCode::IncompletePlanning, "resource-contract capture typed binding counts do not match declared uses", entry.node);
+        }
+        storage->candidateNodesReady = true;
+        return true;
+    }
+
+    bool RenderNodeGraph::InstantiateResourceContract(const RenderFlowResourceContract& contract, RenderNodeResourceBindings& resourceBindings,
+                                                      RenderFlowResourceAllocator& allocator, RenderFlowResourceFailure* const failure) const noexcept
+    {
+        if (failure != nullptr)
+            *failure = {};
+        auto fail = [&](const RenderFlowResourceFailureCode code, const char* const message, const RenderFlowNodeId node = {}) noexcept
+        {
+            if (failure != nullptr)
+            {
+                failure->code = code;
+                failure->phase = allocator.GetState();
+                failure->node = node;
+                failure->message = message;
+            }
+            return false;
+        };
+        if (!m_isBuilt || allocator.m_impl == nullptr || allocator.m_impl->state != RenderFlowResourceSessionState::Planning)
+            return fail(RenderFlowResourceFailureCode::InvalidPhase, "resource-contract instantiation requires a built graph in allocator planning state");
+        const auto* const storage = static_cast<const detail::ResourceContractStorage*>(contract.m_storage);
+        if (storage == nullptr || !storage->valid || !storage->plan.valid || storage->nodes.Size() != m_nodes.GetNumItems() ||
+            resourceBindings.m_entries.Size() != m_nodes.GetNumItems())
+            return fail(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource-contract node template does not match the current built graph");
+
+        const u32 generation = allocator.m_impl->sessionGeneration;
+        for (u32 usageIndex = 0; usageIndex < m_nodes.GetNumItems(); ++usageIndex)
+        {
+            const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(usageIndex);
+            const RenderNodeResourceBindings::Entry& entry = resourceBindings.m_entries[usageIndex];
+            const detail::ResourceContractNodeTemplate& source = storage->nodes[usageIndex];
+            if (entry.node != RenderFlowNodeId{nodeId} || source.node != entry.node)
+                return fail(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource-contract node identity does not match the current built graph", RenderFlowNodeId{nodeId});
+        }
+        for (u32 usageIndex = 0; usageIndex < m_nodes.GetNumItems(); ++usageIndex)
+        {
+            RenderNodeResourceBindings::Entry& entry = resourceBindings.m_entries[usageIndex];
+            const detail::ResourceContractNodeTemplate& source = storage->nodes[usageIndex];
+            entry.resources.BindWarmContract(source, generation);
         }
         return true;
     }
@@ -740,6 +919,60 @@ namespace vanguard::rendering
         builder.DispatchFence();
     }
 
+    bool RenderNodeGraph::PatchResourceContract(const RenderNodeImplContext& context, RenderFlowResourceAllocator& allocator,
+                                                RenderNodeResourceBindings& resourceBindings, RenderFlowResourceFailure* const failureOut) const noexcept
+    {
+        VG_ASSERT(m_isBuilt);
+        VG_ASSERT(resourceBindings.m_entries.Size() == m_nodes.GetNumItems());
+        if (failureOut != nullptr)
+            *failureOut = {};
+        bool hasDynamicDecisions = false;
+        for (const RenderNodeResourceBindings::Entry& entry : resourceBindings.m_entries)
+        {
+            if (entry.resources.DecisionCount() != 0)
+            {
+                hasDynamicDecisions = true;
+                break;
+            }
+        }
+        if (!hasDynamicDecisions)
+            return true;
+        RenderNodeImplContext nodeContext(context, context.GetDispatcherThreadIndex());
+        nodeContext.ResetNodeData();
+        for (u32 usageIndex = 0; usageIndex < m_nodes.GetNumItems(); ++usageIndex)
+        {
+            const ItemId nodeId = m_nodes.GetItemIdByUsageIndex(usageIndex);
+            const RenderNodeData& node = m_nodes[nodeId];
+            RenderNodeImpl* const impl = node.m_renderNodeParameters.m_impl;
+            if (impl == nullptr)
+                continue;
+            RenderNodeResourceBindings::Entry& binding = resourceBindings.m_entries[usageIndex];
+            if (binding.node != RenderFlowNodeId{nodeId})
+            {
+                RenderFlowResourceFailure failure;
+                failure.code = RenderFlowResourceFailureCode::InvalidOrStaleIdentity;
+                failure.phase = RenderFlowResourceSessionState::Planning;
+                failure.node = RenderFlowNodeId{nodeId};
+                failure.message = "resource-contract patch bindings do not match the built graph";
+                if (failureOut != nullptr)
+                    *failureOut = failure;
+                return false;
+            }
+            nodeContext.SetupNodeData(node.m_renderNodeContext, node.m_renderNodeParameters);
+            RenderFlowResourceFailure failure;
+            nodeContext.BeginResourceContractPatch(allocator, binding.resources, failure);
+            impl->Process(nodeContext, nullptr);
+            nodeContext.EndResourceContractPatch();
+            if (failure.code != RenderFlowResourceFailureCode::None)
+            {
+                if (failureOut != nullptr)
+                    *failureOut = failure;
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool RenderNodeGraph::PrepareExecutionPackets(RenderFlowResourceAllocator& allocator, RenderFrameCommandLists& frameCommandLists, RenderNodeResourceBindings& resourceBindings,
                                                   RenderFlowResourceFailure* const failure) const noexcept
     {
@@ -780,8 +1013,7 @@ namespace vanguard::rendering
             }
             entry.executionFailure = {};
             entry.packet = {};
-            for (RenderNodeResourceRange& range : entry.resources.m_ranges)
-                range.execution = {};
+            entry.resources.ClearRangeExecutions();
             if (entry.node != RenderFlowNodeId{nodeId} || entry.executionContext == nullptr)
             {
                 if (failure != nullptr)
@@ -797,7 +1029,7 @@ namespace vanguard::rendering
             const RenderNodeImpl* const impl = node.m_renderNodeParameters.m_impl;
             if (impl == nullptr || !impl->HasCommandList(impl->GetCommandListUsage()))
             {
-                if (!entry.resources.m_uses.Empty() || !entry.resources.m_decisions.Empty())
+                if (entry.resources.UseCount() != 0 || entry.resources.DecisionCount() != 0)
                 {
                     entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
                     entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
@@ -815,7 +1047,7 @@ namespace vanguard::rendering
                     *failure = entry.executionFailure;
                 return false;
             }
-            if (entry.packet.GetUseCount() != entry.resources.m_uses.Size() || entry.packet.GetDecisionCount() != entry.resources.m_decisions.Size())
+            if (entry.packet.GetUseCount() != entry.resources.UseCount() || entry.packet.GetDecisionCount() != entry.resources.DecisionCount())
             {
                 entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
                 entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
@@ -828,15 +1060,15 @@ namespace vanguard::rendering
 
             u32 nextUse = 0;
             u32 nextDecision = 0;
-            for (u32 rangeIndex = 0; rangeIndex < entry.resources.m_ranges.Size(); ++rangeIndex)
+            for (u32 rangeIndex = 0; rangeIndex < entry.resources.RangeCount(); ++rangeIndex)
             {
-                RenderNodeResourceRange& range = entry.resources.m_ranges[rangeIndex];
+                const RenderNodeResourceRange range = entry.resources.GetRange(rangeIndex);
                 if (range.firstUse != nextUse ||
-                    range.firstUse > entry.resources.m_uses.Size() || range.useCount > entry.resources.m_uses.Size() - range.firstUse ||
+                    range.firstUse > entry.resources.UseCount() || range.useCount > entry.resources.UseCount() - range.firstUse ||
                     range.firstDecision != nextDecision ||
-                    range.firstDecision > entry.resources.m_decisions.Size() || range.decisionCount > entry.resources.m_decisions.Size() - range.firstDecision ||
-                    range.lookupBucketOffset > entry.resources.m_lookupBuckets.Size() || range.lookupBucketCount > entry.resources.m_lookupBuckets.Size() - range.lookupBucketOffset ||
-                    range.lookupGroupOffset > entry.resources.m_lookupGroups.Size() || range.lookupGroupCount > entry.resources.m_lookupGroups.Size() - range.lookupGroupOffset ||
+                    range.firstDecision > entry.resources.DecisionCount() || range.decisionCount > entry.resources.DecisionCount() - range.firstDecision ||
+                    range.lookupBucketOffset > entry.resources.LookupBucketCount() || range.lookupBucketCount > entry.resources.LookupBucketCount() - range.lookupBucketOffset ||
+                    range.lookupGroupOffset > entry.resources.LookupGroupCount() || range.lookupGroupCount > entry.resources.LookupGroupCount() - range.lookupGroupOffset ||
                     (range.useCount == 0 && (range.lookupBucketCount != 0 || range.lookupGroupCount != 0)) ||
                     (range.useCount != 0 && (range.lookupBucketCount == 0 || (range.lookupBucketCount & (range.lookupBucketCount - 1u)) != 0 || range.lookupGroupCount > range.useCount)))
                 {
@@ -851,14 +1083,16 @@ namespace vanguard::rendering
                 nextUse += range.useCount;
                 nextDecision += range.decisionCount;
 
-                if (!entry.packet.ResolveExecutionRange(range.firstUse, range.useCount, range.execution, &entry.executionFailure))
+                CompiledExecutionRange execution;
+                if (!entry.packet.ResolveExecutionRange(range.firstUse, range.useCount, execution, &entry.executionFailure))
                 {
                     if (failure != nullptr)
                         *failure = entry.executionFailure;
                     return false;
                 }
+                entry.resources.SetRangeExecution(rangeIndex, execution);
             }
-            if (nextUse != entry.resources.m_uses.Size() || nextDecision != entry.resources.m_decisions.Size())
+            if (nextUse != entry.resources.UseCount() || nextDecision != entry.resources.DecisionCount())
             {
                 entry.executionFailure.code = RenderFlowResourceFailureCode::IncompleteExecution;
                 entry.executionFailure.phase = RenderFlowResourceSessionState::Executing;
@@ -878,6 +1112,12 @@ namespace vanguard::rendering
         m_isBuilt = false;
         m_nodes.Reset();
         m_dependencies.Reset();
+        m_cpuOrderedNodes.Clear();
+        m_cpuParentOffsets.Clear();
+        m_cpuParentUsageIndices.Clear();
+        m_cpuRootCount = 0;
+        m_cpuLeafCount = 0;
+        m_cpuTerminalLeafUsageIndex = InvalidRenderFlowResourceIndex;
     }
 
     void RenderNodeGraph::AcquireExclusiveUpdateFlag()

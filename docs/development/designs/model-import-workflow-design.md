@@ -1294,9 +1294,7 @@ The architecture above maps cleanly onto current Vanguard foundations, but sever
 - no project-level generation of model-owned embedded texture outputs exists yet;
 - `prefabs::CookPrefab(...)` exists, but there is no project asset compiler/adapter for producing `PrefabResourceType` through the project build graph;
 - prefab `ComponentBuildRecord` / `ComponentRecord` currently persist only component identity and owning entity identity; there is no authored same-entity parent-component relationship, and the materializer currently attaches every placed object component directly to the entity transform root;
-- the current asset operation that updates settings intentionally preserves the existing output schema; there is no atomic operation that updates model settings and declared outputs together while preserving the parent `AssetId`;
-- `AssetFileTransaction` can conditionally write/delete by expected digest, but it has no read-only digest assertion/precondition for proving at commit time that an inspected model source remained unchanged when the transaction only needs to mutate metadata/other files;
-- existing high-level asset executors each own their own transaction boundary, so model-source creation/update plus `.vmeta` schema changes plus selected extra source adoptions cannot yet be composed under one durable commit;
+- P2 has since closed the earlier durable-authoring gaps around schema-changing metadata replacement with parent `AssetId` preservation, read-only digest assertions, and one composite model/source/auxiliary-adoption transaction; see the P2 implementation closure below;
 - `DependencyIndex` replacement builds are transactional, but removal of a retired output does not currently participate in that transaction; destructive model reimport therefore needs transactional retirement/removal support rather than publishing replacement records and retiring old records in separate observable steps;
 - project publication already has prepared batch visibility, but current automatic grouping is driven by generated-dependency connectivity rather than an explicit model-generation/cohort contract; model reimport must prove that the required model closure cuts over coherently and retains the previous published generation on candidate failure;
 - exact-current model reimport is recook of the existing persisted output schema rather than source-output rediscovery/reconciliation;
@@ -1827,6 +1825,34 @@ The implementation must, however, preserve or explicitly reject decoder cases wh
 
 With those constraints, the existing VMESH cooker remains a valid downstream target and P0 can be implemented entirely as a new preservation/extraction layer above it.
 
+##### P0 implementation closure — 2026-10-09
+
+P0 has now been implemented in the exact-current shared tree.
+
+The implementation adds:
+
+- source/meshTools/include/vanguard/mesh_tools/model_import.hpp and source/meshTools/src/model_import.cpp for the owned canonical manifest, exact-source inspection, bounds/diagnostics/progress/cancellation, local-transform preservation, selected-definition extraction and explicit import-space transform conversion;
+- a narrow Vanguard Assimp provenance bridge in external/assimp/include/assimp/vanguard_model_provenance.h;
+- glTF2 decoder provenance for source mesh -> primitive grouping, per-use skin identity, structural-buffer classification and exact source-joint -> aiNode bone identity;
+- FBX decoder provenance for source Geometry ID -> material partitions, reuse binding validation and exact cluster-target -> aiNode bone identity;
+- typed dependency tracking that permits external image provenance while explicitly rejecting v1 .gltf external structural buffers;
+- packed glTF metallic-roughness texture provenance without dropping the metallic channel;
+- full source skin influences and inverse-bind evidence in the manifest, with four-weight reduction deferred to extraction;
+- compatibility preservation for the existing ImportMeshFile / ImportMeshMemory path and unchanged SourceMesh / CookMesh / VMESH contracts.
+
+P0 canonical inspection intentionally does not use aiProcess_SortByPType or Assimp's name-based aiProcess_PopulateArmatureData. Decoder-origin grouping is kept stable, and glTF/FBX bone node identity is supplied structurally before meshTools consumes the scene. Conflicting reused source geometry bindings are rejected instead of silently choosing first/last instance semantics.
+
+Focused coverage in source/meshTools/tests/mesh_tools_tests.cpp now proves shared multi-primitive geometry reuse, duplicate display names, exact local hierarchy transforms, nonuniform/negative/sheared transform preservation and diagnostics, exact source fingerprinting, packed material-texture provenance, .glb / self-contained .gltf acceptance, external .bin rejection, optional inverse-bind matrices, consistent/conflicting reused skins, exact joint identity despite duplicate display names, more-than-four source influences with extraction-time reduction, aggregate limits, cancellation, file dependency classification and selected-definition cooking through the existing VMESH cooker.
+
+Validation completed in Debug with VS2022 x64 outer MSBuild /m:1:
+
+    meshToolsTests build: 0 warnings, 0 errors
+    meshToolsTests run:   all checks passed
+
+The normal generate-vs2022.bat entrypoint was also attempted but is currently blocked before project generation by unrelated pre-existing engine-code audit violations outside the P0 files. Those unrelated violations were not changed as part of P0.
+
+**P0 exit gate: CLOSED.** P1 remains a separate next phase and has not been started by this implementation.
+
 ### P1 — Versioned model settings, stable identities and immutable `ModelImportPlan`
 
 **Why next:** current generic authoring can store many outputs, but it has no model-specific durable correspondence or reviewed plan. We need to decide exact output identities before any source mutation or build routing is trustworthy.
@@ -1851,6 +1877,28 @@ This phase also defines friendly model-output description data for later Asset E
 
 **Exit gate:** given old `.vmeta` + source A and then source B, headless tests produce deterministic preserved/new/removed/ambiguous output decisions and exact external-reference blockers, with zero durable mutation.
 
+#### P1 implementation closure — 2026-10-09
+
+P1 is implemented as a headless, zero-durable-mutation planning layer in `meshTools`. `ModelImportSettings` v1 now owns the compact durable correspondence/policy state and uses a deterministic bounded codec under `MaximumAssetSettingsBytes`; retired output keys and stable material-slot IDs are tombstoned and never recycled. Codec validity is independent of live cooking-profile registration, while planning rejects a currently unavailable selected cooking profile.
+
+`ModelImportPlan` is move-only and immutable to callers after publication. Planning stages all state locally and owns its proposed output schema, reconciliation rows, ambiguity evidence, material-slot decisions, texture/dependency decisions, blockers and stale-plan witnesses. Reimport requires the persisted metadata digest to match the exact metadata snapshot being validated, and managed dependency metadata fingerprints are likewise bound to the exact parsed dependency metadata snapshot before they can enter a plan.
+
+Persistent output reconciliation uses evidence-strength-aware global passes: stable native identity first, then strong structural evidence, then a weaker name-independent relationship/schema witness. Each pass preserves only globally isolated bidirectional 1:1 correspondence, reserves stronger matches before weaker evidence runs, and quarantines non-1:1 candidate components as ambiguity. Source/display names may corroborate already-strong structural evidence but are never a name-only fallback; sibling/occurrence ordinals and raw vertex payload are not durable identity authority. Material identity follows owning geometry/schema evidence without texture authored-path content, and stable material slots use global strong partition evidence followed by a conservative weaker schema pass with no ordinal fallback.
+
+Destructive reconciliation reuses `SourceDatabase` backward references and owns exact external-reference blocker detail (`target`, referencer, dependency kind, location, in-place state, referencer source identity/path and scan state). Missing, unreadable, invalid or identity-conflicted unscanned metadata conservatively produces `ReferenceStateUnavailable`; exact stable-slot backlinks remain unavailable and slot retirement therefore uses `StableSlotReferenceUnavailable`. First import and reimport both validate canonical source root/destination/source identity against the live catalog, including ambiguous cross-root identities, while outside-project first import preserves the exact origin and explicit copy decision. Managed default material/skeleton and managed/adopted texture decisions carry owned source/metadata existence and fingerprint witnesses, including distinct selected outputs from one managed source.
+
+Final independent exact-current reviews reported `0 BLOCKER / 0 HIGH / 0 MEDIUM` for both identity/settings and reconciliation/reference safety.
+
+Validation completed in **Debug only** with VS2022 x64 outer MSBuild `/m:1`:
+
+    meshToolsTests build: 0 warnings, 0 errors
+    meshToolsTests run:   all checks passed
+    scoped git diff --check: clean (line-ending notices only)
+
+No Development configuration validation was run for P1.
+
+**P1 exit gate: CLOSED.** P2 has not been started and requires separate authorization.
+
 ### P2 — Stale-safe composite durable model commit
 
 **Why before compilers/UI:** the design promises that the reviewed plan is what gets committed. Exact-current `createImportDescription` cannot inspect source bytes, `ExecuteAssetUpdateSettings` cannot change the output schema, and existing high-level executors each own their transaction. Those seams must be fixed before the first real model import is safe.
@@ -1868,6 +1916,30 @@ The minimum durable transaction work is:
 Outside-origin import should reuse the source byte snapshot already captured by `ProjectAssetExternalImportRequest`; a pre-existing candidate under `Assets` should be inspected from one exact loaded snapshot. Neither frontend should be allowed to re-open/re-parse a different file version between review and commit without triggering a rescan.
 
 **Exit gate:** headless tests cover first import, already-under-`Assets` adoption, outside-origin copy, multi-file adoption in the same transaction, injected transaction failure/rollback, source-changed stale rejection and schema-changing reimport while preserving `AssetId`.
+
+#### P2 implementation closure — 2026-10-10
+
+P2 is implemented as a generic planned-authoring path rather than model policy embedded in assetStreaming. assets::PlannedAssetImportRequest / PlannedAssetDependencyWitness carry immutable authoring witnesses; meshTools::BuildModelPlannedImportRequest(...) is the single shared ModelImportPlan translation seam; and ProjectAssetPipeline::CommitPlannedImport(...) owns durable project admission, history, transaction execution and reconciliation. First import obtains its parent identity through the pipeline-owned pre-plan GenerateImportIdentityCandidate(...) seam, while schema-changing reimport preserves the existing parent AssetId.
+
+AssetFileTransaction now has separate writable roots and read-only assertion roots plus exact SHA-256 digest assertions. The planned commit revalidates the reviewed source snapshot, persisted parent metadata, reused managed dependency source/metadata witnesses and auxiliary unmanaged candidate sources. In-project first import creates the parent metadata; outside-origin first import copies the exact reviewed source snapshot and creates metadata; reimport conditionally replaces the parent metadata while preserving identity; and selected auxiliary project-source adoptions create their metadata in the same transaction. Transaction-local AssetId and output-path reservations cover the parent plus every staged auxiliary adoption.
+
+Watcher generations are not treated as authoritative disk revisions. Immediately before transaction admission, the pipeline rebuilds a complete non-published project candidate from disk and requires it to compare unchanged against the exact accepted generation reviewed by the plan. This closes delayed-watcher holes in project-wide identity/output/reference and retirement-blocker facts. The subsequent observation fence is deliberately short: expensive filesystem application and completion happen outside the SourceChangeAccumulator mutex, while only the journal publication linearization step executes under the short stable-change fence. Exact paths authored by the transaction may cross that fence as self-observation; unrelated changes, overflow or missing change provenance reject the plan. A successful durable commit records one history entry, performs one published synchronous project rescan/reconciliation, and acknowledges only watcher hints represented by that authoritative rescan.
+
+The transaction split is Prepare -> ApplyPrepared -> PublishCommit -> CompleteCommit. Runtime rollback after an applied-but-not-yet-published transaction remains rollback-capable outside higher-level locks, and rollback failure propagates as recovery failure rather than being mislabeled stale. The original closure still had one known MEDIUM here: ApplyPrepared physically changed files while the durable journal remained Prepared, so a process crash before PublishCommit could leave startup unable to prove whether visible target/backup state belonged to the interrupted transaction. That original limitation was fail-closed and data-safe, not silent corruption.
+
+Latest compile-only validation on the original closure source used VS2022 Debug x64 with outer /m:1 and BuildProjectReferences=false for assets.vcxproj, assetStreaming.vcxproj, meshTools.vcxproj and nanovanguard.vcxproj; all four succeeded and nanovanguard.exe linked. Scoped git diff --check was clean apart from line-ending notices, and generated VS2022 project files had no diff. Two final read-only source audits reported 0 BLOCKER / 0 HIGH / 1 MEDIUM for the transaction/recovery path (the crash window above) and 0 BLOCKER / 0 HIGH / 0 MEDIUM for the authoritative catalog/stale-proof path.
+
+Per explicit user direction on 2026-10-10, no test executable was run for that original P2/P3 closure. The original broad test-oriented exit gate above therefore remains deferred validation evidence rather than something this note claims was executed.
+
+#### P2.1 transaction crash-recovery hardening — 2026-10-10
+
+The remaining ApplyPrepared-before-PublishCommit MEDIUM was subsequently closed in AssetFileTransaction without relaxing any ambiguity checks. Journal version 5 preserves the legacy numeric states Staging=1, Prepared=2 and Committed=3 and adds Applying=4. Before the first authored path is mutated, ApplyPrepared verifies the exact prepared write stage and all current conditions/assertions, snapshots the SHA-256 pre-image of every existing target plus every move source, retains the exact write post-image digest, and durably publishes those per-entry recovery witnesses in the Applying journal. The journal therefore carries enough write-ahead evidence to distinguish untouched, target-backed-up, and fully-applied topology after restart rather than depending on process-local touched flags.
+
+Startup recovery retains the old v1-v4 Prepared interpretation for journals produced by older binaries. For v5, Prepared is now a positive proof that no authored target/source mutation began, so recovery and live pre-Apply rollback clean only transaction-owned staging files and never restore/delete authored targets or move sources. v5 Applying recovery first classifies the entire transaction read-only from exact path topology plus the durable pre/post digests; rollback begins only if every entry is safely reversible, then runs in reverse order. Any unexpected or digest-mismatched target/source/backup remains fail-closed as RecoveryRequired with the conflicting evidence preserved. Existing-target write rollback restores the verified backup over the verified post-image with one replace operation so recovery itself does not introduce a delete-then-restore crash window. Only the durable Committed journal remains the logical commit point.
+
+Focused low-level restart-style coverage in assetsTests now exercises v5 Prepared cleanup, preservation of a concurrent target before Applying, explicit live Prepared rollback, interrupted create, conditional replace, a mid-write target-backed-up/stage-pending topology, conditional delete, occupied-target move rollback, Committed cleanup, and fail-closed foreign post-image interference. On the exact P2.1 source, assets.vcxproj, assetsTests.vcxproj and the assetStreaming consumer compile in VS2022 Debug x64 with BuildProjectReferences=false and outer /m:1; assetsTests exits 0. An independent post-fix read-only audit of the v5 recovery architecture reported 0 BLOCKER / 0 HIGH / 0 MEDIUM and classified the original ApplyPrepared-before-PublishCommit MEDIUM as closed. A final matching live pre-Apply rollback alignment was then covered directly by the same focused test executable. These focused tests close the specific transaction recovery defect; they do not retroactively claim that the broader original P2/P3 end-to-end test matrix was run.
+
+**P2 exit gate: CLOSED for the durable authoring path, including the P2.1 ApplyPrepared/PublishCommit crash-recovery boundary.**
 
 ### P3 — Compound model build routing and real mesh/material/texture outputs
 
@@ -1895,6 +1967,24 @@ MaterialResource -> TextureResource / shader / pipeline
 Register and validate these routes first in headless asset/build tests. Do **not** wire the Editor project service until one-source/many-output build, VDDC caching, dependency invalidation and package planning are proven.
 
 **Exit gate:** one model source can declare and independently build several `MeshResource`, `MaterialResource` and `TextureResource` outputs through `SourceDatabase::LookupOutput` / `ProjectAssetBuildSystem`, with correct generated dependencies, caching and no repeated full source parse per child.
+
+#### P3 implementation closure — 2026-10-10
+
+P3 is implemented for the production **glTF 2.0 / GLB** model path. The compound model importer intentionally recognizes only `.gltf` and `.glb`; broader Assimp format support remains available to the generic mesh importer but is not part of the compound-model P3 contract. FBX/OBJ parity is explicitly out of scope for this closure.
+
+The implemented path reuses exact-output `SourceDatabase::LookupOutput` / `ProjectAssetBuildSystem` routing, provides bounded graph resource estimates, shares one bounded process-local Assimp inspection across sibling outputs, cooks exact geometry children through ordinary VMESH, composes model-owned materials through the production material canonical builder, and routes supported encoded embedded images through the production texture compiler. Mesh children carry actual per-submesh material dependencies; material children retain ordinary texture/shader/pipeline dependency closure; generated canonical intermediates remain internal fallback requests rather than public model outputs.
+
+Persisted P1 correspondence and exact source/settings witnesses remain authoritative. RuntimeStatic model-owned geometry is canonicalized to the fixed production static-surface ABI, material-driven UV0/tangent requirements fail closed when required source attributes are absent, concurrent first-miss inspection is coalesced without parsing under the cache mutex, and mesh cooking-profile policy participates in build invalidation through a deterministic profile fingerprint. glTF alpha `BLEND` remains unsupported and rejects rather than silently degrading to Opaque/Masked; raw uncompressed embedded pixel payloads remain unsupported.
+
+At the time P3 was closed, the existing headless P3 fixture exercised only the persisted-build side of the contract by synthesizing committed metadata directly and therefore did **not** prove P2's durable authoring transaction. P2 has since been implemented and closed separately above; that later closure supplies the missing reviewed-plan/source/metadata/output-schema commit bridge without retroactively turning the synthetic P3 fixture into end-to-end execution evidence.
+
+Follow-up exact-current source review closed the two remaining glTF2/GLB production defects found after the original closure. The default model material-mapper witness now matches the production imported-surface mapper version (v2), so a default `ImportModelOwned` plan no longer persists settings that the production VMAT composition path rejects. Same-transaction adopted project textures are also finalized before parent metadata encoding: generic authoring assigns the auxiliary asset/output identity, passes a neutral adoption receipt to the shared meshTools settings finalizer, and the persisted model setting is rewritten from temporary `AdoptProjectSource` source identity to the exact typed `ReuseManagedResource` reference. The existing model source-reference scanner then records that exact managed texture as an ordinary required backlink. The earlier mesh-cooking-profile invalidation finding is likewise closed in exact-current source by the deterministic cooking-profile fingerprint already carried by model mesh discovery.
+
+The final closure source was compile-checked with VS2022 Debug x64, outer `/m:1` and `BuildProjectReferences=false` for `assets.vcxproj`, `assetStreaming.vcxproj`, `meshTools.vcxproj` and `nanovanguard.vcxproj`; all four succeeded and `nanovanguard.exe` linked. This is compile-only evidence: the user explicitly requested no fresh P3 test execution, so no test executable was run for these final closure tightenings.
+
+Per explicit user direction on 2026-10-10, P3 is being closed in this exact-current source state **without an additional post-closure test run**. Do not interpret this closure note as fresh Debug or Development execution evidence after the final glTF2/GLB-only scope tightening.
+
+**P3 exit gate: CLOSED for glTF2/GLB.**
 
 ### P4 — Persisted same-entity component hierarchy and generated composition output
 
@@ -1926,6 +2016,78 @@ Then implement the model-owned `composition` output:
 
 **Why before shipping Editor workflows:** exact-current recook already has strong transactional replacement behavior, but schema-changing model refresh adds output removals and a model-generation cutover rule that current per-output behavior does not fully express.
 
+#### P5 implementation closure — 2026-10-11
+
+P5 now extends the existing project-asset authorities rather than introducing a
+second scheduler, database, cooker, or publication owner. `DependencyIndex`
+supports transaction-scoped removals plus exact successor publication witnesses;
+`IncrementalRecooker` stages replacement records, retirements, and successor
+witnesses in the same VADI transaction. Removed/superseded predecessor
+`DependencyRecord`s are retained durably outside current build authority until
+their complete exact successor witness set is visible. Those retained records
+participate in the existing persistent-cache protection snapshot, so VDDC
+maintenance cannot collect last-known-good artifacts before cutover. Failed
+index saves remain rollback-capable, and ordinary no-retirement recooks retain
+the established incremental path.
+
+The project pipeline exposes an exact explicit cohort request carrying
+`{AssetId, acceptedGeneration, complete output set}`. Admission validates the
+current accepted asset/generation and the complete typed output set before
+coordinator mutation. The cohort is forced through the existing
+`IncrementalRecooker`/`BuildGraph`; all required members, including disconnected
+siblings, must produce exact committed evidence before one existing
+`PreparedLooseBatch` can change visibility. Missing/stale/repair-required members
+block the entire cohort. A failed successor therefore leaves the previous exact
+publication cohort visible; a first-ever failed import exposes no synthetic
+Ready generation. Explicit recook completion remains `Pending` until coherent
+publication/owner settlement has actually completed, and cancellation is
+rejected once the non-cancellable publication visibility commit has started.
+
+Restart safety spans the existing VPAS/source-WAL/VADI authorities. VPAS 1.1
+persists a bounded `ProjectAssetCohortIntent` containing the parent asset/source,
+reviewed accepted generation, canonical target metadata fingerprint, exact
+predecessor set, and exact successor set. `CommitPlannedImport` orders the source
+transaction as `Prepare -> ApplyPrepared -> durable VPAS intent -> PublishCommit`.
+A crash before `PublishCommit` is recovered by the existing source WAL and the
+intent is rebased/cleared accordingly; a committed marker resumes the exact
+cohort after restart even when ordinary automatic recook policy is disabled.
+While the marker is live, generic reconciliation retains predecessor visibility
+and suppresses successor-only partial visibility. Successful settlement clears
+the durable marker before VADI retirement protection is released. Restart replay
+can restore retained exact historical rows through the existing loose publisher
+without making them current build authority.
+
+Because VPAS predecessor identities alone cannot reconstruct old
+build/content/artifact evidence, a predecessor-bearing cohort intent also makes
+VADI recovery fail closed: `DependencyIndex` destructive recovery is disabled for
+that startup only. Corrupt/incompatible primary persistence and temp-only
+recovery evidence are preserved across repeated initialization attempts instead
+of being deleted and later mistaken for an empty clean index. A valid committed
+primary still permits harmless stale-temp cleanup after it parses successfully.
+First-import intents have no predecessor LKG evidence and ordinary project
+startup retains the existing self-healing recovery default.
+
+The headless model `RefreshModelFromSource` path is complete and remains distinct
+from `RequestAssetReimport()` (recook current schema): fresh source inspection ->
+plan -> reconciliation/blocker validation -> atomic metadata/schema commit ->
+exact cohort build/publication. Stable removed output IDs are not recycled, and
+authored external references remain authoritative retirement blockers.
+
+Focused VS2022 x64 validation was run with serialized outer MSBuild `/m:1` in
+both Debug and Development. `assetIndexTests`, `assetRecookerTests`,
+`assetsPersistentCacheTests`, `assetStreamingTests`, and
+`nanovanguardProjectAssetTests` pass with zero failed checks, including durable
+retirement/VDDC protection, VPAS intent round-trip and corruption fail-closed
+behavior, repeated corrupt-VADI restart protection, content refresh, schema
+addition/removal, reference-blocked retirement, failed-successor LKG,
+first-import failure/retry, cancellation/retry, disconnected cohort publication,
+and later successful cutover. Nanovanguard validation used equivalent temporary
+include/library additions because the checked-in generated VS project lagged its
+already-correct premake `entities`/`prefabs` closure; generated project files were
+not edited. Relevant P5 diffs pass `git diff --check` (line-ending notices only).
+The final independent exact-current P5 audit reported **0 BLOCKER / 0 HIGH / 0
+MEDIUM**; a second focused restart-recovery audit independently reported 0/0/0.
+
 Reuse `IncrementalRecooker`/`BuildGraph`/`DependencyIndex` rather than creating another scheduler. Existing replacement builds already stage records under one `DependencyIndex` transaction and roll back on any build/precommit validation failure. Extend that foundation only where model refresh requires it:
 
 - allow output retirement/removal/tombstone changes to participate in the same dependency-index transaction as replacement records;
@@ -1939,6 +2101,8 @@ Reuse `IncrementalRecooker`/`BuildGraph`/`DependencyIndex` rather than creating 
 The existing `RequestAssetReimport()` remains useful as **recook current schema**. Add a separate model `Refresh/Reimport from Source` path that runs fresh inspection -> plan -> reconciliation -> atomic schema commit -> cohort build/publication.
 
 **Exit gate:** tests cover successful content-only refresh, schema addition, unreferenced removal, referenced blocking removal, ambiguous referenced mapping, candidate build failure with old generation still active, first-import build failure, cancellation/retry and successful later cutover.
+
+**P5 exit gate: CLOSED.**
 
 ### P6 — Editor pipeline registration and first functional model import frontend
 

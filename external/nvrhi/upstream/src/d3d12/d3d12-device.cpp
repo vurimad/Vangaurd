@@ -21,6 +21,7 @@
 */
 
 #include "d3d12-backend.h"
+#include "../../../../../source/profiling/include/vanguard/profiling/profiling.hpp"
 
 #include <nvrhi/common/misc.h>
 
@@ -616,7 +617,18 @@ namespace nvrhi::d3d12
     
     uint64_t Device::executeCommandLists(nvrhi::ICommandList* const* pCommandLists, size_t numCommandLists, CommandQueue executionQueue)
     {
-        std::vector<ID3D12CommandList*> commandListsToExecute(numCommandLists);
+        // RF18: ordinary per-queue submissions are small. Avoid allocating a
+        // temporary vector for every submission, without imposing a fixed limit
+        // on larger batches from non-RenderFlow callers.
+        constexpr size_t InlineCommandListCapacity = 16;
+        ID3D12CommandList* inlineCommandLists[InlineCommandListCapacity]{};
+        std::vector<ID3D12CommandList*> overflowCommandLists;
+        ID3D12CommandList** commandListsToExecute = numCommandLists != 0 ? inlineCommandLists : nullptr;
+        if (numCommandLists > InlineCommandListCapacity)
+        {
+            overflowCommandLists.resize(numCommandLists);
+            commandListsToExecute = overflowCommandLists.data();
+        }
         for (size_t i = 0; i < numCommandLists; i++)
         {
             commandListsToExecute[i] = checked_cast<CommandList*>(pCommandLists[i])->getD3D12CommandList();
@@ -624,14 +636,24 @@ namespace nvrhi::d3d12
 
         Queue* pQueue = getQueue(executionQueue);
 
-        pQueue->queue->ExecuteCommandLists(uint32_t(commandListsToExecute.size()), commandListsToExecute.data());
-        (void)pQueue->Signal();
-
-        for (size_t i = 0; i < numCommandLists; i++)
         {
-            (void)checked_cast<CommandList*>(pCommandLists[i])->executed(pQueue);
+            VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/DriverExecuteCommandLists");
+            pQueue->queue->ExecuteCommandLists(uint32_t(numCommandLists), commandListsToExecute);
+        }
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/PrivateQueueSignal");
+            (void)pQueue->Signal();
         }
 
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/ExecutedLists");
+            for (size_t i = 0; i < numCommandLists; i++)
+            {
+                (void)checked_cast<CommandList*>(pCommandLists[i])->executed(pQueue);
+            }
+        }
+
+        VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/DeviceRemovedCheck");
         HRESULT hr = m_Context.device->GetDeviceRemovedReason();
         if (FAILED(hr))
         {

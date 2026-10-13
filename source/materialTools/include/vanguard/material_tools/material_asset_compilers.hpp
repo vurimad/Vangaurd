@@ -96,6 +96,12 @@ namespace vanguard::material_tools
     struct MaterialArtifactCompilerConfig
     {
         MaterialOfflineContract offline;
+        // Optional trusted include/source provider used by generated material
+        // programs. When supplied, its content fingerprint participates in the
+        // compiler tool identity so DDC entries cannot survive provider changes.
+        shader_tools::LoadSourceFunction loadSource = nullptr;
+        void* loadSourceUserData = nullptr;
+        crypto::Digest256 sourceProviderFingerprint;
         u32 maximumEntryPoints = 32;
         u32 maximumDefines = 1024;
         u32 maximumSourceRanges = 65536;

@@ -223,6 +223,27 @@ namespace vanguard::asset_streaming
                 observation.kind = kind;
                 if (observation.path.IsFilePath())
                 {
+                    // ReadDirectoryChangesW includes directory entries in its
+                    // recursive stream. CreateFilePath is purely syntactic and
+                    // otherwise misclassifies an existing parent folder as an
+                    // authored source file. In particular, touching a large
+                    // transaction-stage sibling may update its parent folder's
+                    // last-write metadata: treating that notification as an
+                    // unrelated file edit makes the planned-import ownership
+                    // fence roll back its own otherwise-valid transaction.
+                    //
+                    // A directory-only MODIFIED notification does not identify
+                    // an authored file change; real children have independent
+                    // notifications, and a dropped stream still reports overflow.
+                    // Creation/renaming of a directory may change the source
+                    // inventory, so retain conservative full-rescan behavior.
+                    const DWORD attributes = ::GetFileAttributesW(observation.path.ToUtf16String().AsChar());
+                    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0u)
+                    {
+                        if (information->Action != FILE_ACTION_MODIFIED)
+                            m_owner->PublishOverflow(m_rootIndex);
+                        return true;
+                    }
                     m_owner->Publish(observation);
                     return true;
                 }

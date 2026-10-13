@@ -35,6 +35,12 @@ namespace vanguard::assets
         BuildGraphConfig buildGraph;
         DependencyIndexConfig dependencyIndex;
         ProjectSourceDataLimits sourceData;
+        // Project-declared outputs remain authoritative. This fallback is only
+        // consulted for generated dependencies that have no SourceDatabase
+        // owner, such as compiler-owned canonical intermediates synthesized by
+        // a compound source importer.
+        ResolveGeneratedDependencyFunction resolveGeneratedFallback = nullptr;
+        void* resolveGeneratedFallbackUserData = nullptr;
 
         [[nodiscard]] bool IsValid() const noexcept
         {
@@ -46,7 +52,8 @@ namespace vanguard::assets
     // Shared project cooker ownership. The editor and headless tools are
     // consumers; neither owns a separate compiler registry, graph, or DDC.
     // SourceDatabase mutations and shutdown require all returned requests to
-    // be released. Compiler/importer callback state must outlive this object.
+    // be released. Compiler/importer/generated-fallback callback state must
+    // outlive this object.
     class ProjectAssetBuildSystem final
     {
     public:
@@ -73,6 +80,22 @@ namespace vanguard::assets
         // without swapping that candidate into the live SourceDatabase first.
         [[nodiscard]] ProjectAssetBuildResult Resolve(const SourceDatabase& sources, resources::ResourceReference output,
                                                       OwnedBuildRequest& request) const noexcept;
+        // Opt-in bounded cohort resolver. Requests preserve input order and the
+        // first failing output index is reported exactly. When every output is
+        // owned by the same immutable SourceRecord, source bytes/metadata are
+        // loaded once and the resulting requests share one owned source backing.
+        // Mixed-source cohorts conservatively fall back to the canonical
+        // per-output resolver. On any failure, requests is empty.
+        [[nodiscard]] ProjectAssetBuildResult ResolveCohort(
+            const SourceDatabase& sources, containers::ArraySpan<const resources::ResourceReference> outputs,
+            containers::DynamicArray<OwnedBuildRequest>& requests, u32& failedIndex) const noexcept;
+        // P5 pre-commit freshness validation must resolve the exact compiler-owned
+        // Generated dependencies already materialized by BuildGraph, while
+        // ordinary public/root Resolve remains source-database-only. Never
+        // shadow a declared project path, including an unbuildable one.
+        [[nodiscard]] ProjectAssetBuildResult ResolveForValidation(
+            const SourceDatabase& sources, resources::ResourceReference output,
+            OwnedBuildRequest& request) const noexcept;
 
         [[nodiscard]] GraphRequest Request(resources::ResourceReference output, BuildPriority priority = BuildPriority::Normal,
                                            ProjectAssetBuildResult* result = nullptr) noexcept;

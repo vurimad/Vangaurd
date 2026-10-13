@@ -109,14 +109,39 @@ namespace vanguard::asset_streaming
             return record.source.IsValid() && record.source.IsTyped() ? AddInput(index, state, record.source, config) : false;
         }
 
-        void RemoveCurrentRequest(ProjectAssetAutomaticPendingState& state, const resources::ResourceReference output) noexcept
+        [[nodiscard]] bool RemoveCurrentRequest(ProjectAssetAutomaticPendingState& state,
+                                                const resources::ResourceReference output) noexcept
         {
             for (u32 index = 0; index < state.currentRequests.Size(); ++index)
                 if (state.currentRequests[index].outputReference == output)
                 {
+                    const assets::OwnedBuildRequest& removed = state.currentRequests[index];
+                    const u64 sharedBytes = removed.SharedSourceStorageByteCount();
+                    u64 releasedSharedBytes = 0u;
+                    if (sharedBytes != 0u)
+                    {
+                        bool retained = false;
+                        for (u32 other = 0u; other < state.currentRequests.Size(); ++other)
+                            if (other != index && removed.SharesSourceStorage(state.currentRequests[other]))
+                            {
+                                retained = true;
+                                break;
+                            }
+                        if (!retained)
+                        {
+                            if (state.currentRequestSharedSourceBytes < sharedBytes)
+                                return false;
+                            releasedSharedBytes = sharedBytes;
+                        }
+                    }
+                    const u32 before = state.currentRequests.Size();
                     static_cast<void>(state.currentRequests.RemoveAtReorder(index));
-                    return;
+                    if (state.currentRequests.Size() + 1u != before)
+                        return false;
+                    state.currentRequestSharedSourceBytes -= releasedSharedBytes;
+                    return true;
                 }
+            return true;
         }
 
         [[nodiscard]] i32 FindForcedOutput(const ProjectAssetAutomaticPendingState& state,
@@ -169,17 +194,114 @@ namespace vanguard::asset_streaming
             }
         }
 
-        [[nodiscard]] bool SetCurrentRequest(ProjectAssetAutomaticPendingState& state, const assets::OwnedBuildRequest& request,
+        [[nodiscard]] bool SetCurrentRequest(ProjectAssetAutomaticPendingState& state, assets::OwnedBuildRequest& request,
                                              const u32 maximumOutputs) noexcept
         {
-            for (assets::OwnedBuildRequest& existing : state.currentRequests)
-                if (existing.outputReference == request.outputReference)
-                    return existing.CopyFrom(request.View());
-            if (state.currentRequests.Size() >= maximumOutputs)
+            if (!request.View().IsValid())
                 return false;
-            const u32 before = state.currentRequests.Size();
-            state.currentRequests.Resize(before + 1u);
-            return state.currentRequests.Size() == before + 1u && state.currentRequests[before].CopyFrom(request.View());
+
+            i32 replacementIndex = -1;
+            for (u32 index = 0u; index < state.currentRequests.Size(); ++index)
+                if (state.currentRequests[index].outputReference == request.outputReference)
+                {
+                    replacementIndex = static_cast<i32>(index);
+                    break;
+                }
+            if (replacementIndex < 0 && state.currentRequests.Size() >= maximumOutputs)
+                return false;
+
+            assets::OwnedBuildRequest prepared;
+            bool foundSharedSource = false;
+            for (assets::OwnedBuildRequest& retained : state.currentRequests)
+            {
+                // The source-grouped cohort resolver has already established one
+                // immutable shared backing for all members. Pointer identity of
+                // that owned backing is stronger than a second 60MB memcmp and
+                // proves exact source identity + bytes by construction.
+                if (retained.SharesSourceStorage(request))
+                {
+                    if (!prepared.CopyFromSharingSource(request))
+                        return false;
+                    foundSharedSource = true;
+                    break;
+                }
+                if (!retained.SourceContentEquals(request.View()))
+                    continue;
+                if (retained.SharedSourceStorageByteCount() == 0u && retained.SourceByteCount() != 0u)
+                {
+                    if (!retained.MakeSourceShared())
+                        return false;
+                    const u64 promotedBytes = retained.SharedSourceStorageByteCount();
+                    if (promotedBytes == 0u || state.currentRequestSharedSourceBytes > ~u64{0} - promotedBytes)
+                        return false;
+                    state.currentRequestSharedSourceBytes += promotedBytes;
+                }
+                if (!prepared.CopyFromSharingSource(request.View(), retained))
+                    return false;
+                foundSharedSource = true;
+                break;
+            }
+            if (!foundSharedSource)
+            {
+                if (!request.MakeSourceShared() || !prepared.CopyFromSharingSource(request))
+                    return false;
+            }
+
+            u64 removedSharedBytes = 0u;
+            if (replacementIndex >= 0)
+            {
+                const u32 replacing = static_cast<u32>(replacementIndex);
+                const assets::OwnedBuildRequest& previous = state.currentRequests[replacing];
+                const u64 previousSharedBytes = previous.SharedSourceStorageByteCount();
+                if (previousSharedBytes != 0u && !previous.SharesSourceStorage(prepared))
+                {
+                    bool retained = false;
+                    for (u32 other = 0u; other < state.currentRequests.Size(); ++other)
+                        if (other != replacing && previous.SharesSourceStorage(state.currentRequests[other]))
+                        {
+                            retained = true;
+                            break;
+                        }
+                    if (!retained)
+                        removedSharedBytes = previousSharedBytes;
+                }
+            }
+
+            u64 addedSharedBytes = 0u;
+            const u64 preparedSharedBytes = prepared.SharedSourceStorageByteCount();
+            if (preparedSharedBytes != 0u)
+            {
+                bool alreadyRetained = false;
+                for (const assets::OwnedBuildRequest& existing : state.currentRequests)
+                    if (prepared.SharesSourceStorage(existing))
+                    {
+                        alreadyRetained = true;
+                        break;
+                    }
+                if (!alreadyRetained)
+                    addedSharedBytes = preparedSharedBytes;
+            }
+
+            if (state.currentRequestSharedSourceBytes < removedSharedBytes)
+                return false;
+            const u64 afterRemoval = state.currentRequestSharedSourceBytes - removedSharedBytes;
+            if (afterRemoval > ~u64{0} - addedSharedBytes)
+                return false;
+
+            if (replacementIndex >= 0)
+            {
+                state.currentRequests[static_cast<u32>(replacementIndex)] = static_cast<assets::OwnedBuildRequest&&>(prepared);
+            }
+            else
+            {
+                const u32 before = state.currentRequests.Size();
+                state.currentRequests.Resize(before + 1u);
+                if (state.currentRequests.Size() != before + 1u)
+                    return false;
+                state.currentRequests[before] = static_cast<assets::OwnedBuildRequest&&>(prepared);
+            }
+            state.currentRequestSharedSourceBytes = afterRemoval + addedSharedBytes;
+            return true;
         }
 
         [[nodiscard]] bool CopyAsset(const ProjectAssetAutomaticPendingAsset& source,
@@ -274,10 +396,11 @@ namespace vanguard::asset_streaming
             for (u32 index = 0; index < source.outputs.Size(); ++index)
                 destination.outputs[index] = source.outputs[index];
             for (u32 index = 0; index < source.currentRequests.Size(); ++index)
-                if (!destination.currentRequests[index].CopyFrom(source.currentRequests[index].View()))
+                if (!destination.currentRequests[index].CopyFromSharingSource(source.currentRequests[index]))
                     return false;
             for (u32 index = 0; index < source.forcedOutputs.Size(); ++index)
                 destination.forcedOutputs[index] = source.forcedOutputs[index];
+            destination.currentRequestSharedSourceBytes = source.currentRequestSharedSourceBytes;
             return true;
         }
 
@@ -285,11 +408,12 @@ namespace vanguard::asset_streaming
         {
             u64 bytes = static_cast<u64>(state.inputs.Size()) * sizeof(resources::ResourceReference) +
                         static_cast<u64>(state.outputs.Size()) * sizeof(resources::ResourceReference) +
-                        static_cast<u64>(state.forcedOutputs.Size()) * sizeof(ProjectAssetAutomaticForcedOutput);
+                        static_cast<u64>(state.forcedOutputs.Size()) * sizeof(ProjectAssetAutomaticForcedOutput) +
+                        state.currentRequestSharedSourceBytes;
             for (const ProjectAssetAutomaticPendingAsset& asset : state.assets)
                 bytes += sizeof(ProjectAssetAutomaticPendingAsset) + asset.previous.ByteCount() + asset.current.ByteCount();
             for (const assets::OwnedBuildRequest& request : state.currentRequests)
-                bytes += sizeof(assets::OwnedBuildRequest) + request.ByteCount();
+                bytes += sizeof(assets::OwnedBuildRequest) + request.PrivateByteCount();
             return bytes;
         }
 
@@ -303,10 +427,62 @@ namespace vanguard::asset_streaming
                                                         const ProjectAssetAutomaticOwnedEvidence& evidence) noexcept
         {
             u64 bytes = 0;
-            for (const assets::OwnedBuildRequest& request : state.currentRequests)
-                if (Contains(evidence.outputs, request.outputReference))
-                    bytes += sizeof(assets::OwnedBuildRequest) + request.ByteCount();
+            for (u32 index = 0u; index < state.currentRequests.Size(); ++index)
+            {
+                const assets::OwnedBuildRequest& request = state.currentRequests[index];
+                if (!Contains(evidence.outputs, request.outputReference))
+                    continue;
+                bytes += sizeof(assets::OwnedBuildRequest) + request.PrivateByteCount();
+
+                const u64 sharedBytes = request.SharedSourceStorageByteCount();
+                if (sharedBytes == 0u)
+                    continue;
+                bool firstMatchedOwner = true;
+                for (u32 previous = 0u; previous < index; ++previous)
+                    if (Contains(evidence.outputs, state.currentRequests[previous].outputReference) &&
+                        request.SharesSourceStorage(state.currentRequests[previous]))
+                    {
+                        firstMatchedOwner = false;
+                        break;
+                    }
+                if (!firstMatchedOwner)
+                    continue;
+
+                bool retainedOutsideEvidence = false;
+                for (const assets::OwnedBuildRequest& candidate : state.currentRequests)
+                    if (request.SharesSourceStorage(candidate) && !Contains(evidence.outputs, candidate.outputReference))
+                    {
+                        retainedOutsideEvidence = true;
+                        break;
+                    }
+                if (!retainedOutsideEvidence)
+                    bytes += sharedBytes;
+            }
             return bytes;
+        }
+
+        [[nodiscard]] u64 AdditionalCurrentRequestBytes(const ProjectAssetAutomaticPendingState& state,
+                                                        const assets::OwnedBuildRequest& request) noexcept
+        {
+            const u64 sourceBytes = request.SourceByteCount();
+            const u64 requestBytes = request.ByteCount();
+            if (requestBytes < sourceBytes)
+                return ~u64{0};
+            u64 bytes = sizeof(assets::OwnedBuildRequest) + requestBytes - sourceBytes;
+            for (const assets::OwnedBuildRequest& retained : state.currentRequests)
+                if (retained.SourceContentEquals(request.View()))
+                {
+                    if (sourceBytes == 0u || retained.SharedSourceStorageByteCount() != 0u)
+                        return bytes;
+                    const u64 overhead = assets::OwnedBuildRequest::SharedSourceStorageOverhead();
+                    return bytes <= ~u64{0} - overhead ? bytes + overhead : ~u64{0};
+                }
+            if (sourceBytes == 0u)
+                return bytes;
+            const u64 overhead = assets::OwnedBuildRequest::SharedSourceStorageOverhead();
+            if (bytes > ~u64{0} - overhead || bytes + overhead > ~u64{0} - sourceBytes)
+                return ~u64{0};
+            return bytes + overhead + sourceBytes;
         }
 
         [[nodiscard]] bool ApplyChange(ProjectAssetAutomaticPendingState& state, const ProjectAssetChangeRecord& change,
@@ -364,7 +540,8 @@ namespace vanguard::asset_streaming
             // Requests for the formerly-current side are no longer current, but
             // their input/output identities stay in the unioned invalidation set.
             for (const resources::ResourceReference output : pending.current.outputs)
-                RemoveCurrentRequest(state, output);
+                if (!RemoveCurrentRequest(state, output))
+                    return false;
 
             if (!pending.current.CopyFrom(change.current))
                 return false;
@@ -399,7 +576,7 @@ namespace vanguard::asset_streaming
                         continue;
                     }
                     const u64 requestRetainedBytes = ComputeBytes(state);
-                    const u64 requestBytes = sizeof(assets::OwnedBuildRequest) + request.ByteCount();
+                    const u64 requestBytes = AdditionalCurrentRequestBytes(state, request);
                     if (requestRetainedBytes > config.maximumCapturedEvidenceBytes ||
                         requestBytes > config.maximumCapturedEvidenceBytes - requestRetainedBytes ||
                         !SetCurrentRequest(state, request, config.maximumPendingOutputs) ||
@@ -487,6 +664,7 @@ namespace vanguard::asset_streaming
         outputs.Clear();
         currentRequests.Clear();
         forcedOutputs.Clear();
+        currentRequestSharedSourceBytes = 0u;
         capturedEvidenceBytes = 0;
         lastAcceptedGeneration = 0;
         diagnostics = 0;
@@ -499,6 +677,9 @@ namespace vanguard::asset_streaming
         outputs.Swap(other.outputs);
         currentRequests.Swap(other.currentRequests);
         forcedOutputs.Swap(other.forcedOutputs);
+        const u64 sharedSourceBytes = currentRequestSharedSourceBytes;
+        currentRequestSharedSourceBytes = other.currentRequestSharedSourceBytes;
+        other.currentRequestSharedSourceBytes = sharedSourceBytes;
         const u64 bytes = capturedEvidenceBytes;
         capturedEvidenceBytes = other.capturedEvidenceBytes;
         other.capturedEvidenceBytes = bytes;
@@ -591,22 +772,33 @@ namespace vanguard::asset_streaming
         const ProjectAssetAutomaticPendingState& existing, const ProjectAssetState& asset,
         const u64 acceptedGeneration, const assets::SourceDatabase& sources,
         const assets::ProjectAssetBuildSystem& builds, assets::DependencyIndex& index,
-        const ProjectAssetAutomaticRecookConfig& config, ProjectAssetAutomaticPendingState& staged) noexcept
+        const ProjectAssetAutomaticRecookConfig& config, ProjectAssetAutomaticPendingState& staged,
+        const containers::ArraySpan<const assets::OwnedBuildRequest> alreadyResolved) noexcept
     {
         staged.Reset();
         if (!config.IsValid() || acceptedGeneration < existing.lastAcceptedGeneration ||
             asset.presence != ProjectAssetPresence::Present || asset.sourceIssues != assets::SourceIssueNone ||
             asset.importState != assets::SourceImportState::MetadataSelected || asset.importer == assets::InvalidSourceImporterId ||
             asset.authoredImporterVersion == 0u || asset.authoredImporterVersion != asset.availableImporterVersion ||
-            asset.outputs.Empty() || asset.outputs.Count() > config.maximumPendingOutputs || !CloneState(existing, staged))
+            asset.outputs.Empty() || asset.outputs.Count() > config.maximumPendingOutputs ||
+            (!alreadyResolved.Empty() && (alreadyResolved.Data() == nullptr || alreadyResolved.Count() != asset.outputs.Count())) ||
+            !CloneState(existing, staged))
             return ProjectAssetAutomaticPendingPrepareResult::RecoveryRequired;
 
-        for (const ProjectAssetOutputState& outputState : asset.outputs)
+        for (u32 outputIndex = 0u; outputIndex < asset.outputs.Count(); ++outputIndex)
         {
+            const ProjectAssetOutputState& outputState = asset.outputs[outputIndex];
             const resources::ResourceReference output = outputState.resource;
             assets::OwnedBuildRequest request;
+            const assets::ProjectAssetBuildResult resolved = alreadyResolved.Empty()
+                ? builds.Resolve(sources, output, request)
+                : (!alreadyResolved[outputIndex].View().IsValid() ||
+                   alreadyResolved[outputIndex].outputReference != output ||
+                   !request.CopyFromSharingSource(alreadyResolved[outputIndex])
+                       ? assets::ProjectAssetBuildResult::BuildRequestCreationFailed
+                       : assets::ProjectAssetBuildResult::Success);
             if (!output.IsValid() || !output.IsTyped() ||
-                builds.Resolve(sources, output, request) != assets::ProjectAssetBuildResult::Success ||
+                resolved != assets::ProjectAssetBuildResult::Success ||
                 !AddOutput(staged.outputs, output, config.maximumPendingOutputs) ||
                 !SetCurrentRequest(staged, request, config.maximumPendingOutputs) ||
                 !AddInput(index, staged, request.sourceReference, config) ||

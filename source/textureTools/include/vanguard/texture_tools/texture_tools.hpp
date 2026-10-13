@@ -151,7 +151,12 @@ namespace vanguard::texture_tools
         bool usedJobs = false;
     };
 
+    // Legacy/root initialization is idempotent. Shutdown releases that root initialization.
+    // Scoped composition owners should use Acquire/Release so they do not disturb an inherited root.
     [[nodiscard]] bool Initialize() noexcept;
+    [[nodiscard]] bool Shutdown() noexcept;
+    [[nodiscard]] bool Acquire() noexcept;
+    [[nodiscard]] bool Release() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
     struct TextureToolsConfigurationFingerprint
     {

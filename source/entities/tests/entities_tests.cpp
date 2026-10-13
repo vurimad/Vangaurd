@@ -8,9 +8,14 @@
 #include <vanguard/jobs/jobs.hpp>
 
 #include <array>
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <new>
+#include <vector>
 
 namespace
 {
@@ -295,7 +300,7 @@ namespace
     }
 } // namespace
 
-int main()
+int main(const int argc, const char* const* const argv)
 {
     namespace containers = vanguard::containers;
     namespace diagnostics = vanguard::diagnostics;
@@ -832,10 +837,461 @@ int main()
           "shutdown a fully drained entity-streaming world");
     streamedWorld.Close();
 
+    // Exercise the indexed (>=24 objects) assembly path with many same-type
+    // components sharing one logical entity, then verify stable-key lookup and
+    // complete lifecycle removal. This is intentionally in the existing world.
+    {
+        constexpr vanguard::u32 ManyComponents = 32u;
+        constexpr ecs::EntityId ManyEntity = 53'200u;
+        constexpr vanguard::u64 ManyCellId = 53'201u;
+        const resources::ResourceReference manyPrefabReference(
+            resources::ResourcePath::FromString("prefabs/indexed_assembly_test.vprefab"), prefab::PrefabResourceType);
+        std::array<ObjectData, ManyComponents> manyData{};
+        std::array<prefab::ComponentBuildRecord, ManyComponents> manyComponents{};
+        for (vanguard::u32 index = 0; index < ManyComponents; ++index)
+        {
+            manyData[index].value = index + 10u;
+            manyComponents[index] = {1000u + index, 1u, &ObjectSchema, &manyData[index], prefab::ComponentFlags::None};
+        }
+        const prefab::EntityBuildRecord manyPrefabEntity{1u, prefab::InvalidStableId, 0u, prefab::EntityFlags::None};
+        prefab::CookDescription manyPrefabDescription;
+        manyPrefabDescription.name = 0x5320u;
+        manyPrefabDescription.entities = {&manyPrefabEntity, 1u};
+        manyPrefabDescription.components = {manyComponents.data(), ManyComponents};
+        manyPrefabDescription.sourceFingerprint = vanguard::crypto::Sha256("indexed prefab", 14);
+        ByteArray manyPrefabBytes(memory::pools::World::GetInstance());
+        filesystem::MemoryFileWriter manyPrefabWriter(manyPrefabBytes);
+        Check(prefab::CookPrefab(manyPrefabDescription, manyPrefabWriter) == prefab::Result::Success,
+              "cook 32 repeated object components for indexed assembly");
+        filesystem::MemoryFileReader manyPrefabReader(manyPrefabBytes, 0);
+        prefab::PrefabFile manyPrefabFile;
+        Check(manyPrefabFile.Open(manyPrefabReader) == prefab::Result::Success,
+              "open indexed object-assembly prefab");
+        world::PlacementBuildRecord manyPlacement;
+        manyPlacement.entityId = ManyEntity;
+        manyPlacement.prefab = manyPrefabReference;
+        world::CellBuildDescription manyCellDescription;
+        manyCellDescription.cellId = ManyCellId;
+        manyCellDescription.worldId = 50u;
+        manyCellDescription.placements = {&manyPlacement, 1u};
+        manyCellDescription.sourceFingerprint = vanguard::crypto::Sha256("indexed cell", 12);
+        ByteArray manyCellBytes(memory::pools::World::GetInstance());
+        filesystem::MemoryFileWriter manyCellWriter(manyCellBytes);
+        Check(world::CookCell(manyCellDescription, manyCellWriter) == world::Result::Success,
+              "cook indexed object-assembly cell");
+        filesystem::MemoryFileReader manyCellReader(manyCellBytes, 0);
+        world::CellFile manyCellFile;
+        Check(manyCellFile.Open(manyCellReader) == world::Result::Success,
+              "open indexed object-assembly cell");
+        PrefabResolverContext manyResolver{manyPrefabReference, &manyPrefabFile};
+        Check(materializer.QueueCell(manyCellFile, 1u, &ResolvePrefab, &manyResolver) ==
+                      entities::Result::Success &&
+                  ecsWorld.FlushActions() && ecsWorld.FlushComponentActions() &&
+                  SettleActivationInitialization(materializer, ManyCellId, 1u) == entities::Result::Success &&
+                  componentRuntime.GetDirectory().GetEntityComponentCount(ManyEntity) == ManyComponents,
+              "materialize and activate 32 indexed stable objects on one entity");
+        bool allFound = true;
+        for (vanguard::u32 index = 0; index < ManyComponents; ++index)
+        {
+            const auto* const found = static_cast<const TestObjectComponent*>(componentRuntime.GetDirectory().Find(ManyEntity, 1000u + index));
+            allFound &= found != nullptr && found->GetValue() == index + 10u;
+        }
+        Check(allFound && componentRuntime.GetDirectory().Find(ManyEntity, 999u) == nullptr,
+              "indexed stable-key lookup preserves every repeated component and rejects absent keys");
+        Check(materializer.QueueRelease(ManyCellId, 1u) == entities::Result::Success && ecsWorld.FlushActions() &&
+                  ecsWorld.FlushComponentActions() && materializer.CompleteRelease(ManyCellId, 1u) == entities::Result::Success &&
+                  componentRuntime.GetDirectory().GetEntityComponentCount(ManyEntity) == 0u &&
+                  componentRuntime.GetDirectory().Find(ManyEntity, 1000u) == nullptr,
+              "release all indexed object components without retained stable-key entries");
+        manyCellFile.Close();
+        manyPrefabFile.Close();
+    }
+
     Check(materializer.Shutdown(), "shutdown empty materializer");
     Check(referenceRegistry.Shutdown(), "shutdown empty entity reference registry");
     Check(componentRegistry.Shutdown(), "shutdown component registry");
     Check(materializationWorld.Shutdown(), "shutdown empty materialization game world");
+
+    // Keep this isolated TransformRuntime proof after every other Flecs world: Flecs' C++
+    // component-registration cache is process-global, while ComponentType tokens are world-scoped.
+    // Running an extra WorldPlacement registration earlier would perturb older multi-world fixtures.
+    {
+        entities::TransformRuntimeConfig transformConfig;
+        transformConfig.maximumTrackedEntities = 8u;
+        transformConfig.maximumPlacedComponents = 64u;
+        transformConfig.maximumChangesPerSynchronize = 32u;
+        transformConfig.transformSystem.maximumComponents = 72u;
+        transformConfig.transformSystem.maximumAttachments = 71u;
+        transformConfig.transformSystem.maximumScheduledRoots = 72u;
+        transformConfig.transformSystem.maximumHierarchyDepth = 8u;
+        entities::TransformRuntime transformRuntime(transformConfig);
+        entities::ComponentRuntime placedComponentRuntime;
+        vanguard::game::GameWorld transformWorld;
+        Check(transformWorld.RegisterSystem(transformRuntime) && transformWorld.RegisterSystem(placedComponentRuntime) && transformWorld.Initialize(),
+              "initialize a focused placed-component hierarchy runtime");
+        ecs::World& transformEcs = transformWorld.GetEntities();
+        entities::ComponentRegistry placedComponentRegistry;
+        entities::EntityReferenceRegistry placedReferenceRegistry;
+        entities::CellMaterializer placedMaterializer;
+        Check(placedComponentRegistry.Initialize(transformEcs) && entities::RegisterTransformComponent(placedComponentRegistry) &&
+                  placedComponentRegistry.Seal() && placedReferenceRegistry.Initialize(transformEcs) &&
+                  placedMaterializer.Initialize(placedComponentRegistry, placedComponentRuntime.GetDirectory(), placedReferenceRegistry),
+              "initialize transform object materializer in the isolated hierarchy world");
+        const ecs::ComponentType<entities::WorldPlacement> placementType = ecs::RegisterComponent<entities::WorldPlacement>(transformEcs);
+        constexpr ecs::EntityId TransformHierarchyEntity = 9'200u;
+        Check(static_cast<bool>(placementType), "resolve the TransformRuntime WorldPlacement component type");
+        Check(transformEcs.QueueCreate(TransformHierarchyEntity) && transformEcs.FlushActions(),
+              "create the focused transform entity");
+        Check(transformEcs.QueueAddComponent(TransformHierarchyEntity, placementType) && transformEcs.FlushComponentActions(),
+              "commit the focused transform entity placement");
+        entities::TransformRuntimeFailure synchronizeFailure;
+        const bool synchronizedTransformRoot = transformRuntime.Synchronize(&synchronizeFailure);
+        if (!synchronizedTransformRoot)
+            std::fprintf(stderr, "[entitiesTests] transform hierarchy sync failure code=%u transform=%u message=%s\n",
+                         static_cast<vanguard::u32>(synchronizeFailure.code), static_cast<vanguard::u32>(synchronizeFailure.transform.code),
+                         synchronizeFailure.message != nullptr ? synchronizeFailure.message : "<none>");
+        Check(synchronizedTransformRoot && transformRuntime.GetRoot(TransformHierarchyEntity) != nullptr,
+              "create a live entity transform root for same-entity placed components");
+
+        entities::TransformComponent parent(entities::TransformComponentData{});
+        entities::TransformComponent child(entities::TransformComponentData{});
+        entities::TransformComponent sibling(entities::TransformComponentData{});
+        entities::TransformComponent grandchild(entities::TransformComponentData{});
+        entities::PlacedComponentBindingHandle parentBinding;
+        entities::PlacedComponentBindingHandle childBinding;
+        entities::PlacedComponentBindingHandle siblingBinding;
+        entities::PlacedComponentBindingHandle grandchildBinding;
+        Check(transformRuntime.AttachPlacedComponent(TransformHierarchyEntity, parent, parentBinding) &&
+                  transformRuntime.AttachPlacedComponent(TransformHierarchyEntity, child, &parent, childBinding) &&
+                  transformRuntime.AttachPlacedComponent(TransformHierarchyEntity, sibling, &parent, siblingBinding) &&
+                  transformRuntime.AttachPlacedComponent(TransformHierarchyEntity, grandchild, &child, grandchildBinding),
+              "attach a parent, siblings, and a grandchild on one entity");
+        const auto drainTransforms = [&]() noexcept
+        {
+            vanguard::jobs::Builder builder({vanguard::jobs::Priority::RenderPath, vanguard::jobs::Affinity::AnyWorker});
+            entities::TransformUpdateDispatch dispatch;
+            return builder.IsValid() && transformRuntime.DispatchUpdates(builder, dispatch) &&
+                   (!dispatch.dispatched || builder.WaitForCompletion());
+        };
+        Check(drainTransforms(), "drain initial transform registration and placement updates");
+        const vanguard::u64 beforeSubtree = transformRuntime.GetStats().transformSystem.updatedComponents;
+        child.SetLocalPosition(math::Vector3(1.0f, 0.0f, 0.0f));
+        const vanguard::u32 subtreeRoots = transformRuntime.GetStats().transformSystem.scheduledRoots;
+        const bool subtreeDrained = drainTransforms();
+        const vanguard::u64 afterSubtree = transformRuntime.GetStats().transformSystem.updatedComponents;
+        if (subtreeRoots != 1u || !subtreeDrained || afterSubtree < beforeSubtree + 2u)
+            std::fprintf(stderr, "[entitiesTests] subtree roots=%u drained=%u callbacks before=%llu after=%llu\n", subtreeRoots,
+                         subtreeDrained ? 1u : 0u, static_cast<unsigned long long>(beforeSubtree),
+                         static_cast<unsigned long long>(afterSubtree));
+        Check(subtreeRoots == 1u && subtreeDrained && afterSubtree >= beforeSubtree + 2u,
+              "editing one branch updates child and grandchild through its owning root");
+        child.SetLocalPosition(math::Vector3(2.0f, 0.0f, 0.0f));
+        sibling.SetLocalPosition(math::Vector3(0.0f, 1.0f, 0.0f));
+        Check(transformRuntime.GetStats().transformSystem.scheduledRoots == 1u && drainTransforms(),
+              "separate sibling edits share one safe cascade-root job");
+        child.SetLocalPosition(math::Vector3(3.0f, 0.0f, 0.0f));
+        parent.SetLocalPosition(math::Vector3(0.0f, 0.0f, 1.0f));
+        const vanguard::u64 beforeAncestor = transformRuntime.GetStats().transformSystem.updatedComponents;
+        Check(transformRuntime.GetStats().transformSystem.scheduledRoots == 1u && drainTransforms() &&
+                  transformRuntime.GetStats().transformSystem.updatedComponents == beforeAncestor + 4u,
+              "ancestor edit merges queued descendant and safely propagates to every affected child");
+        const entities::TransformRuntimeStats beforeRejectedParentDetach = transformRuntime.GetStats();
+        const entities::ITransformAttachment* const parentIncoming = parent.GetParentTransform();
+        const entities::ITransformAttachment* const childIncoming = child.GetParentTransform();
+        entities::TransformRuntimeFailure detachFailure;
+        entities::PlacedComponentBindingSnapshot parentSnapshot;
+        entities::PlacedComponentBindingSnapshot childSnapshot;
+        Check(!transformRuntime.DetachPlacedComponent(parentBinding, &detachFailure) &&
+                  detachFailure.code == entities::TransformRuntimeFailureCode::TransformFailure &&
+                  detachFailure.transform.code == entities::TransformFailureCode::InvalidComponent && parent.IsRegistered() && child.IsRegistered() &&
+                  parent.GetParentTransform() == parentIncoming && child.GetParentTransform() == childIncoming &&
+                  transformRuntime.GetPlacedComponentBinding(parentBinding, parentSnapshot) && parentSnapshot.attached &&
+                  transformRuntime.GetPlacedComponentBinding(childBinding, childSnapshot) && childSnapshot.attached &&
+                  transformRuntime.GetStats().placedComponents == beforeRejectedParentDetach.placedComponents &&
+                  transformRuntime.GetStats().transformSystem.attachments == beforeRejectedParentDetach.transformSystem.attachments,
+              "reject parent teardown with a live child without mutating either placed binding");
+        Check(transformRuntime.DetachPlacedComponent(grandchildBinding) && transformRuntime.DetachPlacedComponent(childBinding) &&
+                  transformRuntime.DetachPlacedComponent(siblingBinding) && transformRuntime.DetachPlacedComponent(parentBinding) &&
+                  !parent.IsRegistered() && !child.IsRegistered() && !sibling.IsRegistered() && !grandchild.IsRegistered() &&
+                  !transformRuntime.GetPlacedComponentBinding(childBinding, childSnapshot) &&
+                  !transformRuntime.GetPlacedComponentBinding(parentBinding, parentSnapshot),
+              "detach the same hierarchy child-first and invalidate both binding handles");
+
+        // Real indexed parent-resolution regression: the previous 32-object fixture
+        // exercised insertion only. Here 32 *placed* siblings/descendants force the
+        // >=24 lookup path, including a grandchild whose parent appears later.
+        {
+            constexpr vanguard::u32 PlacedCount = 32u;
+            constexpr ecs::EntityId PlacedEntityId = 53'300u;
+            constexpr vanguard::u64 PlacedCellId = 53'301u;
+            const resources::ResourceReference placedPrefabReference(
+                resources::ResourcePath::FromString("prefabs/indexed_placed_test.vprefab"), prefab::PrefabResourceType);
+            std::array<entities::TransformComponentData, PlacedCount> placedData{};
+            std::array<prefab::ComponentBuildRecord, PlacedCount> placedComponents{};
+            std::array<prefab::PlacedComponentBuildRecord, PlacedCount> placedRelations{};
+            for (vanguard::u32 index = 0; index < PlacedCount; ++index)
+            {
+                const vanguard::u64 stableId = 1000u + index;
+                placedComponents[index] = {stableId, 1u, &entities::GetTransformComponentSchema(), &placedData[index],
+                                           prefab::ComponentFlags::None};
+                placedRelations[index].componentStableId = stableId;
+                placedRelations[index].parentComponentStableId = index == PlacedCount - 1u ? prefab::InvalidStableId
+                                                            : index == 0u ? 1001u : 1000u + PlacedCount - 1u;
+                placedRelations[index].translation[0] = 1.0f;
+            }
+            const prefab::EntityBuildRecord placedEntity{1u, prefab::InvalidStableId, 0u, prefab::EntityFlags::None};
+            prefab::CookDescription placedDescription;
+            placedDescription.name = 0x5330u;
+            placedDescription.entities = {&placedEntity, 1u};
+            placedDescription.components = {placedComponents.data(), PlacedCount};
+            placedDescription.placedComponents = {placedRelations.data(), PlacedCount};
+            placedDescription.sourceFingerprint = vanguard::crypto::Sha256("placed index", 12);
+            ByteArray placedPrefabBytes(memory::pools::World::GetInstance());
+            filesystem::MemoryFileWriter placedPrefabWriter(placedPrefabBytes);
+            Check(prefab::CookPrefab(placedDescription, placedPrefabWriter) == prefab::Result::Success,
+                  "cook large placed hierarchy with non-topological component ordering");
+            filesystem::MemoryFileReader placedPrefabReader(placedPrefabBytes, 0);
+            prefab::PrefabFile placedPrefabFile;
+            Check(placedPrefabFile.Open(placedPrefabReader) == prefab::Result::Success, "open indexed placed hierarchy prefab");
+            world::PlacementBuildRecord placedWorldPlacement;
+            placedWorldPlacement.entityId = PlacedEntityId;
+            placedWorldPlacement.prefab = placedPrefabReference;
+            world::CellBuildDescription placedCellDescription;
+            placedCellDescription.cellId = PlacedCellId;
+            placedCellDescription.worldId = 50u;
+            placedCellDescription.placements = {&placedWorldPlacement, 1u};
+            placedCellDescription.sourceFingerprint = vanguard::crypto::Sha256("placed cell", 11);
+            ByteArray placedCellBytes(memory::pools::World::GetInstance());
+            filesystem::MemoryFileWriter placedCellWriter(placedCellBytes);
+            Check(world::CookCell(placedCellDescription, placedCellWriter) == world::Result::Success,
+                  "cook indexed placed-component world cell");
+            filesystem::MemoryFileReader placedCellReader(placedCellBytes, 0);
+            world::CellFile placedCellFile;
+            Check(placedCellFile.Open(placedCellReader) == world::Result::Success,
+                  "open indexed placed-component world cell");
+            PrefabResolverContext placedResolver{placedPrefabReference, &placedPrefabFile};
+            const entities::Result placedQueue = placedMaterializer.QueueCell(placedCellFile, 1u, &ResolvePrefab, &placedResolver);
+            const bool placedCommit = placedQueue == entities::Result::Success && transformEcs.FlushActions() &&
+                                      transformEcs.FlushComponentActions() && transformRuntime.Synchronize();
+            const entities::Result placedActivation = placedCommit
+                                                        ? SettleActivationInitialization(placedMaterializer, PlacedCellId, 1u)
+                                                        : entities::Result::InvalidState;
+            const vanguard::u32 placedComponentsLive = placedComponentRuntime.GetDirectory().GetEntityComponentCount(PlacedEntityId);
+            const bool placedDrained = placedActivation == entities::Result::Success && drainTransforms();
+            if (placedQueue != entities::Result::Success || !placedCommit || placedActivation != entities::Result::Success ||
+                placedComponentsLive != PlacedCount || !placedDrained)
+                std::fprintf(stderr, "[entitiesTests] indexed placed queue=%u commit=%u activation=%u live=%u drained=%u\n",
+                             static_cast<vanguard::u32>(placedQueue), placedCommit ? 1u : 0u,
+                             static_cast<vanguard::u32>(placedActivation), placedComponentsLive, placedDrained ? 1u : 0u);
+            Check(placedQueue == entities::Result::Success && placedCommit && placedActivation == entities::Result::Success &&
+                      placedComponentsLive == PlacedCount && placedDrained,
+                  "resolve all 32 stable placed parents through indexed assembly");
+            const entities::Component* const anchor = placedComponentRuntime.GetDirectory().Find(PlacedEntityId, 1031u);
+            const entities::Component* const mid = placedComponentRuntime.GetDirectory().Find(PlacedEntityId, 1001u);
+            const entities::Component* const leaf = placedComponentRuntime.GetDirectory().Find(PlacedEntityId, 1000u);
+            Check(anchor != nullptr && mid != nullptr && leaf != nullptr && anchor->GetPlacedComponent() != nullptr &&
+                      mid->GetPlacedComponent() != nullptr && leaf->GetPlacedComponent() != nullptr &&
+                      mid->GetPlacedComponent()->GetParentTransform() != nullptr &&
+                      &mid->GetPlacedComponent()->GetParentTransform()->GetSource() == anchor->GetPlacedComponent() &&
+                      leaf->GetPlacedComponent()->GetParentTransform() != nullptr &&
+                      &leaf->GetPlacedComponent()->GetParentTransform()->GetSource() == mid->GetPlacedComponent(),
+                  "indexed parent lookup retains authored anchor-to-child-to-grandchild hierarchy");
+            Check(placedMaterializer.QueueRelease(PlacedCellId, 1u) == entities::Result::Success && transformEcs.FlushActions() &&
+                      transformEcs.FlushComponentActions() &&
+                      placedMaterializer.CompleteRelease(PlacedCellId, 1u) == entities::Result::Success &&
+                      placedComponentRuntime.GetDirectory().GetEntityComponentCount(PlacedEntityId) == 0u,
+                  "destroy 32 indexed placed components child-first without parent ownership leaks");
+            placedCellFile.Close();
+            placedPrefabFile.Close();
+        }
+        Check(placedMaterializer.Shutdown() && placedReferenceRegistry.Shutdown() && placedComponentRegistry.Shutdown(),
+              "shutdown isolated indexed placed-component materializer");
+        Check(transformEcs.QueueDestroy(TransformHierarchyEntity) && transformEcs.FlushActions() && transformRuntime.Synchronize() &&
+                  transformWorld.Shutdown(),
+              "retire the focused placed-component hierarchy runtime without retained state");
+    }
+
+    // Measure *attachment evaluations*, rather than relying on callback counts:
+    // recomputing an unchanged sibling did not increment updatedComponents before
+    // dirty-branch pruning, so that older statistic alone cannot prove the win.
+    {
+        struct CountingAttachment final : entities::ITransformAttachment
+        {
+            CountingAttachment(entities::IPlacedComponent& from, entities::IPlacedComponent& to) noexcept
+                : ITransformAttachment(from, to) {}
+            [[nodiscard]] bool ComputeFinalTransform(const entities::IPlacedComponent* from,
+                                                     math::WorldTransform& output) const noexcept override
+            {
+                ++evaluations;
+                if (from == nullptr)
+                    return false;
+                output = from->GetLocalToWorld();
+                return true;
+            }
+            mutable vanguard::u32 evaluations = 0;
+        };
+        entities::TransformSystem system;
+        entities::TransformSystemConfig config;
+        config.maximumComponents = 8u;
+        config.maximumAttachments = 4u;
+        config.maximumScheduledRoots = 8u;
+        config.maximumHierarchyDepth = 8u;
+        entities::TransformComponent transformRoot(entities::TransformComponentData{});
+        entities::TransformComponent left(entities::TransformComponentData{});
+        entities::TransformComponent right(entities::TransformComponentData{});
+        entities::TransformComponent leaf(entities::TransformComponentData{});
+        CountingAttachment rootToLeft(transformRoot, left);
+        CountingAttachment rootToRight(transformRoot, right);
+        CountingAttachment leftToLeaf(left, leaf);
+        const auto drain = [&]() noexcept
+        {
+            vanguard::jobs::Builder builder({vanguard::jobs::Priority::RenderPath, vanguard::jobs::Affinity::AnyWorker});
+            entities::TransformUpdateDispatch dispatch;
+            return builder.IsValid() && system.DispatchUpdates(builder, dispatch) &&
+                   (!dispatch.dispatched || builder.WaitForCompletion());
+        };
+        Check(system.Initialize(config) && system.RegisterComponent(transformRoot) && system.RegisterComponent(left) &&
+                  system.RegisterComponent(right) && system.RegisterComponent(leaf) && system.Attach(rootToLeft) &&
+                  system.Attach(rootToRight) && system.Attach(leftToLeaf) && drain(),
+              "initialize and drain counting transform hierarchy");
+        // The first root dispatch propagates a one-shot force marker to every
+        // child after applying its initial transform. Consume those inherited
+        // markers before measuring *new* dirty-branch work.
+        transformRoot.SetLocalPosition(math::Vector3(0.0f, 0.0f, 0.5f));
+        Check(drain(), "settle inherited first-update force callbacks before sparse branch proof");
+        rootToLeft.evaluations = rootToRight.evaluations = leftToLeaf.evaluations = 0;
+        left.SetLocalPosition(math::Vector3(1.0f, 0.0f, 0.0f));
+        Check(system.GetStats().scheduledRoots == 1u && drain() && rootToLeft.evaluations == 1u &&
+                  leftToLeaf.evaluations == 1u && rootToRight.evaluations == 0u,
+              "dirty left branch evaluates only the left and leaf attachments");
+        rootToLeft.evaluations = rootToRight.evaluations = leftToLeaf.evaluations = 0;
+        left.SetLocalPosition(math::Vector3(2.0f, 0.0f, 0.0f));
+        right.SetLocalPosition(math::Vector3(0.0f, 1.0f, 0.0f));
+        Check(system.GetStats().scheduledRoots == 1u && drain() && rootToLeft.evaluations == 1u &&
+                  leftToLeaf.evaluations == 1u && rootToRight.evaluations == 1u,
+              "two dirty siblings share one root dispatch without recomputing either branch twice");
+        rootToLeft.evaluations = rootToRight.evaluations = leftToLeaf.evaluations = 0;
+        right.ForceUpdateCallbackOnce();
+        left.SetLocalPosition(math::Vector3(4.0f, 0.0f, 0.0f));
+        Check(drain() && rootToRight.evaluations == 1u,
+              "a pending one-shot force callback on an otherwise clean sibling survives branch pruning");
+        rootToLeft.evaluations = rootToRight.evaluations = leftToLeaf.evaluations = 0;
+        right.ForceUpdateCallback(true);
+        left.SetLocalPosition(math::Vector3(5.0f, 0.0f, 0.0f));
+        const bool forcedFirst = drain() && rootToRight.evaluations == 1u;
+        rootToRight.evaluations = 0u;
+        left.SetLocalPosition(math::Vector3(6.0f, 0.0f, 0.0f));
+        Check(forcedFirst && drain() && rootToRight.evaluations == 1u,
+              "persistent force-callback sibling remains visible to subsequent root updates");
+        right.ForceUpdateCallback(false);
+        rootToLeft.evaluations = rootToRight.evaluations = leftToLeaf.evaluations = 0;
+        transformRoot.SetLocalPosition(math::Vector3(0.0f, 0.0f, 1.0f));
+        Check(drain() && rootToLeft.evaluations == 1u && leftToLeaf.evaluations == 1u && rootToRight.evaluations == 1u,
+              "root movement still propagates to the entire hierarchy");
+        Check(system.Detach(leftToLeaf) && system.Detach(rootToRight) && system.Detach(rootToLeft) &&
+                  system.UnregisterComponent(leaf) && system.UnregisterComponent(right) && system.UnregisterComponent(left) &&
+                  system.UnregisterComponent(transformRoot) && system.Shutdown(),
+              "tear down counted transform attachments and components in dependency order");
+    }
+
+    // Opt-in microbenchmark: reports owner-thread scheduling, job-submission, and
+    // worker completion separately. It must not add timing-sensitive pass/fail gates
+    // to ordinary entitiesTests. Invoke entitiesTests.exe --transform-bench.
+    if (argc == 2 && std::strcmp(argv[1], "--transform-bench") == 0)
+    {
+        constexpr vanguard::u32 ChildCount = 512u;
+        constexpr vanguard::u32 WarmupFrames = 128u;
+        constexpr vanguard::u32 SampleFrames = 101u;
+        using Clock = std::chrono::steady_clock;
+        const auto microseconds = [](const Clock::duration duration) noexcept
+        {
+            return std::chrono::duration<double, std::micro>(duration).count();
+        };
+        entities::TransformSystem benchmarkSystem;
+        entities::TransformSystemConfig config;
+        config.maximumComponents = ChildCount + 1u;
+        config.maximumAttachments = ChildCount;
+        config.maximumScheduledRoots = ChildCount + 1u;
+        config.maximumHierarchyDepth = 8u;
+        entities::TransformComponent benchmarkRoot(entities::TransformComponentData{});
+        std::vector<std::unique_ptr<entities::TransformComponent>> children;
+        std::vector<std::unique_ptr<entities::HardAttachment>> attachments;
+        children.reserve(ChildCount);
+        attachments.reserve(ChildCount);
+        bool ready = benchmarkSystem.Initialize(config) && benchmarkSystem.RegisterComponent(benchmarkRoot);
+        for (vanguard::u32 index = 0; index < ChildCount && ready; ++index)
+        {
+            children.emplace_back(std::make_unique<entities::TransformComponent>(entities::TransformComponentData{}));
+            attachments.emplace_back(std::make_unique<entities::HardAttachment>(benchmarkRoot, *children.back()));
+            ready = benchmarkSystem.RegisterComponent(*children.back()) && benchmarkSystem.Attach(*attachments.back());
+        }
+        const auto dispatchAndWait = [&]() noexcept
+        {
+            vanguard::jobs::Builder builder({vanguard::jobs::Priority::RenderPath, vanguard::jobs::Affinity::AnyWorker});
+            entities::TransformUpdateDispatch dispatch;
+            return builder.IsValid() && benchmarkSystem.DispatchUpdates(builder, dispatch) &&
+                   (!dispatch.dispatched || builder.WaitForCompletion());
+        };
+        ready = ready && dispatchAndWait();
+        const auto benchmark = [&](const bool moveRoot, const char* const label)
+        {
+            std::vector<double> schedule;
+            std::vector<double> submit;
+            std::vector<double> finish;
+            schedule.reserve(SampleFrames);
+            submit.reserve(SampleFrames);
+            finish.reserve(SampleFrames);
+            const vanguard::u64 before = benchmarkSystem.GetStats().updatedComponents;
+            for (vanguard::u32 frame = 0; frame < WarmupFrames + SampleFrames; ++frame)
+            {
+                const auto t0 = Clock::now();
+                const float x = static_cast<float>(frame + 1u + (moveRoot ? 1000u : 0u));
+                if (moveRoot)
+                    benchmarkRoot.SetLocalPosition(math::Vector3(x, 0.0f, 0.0f));
+                else
+                    children[frame % ChildCount]->SetLocalPosition(math::Vector3(x, 0.0f, 0.0f));
+                const auto t1 = Clock::now();
+                vanguard::jobs::Builder builder({vanguard::jobs::Priority::RenderPath, vanguard::jobs::Affinity::AnyWorker});
+                entities::TransformUpdateDispatch dispatch;
+                if (!builder.IsValid() || !benchmarkSystem.DispatchUpdates(builder, dispatch))
+                    return false;
+                const auto t2 = Clock::now();
+                if (dispatch.dispatched && !builder.WaitForCompletion())
+                    return false;
+                const auto t3 = Clock::now();
+                if (frame >= WarmupFrames)
+                {
+                    schedule.push_back(microseconds(t1 - t0));
+                    submit.push_back(microseconds(t2 - t1));
+                    finish.push_back(microseconds(t3 - t2));
+                }
+            }
+            const auto report = [&](std::vector<double>& samples, const char* const phase)
+            {
+                std::sort(samples.begin(), samples.end());
+                std::printf("[transformBench] %s %s p50=%.3fus p95=%.3fus\n", label, phase,
+                            samples[SampleFrames / 2u], samples[SampleFrames * 95u / 100u]);
+            };
+            report(schedule, "schedule");
+            report(submit, "submit");
+            report(finish, "completion");
+            std::printf("[transformBench] %s callbackDelta=%llu\n", label,
+                        static_cast<unsigned long long>(benchmarkSystem.GetStats().updatedComponents - before));
+            return true;
+        };
+        Check(ready && benchmark(false, "wide-sparse") && benchmark(true, "wide-root-move"),
+              "complete opt-in wide transform scheduling and cascade benchmark");
+        for (vanguard::u32 index = ChildCount; index > 0; --index)
+            if (attachments[index - 1u] && attachments[index - 1u]->IsAttached())
+                Check(benchmarkSystem.Detach(*attachments[index - 1u]), "detach transform benchmark child");
+        for (vanguard::u32 index = ChildCount; index > 0; --index)
+            if (children[index - 1u] && children[index - 1u]->IsRegistered())
+                Check(benchmarkSystem.UnregisterComponent(*children[index - 1u]), "unregister transform benchmark child");
+        if (benchmarkRoot.IsRegistered())
+            Check(benchmarkSystem.UnregisterComponent(benchmarkRoot), "unregister transform benchmark root");
+        Check(benchmarkSystem.Shutdown(), "shutdown opt-in transform benchmark");
+    }
+
     Check(vanguard::jobs::Shutdown(), "shutdown Jobs after entity and RenderScene work drains");
 
     collidingCellFile.Close();

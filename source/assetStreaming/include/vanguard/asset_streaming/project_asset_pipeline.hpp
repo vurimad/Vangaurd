@@ -4,6 +4,7 @@
 #include <vanguard/asset_streaming/project_asset_observation.hpp>
 #include <vanguard/asset_streaming/project_loose_publisher.hpp>
 #include <vanguard/assets/asset_operations.hpp>
+#include <vanguard/assets/asset_recooker.hpp>
 #include <vanguard/assets/project_asset_build_system.hpp>
 
 namespace vanguard::filesystem
@@ -44,6 +45,7 @@ namespace vanguard::asset_streaming
         SnapshotSaveFailed,
         OperationInitializationFailed,
         OperationFailed,
+        StalePlan,
         IdentityGenerationFailed,
         HistoryLimitExceeded,
         UndoUnavailable,
@@ -130,6 +132,11 @@ namespace vanguard::asset_streaming
     {
         ProjectAssetAutomaticRecookState state = ProjectAssetAutomaticRecookState::Disabled;
         ProjectAssetAutomaticRecookDirtyReason dirtyReasons = ProjectAssetAutomaticRecookDirtyReason::None;
+        // Terminal worker diagnostic, retained across idle UI frames until a
+        // new plan begins. A failed recook need not have failed output records.
+        assets::RecookFailure lastRecookFailure = assets::RecookFailure::None;
+        assets::RecookRootFailureDetail firstFailedRoot;
+        u32 failedRootCount = 0u;
         u32 pendingAssets = 0;
         u32 pendingInputs = 0;
         u32 pendingOutputs = 0;
@@ -142,6 +149,8 @@ namespace vanguard::asset_streaming
         u32 retryEntries = 0;
         u32 activeRoots = 0;
         u32 completedRoots = 0;
+        u32 buildOperations = 0;
+        u32 completedBuildOperations = 0;
         u32 pendingDeliveryOutputs = 0;
         u64 activeAcceptedGeneration = 0;
         u64 capturedEvidenceBytes = 0;
@@ -465,6 +474,52 @@ namespace vanguard::asset_streaming
         containers::ArraySpan<const u8> settings;
     };
 
+    // Opt-in atomic delivery cohort. `outputs` must be the complete current
+    // accepted output set for `asset` at `acceptedGeneration`.
+    struct ProjectAssetCohortDeliveryRequest
+    {
+        assets::AssetId asset;
+        u64 acceptedGeneration = 0;
+        containers::ArraySpan<const resources::ResourceReference> outputs;
+    };
+
+    enum class ProjectAssetDeferredPlannedImportState : u8
+    {
+        None,
+        // The reviewed transaction is staged but not durable. The pipeline owns
+        // all continuation evidence while a Jobs worker executes only
+        // AssetFileTransaction::Prepare(). `CommitPlannedImport` returns Pending
+        // and leaves importedAsset invalid in this state.
+        PreparingTransaction,
+        AwaitingReconciliation,
+        CohortQueued,
+        ContinuationFailed
+    };
+
+    enum class ProjectAssetDeferredPlannedImportPreparePhase : u8
+    {
+        None,
+        Writing,
+        Verifying
+    };
+
+    // Process-local observation of the one owner-driven continuation attached to
+    // an explicitly deferred planned import. The durable cohort intent remains the
+    // restart authority; this status only reports the current process attempt.
+    struct ProjectAssetDeferredPlannedImportStatus
+    {
+        ProjectAssetDeferredPlannedImportState state = ProjectAssetDeferredPlannedImportState::None;
+        assets::AssetId asset;
+        u64 acceptedGeneration = 0u;
+        ProjectAssetPipelineResult result = ProjectAssetPipelineResult::Success;
+        assets::ProjectAssetBuildResult build = assets::ProjectAssetBuildResult::Success;
+        resources::ResourceReference buildRequestOutput;
+        u32 buildRequestOutputIndex = ~u32{0};
+        ProjectAssetDeferredPlannedImportPreparePhase preparePhase = ProjectAssetDeferredPlannedImportPreparePhase::None;
+        u64 prepareCompletedBytes = 0u;
+        u64 prepareTotalBytes = 0u;
+    };
+
     struct ProjectAssetBuildFreshness
     {
         resources::ResourceReference output;
@@ -474,8 +529,16 @@ namespace vanguard::asset_streaming
     struct ProjectAssetPipelineFailure
     {
         ProjectAssetPipelineResult result = ProjectAssetPipelineResult::Success;
+        // One-shot diagnostic for reviewed import rejection. Zero means this
+        // failure did not originate from CommitPlannedImport's stale witness.
+        // This is evidence only; it never changes admission policy.
+        u32 stalePlanSite = 0u;
         ProjectAssetSnapshotResult acceptedSnapshot = ProjectAssetSnapshotResult::NotChecked;
         assets::ProjectAssetBuildResult build = assets::ProjectAssetBuildResult::Success;
+        // First failing member of a reviewed explicit cohort. Only populated
+        // for a pre-admission resolver failure; never implies durable rollback.
+        resources::ResourceReference buildRequestOutput;
+        u32 buildRequestOutputIndex = ~u32{0};
         assets::BuildFailure buildFailure = assets::BuildFailure::None;
         assets::Result buildError = assets::Result::Success;
         assets::IndexResult index = assets::IndexResult::Success;
@@ -558,6 +621,12 @@ namespace vanguard::asset_streaming
         // queue, graph, scheduler or cache-bypass owner is created.
         [[nodiscard]] ProjectAssetPipelineResult RequestAssetReimport(assets::AssetId asset,
                                                                      ProjectAssetPipelineFailure* failure = nullptr) noexcept;
+        // Forces one exact accepted asset-generation output set through the same
+        // recooker, then publishes every cohort member through one prepared loose
+        // visibility batch. Disconnected siblings remain in the same cutover.
+        [[nodiscard]] ProjectAssetPipelineResult RequestAssetCohortDelivery(
+            const ProjectAssetCohortDeliveryRequest& request,
+            ProjectAssetPipelineFailure* failure = nullptr) noexcept;
         [[nodiscard]] ProjectAssetPipelineResult CancelAutomaticRecook(ProjectAssetPipelineFailure* failure = nullptr) noexcept;
         [[nodiscard]] ProjectAssetPipelineResult TickAutomaticRecook(ProjectAssetPipelineFailure* failure = nullptr) noexcept;
         [[nodiscard]] bool IsAutomaticRecookEnabled() const noexcept;
@@ -641,6 +710,11 @@ namespace vanguard::asset_streaming
         [[nodiscard]] ProjectAssetPipelineResult ImportExternalSource(
             const ProjectAssetExternalImportRequest& request, assets::AssetId& importedAsset,
             ProjectAssetRestoreReport* report = nullptr, ProjectAssetPipelineFailure* failure = nullptr) noexcept;
+        // Produces a collision-free parent identity candidate before a format-owned
+        // immutable import plan exists. The plan validates its derived output paths;
+        // CommitPlannedImport rechecks all identity/output collisions before mutation.
+        [[nodiscard]] ProjectAssetPipelineResult GenerateImportIdentityCandidate(
+            assets::AssetId& identity, ProjectAssetPipelineFailure* failure = nullptr) noexcept;
         // Upper bound a frontend may read before canonical VMETA size is known.
         // ImportExternalSource still performs the exact source+VMETA staged/history
         // admission before commit.
@@ -648,6 +722,39 @@ namespace vanguard::asset_streaming
         [[nodiscard]] ProjectAssetPipelineResult UpdateAssetSettings(
             const ProjectAssetSettingsUpdateRequest& request, ProjectAssetRestoreReport* report = nullptr,
             ProjectAssetPipelineFailure* failure = nullptr) noexcept;
+        // Stale-safe composite durable commit for a previously reviewed plan.
+        // It preserves the existing AssetId on reimport, atomically commits the
+        // source/VMETA/output schema plus explicitly selected auxiliary candidate
+        // adoptions, records history, then rescans/reconciles through this owner.
+        // `deferPostCommitReconciliation` is a narrow opt-in for an independent,
+        // create-only first import. The durable filesystem transaction and cohort
+        // intent still commit before return; authoritative catalog reconciliation
+        // is then completed by the owner-driven observation catch-up.
+        [[nodiscard]] ProjectAssetPipelineResult CommitPlannedImport(
+            const assets::PlannedAssetImportRequest& request, assets::AssetId& importedAsset,
+            ProjectAssetRestoreReport* report = nullptr, ProjectAssetPipelineFailure* failure = nullptr,
+            bool deferPostCommitReconciliation = false) noexcept;
+        // Cheap owner-thread readiness probe for a reviewed plan. The commit itself
+        // remains authoritative and must repeat every gate and stale witness proof.
+        // A plan replacing its own persisted cohort may use the same exception as
+        // CommitPlannedImport; unrelated source mutations remain fenced.
+        [[nodiscard]] bool CanCommitPlannedImportNow(assets::AssetId parentAsset,
+                                                     resources::ResourcePath sourceIdentity) const noexcept;
+        // Owner-frame settlement for the pre-durable async Prepare path. This is
+        // intentionally separate from TickObservation because observation is
+        // stopped while a large independent first import is being prepared.
+        // Success means no pre-durable continuation is pending; Pending means the
+        // worker still owns Prepare; CommittedReconciliationPending means the
+        // owner has durably committed and handed the operation to the existing
+        // observation/deferred-cohort continuation.
+        [[nodiscard]] ProjectAssetPipelineResult TickDeferredPlannedImport(
+            ProjectAssetPipelineFailure* failure = nullptr) noexcept;
+        // EngineHost quiesce barrier. Cancel/join any pre-durable Prepare worker
+        // and roll back its unapplied transaction BEFORE Jobs service drain.
+        // Pipeline Shutdown calls this as a fallback for direct non-host users.
+        [[nodiscard]] ProjectAssetPipelineResult QuiesceDeferredPlannedImport(
+            ProjectAssetPipelineFailure* failure = nullptr) noexcept;
+        [[nodiscard]] ProjectAssetDeferredPlannedImportStatus GetDeferredPlannedImportStatus() const noexcept;
         [[nodiscard]] ProjectAssetPipelineResult MoveAsset(assets::AssetId asset, const filesystem::AbsolutePath& target,
                                                            ProjectAssetRestoreReport* report = nullptr,
                                                            ProjectAssetPipelineFailure* failure = nullptr) noexcept;

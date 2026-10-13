@@ -1,6 +1,7 @@
 #include "../../tests/support/scratch_directory.hpp"
 
 #include <vanguard/editor/editor_project_service.hpp>
+#include <vanguard/editor/editor_model_import_session.hpp>
 #include <vanguard/editor/editor_service_ids.hpp>
 
 #include <vanguard/application/engine_host.hpp>
@@ -16,6 +17,7 @@
 #include <vanguard/engine/resources_service.hpp>
 #include <vanguard/filesystem/filesystem.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/mesh_tools/model_import.hpp>
 #include <vanguard/projects/project.hpp>
 #include <vanguard/rendering/texture_residency.hpp>
 #include <vanguard/rhi/d3d12/backend.hpp>
@@ -24,7 +26,10 @@
 #include <vanguard/texture_tools/texture_tools.hpp>
 #include <vanguard/textures/texture_resource.hpp>
 
+#include <algorithm>
 #include <cstdio>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <system_error>
 
@@ -875,6 +880,700 @@ namespace
             return FailStep("p0-root-presentation");
         if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock))
             return FailStep("p0-import-mutation-ready");
+
+        // Optional exact local reproduction in the disposable test workspace.
+        // Neither the external GLB nor Project Cardinal is ever mutated here.
+        char localGlbPath[2048]{};
+        size_t localGlbLength = 0u;
+        if (getenv_s(&localGlbLength, localGlbPath, sizeof(localGlbPath),
+                     "VANGUARD_MESH_TOOLS_LOCAL_GLB") == 0 && localGlbLength > 1u)
+        {
+            const auto realGlbWorkflowStart = std::chrono::steady_clock::now();
+            std::FILE* localFile = nullptr;
+            if (fopen_s(&localFile, localGlbPath, "rb") != 0 || localFile == nullptr)
+                return FailStep("model-import-local-glb-open");
+            const bool fileSizeReady = std::fseek(localFile, 0, SEEK_END) == 0;
+            const long fileSize = fileSizeReady ? std::ftell(localFile) : -1L;
+            if (!fileSizeReady || fileSize <= 0L || std::fseek(localFile, 0, SEEK_SET) != 0)
+            {
+                std::fclose(localFile);
+                return FailStep("model-import-local-glb-size");
+            }
+            vanguard::containers::DynamicArray<vanguard::u8> localBytes(vanguard::memory::pools::Tools::GetInstance());
+            localBytes.Resize(static_cast<vanguard::u32>(fileSize));
+            const bool localRead = localBytes.Size() == static_cast<vanguard::u32>(fileSize) &&
+                                   std::fread(localBytes.Data(), 1u, localBytes.Size(), localFile) == localBytes.Size();
+            std::fclose(localFile);
+            if (!localRead)
+                return FailStep("model-import-local-glb-read");
+            const filesystem::AbsolutePath localSource = filesystem::AbsolutePath::CreateFilePath(localGlbPath);
+            vanguard::mesh_tools::ModelImportManifest localManifest;
+            vanguard::mesh_tools::ModelImportReport localReport;
+            const auto inspectStart = std::chrono::steady_clock::now();
+            if (vanguard::mesh_tools::InspectModelMemory(
+                    localBytes.Data(), localBytes.Size(), "glb", localSource.AsStringView(),
+                    {}, {}, localManifest, &localReport) != vanguard::mesh_tools::ModelImportResult::Success)
+                return FailStep("model-import-local-glb-inspect");
+            const auto inspectMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - inspectStart).count();
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] real GLB inspect duration_ms=%lld geometries=%u embeddedTextures=%u textureRefs=%u materials=%u\n",
+                         static_cast<long long>(inspectMs), localManifest.geometryDefinitions.Size(),
+                         localManifest.embeddedTextures.Size(), localManifest.textureReferences.Size(), localManifest.materials.Size());
+            const filesystem::AbsolutePath modelFolder = workspace->GetAssetsRoot();
+            if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock) ||
+                !DriveUntilExternalImportDestinationReady(projectAssets, 0u, {}, *frames, clock))
+                return FailStep("model-import-local-glb-ready");
+            vanguard::mesh_tools::ModelImportSettings localSettings;
+            localSettings.materialPolicy = vanguard::mesh_tools::ModelImportMaterialPolicy::ImportModelOwned;
+            localSettings.embeddedTexturePolicy = vanguard::mesh_tools::ModelImportEmbeddedTexturePolicy::ImportModelOwned;
+            localSettings.includeComposition = true;
+            vanguard::mesh_tools::ModelImportPlan localPlan;
+            vanguard::mesh_tools::ModelImportPlanReport localPlanReport;
+            assetStreaming::ProjectAssetPipelineFailure localFailure;
+            assets::AssetId localPlannedAsset;
+            const auto planStart = std::chrono::steady_clock::now();
+            const auto prefabPreflight = projectAssets.PrepareModelImportPlan(
+                localSource, {localBytes.TypedData(), localBytes.Size()}, 0u, {}, "lieutenantHead.glb", {},
+                0u, 0u, localManifest, localSettings, localPlan, &localPlanReport, localPlannedAsset, &localFailure);
+            // The original Project Cardinal import had composition disabled.
+            // A separate opt-in prefab capability check must not prevent its
+            // BLEND/specular VMAT output cohort from being fully exercised.
+            const filesystem::AbsolutePath destination = modelFolder.AddFilePath("lieutenantHead.glb");
+            if (prefabPreflight != assetStreaming::ProjectAssetPipelineResult::OperationFailed ||
+                localPlanReport.blockers == 0u ||
+                std::strstr(localPlanReport.diagnostic.AsChar(), "rigid unit-scale") == nullptr ||
+                filesystem::RawFileReader::Create(destination) ||
+                filesystem::RawFileReader::Create(MetadataPath(destination)))
+                return FailStep("model-import-local-glb-prefab-preflight");
+            localSettings.includeComposition = false;
+            localFailure = {};
+            const auto localPrepared = projectAssets.PrepareModelImportPlan(
+                localSource, {localBytes.TypedData(), localBytes.Size()}, 0u, {}, "lieutenantHead.glb", {},
+                0u, 0u, localManifest, localSettings, localPlan, &localPlanReport, localPlannedAsset, &localFailure);
+            if (localPrepared != assetStreaming::ProjectAssetPipelineResult::Success || localPlan.HasBlockingConflicts())
+            {
+                std::fprintf(stderr, "[editorAssetRetirementTests] real GLB plan result=%s blockers=%u diagnostic=%s\n",
+                             assetStreaming::ToString(localPrepared), localPlan.GetBlockers().Size(),
+                             localPlanReport.diagnostic.AsChar());
+                return FailStep("model-import-local-glb-plan");
+            }
+            const auto planMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - planStart).count();
+            std::fprintf(stderr, "[editorAssetRetirementTests] real GLB review/preflight duration_ms=%lld outputs=%u\n",
+                         static_cast<long long>(planMs), localPlan.GetImportDescription().outputs.Size());
+            assets::AssetId localImportedAsset;
+            localFailure = {};
+            const bool watchedBeforeLargeCommit = pipeline->IsObservingSources();
+            const auto initialCommitStart = std::chrono::steady_clock::now();
+            auto localCommitted = projectAssets.CommitModelImportPlan(
+                localPlan, {localBytes.TypedData(), localBytes.Size()}, localImportedAsset, &localFailure);
+            const auto initialCommitMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - initialCommitStart).count();
+            std::fprintf(stderr, "[editorAssetRetirementTests] real GLB initial owner-thread commit duration_us=%lld result=%s\n",
+                         static_cast<long long>(initialCommitMicros), assetStreaming::ToString(localCommitted));
+            if (watchedBeforeLargeCommit &&
+                (localCommitted == assetStreaming::ProjectAssetPipelineResult::Success ||
+                 localCommitted == assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending ||
+                 localCommitted == assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending) &&
+                pipeline->IsObservingSources())
+                return FailStep("model-import-local-glb-watcher-paused-through-large-commit");
+            for (vanguard::u32 retry = 0u;
+                 retry < 8u && localCommitted == assetStreaming::ProjectAssetPipelineResult::Busy; ++retry)
+            {
+                bool ready = false;
+                for (vanguard::u32 attempt = 0u; attempt < 10'000u; ++attempt)
+                {
+                    const assetStreaming::ProjectAssetObservationStatus observed = pipeline->GetObservationStatus();
+                    if (!observed.rescanRequired && !observed.reconcilePending && projectAssets.CanMutateAssets())
+                    {
+                        ready = true;
+                        break;
+                    }
+                    if (!RunFrame(*frames, clock))
+                        return FailStep("model-import-local-glb-observer-frame");
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+                }
+                if (!ready)
+                    return FailStep("model-import-local-glb-observer-settle");
+                localFailure = {};
+                localCommitted = projectAssets.CommitModelImportPlan(
+                    localPlan, {localBytes.TypedData(), localBytes.Size()}, localImportedAsset, &localFailure);
+            }
+            if (localCommitted == assetStreaming::ProjectAssetPipelineResult::Pending)
+            {
+                const auto preparing = pipeline->GetDeferredPlannedImportStatus();
+                if (preparing.state != assetStreaming::ProjectAssetDeferredPlannedImportState::PreparingTransaction ||
+                    preparing.asset != localPlannedAsset || localImportedAsset.IsValid() ||
+                    filesystem::RawFileReader::Create(modelFolder.AddFilePath("lieutenantHead.glb")))
+                    return FailStep("model-import-local-glb-pre-durable-pending-proof");
+
+                char shutdownFlag[8]{};
+                size_t shutdownFlagLength = 0u;
+                const bool cancelThroughOwnerShutdown =
+                    getenv_s(&shutdownFlagLength, shutdownFlag, sizeof(shutdownFlag),
+                             "VANGUARD_EDITOR_ASYNC_SHUTDOWN_PROOF") == 0 &&
+                    shutdownFlagLength > 1u && shutdownFlag[0] == '1';
+                if (cancelThroughOwnerShutdown)
+                {
+                    const filesystem::AbsolutePath shutdownModelDestination = modelFolder.AddFilePath("lieutenantHead.glb");
+                    const filesystem::AbsolutePath shutdownModelMetadata = MetadataPath(shutdownModelDestination);
+                    const bool shutdownSucceeded = host.Shutdown(&hostFailure);
+                    if (!shutdownSucceeded || rhi::IsInitialized())
+                    {
+                        std::fprintf(stderr,
+                                     "[editorAssetRetirementTests] async host shutdown failed: code=%u service=%llu related=%llu message=%s rhi=%u\n",
+                                     static_cast<unsigned>(hostFailure.code), static_cast<unsigned long long>(hostFailure.service),
+                                     static_cast<unsigned long long>(hostFailure.relatedService),
+                                     hostFailure.message != nullptr ? hostFailure.message : "<none>",
+                                     static_cast<unsigned>(rhi::IsInitialized()));
+                        return FailStep("model-import-local-glb-async-shutdown");
+                    }
+                    std::error_code sourceCheckError;
+                    const bool sourceLeft = std::filesystem::exists(std::filesystem::path(shutdownModelDestination.AsChar()), sourceCheckError);
+                    std::error_code metadataCheckError;
+                    const bool metadataLeft = std::filesystem::exists(std::filesystem::path(shutdownModelMetadata.AsChar()), metadataCheckError);
+                    if (sourceCheckError || metadataCheckError || sourceLeft || metadataLeft)
+                        return FailStep("model-import-local-glb-async-shutdown-durable-leak");
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] async pre-durable shutdown cancelled/joined and left no source or VMETA\n");
+                    return true;
+                }
+
+                // Opt-in adversarial proof: an unrelated writer can create a
+                // colliding destination while our worker owns only Prepare.
+                // The owner MUST repeat authoritative disk validation before
+                // Apply and leave the foreign file unmodified on StalePlan.
+                char collisionFlag[8]{};
+                size_t collisionFlagLength = 0u;
+                const bool injectForeignCollision =
+                    getenv_s(&collisionFlagLength, collisionFlag, sizeof(collisionFlag),
+                             "VANGUARD_EDITOR_ASYNC_COLLISION_PROOF") == 0 &&
+                    collisionFlagLength > 1u && collisionFlag[0] == '1';
+                char metadataCollisionFlag[8]{};
+                size_t metadataCollisionFlagLength = 0u;
+                const bool injectForeignMetadataCollision =
+                    getenv_s(&metadataCollisionFlagLength, metadataCollisionFlag, sizeof(metadataCollisionFlag),
+                             "VANGUARD_EDITOR_ASYNC_METADATA_COLLISION_PROOF") == 0 &&
+                    metadataCollisionFlagLength > 1u && metadataCollisionFlag[0] == '1';
+                if (injectForeignCollision && injectForeignMetadataCollision)
+                    return FailStep("model-import-local-glb-conflicting-collision-fixtures");
+                const filesystem::AbsolutePath collidedDestination = modelFolder.AddFilePath("lieutenantHead.glb");
+                constexpr char ForeignContent[] = "external-writer-collision";
+                if (injectForeignCollision || injectForeignMetadataCollision)
+                {
+                    const filesystem::AbsolutePath foreignPath = injectForeignMetadataCollision
+                        ? MetadataPath(collidedDestination) : collidedDestination;
+                    std::FILE* foreign = nullptr;
+                    if (fopen_s(&foreign, foreignPath.AsChar(), "wb") != 0 || foreign == nullptr)
+                        return FailStep("model-import-local-glb-collision-create");
+                    const bool written = std::fwrite(ForeignContent, 1u, sizeof(ForeignContent) - 1u, foreign) ==
+                                         sizeof(ForeignContent) - 1u && std::fflush(foreign) == 0;
+                    std::fclose(foreign);
+                    if (!written)
+                        return FailStep("model-import-local-glb-collision-write");
+                }
+
+                vanguard::u64 lastProgress = 0u;
+                vanguard::u64 observedTotal = 0u;
+                long long maximumOwnerFrameUs = 0;
+                bool observedWorkerProgress = false;
+                bool settled = false;
+                for (vanguard::u32 tick = 0u; tick < 15'000u; ++tick)
+                {
+                    const auto current = pipeline->GetDeferredPlannedImportStatus();
+                    if (current.asset != localPlannedAsset)
+                        return FailStep("model-import-local-glb-pre-durable-identity");
+                    if (current.state == assetStreaming::ProjectAssetDeferredPlannedImportState::AwaitingReconciliation ||
+                        current.state == assetStreaming::ProjectAssetDeferredPlannedImportState::CohortQueued)
+                    {
+                        localImportedAsset = localPlannedAsset;
+                        localCommitted = assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        settled = true;
+                        break;
+                    }
+                    if (current.state == assetStreaming::ProjectAssetDeferredPlannedImportState::ContinuationFailed)
+                    {
+                        if ((injectForeignCollision || injectForeignMetadataCollision) &&
+                            current.result == assetStreaming::ProjectAssetPipelineResult::StalePlan)
+                        {
+                            const filesystem::AbsolutePath foreignMetadata = MetadataPath(collidedDestination);
+                            {
+                                const filesystem::AbsolutePath foreignPath = injectForeignMetadataCollision
+                                    ? foreignMetadata : collidedDestination;
+                                const filesystem::AbsolutePath mustStayAbsent = injectForeignMetadataCollision
+                                    ? collidedDestination : foreignMetadata;
+                                auto foreign = filesystem::RawFileReader::Create(foreignPath);
+                                char actual[sizeof(ForeignContent)]{};
+                                if (!foreign || foreign->GetSize() != sizeof(ForeignContent) - 1u)
+                                    return FailStep("model-import-local-glb-collision-preserves-foreign-size");
+                                foreign->Serialize(actual, sizeof(ForeignContent) - 1u);
+                                if (foreign->HasErrors() ||
+                                    std::memcmp(actual, ForeignContent, sizeof(ForeignContent) - 1u) != 0 ||
+                                    filesystem::RawFileReader::Create(mustStayAbsent))
+                                    return FailStep("model-import-local-glb-collision-preserves-foreign-bytes");
+                            }
+                            if (!host.Shutdown(&hostFailure) || rhi::IsInitialized())
+                                return FailStep("model-import-local-glb-collision-quiesce");
+                            std::fprintf(stderr,
+                                         "[editorAssetRetirementTests] async %s collision rejected stale import, foreign bytes preserved; original GLB unchanged\n",
+                                         injectForeignMetadataCollision ? "VMETA-only" : "source");
+                            return true;
+                        }
+                        std::fprintf(stderr,
+                                     "[editorAssetRetirementTests] real GLB pre-durable staging failed: result=%s\n",
+                                     assetStreaming::ToString(current.result));
+                        return FailStep("model-import-local-glb-pre-durable-prepare-failed");
+                    }
+                    if (current.state != assetStreaming::ProjectAssetDeferredPlannedImportState::PreparingTransaction ||
+                        current.prepareCompletedBytes < lastProgress ||
+                        (current.prepareTotalBytes != 0u &&
+                         current.prepareCompletedBytes > current.prepareTotalBytes))
+                        return FailStep("model-import-local-glb-prepare-progress-integrity");
+                    if (current.prepareTotalBytes != 0u)
+                    {
+                        observedTotal = current.prepareTotalBytes;
+                        observedWorkerProgress = observedWorkerProgress || current.prepareCompletedBytes > lastProgress;
+                    }
+                    lastProgress = current.prepareCompletedBytes;
+                    const auto frameStart = std::chrono::steady_clock::now();
+                    if (!RunFrame(*frames, clock))
+                        return FailStep("model-import-local-glb-pre-durable-owner-frame");
+                    const auto ownerFrameUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - frameStart).count();
+                    maximumOwnerFrameUs = std::max(maximumOwnerFrameUs, static_cast<long long>(ownerFrameUs));
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+                }
+                std::fprintf(stderr,
+                             "[editorAssetRetirementTests] real GLB worker prepare total_bytes=%llu progress_observed=%u max_owner_frame_us=%lld elapsed_ms=%lld\n",
+                             static_cast<unsigned long long>(observedTotal),
+                             static_cast<unsigned>(observedWorkerProgress), maximumOwnerFrameUs,
+                             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - initialCommitStart).count()));
+                if (!settled || !observedWorkerProgress || observedTotal == 0u)
+                    return FailStep("model-import-local-glb-async-prepared-continuation");
+                if (injectForeignCollision || injectForeignMetadataCollision)
+                    return FailStep("model-import-local-glb-collision-was-not-rejected");
+            }
+            std::fprintf(stderr, "[editorAssetRetirementTests] real GLB commit result=%s failure=%s build=%s outputIndex=%u staleSite=%u outputs=%u\n",
+                         assetStreaming::ToString(localCommitted), assetStreaming::ToString(localFailure.result),
+                         assets::ToString(localFailure.build), localFailure.buildRequestOutputIndex,
+                         localFailure.stalePlanSite, localPlan.GetImportDescription().outputs.Size());
+            if ((localCommitted != assetStreaming::ProjectAssetPipelineResult::Success &&
+                 localCommitted != assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending &&
+                 localCommitted != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending) ||
+                localImportedAsset != localPlannedAsset)
+                return FailStep("model-import-local-glb-commit");
+            const auto deferredAtCommit = pipeline->GetDeferredPlannedImportStatus();
+            const bool ownerDeferredImport =
+                localCommitted == assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending &&
+                deferredAtCommit.state == assetStreaming::ProjectAssetDeferredPlannedImportState::AwaitingReconciliation &&
+                deferredAtCommit.asset == localImportedAsset;
+            if (watchedBeforeLargeCommit && !ownerDeferredImport)
+                return FailStep("model-import-local-glb-owner-deferred-after-durability");
+            const filesystem::AbsolutePath durableGlb = modelFolder.AddFilePath("lieutenantHead.glb");
+            {
+                // Windows readers may deny delete sharing. Keep these
+                // verification handles scoped so the later observer-deletion
+                // proof does not fail on its own test fixture's open handles.
+                auto durableSource = filesystem::RawFileReader::Create(durableGlb);
+                auto durableMetadata = filesystem::RawFileReader::Create(MetadataPath(durableGlb));
+                if (!durableSource || durableSource->GetSize() != localBytes.Size() ||
+                    !durableMetadata || durableMetadata->GetSize() == 0u ||
+                    durableMetadata->GetSize() > assets::MaximumAssetMetadataBytes)
+                    return FailStep("model-import-local-glb-durable-truth");
+            }
+
+            // Test the post-commit cohort as well as the file transaction.
+            // The file/VMETA being durable alone does not prove that each
+            // separately-authored model output can construct a BuildRequest.
+            // CommitModelImportPlan already calls ResumeCommittedModelImport.
+            // Success/CommittedCleanupPending prove it acquired the exact
+            // cohort. Retrying that same explicit generation is correctly
+            // Busy while its submitted build is live, not an admission fault.
+            bool localCohortAdmitted = localCommitted == assetStreaming::ProjectAssetPipelineResult::Success ||
+                                       localCommitted == assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending;
+            const auto postCommitStart = std::chrono::steady_clock::now();
+            bool localRecoveryRetried = false;
+            for (vanguard::u32 attempt = 0u; !localCohortAdmitted && attempt < 10'000u; ++attempt)
+            {
+                assetStreaming::ProjectAssetPipelineFailure cohortFailure;
+                const auto deferred = pipeline->GetDeferredPlannedImportStatus();
+                if (ownerDeferredImport && deferred.asset == localImportedAsset &&
+                    deferred.state == assetStreaming::ProjectAssetDeferredPlannedImportState::ContinuationFailed)
+                {
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] real GLB owner-deferred admission failed: result=%s build=%s outputIndex=%u\n",
+                                 assetStreaming::ToString(deferred.result), assets::ToString(deferred.build),
+                                 deferred.buildRequestOutputIndex);
+                    return FailStep("model-import-local-glb-deferred-cohort-admission");
+                }
+                if (ownerDeferredImport && deferred.asset == localImportedAsset &&
+                    deferred.state == assetStreaming::ProjectAssetDeferredPlannedImportState::CohortQueued &&
+                    deferred.acceptedGeneration != 0u)
+                {
+                    localCohortAdmitted = true;
+                    break;
+                }
+                // Resolving the exact 31 output requests is substantial work,
+                // not a cheap status poll. Retry cohort admission periodically
+                // while every intervening frame advances the real coordinator.
+                const auto cohortResult = !ownerDeferredImport && attempt % 32u == 0u
+                                              ? projectAssets.ResumeCommittedModelImport(
+                                                    localPlan, localImportedAsset, 0u, &cohortFailure)
+                                              : assetStreaming::ProjectAssetPipelineResult::Pending;
+                const assetStreaming::ProjectAssetAutomaticRecookStatus recook = projectAssets.GetAutomaticRecookStatus();
+                if (attempt % 64u == 0u)
+                {
+                    const assetStreaming::ProjectAssetState* const accepted = pipeline->LookupAcceptedAsset(localImportedAsset);
+                    const assetStreaming::ProjectAssetObservationStatus observation = pipeline->GetObservationStatus();
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] real GLB cohort tick=%u result=%s failure=%s build=%s outputIndex=%u acceptedGeneration=%llu acceptedOutputs=%u observation=%u rescan=%u pending=%u recook=%u activeRoots=%u pendingOutputs=%u retry=%u\n",
+                                 attempt, assetStreaming::ToString(cohortResult), assetStreaming::ToString(cohortFailure.result),
+                                 assets::ToString(cohortFailure.build), cohortFailure.buildRequestOutputIndex,
+                                 static_cast<unsigned long long>(accepted != nullptr ? accepted->acceptedGeneration : 0u),
+                                 accepted != nullptr ? accepted->outputs.Count() : 0u,
+                                 static_cast<unsigned>(observation.running), static_cast<unsigned>(observation.rescanRequired),
+                                 static_cast<unsigned>(observation.reconcilePending), static_cast<unsigned>(recook.state),
+                                 recook.activeRoots, recook.pendingOutputs, recook.retryEntries);
+                }
+                if (recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                    recook.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                {
+                    if (localRecoveryRetried)
+                    {
+                        std::fprintf(stderr,
+                                     "[editorAssetRetirementTests] real GLB terminal recook persisted after one explicit retry: state=%u dirty=0x%x roots=%u finished=%u retries=%u\n",
+                                     static_cast<unsigned>(recook.state), static_cast<unsigned>(recook.dirtyReasons),
+                                     recook.activeRoots, recook.completedRoots, recook.retryEntries);
+                        return FailStep("model-import-local-glb-recovery-terminal");
+                    }
+                    assetStreaming::ProjectAssetPipelineFailure recoveryFailure;
+                    const auto retry = projectAssets.RetryAutomaticRecook(&recoveryFailure);
+                    std::fprintf(stderr, "[editorAssetRetirementTests] real GLB coordinator recovery: result=%s failure=%s build=%s\n",
+                                 assetStreaming::ToString(retry), assetStreaming::ToString(recoveryFailure.result),
+                                 assets::ToString(recoveryFailure.build));
+                    if (retry != assetStreaming::ProjectAssetPipelineResult::Success &&
+                        retry != assetStreaming::ProjectAssetPipelineResult::Pending)
+                        return FailStep("model-import-local-glb-recovery-retry");
+                    localRecoveryRetried = true;
+                }
+                if (cohortResult == assetStreaming::ProjectAssetPipelineResult::Success)
+                {
+                    localCohortAdmitted = true;
+                    break;
+                }
+                if (cohortResult == assetStreaming::ProjectAssetPipelineResult::BuildRequestFailed)
+                {
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] real GLB cohort BuildRequestFailed: reason=%s outputIndex=%u path=%llu type=%llu\n",
+                                 assets::ToString(cohortFailure.build), cohortFailure.buildRequestOutputIndex,
+                                 static_cast<unsigned long long>(cohortFailure.buildRequestOutput.GetPath().Id()),
+                                 static_cast<unsigned long long>(cohortFailure.buildRequestOutput.ExpectedType()));
+                    return FailStep("model-import-local-glb-cohort-build-request");
+                }
+                if (cohortResult != assetStreaming::ProjectAssetPipelineResult::Busy &&
+                    cohortResult != assetStreaming::ProjectAssetPipelineResult::Pending &&
+                    cohortResult != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending)
+                    return FailStep("model-import-local-glb-cohort-admission");
+                if (!RunFrame(*frames, clock))
+                    return FailStep("model-import-local-glb-cohort-frame");
+                vanguard::concurrency::SleepOnCurrentThread(1);
+            }
+            if (!localCohortAdmitted)
+                return FailStep("model-import-local-glb-cohort-timeout");
+            std::fprintf(stderr, "[editorAssetRetirementTests] real GLB cohort admitted elapsed_ms=%lld\n",
+                         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - postCommitStart).count()));
+            // Admission alone is not enough: generated VMAT/VPROG/VPIPE,
+            // embedded VTEX and VMESH outputs must all publish coherently.
+            // This stays inside the disposable workspace, not Project Cardinal.
+            bool localCohortPublished = false;
+            for (vanguard::u32 attempt = 0u; attempt < 20'000u; ++attempt)
+            {
+                vanguard::u32 installed = 0u;
+                for (const assets::AssetOutput& authored : localPlan.GetImportDescription().outputs)
+                {
+                    const resources::ResourceReference resource = assets::GetAssetOutputReference(localImportedAsset, authored);
+                    assetStreaming::ProjectAssetOutputDeliveryStatus delivery;
+                    if (!projectAssets.GetOutputDeliveryStatus(resource, delivery) ||
+                        delivery.publicationState != assetStreaming::ProjectAssetDeliveryStageState::Installed ||
+                        delivery.publishedBuildFingerprint.IsEmpty() || delivery.publishedContentFingerprint.IsEmpty() ||
+                        !delivery.publishedPhysicalPath.IsFilePath() || delivery.publicationRetryRequired)
+                        continue;
+                    ++installed;
+                }
+                if (installed == localPlan.GetImportDescription().outputs.Size())
+                {
+                    localCohortPublished = true;
+                    break;
+                }
+                const auto recook = projectAssets.GetAutomaticRecookStatus();
+                if (attempt % 256u == 0u)
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] real GLB publishing tick=%u installed=%u/%u state=%u dirty=0x%x roots=%u finished=%u buildOps=%u/%u delivery=%u elapsed_ms=%lld\n",
+                                 attempt, installed, localPlan.GetImportDescription().outputs.Size(),
+                                 static_cast<unsigned>(recook.state), static_cast<unsigned>(recook.dirtyReasons),
+                                 recook.activeRoots, recook.completedRoots, recook.completedBuildOperations,
+                                 recook.buildOperations, recook.pendingDeliveryOutputs,
+                                 static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - postCommitStart).count()));
+                if (recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                    recook.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                    return FailStep("model-import-local-glb-publish-failed");
+                if (!RunFrame(*frames, clock))
+                    return FailStep("model-import-local-glb-publish-frame");
+                vanguard::concurrency::SleepOnCurrentThread(1);
+            }
+            if (!localCohortPublished)
+                return FailStep("model-import-local-glb-publish-timeout");
+            std::fprintf(stderr, "[editorAssetRetirementTests] real GLB all %u outputs installed\n",
+                         localPlan.GetImportDescription().outputs.Size());
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] real GLB timing postcommit_to_installed_ms=%lld total_workflow_ms=%lld\n",
+                         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - postCommitStart).count()),
+                         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - realGlbWorkflowStart).count()));
+            char deletionProof[8]{};
+            size_t deletionProofLength = 0u;
+            if (getenv_s(&deletionProofLength, deletionProof, sizeof(deletionProof),
+                         "VANGUARD_EDITOR_REAL_GLB_DELETE_PROOF") == 0 &&
+                deletionProofLength > 1u && deletionProof[0] == '1')
+            {
+                if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock))
+                    return FailStep("model-import-local-glb-delete-ready");
+                // The disposable observer fixture uses an external filesystem
+                // deletion so it can exercise the accepted Missing transition
+                // without conflating it with asset-operation journal limits.
+                if (!filesystem::GetManager().DeleteFile(destination) ||
+                    !filesystem::GetManager().DeleteFile(MetadataPath(destination)))
+                    return FailStep("model-import-local-glb-external-delete");
+                bool deletionSettled = false;
+                for (vanguard::u32 attempt = 0u; attempt < 12'000u; ++attempt)
+                {
+                    if (!RunFrame(*frames, clock))
+                        return FailStep("model-import-local-glb-delete-frame");
+                    const auto recook = projectAssets.GetAutomaticRecookStatus();
+                    if (recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                        recook.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                    {
+                        std::fprintf(stderr, "[editorAssetRetirementTests] real GLB scratch delete recook FAILED: reason=%s diagnostics=%u root=%u\n",
+                                     assets::ToString(recook.lastRecookFailure), recook.pendingDiagnostics,
+                                     recook.firstFailedRoot.rootIndex);
+                        return FailStep("model-import-local-glb-delete-recook-failed");
+                    }
+                    const auto* const accepted = pipeline->LookupAcceptedAsset(localImportedAsset);
+                    if (accepted != nullptr && accepted->presence == assetStreaming::ProjectAssetPresence::Missing &&
+                        recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Idle &&
+                        !filesystem::RawFileReader::Create(destination) &&
+                        !filesystem::RawFileReader::Create(MetadataPath(destination)))
+                    {
+                        deletionSettled = true;
+                        break;
+                    }
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+                }
+                if (!deletionSettled)
+                    return FailStep("model-import-local-glb-delete-settle");
+                std::fprintf(stderr, "[editorAssetRetirementTests] real GLB scratch delete recook settled without a missing-root failure\n");
+
+                // Re-review after the accepted tombstone. A plan from the
+                // first import would be stale and must not be recycled here.
+                const auto* const deleted = pipeline->LookupAcceptedAsset(localImportedAsset);
+                if (deleted == nullptr || deleted->presence != assetStreaming::ProjectAssetPresence::Missing)
+                    return FailStep("model-import-local-glb-reimport-tombstone");
+                const vanguard::u64 deletedGeneration = deleted->acceptedGeneration;
+                if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock) ||
+                    !DriveUntilExternalImportDestinationReady(projectAssets, 0u, {}, *frames, clock))
+                    return FailStep("model-import-local-glb-reimport-ready");
+                vanguard::mesh_tools::ModelImportPlan reimportPlan;
+                vanguard::mesh_tools::ModelImportPlanReport reimportReport;
+                assetStreaming::ProjectAssetPipelineFailure reimportFailure;
+                assets::AssetId reimportPlannedAsset;
+                const auto reimportPrepared = projectAssets.PrepareModelImportPlan(
+                    localSource, {localBytes.TypedData(), localBytes.Size()}, 0u, {}, "lieutenantHead.glb", {},
+                    0u, 0u, localManifest, localSettings, reimportPlan, &reimportReport,
+                    reimportPlannedAsset, &reimportFailure);
+                if (reimportPrepared != assetStreaming::ProjectAssetPipelineResult::Success ||
+                    reimportPlan.HasBlockingConflicts() ||
+                    reimportPlan.GetImportDescription().outputs.Size() != 31u)
+                {
+                    std::fprintf(stderr, "[editorAssetRetirementTests] real GLB re-review failed: result=%s blockers=%u diagnostic=%s\n",
+                                 assetStreaming::ToString(reimportPrepared), reimportReport.blockers,
+                                 reimportReport.diagnostic.AsChar());
+                    return FailStep("model-import-local-glb-reimport-plan");
+                }
+                assets::AssetId reimportedAsset;
+                auto reimportCommit = projectAssets.CommitModelImportPlan(
+                    reimportPlan, {localBytes.TypedData(), localBytes.Size()}, reimportedAsset, &reimportFailure);
+                for (vanguard::u32 retry = 0u;
+                     retry < 8u && reimportCommit == assetStreaming::ProjectAssetPipelineResult::Busy; ++retry)
+                {
+                    const auto observation = pipeline->GetObservationStatus();
+                    const auto recook = projectAssets.GetAutomaticRecookStatus();
+                    const auto deferred = pipeline->GetDeferredPlannedImportStatus();
+                    std::fprintf(stderr, "[editorAssetRetirementTests] real GLB reimport busy retry=%u observation=%u rescan=%u reconcile=%u recook=%u deferred=%u\n",
+                                 retry, static_cast<unsigned>(observation.running),
+                                 static_cast<unsigned>(observation.rescanRequired),
+                                 static_cast<unsigned>(observation.reconcilePending),
+                                 static_cast<unsigned>(recook.state), static_cast<unsigned>(deferred.state));
+                    if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock))
+                        return FailStep("model-import-local-glb-reimport-busy-ready");
+                    // CommitPlannedImport performs its full authoritative
+                    // precommit validation on each attempt, never stale apply.
+                    for (vanguard::u32 attempt = 0u; attempt < 32u; ++attempt)
+                        if (!RunFrame(*frames, clock))
+                            return FailStep("model-import-local-glb-reimport-busy-frame");
+                    reimportFailure = {};
+                    reimportCommit = projectAssets.CommitModelImportPlan(
+                        reimportPlan, {localBytes.TypedData(), localBytes.Size()}, reimportedAsset, &reimportFailure);
+                }
+                std::fprintf(stderr, "[editorAssetRetirementTests] real GLB reimport commit result=%s plannedOutputs=%u\n",
+                             assetStreaming::ToString(reimportCommit),
+                             reimportPlan.GetImportDescription().outputs.Size());
+                if (reimportCommit != assetStreaming::ProjectAssetPipelineResult::Pending &&
+                    reimportCommit != assetStreaming::ProjectAssetPipelineResult::Success &&
+                    reimportCommit != assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending &&
+                    reimportCommit != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending)
+                    return FailStep("model-import-local-glb-reimport-commit");
+
+                bool reimportAdmitted = false;
+                vanguard::u64 reimportGeneration = 0u;
+                for (vanguard::u32 attempt = 0u; attempt < 16'000u; ++attempt)
+                {
+                    const auto deferred = pipeline->GetDeferredPlannedImportStatus();
+                    if (deferred.asset == reimportPlannedAsset &&
+                        deferred.state == assetStreaming::ProjectAssetDeferredPlannedImportState::ContinuationFailed)
+                    {
+                        std::fprintf(stderr, "[editorAssetRetirementTests] real GLB reimport continuation failed: result=%s build=%s index=%u\n",
+                                     assetStreaming::ToString(deferred.result), assets::ToString(deferred.build),
+                                     deferred.buildRequestOutputIndex);
+                        return FailStep("model-import-local-glb-reimport-continuation");
+                    }
+                    const auto recook = projectAssets.GetAutomaticRecookStatus();
+                    if (recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                        recook.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                    {
+                        std::fprintf(stderr, "[editorAssetRetirementTests] real GLB reimport recook failed: reason=%s diagnostics=%u\n",
+                                     assets::ToString(recook.lastRecookFailure), recook.pendingDiagnostics);
+                        return FailStep("model-import-local-glb-reimport-recook-failed");
+                    }
+                    const auto* const accepted = pipeline->LookupAcceptedAsset(reimportPlannedAsset);
+                    if (accepted != nullptr && accepted->presence == assetStreaming::ProjectAssetPresence::Present &&
+                        accepted->acceptedGeneration > deletedGeneration && accepted->outputs.Count() == 31u)
+                    {
+                        reimportGeneration = accepted->acceptedGeneration;
+                        if (deferred.asset == reimportPlannedAsset &&
+                            deferred.state == assetStreaming::ProjectAssetDeferredPlannedImportState::CohortQueued &&
+                            deferred.acceptedGeneration == reimportGeneration)
+                        {
+                            reimportAdmitted = true;
+                            break;
+                        }
+                        if (reimportCommit == assetStreaming::ProjectAssetPipelineResult::Success ||
+                            reimportCommit == assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending)
+                        {
+                            reimportAdmitted = true;
+                            break;
+                        }
+                    }
+                    if (!RunFrame(*frames, clock))
+                        return FailStep("model-import-local-glb-reimport-admission-frame");
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+                }
+                if (!reimportAdmitted)
+                    return FailStep("model-import-local-glb-reimport-admission-timeout");
+
+                bool reimportPublished = false;
+                for (vanguard::u32 attempt = 0u; attempt < 20'000u; ++attempt)
+                {
+                    vanguard::u32 installed = 0u;
+                    for (const assets::AssetOutput& authored : reimportPlan.GetImportDescription().outputs)
+                    {
+                        const resources::ResourceReference resource =
+                            assets::GetAssetOutputReference(reimportPlannedAsset, authored);
+                        assetStreaming::ProjectAssetOutputDeliveryStatus delivery;
+                        if (projectAssets.GetOutputDeliveryStatus(resource, delivery) &&
+                            delivery.authoredGeneration == reimportGeneration &&
+                            delivery.publicationState == assetStreaming::ProjectAssetDeliveryStageState::Installed &&
+                            !delivery.publishedBuildFingerprint.IsEmpty() &&
+                            !delivery.publishedContentFingerprint.IsEmpty() &&
+                            delivery.publishedPhysicalPath.IsFilePath() && !delivery.publicationRetryRequired)
+                            ++installed;
+                    }
+                    if (installed == 31u)
+                    {
+                        reimportPublished = true;
+                        break;
+                    }
+                    const auto recook = projectAssets.GetAutomaticRecookStatus();
+                    if (attempt % 512u == 0u)
+                        std::fprintf(stderr, "[editorAssetRetirementTests] real GLB reimport publication tick=%u installed=%u/31 state=%u roots=%u finished=%u\n",
+                                     attempt, installed, static_cast<unsigned>(recook.state),
+                                     recook.activeRoots, recook.completedRoots);
+                    if (recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                        recook.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                        return FailStep("model-import-local-glb-reimport-publish-failed");
+                    if (!RunFrame(*frames, clock))
+                        return FailStep("model-import-local-glb-reimport-publish-frame");
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+                }
+                if (!reimportPublished)
+                    return FailStep("model-import-local-glb-reimport-publish-timeout");
+                std::fprintf(stderr, "[editorAssetRetirementTests] real GLB scratch reimport published all 31 current-generation outputs\n");
+
+                // Also exercise the actual Asset Browser Delete transaction,
+                // not just an external watcher event. Both tests use only the
+                // disposable workspace and preserve the external source.
+                if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock))
+                    return FailStep("model-import-local-glb-operation-delete-ready");
+                assetStreaming::ProjectAssetPipelineFailure operationDeleteFailure;
+                const auto operationDelete = pipeline->DeleteAsset(
+                    reimportPlannedAsset, {}, nullptr, &operationDeleteFailure);
+                std::fprintf(stderr, "[editorAssetRetirementTests] real GLB scratch operation delete result=%s operation=%u transaction=%u\n",
+                             assetStreaming::ToString(operationDelete),
+                             static_cast<unsigned>(operationDeleteFailure.operation.result),
+                             static_cast<unsigned>(operationDeleteFailure.operation.transaction));
+                if (operationDelete != assetStreaming::ProjectAssetPipelineResult::Success &&
+                    operationDelete != assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending &&
+                    operationDelete != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending)
+                    return FailStep("model-import-local-glb-operation-delete");
+                bool operationDeleteSettled = false;
+                for (vanguard::u32 attempt = 0u; attempt < 12'000u; ++attempt)
+                {
+                    if (!RunFrame(*frames, clock))
+                        return FailStep("model-import-local-glb-operation-delete-frame");
+                    const auto recook = projectAssets.GetAutomaticRecookStatus();
+                    if (recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                        recook.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+                        return FailStep("model-import-local-glb-operation-delete-recook-failed");
+                    const auto* const accepted = pipeline->LookupAcceptedAsset(reimportPlannedAsset);
+                    if (accepted != nullptr && accepted->presence == assetStreaming::ProjectAssetPresence::Missing &&
+                        accepted->acceptedGeneration > reimportGeneration &&
+                        recook.state == assetStreaming::ProjectAssetAutomaticRecookState::Idle &&
+                        !filesystem::RawFileReader::Create(destination) &&
+                        !filesystem::RawFileReader::Create(MetadataPath(destination)))
+                    {
+                        operationDeleteSettled = true;
+                        break;
+                    }
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+                }
+                if (!operationDeleteSettled)
+                    return FailStep("model-import-local-glb-operation-delete-settle");
+                std::fprintf(stderr, "[editorAssetRetirementTests] real GLB scratch Asset Browser delete settled without recook failure\n");
+            }
+        }
+
+        if (localGlbLength > 1u)
+        {
+            if (!host.Shutdown(&hostFailure) || rhi::IsInitialized())
+                return FailStep("model-import-local-glb-quiesce");
+            std::fprintf(stderr, "[editorAssetRetirementTests] isolated real GLB cohort admission/publication passed; original asset unchanged\n");
+            return true;
+        }
+
         if (!DriveUntilExternalImportDestinationReady(
                 projectAssets, 0u, vanguard::containers::StringView("Textures"), *frames, clock) ||
             !DriveUntilExternalImportDestinationReady(
@@ -1124,6 +1823,485 @@ namespace
         if (!RunFrame(*frames, clock) || runtime.GetStats().liveDemands != 1u)
             return FailStep("preview-retirement-after-later-frame");
         static_cast<void>(rhi::SafeRelease(previewSampler));
+
+        // Exercise the real reviewed model-import seam through the same production
+        // EditorProjectAssetAccess/ProjectAssetPipeline owned by this workspace.
+        // Planning must remain disposable until the explicit commit below.
+        constexpr char reviewedModel[] = R"json({
+            "asset":{"version":"2.0"},
+            "buffers":[{"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AACAPwAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAABAAIAAwAEAAUA","byteLength":132}],
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":72,"target":34962},
+                {"buffer":0,"byteOffset":72,"byteLength":48,"target":34962},
+                {"buffer":0,"byteOffset":120,"byteLength":6,"target":34963},
+                {"buffer":0,"byteOffset":126,"byteLength":6,"target":34963}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":6,"type":"VEC3","min":[0,0,0],"max":[1,1,1]},
+                {"bufferView":1,"componentType":5126,"count":6,"type":"VEC2"},
+                {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+                {"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}],
+            "images":[
+                {"uri":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/VscvDQAAAABJRU5ErkJggg=="},
+                {"uri":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg=="}],
+            "textures":[{"source":0},{"source":1}],
+            "materials":[
+                {"name":"Body","pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicRoughnessTexture":{"index":1},"metallicFactor":0.7,"roughnessFactor":0.4}},
+                {"name":"Masked","alphaMode":"MASK","alphaCutoff":0.35,"pbrMetallicRoughness":{"baseColorFactor":[0.3,0.6,0.9,0.8]}}],
+            "meshes":[{"name":"Compound","primitives":[
+                {"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0},
+                {"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":3,"material":1}]}],
+            "nodes":[{"name":"Root","mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
+        })json";
+        const vanguard::containers::ArraySpan<const vanguard::u8> reviewedSnapshot{
+            reinterpret_cast<const vanguard::u8*>(reviewedModel),
+            static_cast<vanguard::u32>(sizeof(reviewedModel) - 1u)};
+        const filesystem::AbsolutePath reviewedExternalSource =
+            root.AddDirPath("ExternalImport").AddFilePath("reviewed_model.gltf");
+        const filesystem::AbsolutePath reviewedManagedSource =
+            workspace->GetAssetsRoot().AddFilePath("reviewed_model.gltf");
+        if (!WriteRawFile(reviewedExternalSource, reviewedSnapshot.Data(), reviewedSnapshot.Size()))
+            return FailStep("model-import-external-fixture");
+
+        vanguard::mesh_tools::ModelImportManifest modelManifest;
+        vanguard::mesh_tools::ModelImportReport modelReport;
+        const vanguard::mesh_tools::ModelImportResult inspected = vanguard::mesh_tools::InspectModelMemory(
+            reviewedSnapshot.Data(), reviewedSnapshot.Size(), "gltf", reviewedExternalSource.AsStringView(),
+            {}, {}, modelManifest, &modelReport);
+        if (inspected != vanguard::mesh_tools::ModelImportResult::Success ||
+            modelManifest.geometryDefinitions.Size() != 1u || modelManifest.materials.Size() < 2u ||
+            modelManifest.materials.Size() > 4u ||
+            modelManifest.embeddedTextures.Size() != 2u)
+        {
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] model import inspect failed: result=%s geometry=%u materials=%u embedded=%u diagnostic=%s\n",
+                         vanguard::mesh_tools::ToString(inspected), modelManifest.geometryDefinitions.Size(),
+                         modelManifest.materials.Size(), modelManifest.embeddedTextures.Size(),
+                         modelReport.diagnostic.AsChar());
+            return FailStep("model-import-inspection");
+        }
+        if (!DriveUntilAssetMutationReady(projectAssets, *frames, clock) ||
+            !DriveUntilExternalImportDestinationReady(projectAssets, 0u, {}, *frames, clock))
+            return FailStep("model-import-planning-ready");
+
+        vanguard::mesh_tools::ModelImportSettings modelSettings;
+        modelSettings.materialPolicy = vanguard::mesh_tools::ModelImportMaterialPolicy::ImportModelOwned;
+        modelSettings.embeddedTexturePolicy = vanguard::mesh_tools::ModelImportEmbeddedTexturePolicy::ImportModelOwned;
+        modelSettings.includeComposition = true;
+        vanguard::mesh_tools::ModelImportPlan modelPlan;
+        vanguard::mesh_tools::ModelImportPlanReport modelPlanReport;
+        assetStreaming::ProjectAssetPipelineFailure modelPlanFailure;
+        assets::AssetId provisionalModelAsset;
+        const assetStreaming::ProjectAssetPipelineResult firstPlan = projectAssets.PrepareModelImportPlan(
+            reviewedExternalSource, reviewedSnapshot, 0u, {}, "reviewed_model.gltf", {}, 0u, 0u,
+            modelManifest, modelSettings, modelPlan, &modelPlanReport, provisionalModelAsset, &modelPlanFailure);
+        if (firstPlan != assetStreaming::ProjectAssetPipelineResult::Success || !provisionalModelAsset.IsValid() ||
+            modelPlan.HasBlockingConflicts() || modelPlan.GetImportDescription().outputs.Size() < 6u ||
+            modelPlan.GetImportDescription().outputs.Size() > 8u ||
+            filesystem::RawFileReader::Create(reviewedManagedSource) ||
+            filesystem::RawFileReader::Create(MetadataPath(reviewedManagedSource)))
+        {
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] first model plan failed: result=%s failure=%s outputs=%u blockers=%u diagnostic=%s\n",
+                         assetStreaming::ToString(firstPlan), assetStreaming::ToString(modelPlanFailure.result),
+                         modelPlan.GetImportDescription().outputs.Size(), modelPlan.GetBlockers().Size(),
+                         modelPlanReport.diagnostic.AsChar());
+            return FailStep("model-import-nondurable-plan");
+        }
+
+        const assets::AssetId firstProvisionalModelAsset = provisionalModelAsset;
+        vanguard::mesh_tools::ModelImportPlan reviewedModelPlan;
+        vanguard::mesh_tools::ModelImportPlanReport reviewedModelPlanReport;
+        modelPlanFailure = {};
+        const assetStreaming::ProjectAssetPipelineResult replanned = projectAssets.PrepareModelImportPlan(
+            reviewedExternalSource, reviewedSnapshot, 0u, {}, "reviewed_model.gltf", {}, 0u, 0u,
+            modelManifest, modelSettings, reviewedModelPlan, &reviewedModelPlanReport, provisionalModelAsset,
+            &modelPlanFailure);
+        if (replanned != assetStreaming::ProjectAssetPipelineResult::Success ||
+            provisionalModelAsset != firstProvisionalModelAsset || reviewedModelPlan.HasBlockingConflicts() ||
+            filesystem::RawFileReader::Create(MetadataPath(reviewedManagedSource)))
+            return FailStep("model-import-provisional-identity-stability");
+
+        // An unrelated, no-op source-catalog refresh must not invalidate an
+        // independently reviewed first-import model whose scoped source,
+        // destination, accepted state and output identities remain unchanged.
+        assetStreaming::ProjectAssetPipeline* const liveModelPipeline = workspace->GetAssetPipeline();
+        const vanguard::u64 modelCatalogGeneration = workspace->GetSources().GetGeneration();
+        const vanguard::u64 modelAcceptedGeneration = liveModelPipeline->GetAcceptedAssetGeneration();
+        const auto modelRoots = workspace->GetSources().GetRoots();
+        if (liveModelPipeline->Rescan(modelRoots) != assetStreaming::ProjectAssetPipelineResult::Success ||
+            workspace->GetSources().GetGeneration() == modelCatalogGeneration ||
+            liveModelPipeline->GetAcceptedAssetGeneration() != modelAcceptedGeneration)
+            return FailStep("model-import-unrelated-catalog-refresh");
+
+        // An unrelated settings mutation legitimately advances the accepted
+        // generation after review without modifying model import facts.
+        vanguard::u64 unrelatedAcceptedGeneration = 0u;
+        assetStreaming::ProjectAssetPipelineFailure unrelatedFailure;
+        if (!projectAssets.GetAcceptedAssetGeneration(metadata.id, unrelatedAcceptedGeneration))
+            return FailStep("model-import-unrelated-asset-generation");
+        const auto unrelatedUpdate = projectAssets.UpdateAssetSettings(
+            metadata.id, unrelatedAcceptedGeneration, workspace->GetSources().GetGeneration(),
+            metadata.settingsVersion, {metadata.settings.TypedData(), metadata.settings.Size()}, &unrelatedFailure);
+        if ((unrelatedUpdate != assetStreaming::ProjectAssetPipelineResult::Success &&
+             unrelatedUpdate != assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending &&
+             unrelatedUpdate != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending) ||
+            liveModelPipeline->GetAcceptedAssetGeneration() <= modelAcceptedGeneration)
+        {
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] unrelated accepted update=%s old=%llu new=%llu\n",
+                         assetStreaming::ToString(unrelatedUpdate),
+                         static_cast<unsigned long long>(modelAcceptedGeneration),
+                         static_cast<unsigned long long>(liveModelPipeline->GetAcceptedAssetGeneration()));
+            return FailStep("model-import-unrelated-accepted-generation");
+        }
+        // Let the source observer consume the unrelated transaction's watcher
+        // echo. A pending observation is independently a legitimate fail-closed
+        // guard and must not be conflated with global-generation false staleness.
+        bool observationSettled = false;
+        for (vanguard::u32 attempt = 0u; attempt < 10'000u; ++attempt)
+        {
+            const assetStreaming::ProjectAssetObservationStatus observed = liveModelPipeline->GetObservationStatus();
+            if (!observed.rescanRequired && !observed.reconcilePending)
+            {
+                observationSettled = true;
+                break;
+            }
+            if (!RunFrame(*frames, clock))
+                return FailStep("model-import-unrelated-observer-frame");
+            vanguard::concurrency::SleepOnCurrentThread(1);
+        }
+        if (!observationSettled || !DriveUntilAssetMutationReady(projectAssets, *frames, clock))
+            return FailStep("model-import-unrelated-observer-settle");
+
+        assets::AssetId importedModelAsset;
+        assetStreaming::ProjectAssetPipelineFailure modelCommitFailure;
+        const assetStreaming::ProjectAssetPipelineResult modelCommitted = projectAssets.CommitModelImportPlan(
+            reviewedModelPlan, reviewedSnapshot, importedModelAsset, &modelCommitFailure);
+        if ((modelCommitted != assetStreaming::ProjectAssetPipelineResult::Success &&
+             modelCommitted != assetStreaming::ProjectAssetPipelineResult::CommittedCleanupPending &&
+             modelCommitted != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending) ||
+            importedModelAsset != provisionalModelAsset)
+        {
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] model commit failed: result=%s failure=%s build=%s imported=%u identityMatch=%u staleSite=%u\n",
+                         assetStreaming::ToString(modelCommitted), assetStreaming::ToString(modelCommitFailure.result),
+                         assets::ToString(modelCommitFailure.build), importedModelAsset.IsValid() ? 1u : 0u,
+                         importedModelAsset == provisionalModelAsset ? 1u : 0u,
+                         modelCommitFailure.stalePlanSite);
+            return FailStep("model-import-explicit-commit");
+        }
+        if (modelCommitted == assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending)
+        {
+            if (modelCommitFailure.result == assetStreaming::ProjectAssetPipelineResult::BuildRequestFailed)
+            {
+                std::fprintf(stderr,
+                             "[editorAssetRetirementTests] model cohort admission failed after durable commit: build=%s\n",
+                             assets::ToString(modelCommitFailure.build));
+                return FailStep("model-import-cohort-admission");
+            }
+            bool resumed = false;
+            for (vanguard::u32 attempt = 0u; attempt < 10'000u && !resumed; ++attempt)
+            {
+                if (!RunFrame(*frames, clock))
+                    return FailStep("model-import-reconciliation-frame");
+                assetStreaming::ProjectAssetPipelineFailure resumeFailure;
+                const assetStreaming::ProjectAssetPipelineResult resume = projectAssets.ResumeCommittedModelImport(
+                    reviewedModelPlan, importedModelAsset, 0u, &resumeFailure);
+                resumed = resume == assetStreaming::ProjectAssetPipelineResult::Success;
+                if (!resumed && resume != assetStreaming::ProjectAssetPipelineResult::CommittedReconciliationPending)
+                {
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] model cohort resume failed: result=%s build=%s\n",
+                                 assetStreaming::ToString(resume), assets::ToString(resumeFailure.build));
+                    return FailStep("model-import-cohort-resume");
+                }
+                if (!resumed)
+                    vanguard::concurrency::SleepOnCurrentThread(1);
+            }
+            if (!resumed)
+                return FailStep("model-import-cohort-resume-timeout");
+        }
+
+        auto reviewedSourceReader = filesystem::RawFileReader::Create(reviewedManagedSource);
+        vanguard::u8 reviewedDurableBytes[sizeof(reviewedModel) - 1u]{};
+        if (!reviewedSourceReader || reviewedSourceReader->GetSize() != reviewedSnapshot.Size())
+            return FailStep("model-import-durable-source");
+        reviewedSourceReader->Serialize(reviewedDurableBytes, sizeof(reviewedDurableBytes));
+        if (reviewedSourceReader->HasErrors() ||
+            std::memcmp(reviewedDurableBytes, reviewedSnapshot.Data(), reviewedSnapshot.Size()) != 0)
+            return FailStep("model-import-durable-source-snapshot");
+
+        auto reviewedMetadataReader = filesystem::RawFileReader::Create(MetadataPath(reviewedManagedSource));
+        if (!reviewedMetadataReader || reviewedMetadataReader->GetSize() == 0u ||
+            reviewedMetadataReader->GetSize() > assets::MaximumAssetMetadataBytes)
+            return FailStep("model-import-durable-metadata");
+        vanguard::containers::DynamicArray<vanguard::u8> reviewedMetadataBytes(vanguard::memory::pools::Tools::GetInstance());
+        reviewedMetadataBytes.Resize(static_cast<vanguard::u32>(reviewedMetadataReader->GetSize()));
+        if (reviewedMetadataBytes.Size() != reviewedMetadataReader->GetSize())
+            return FailStep("model-import-durable-metadata-buffer");
+        reviewedMetadataReader->Serialize(reviewedMetadataBytes.Data(), reviewedMetadataBytes.Size());
+        assets::AssetMetadata reviewedMetadata;
+        if (reviewedMetadataReader->HasErrors() ||
+            assets::ParseMetadata(
+                {reinterpret_cast<const char*>(reviewedMetadataBytes.Data()), reviewedMetadataBytes.Size()},
+                reviewedMetadata) != assets::MetadataResult::Success ||
+            reviewedMetadata.id != importedModelAsset ||
+            reviewedMetadata.importer != assets::HashCompilerName("vanguard.model.importer") ||
+            reviewedMetadata.importerVersion != vanguard::mesh_tools::ModelSourceImporterVersion ||
+            reviewedMetadata.settingsVersion != vanguard::mesh_tools::ModelImportSettingsVersion ||
+            reviewedMetadata.outputs.Size() != reviewedModelPlan.GetImportDescription().outputs.Size())
+            return FailStep("model-import-durable-metadata-truth");
+        for (vanguard::u32 index = 0u; index < reviewedMetadata.outputs.Size(); ++index)
+        {
+            const assets::AssetOutput& persisted = reviewedMetadata.outputs[index];
+            const assets::AssetOutput& planned = reviewedModelPlan.GetImportDescription().outputs[index];
+            if (persisted.key != planned.key || persisted.type != planned.type)
+                return FailStep("model-import-durable-metadata-outputs");
+        }
+
+        vanguard::u64 reviewedAcceptedGeneration = 0u;
+        vanguard::u32 reviewedAvailableOutputs = 0u;
+        bool reviewedOutputsTruncated = false;
+        static_cast<void>(projectAssets.CopyAssetOutputs(
+            importedModelAsset, 0u, {}, reviewedAvailableOutputs, reviewedOutputsTruncated));
+        if (!projectAssets.GetAcceptedAssetGeneration(importedModelAsset, reviewedAcceptedGeneration) ||
+            reviewedAcceptedGeneration == 0u || reviewedOutputsTruncated ||
+            reviewedAvailableOutputs != reviewedModelPlan.GetImportDescription().outputs.Size())
+            return FailStep("model-import-accepted-cohort-size");
+        vanguard::containers::DynamicArray<resources::ResourceReference> reviewedOutputs(
+            vanguard::memory::pools::Tools::GetInstance());
+        reviewedOutputs.Resize(reviewedAvailableOutputs);
+        vanguard::u32 copiedAvailableOutputs = 0u;
+        bool copiedOutputsTruncated = false;
+        const vanguard::u32 copiedOutputs = projectAssets.CopyAssetOutputs(
+            importedModelAsset, 0u, {reviewedOutputs.TypedData(), reviewedOutputs.Size()},
+            copiedAvailableOutputs, copiedOutputsTruncated);
+        if (copiedOutputs != reviewedAvailableOutputs || copiedAvailableOutputs != reviewedAvailableOutputs ||
+            copiedOutputsTruncated)
+            return FailStep("model-import-accepted-cohort-copy");
+        for (const assets::AssetOutput& planned : reviewedModelPlan.GetImportDescription().outputs)
+        {
+            const resources::ResourceReference expected = assets::GetAssetOutputReference(importedModelAsset, planned);
+            bool found = false;
+            for (const resources::ResourceReference observed : reviewedOutputs)
+                found = found || observed == expected;
+            if (!expected.IsTyped() || !found)
+                return FailStep("model-import-accepted-cohort-identity");
+        }
+        const assets::SourceRecord* const reviewedSourceRecord = workspace->GetSources().LookupAsset(importedModelAsset);
+        if (reviewedSourceRecord == nullptr || reviewedSourceRecord->path != reviewedManagedSource ||
+            reviewedSourceRecord->metadata.id != importedModelAsset ||
+            reviewedSourceRecord->sourceIdentity != reviewedModelPlan.GetWitnesses().sourceIdentity)
+            return FailStep("model-import-source-identity");
+
+        bool reviewedCohortReady = false;
+        vanguard::u32 reviewedStaleBuildRetries = 0u;
+        for (vanguard::u32 attempt = 0u; attempt < 500u && !reviewedCohortReady; ++attempt)
+        {
+            const assetStreaming::ProjectAssetAutomaticRecookStatus automatic = projectAssets.GetAutomaticRecookStatus();
+            bool allReady = automatic.state == assetStreaming::ProjectAssetAutomaticRecookState::Idle &&
+                            automatic.pendingDeliveryOutputs == 0u;
+            for (const resources::ResourceReference modelOutput : reviewedOutputs)
+            {
+                assetStreaming::ProjectAssetOutputDeliveryStatus delivery;
+                if (!projectAssets.GetOutputDeliveryStatus(modelOutput, delivery) ||
+                    delivery.authoredGeneration != reviewedAcceptedGeneration ||
+                    delivery.buildState != assetStreaming::ProjectAssetDeliveryStageState::Committed ||
+                    (delivery.publicationState != assetStreaming::ProjectAssetDeliveryStageState::Installed &&
+                     delivery.publicationState != assetStreaming::ProjectAssetDeliveryStageState::Current &&
+                     delivery.publicationState != assetStreaming::ProjectAssetDeliveryStageState::Stale) ||
+                    delivery.committedBuildFingerprint.IsEmpty() || delivery.committedContentFingerprint.IsEmpty() ||
+                    delivery.publishedBuildFingerprint.IsEmpty() || delivery.publishedContentFingerprint.IsEmpty() ||
+                    !delivery.publishedPhysicalPath.IsFilePath() || delivery.publicationRetryRequired)
+                    allReady = false;
+            }
+            if (allReady)
+            {
+                reviewedCohortReady = true;
+                break;
+            }
+            if (automatic.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+                automatic.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+            {
+                // A concurrent catalog/observation advance can invalidate an
+                // already-admitted build before its VADI commit. P5 must retain
+                // the durable model and exact cohort; exercise its explicit
+                // retry rather than treating a stale completion as a data loss.
+                if (reviewedStaleBuildRetries < 4u &&
+                    assetStreaming::HasAutomaticRecookDirtyReason(
+                        automatic.dirtyReasons,
+                        assetStreaming::ProjectAssetAutomaticRecookDirtyReason::StaleCompletion))
+                {
+                    assetStreaming::ProjectAssetPipelineFailure retryFailure;
+                    const auto retried = projectAssets.RetryAutomaticRecook(&retryFailure);
+                    if (retried == assetStreaming::ProjectAssetPipelineResult::Success ||
+                        retried == assetStreaming::ProjectAssetPipelineResult::Pending)
+                    {
+                        ++reviewedStaleBuildRetries;
+                        continue;
+                    }
+                    std::fprintf(stderr,
+                                 "[editorAssetRetirementTests] model stale-cohort retry rejected: result=%s build=%s\n",
+                                 assetStreaming::ToString(retried), assets::ToString(retryFailure.build));
+                }
+                std::fprintf(stderr,
+                             "[editorAssetRetirementTests] model cohort build failed: state=%u dirty=0x%x pending=%u delivery=%u retry=%u\n",
+                             static_cast<unsigned>(automatic.state), static_cast<unsigned>(automatic.dirtyReasons),
+                             automatic.pendingOutputs, automatic.pendingDeliveryOutputs, automatic.retryEntries);
+                for (const resources::ResourceReference modelOutput : reviewedOutputs)
+                {
+                    assetStreaming::ProjectAssetOutputDeliveryStatus delivery;
+                    if (projectAssets.GetOutputDeliveryStatus(modelOutput, delivery))
+                        std::fprintf(stderr,
+                                     "  output path=%llu type=%u generation=%llu build=%u publication=%u reason=%u pubRetry=%u residentRetry=%u\n",
+                                     static_cast<unsigned long long>(modelOutput.GetPath().Id()),
+                                     static_cast<unsigned>(modelOutput.ExpectedType()),
+                                     static_cast<unsigned long long>(delivery.authoredGeneration),
+                                     static_cast<unsigned>(delivery.buildState),
+                                     static_cast<unsigned>(delivery.publicationState),
+                                     static_cast<unsigned>(delivery.publicationReason),
+                                     delivery.publicationRetryRequired ? 1u : 0u,
+                                     delivery.residentRetryRequired ? 1u : 0u);
+                }
+                return FailStep("model-import-cohort-build");
+            }
+            if (!RunFrame(*frames, clock))
+                return FailStep("model-import-cohort-frame");
+            vanguard::concurrency::SleepOnCurrentThread(1);
+        }
+        if (!reviewedCohortReady)
+        {
+            const assetStreaming::ProjectAssetAutomaticRecookStatus automatic = projectAssets.GetAutomaticRecookStatus();
+            std::fprintf(stderr,
+                         "[editorAssetRetirementTests] model cohort timed out: state=%u dirty=0x%x pendingAssets=%u pendingOutputs=%u delivery=%u retry=%u\n",
+                         static_cast<unsigned>(automatic.state), static_cast<unsigned>(automatic.dirtyReasons),
+                         automatic.pendingAssets, automatic.pendingOutputs, automatic.pendingDeliveryOutputs,
+                         automatic.retryEntries);
+            for (const resources::ResourceReference modelOutput : reviewedOutputs)
+            {
+                assetStreaming::ProjectAssetOutputDeliveryStatus delivery;
+                if (projectAssets.GetOutputDeliveryStatus(modelOutput, delivery))
+                    std::fprintf(stderr,
+                                 "  output path=%llu type=%u generation=%llu build=%u publication=%u reason=%u pubRetry=%u\n",
+                                 static_cast<unsigned long long>(modelOutput.GetPath().Id()),
+                                 static_cast<unsigned>(modelOutput.ExpectedType()),
+                                 static_cast<unsigned long long>(delivery.authoredGeneration),
+                                 static_cast<unsigned>(delivery.buildState),
+                                 static_cast<unsigned>(delivery.publicationState),
+                                 static_cast<unsigned>(delivery.publicationReason),
+                                 delivery.publicationRetryRequired ? 1u : 0u);
+            }
+            return FailStep("model-import-cohort-timeout");
+        }
+
+        // A successful inspected review must remain explicit and non-durable
+        // when a separate maintenance owner momentarily blocks source mutation.
+        // CancelQueuedCommit then preserves the same reviewed plan and source
+        // bytes without creating the source or VMETA.
+        const filesystem::AbsolutePath queuedExternalSource =
+            root.AddDirPath("ExternalImport").AddFilePath("queued_review_model.gltf");
+        const filesystem::AbsolutePath queuedManagedSource =
+            workspace->GetAssetsRoot().AddFilePath("queued_review_model.gltf");
+        if (!WriteRawFile(queuedExternalSource, reviewedSnapshot.Data(), reviewedSnapshot.Size()))
+            return FailStep("model-import-queued-source");
+        {
+            editor::EditorModelImportSession queuedSession;
+            if (!queuedSession.BeginExternalSnapshot(queuedExternalSource, reviewedSnapshot, 0u, {}, projectAssets))
+                return FailStep("model-import-queued-inspection-start");
+            bool queuedReviewReady = false;
+            for (vanguard::u32 attempt = 0u; attempt < 10'000u; ++attempt)
+            {
+                queuedSession.Poll(projectAssets);
+                const auto status = queuedSession.GetStatus();
+                if (status.phase == editor::EditorModelImportSessionPhase::Review)
+                {
+                    queuedReviewReady = true;
+                    break;
+                }
+                if (status.phase != editor::EditorModelImportSessionPhase::Inspecting &&
+                    status.phase != editor::EditorModelImportSessionPhase::ProjectBusy)
+                    return FailStep("model-import-queued-inspection-result");
+                if (!RunFrame(*frames, clock))
+                    return FailStep("model-import-queued-inspection-frame");
+                vanguard::concurrency::SleepOnCurrentThread(1);
+            }
+            if (!queuedReviewReady || queuedSession.GetPlan().HasBlockingConflicts() ||
+                !DriveUntilAssetMutationReady(projectAssets, *frames, clock))
+                return FailStep("model-import-queued-review-ready");
+            // Presentation submits only an immutable approval at click time.
+            // Poll must allow a frame to render the committing notice before
+            // running any synchronous source/transaction work.
+            if (!queuedSession.QueueReviewedCommit() || !queuedSession.GetStatus().commitQueued ||
+                queuedSession.GetStatus().commitAttempts != 0u)
+                return FailStep("model-import-ui-commit-approval-queued");
+            queuedSession.Poll(projectAssets);
+            if (!queuedSession.GetStatus().commitQueued || queuedSession.GetStatus().commitAttempts != 0u ||
+                filesystem::RawFileReader::Create(queuedManagedSource) ||
+                !queuedSession.CancelQueuedCommit() || queuedSession.GetStatus().commitQueued)
+                return FailStep("model-import-ui-commit-notice-precedes-work");
+            const assets::AssetId reviewedQueuedIdentity = queuedSession.GetPlan().GetWitnesses().parentAsset;
+            if (!reviewedQueuedIdentity.IsValid() || !RequestLooseMaintenanceAfterOwnerSettlement(*pipeline))
+                return FailStep("model-import-queued-maintenance-admission");
+            assetStreaming::ProjectAssetPipelineFailure queuedFailure;
+            const auto blocked = queuedSession.CommitReviewedPlan(projectAssets, &queuedFailure);
+            const auto blockedStatus = queuedSession.GetStatus();
+            if (blocked != assetStreaming::ProjectAssetPipelineResult::Busy || !blockedStatus.commitQueued ||
+                blockedStatus.phase != editor::EditorModelImportSessionPhase::Review ||
+                blockedStatus.durableCommitted || blockedStatus.commitAttempts != 1u ||
+                filesystem::RawFileReader::Create(queuedManagedSource) ||
+                filesystem::RawFileReader::Create(MetadataPath(queuedManagedSource)))
+                return FailStep("model-import-queued-busy-is-nondurable");
+            // A retained maintenance/admission owner must not drive another
+            // full-source hash or planned-request creation from the UI poll.
+            // The approved review remains queued, and only an eligible retry
+            // performs the exact immutable witness verification again.
+            for (vanguard::u32 blockedFrame = 0u; blockedFrame < 40u; ++blockedFrame)
+                queuedSession.Poll(projectAssets);
+            if (!queuedSession.GetStatus().commitQueued || queuedSession.GetStatus().commitAttempts != 1u ||
+                projectAssets.CanRetryReviewedModelCommit(queuedSession.GetPlan()))
+                return FailStep("model-import-queued-owner-does-not-spin");
+            if (!queuedSession.CancelQueuedCommit() || queuedSession.GetStatus().commitQueued ||
+                queuedSession.GetStatus().phase != editor::EditorModelImportSessionPhase::Review ||
+                queuedSession.GetPlan().GetWitnesses().parentAsset != reviewedQueuedIdentity ||
+                queuedSession.CancelQueuedCommit())
+                return FailStep("model-import-queued-cancel-retains-review");
+            if (DrainLooseMaintenance(*pipeline) != assetStreaming::ProjectAssetPipelineResult::Success)
+                return FailStep("model-import-queued-maintenance-drain");
+
+            // A second explicit click is allowed after cancellation. This time
+            // keep the queued approval, release the transient maintenance owner,
+            // and prove Poll commits the SAME reviewed plan automatically.
+            if (!RequestLooseMaintenanceAfterOwnerSettlement(*pipeline))
+                return FailStep("model-import-queued-retry-admission");
+            const auto queuedAgain = queuedSession.CommitReviewedPlan(projectAssets, &queuedFailure);
+            if (queuedAgain != assetStreaming::ProjectAssetPipelineResult::Busy ||
+                !queuedSession.GetStatus().commitQueued || queuedSession.GetStatus().commitAttempts != 2u)
+                return FailStep("model-import-queued-second-click");
+            if (DrainLooseMaintenance(*pipeline) != assetStreaming::ProjectAssetPipelineResult::Success)
+                return FailStep("model-import-queued-retry-maintenance-drain");
+            bool autoCommitted = false;
+            for (vanguard::u32 attempt = 0u; attempt < 10'000u; ++attempt)
+            {
+                queuedSession.Poll(projectAssets);
+                const auto queuedStatus = queuedSession.GetStatus();
+                if (queuedStatus.durableCommitted)
+                {
+                    autoCommitted = true;
+                    break;
+                }
+                if (queuedStatus.phase != editor::EditorModelImportSessionPhase::Review ||
+                    !queuedStatus.commitQueued || queuedStatus.commitAttempts > 64u)
+                    return FailStep("model-import-queued-auto-retry-state");
+                if (!RunFrame(*frames, clock))
+                    return FailStep("model-import-queued-auto-retry-frame");
+                vanguard::concurrency::SleepOnCurrentThread(1);
+            }
+            if (!autoCommitted || queuedSession.GetStatus().commitQueued ||
+                queuedSession.GetPlan().GetWitnesses().parentAsset != reviewedQueuedIdentity ||
+                !filesystem::RawFileReader::Create(queuedManagedSource) ||
+                !filesystem::RawFileReader::Create(MetadataPath(queuedManagedSource)))
+                return FailStep("model-import-queued-auto-durable-commit");
+        }
 
         // Leave the current-generation preview live across quiesce. Successful
         // host shutdown proves the workspace reset released its demand/root request

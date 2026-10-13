@@ -3042,12 +3042,15 @@ namespace vanguard::rendering
         view.layerMask = &base.layerMask;
         view.visibilityMask = &base.visibilityMask;
         view.spatialMode = &base.spatialMode;
+        view.gpuInstanceIndex = &base.gpuInstanceIndex;
         view.payloadKind = base.payloadKind;
 
         if (base.payloadKind == RenderProxyPayloadKind::Mesh)
         {
             if (!m_impl->ValidAlivePayload(proxy, RenderProxyPayloadKind::Mesh))
                 return false;
+            const Impl::MeshPayloadSlot& mesh = scene.meshPayloads[base.payloadIndex];
+            view.meshDrawable = &mesh.activeDrawable;
         }
         else if (base.payloadKind == RenderProxyPayloadKind::Light)
         {

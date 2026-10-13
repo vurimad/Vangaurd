@@ -681,7 +681,7 @@ int main()
     Check(vanguard::jobs::Initialize(jobsConfig), "Jobs initialization for parallel texture cooking");
 
     // BuildGraph executes asset compilers from dispatcher work. The texture compiler must therefore keep its internal
-    // block cooking serial: RED Jobs forbids a dispatcher job from synchronously waiting on child jobs. Use a real
+    // block cooking serial: dispatcher work cannot synchronously wait on child jobs. Use a real
     // multi-block Color/JPEG build so the old Automatic path would enter EncodeImage's parallel wait and assert.
     {
         vanguard::assets::BuildSystem dispatcherTextureBuildSystem;

@@ -5,10 +5,14 @@
 #include <vanguard/rendering/render_graph_scheduler_probe.hpp>
 #include <vanguard/rendering/render_graph_nodes.hpp>
 #include <vanguard/rendering/geometry_graph_nodes.hpp>
+#include <vanguard/rendering/mesh_residency.hpp>
 #include <vanguard/rendering/render_node_graph.hpp>
 #include <vanguard/rendering/render_node_impl_context.hpp>
 #include <vanguard/rendering/render_node_job.hpp>
+#include <vanguard/rendering/render_scene_gpu_read.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -103,6 +107,85 @@ namespace vanguard::rendering
         inline constexpr rhi::GpuCounterScopeId GeometryWorkGpuTimingScope = rhi::MakeGpuCounterScopeId("GeometryWork");
         inline constexpr rhi::GpuCounterScopeId CameraGeometryGpuTimingScope = rhi::MakeGpuCounterScopeId("CameraGeometry");
         inline constexpr u64 GeometryWorkCommandListRole = 0x47454f4d574f524bull;
+        inline constexpr ResourceContractPatchId FrameOutputImportPatch{0x524631324f555401ull};
+        inline constexpr ResourceContractPatchId FrameOutputExportPatch{0x524631324f555402ull};
+        inline constexpr ResourceContractPatchId GeometryShellPlanPatch{0x5246313247454f01ull};
+        inline constexpr ResourceContractPatchId GeometryDiagnosticPatch{0x5246313244494101ull};
+
+        [[nodiscard]] constexpr u64 ContractMix(const u64 hash, const u64 value) noexcept
+        {
+            return (hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u))) * 0x100000001b3ull;
+        }
+
+        [[nodiscard]] constexpr ResourceContractPatchId GeometryContractPatch(const u64 domain, const u32 index,
+                                                                               const u32 generation = 0,
+                                                                               const u32 binding = 0) noexcept
+        {
+            u64 value = ContractMix(domain, index);
+            value = ContractMix(value, generation);
+            value = ContractMix(value, binding);
+            return {value != 0 ? value : 1u};
+        }
+
+        [[nodiscard]] RenderFlowResourceContractRevisionKey BuildResourceContractRevision(
+            const RenderGraphCache::CacheEntry& entry, const GeometryFrameWork& work, const bool diagnosticReadback,
+            const bool hasFrameOutput, const RenderViewportOutputKind outputKind, const RenderOutputColorEncoding outputEncoding,
+            const RenderTextureOutputContract* const textureOutputContract) noexcept
+        {
+            RenderFlowResourceContractRevisionKey key;
+            key.hash = ContractMix(0xcbf29ce484222325ull, entry.graphKey.hash);
+            const GeometryFrameWorkCapacity capacity = work.GetCapacity();
+            key.views = capacity.views;
+            key.visibleInstances = capacity.visibleInstances;
+            key.geometryWorkItems = capacity.geometryWorkItems;
+            key.geometryBins = capacity.geometryBins;
+            key.shellDraws = capacity.shellDraws;
+            key.shellsPerView = capacity.shellsPerView;
+            key.indirectArgumentCapacity = work.GetIndirectArgumentCapacity();
+            key.shellDrawCount = work.GetShellDraws().Size();
+            key.diagnosticReadback = diagnosticReadback;
+            const auto outputRegions = work.GetOutputRegions();
+            key.outputRegionCount = outputRegions.Size();
+            for (u32 index = 0; index < outputRegions.Size(); ++index)
+                key.outputRegionViews[index] = outputRegions[index].viewIndex;
+            key.hasFrameOutput = hasFrameOutput;
+            key.outputKind = hasFrameOutput ? outputKind : RenderViewportOutputKind::Headless;
+            key.outputEncoding = hasFrameOutput ? outputEncoding : RenderOutputColorEncoding::SceneLinear;
+            key.hasTextureOutput = textureOutputContract != nullptr;
+            if (hasFrameOutput)
+                key.hash = ContractMix(ContractMix(key.hash, static_cast<u64>(outputKind)), static_cast<u64>(outputEncoding));
+            if (textureOutputContract != nullptr)
+            {
+                // Slot/generation is dynamic, but terminal state/queue/readiness
+                // authored by RTExportFrameOutput are part of the semantic plan.
+                key.textureRestingState = textureOutputContract->restingState;
+                key.textureRestingQueue = textureOutputContract->restingQueue;
+                key.texturePublicationReadiness = textureOutputContract->publicationReadiness;
+            }
+            key.hash = ContractMix(key.hash, key.views);
+            key.hash = ContractMix(key.hash, key.visibleInstances);
+            key.hash = ContractMix(key.hash, key.geometryWorkItems);
+            key.hash = ContractMix(key.hash, key.geometryBins);
+            key.hash = ContractMix(key.hash, key.shellDraws);
+            key.hash = ContractMix(key.hash, key.shellsPerView);
+            key.hash = ContractMix(key.hash, key.indirectArgumentCapacity);
+            key.hash = ContractMix(key.hash, key.shellDrawCount);
+            key.hash = ContractMix(key.hash, key.diagnosticReadback ? 1u : 0u);
+            key.hash = ContractMix(key.hash, key.outputRegionCount);
+            for (u32 index = 0; index < key.outputRegionCount; ++index)
+                key.hash = ContractMix(key.hash, key.outputRegionViews[index]);
+            key.hash = ContractMix(key.hash, key.hasFrameOutput ? 1u : 0u);
+            key.hash = ContractMix(key.hash, key.hasTextureOutput ? 1u : 0u);
+            if (textureOutputContract != nullptr)
+            {
+                key.hash = ContractMix(key.hash, static_cast<u64>(key.textureRestingState));
+                key.hash = ContractMix(key.hash, static_cast<u64>(key.textureRestingQueue));
+                key.hash = ContractMix(key.hash, static_cast<u64>(key.texturePublicationReadiness));
+            }
+            if (key.hash == 0)
+                key.hash = 1;
+            return key;
+        }
 
         enum : u32
         {
@@ -241,6 +324,7 @@ namespace vanguard::rendering
         RetainedBufferImportDesc shellPlanDesc;
         shellPlanDesc.buffer = shellPlanBuffer;
         shellPlanDesc.token = {rhi::ResourceRef(shellPlanDesc.buffer).value};
+        shellPlanDesc.contractPatch = GeometryShellPlanPatch;
         if (!rhi::GetBufferDesc(shellPlanDesc.buffer, shellPlanDesc.expected))
             return false;
         shellPlanDesc.initialState = shellPlanDesc.expected.initialState;
@@ -255,7 +339,8 @@ namespace vanguard::rendering
         auto& imports = work.GetExternalBuffers();
         imports.Clear();
         containers::HashMap<u64, u32> importedBuffers{memory::pools::Rendering::GetInstance()};
-        const auto add = [&](rhi::BufferRef buffer, bool scene, rhi::ResourceState state, rhi::GpuFence incoming) -> bool {
+        const auto add = [&](rhi::BufferRef buffer, bool scene, rhi::ResourceState state, rhi::GpuFence incoming,
+                             const ResourceContractPatchId contractPatch, const char* const semanticName) -> bool {
             u32 existing = 0;
             const u64 identity = rhi::ResourceRef(buffer).value;
             const bool alreadyImported = importedBuffers.Find(identity, existing);
@@ -263,6 +348,7 @@ namespace vanguard::rendering
                 return imports[existing].sceneTable == scene && imports[existing].readState == state;
             RetainedBufferImportDesc desc;
             desc.token = {identity};
+            desc.contractPatch = contractPatch;
             desc.buffer = buffer;
             const bool descriptorAvailable = rhi::GetBufferDesc(buffer, desc.expected);
             if (!descriptorAvailable)
@@ -276,7 +362,7 @@ namespace vanguard::rendering
             GeometryExternalBuffer entry;
             entry.sceneTable = scene;
             entry.readState = state;
-            std::snprintf(entry.name, sizeof(entry.name), "Geometry.External.%llu", static_cast<unsigned long long>(identity));
+            std::snprintf(entry.name, sizeof(entry.name), "%s", semanticName);
             entry.nameHash = LogicalResourceName::CalculateHash(containers::StringView(entry.name));
             // Import readiness follows the actual publication queue. CopySync
             // currently publishes GPU Scene on Graphics; submission ordering
@@ -290,10 +376,14 @@ namespace vanguard::rendering
             imports.PushBack(entry);
             return true;
         };
-        for (const auto buffer : m_gpuScene.GetTables().GetConsumerBuffers())
+        const auto sceneBuffers = m_gpuScene.GetTables().GetConsumerBuffers();
+        for (u32 bufferIndex = 0; bufferIndex < sceneBuffers.Size(); ++bufferIndex)
         {
-            const bool added = add(buffer, true, rhi::ResourceState::ShaderResourceGraphics | rhi::ResourceState::ShaderResourceCompute,
-                                   m_gpuScene.GetPublicationFence());
+            char semanticName[96]{};
+            std::snprintf(semanticName, sizeof(semanticName), "Geometry.SceneTable.%u", bufferIndex);
+            const bool added = add(sceneBuffers[bufferIndex], true,
+                                   rhi::ResourceState::ShaderResourceGraphics | rhi::ResourceState::ShaderResourceCompute,
+                                   m_gpuScene.GetPublicationFence(), GeometryContractPatch(0x5246313253434e45ull, bufferIndex), semanticName);
             if (!added)
                 return false;
         }
@@ -317,10 +407,16 @@ namespace vanguard::rendering
                 if (!indicesAvailable) return false;
                 for (u32 index = 0; index < vertices.bindingCount; ++index)
                 {
-                    const bool vertexAdded = add(vertices.buffers[index], false, rhi::ResourceState::VertexBuffer, {});
+                    char semanticName[96]{};
+                    std::snprintf(semanticName, sizeof(semanticName), "Geometry.Vertex.%u.%u.%u", vertices.id.index, vertices.id.generation, index);
+                    const bool vertexAdded = add(vertices.buffers[index], false, rhi::ResourceState::VertexBuffer, {},
+                                                 GeometryContractPatch(0x5246313256455254ull, vertices.id.index, vertices.id.generation, index), semanticName);
                     if (!vertexAdded) return false;
                 }
-                const bool indexAdded = add(indices.buffer, false, rhi::ResourceState::IndexBuffer, {});
+                char semanticName[96]{};
+                std::snprintf(semanticName, sizeof(semanticName), "Geometry.Index.%u.%u", indices.id.index, indices.id.generation);
+                const bool indexAdded = add(indices.buffer, false, rhi::ResourceState::IndexBuffer, {},
+                                            GeometryContractPatch(0x52463132494e4458ull, indices.id.index, indices.id.generation), semanticName);
                 if (!indexAdded) return false;
             }
         }
@@ -360,6 +456,14 @@ namespace vanguard::rendering
     {
         return m_geometryBatcher != nullptr && m_geometryAllocator != nullptr &&
                work.RecordPhase(*m_geometryBatcher, *m_geometryAllocator, phase, draw, buffers, failure);
+    }
+
+    bool FrameRenderer::RecordTransparentGeometryPhase(const GeometryFrameWork& work, const RenderPhaseId phase,
+                                                       const StaticSurfaceDrawContext& draw, const rhi::BufferRef instances,
+                                                       rhi::Failure* const failure) const noexcept
+    {
+        return m_geometryBatcher != nullptr && m_geometryAllocator != nullptr &&
+               work.RecordTransparentPhase(*m_geometryBatcher, *m_geometryAllocator, phase, draw, instances, failure);
     }
 
     void FrameRenderer::BuildRenderGraphBlank(RenderNodeGraph& graph, NodesContainer& nodes, const bool isWireframe, const bool isPrewarm) noexcept
@@ -461,6 +565,7 @@ namespace vanguard::rendering
             else
             {
                 ADD_SUBNODE("DirectionalDiffuse", RenderNodeDirectionalDiffuse, *this);
+                ADD_SUBNODE("DrawTransparent", RenderNodeDrawTransparent, *this);
             }
             ADD_SUBNODE("EndCameraDependencies", RenderNodeEndCameraDependencies);
             ADD_SUBNODE("EndCameraGpuTiming", RenderNodeEndCameraGpuTiming, *this);
@@ -871,7 +976,7 @@ namespace vanguard::rendering
         {
             FrameResourcePolicy policy;
             policy.processEviction = frame.GetGraph().processResourceEviction;
-            return ExecuteBuiltGraph(context, *frame.GetGraph().graph, policy);
+            return ExecuteBuiltGraph(context, *frame.GetGraph().graph, policy, nullptr);
         }
         PreparedRenderViewFamily& preparedFamily = context.GetPreparedViewFamily();
         const PreparedRenderViewFamily* family = frame.GetViewFamily().IsValid() ? &frame.GetViewFamily() : nullptr;
@@ -1013,7 +1118,7 @@ namespace vanguard::rendering
         FrameResourcePolicy resourcePolicy;
         resourcePolicy.enablePlacedResources = features.enablePlacedResources;
         resourcePolicy.processEviction = !features.gameMode || (frame.GetOutputKind() == RenderViewportOutputKind::Presentation && !isBlankFrame);
-        return ExecuteBuiltGraph(context, graphCacheEntry->graph, resourcePolicy);
+        return ExecuteBuiltGraph(context, graphCacheEntry->graph, resourcePolicy, graphCacheEntry);
     }
 
     RenderFrameExecutionStatus FrameRenderer::ExecuteFrameTick(RenderFrameTickContext& context, void* const userData) noexcept
@@ -1174,14 +1279,181 @@ namespace vanguard::rendering
             return RenderFrameExecutionStatus::Failure("camera depth convention does not match the cooked geometry pipeline; matching PSO variants are required");
         if (planned != GeometryFrameWorkResult::Success)
             return RenderFrameExecutionStatus::Failure("geometry shell planning exceeded capacity or observed an invalid catalog");
+        if (context.GetFrame().GetMode() == RenderingMode::Shaded || context.GetFrame().GetMode() == RenderingMode::ShadedNoAmbient)
+        {
+            const RenderFrameExecutionStatus transparent = PrepareTransparentGeometry(work, family);
+            if (!transparent)
+                return transparent;
+        }
         rhi::Failure shellPlanFailure;
         if (!EnsureGeometryShellPlanBuffer(work, &shellPlanFailure))
             return RenderFrameExecutionStatus::Failure(FailureMessage(shellPlanFailure.message, "geometry persistent shell-plan publication failed"));
         return RenderPreparedFrame(context);
     }
 
+    RenderFrameExecutionStatus FrameRenderer::PrepareTransparentGeometry(GeometryFrameWork& work,
+                                                                          const PreparedRenderViewFamily& family) noexcept
+    {
+        work.m_transparentDraws.Clear();
+        work.m_transparentInstances.Clear();
+        for (auto& range : work.m_transparentDrawRanges)
+            range = {};
+
+        const RenderPhaseId transparentPhase = GetGeometryPhase(standardRenderPhases::Transparent);
+        if (!transparentPhase.IsValid())
+            return RenderFrameExecutionStatus::Failure("transparent geometry phase is unavailable");
+        const auto views = family.GetViews();
+        const u32 visibleCapacityPerView = views.Empty() ? 0u : work.GetCapacity().visibleInstances / views.Size();
+        if (visibleCapacityPerView == 0u || m_geometryBatcher == nullptr)
+            return RenderFrameExecutionStatus::Success();
+
+        const f64 cellSize = static_cast<f64>(GetGeometryWorldCellSize());
+        if (!(cellSize > 0.0) || !std::isfinite(cellSize))
+            return RenderFrameExecutionStatus::Failure("transparent geometry requires a valid GPU Scene cell size");
+
+        containers::DynamicArray<RenderProxyHandle> visible(memory::pools::Rendering::GetInstance());
+        visible.Reserve(visibleCapacityPerView);
+        if (visible.Capacity() < visibleCapacityPerView)
+            return RenderFrameExecutionStatus::Failure("transparent geometry visibility scratch allocation failed");
+        for (u32 viewIndex = 0; viewIndex < views.Size(); ++viewIndex)
+        {
+            const RenderView& view = views[viewIndex];
+            GeometryTransparentDrawRange& range = work.m_transparentDrawRanges[viewIndex];
+            range.firstDraw = work.m_transparentDraws.Size();
+            if (!view.phases.Contains(transparentPhase))
+                continue;
+
+            visible.Clear();
+            VisibilityQueryRequest request;
+            request.scene = family.GetScene();
+            request.mutationEpoch = family.GetFamily().sceneVersion;
+            request.frustum = view.frustum;
+            request.layerMask = view.layerMask;
+            request.visibilityMask = view.visibilityMask;
+            request.requiredFlags = RenderProxyVisibilityFlags::Visible;
+            request.excludedFlags = RenderProxyVisibilityFlags::QueryOnly;
+            request.payloadFilter = VisibilityQueryPayloadFilter::Mesh;
+            request.maximumResults = visibleCapacityPerView;
+            request.useBounds = false;
+            request.useFrustum = true;
+            VisibilityQueryResult visibilityResult;
+            RenderSceneFailure sceneFailure;
+            if (!m_scenes.CollectVisibleProxies(request, visible, visibilityResult, &sceneFailure) || !visibilityResult.completed)
+                return RenderFrameExecutionStatus::Failure(FailureMessage(sceneFailure.message, "transparent geometry visibility collection failed"));
+
+            const f64 camera[3]{static_cast<f64>(view.origin.worldCell[0]) * cellSize + view.origin.localPosition[0],
+                                static_cast<f64>(view.origin.worldCell[1]) * cellSize + view.origin.localPosition[1],
+                                static_cast<f64>(view.origin.worldCell[2]) * cellSize + view.origin.localPosition[2]};
+            const bool reverseDepth = (view.flags & RenderViewFlags::ReverseDepth) != RenderViewFlags::None;
+            for (const RenderProxyHandle proxy : visible)
+            {
+                RenderSceneGpuReadView proxyView;
+                if (!m_scenes.ReadGpuProxy(proxy, proxyView) || !proxyView.HasCommonData() ||
+                    proxyView.payloadKind != RenderProxyPayloadKind::Mesh || proxyView.gpuInstanceIndex == nullptr ||
+                    *proxyView.gpuInstanceIndex == InvalidGpuSceneIndex)
+                    continue;
+
+                const RenderProxyTransform& transform = *proxyView.transform;
+                f64 rowLengthSquared[3]{};
+                const f32* rows[3]{transform.row0, transform.row1, transform.row2};
+                bool validTransform = true;
+                for (u32 row = 0; row < 3; ++row)
+                {
+                    rowLengthSquared[row] = static_cast<f64>(rows[row][0]) * rows[row][0] +
+                                            static_cast<f64>(rows[row][1]) * rows[row][1] +
+                                            static_cast<f64>(rows[row][2]) * rows[row][2];
+                    validTransform = validTransform && std::isfinite(rowLengthSquared[row]) && rowLengthSquared[row] > 1.0e-16;
+                }
+                if (!validTransform)
+                    continue;
+                const f64 determinant =
+                    static_cast<f64>(transform.row0[0]) *
+                        (static_cast<f64>(transform.row1[1]) * transform.row2[2] - static_cast<f64>(transform.row1[2]) * transform.row2[1]) -
+                    static_cast<f64>(transform.row0[1]) *
+                        (static_cast<f64>(transform.row1[0]) * transform.row2[2] - static_cast<f64>(transform.row1[2]) * transform.row2[0]) +
+                    static_cast<f64>(transform.row0[2]) *
+                        (static_cast<f64>(transform.row1[0]) * transform.row2[1] - static_cast<f64>(transform.row1[1]) * transform.row2[0]);
+                if (!std::isfinite(determinant))
+                    continue;
+                const bool mirrored = determinant < 0.0;
+
+                const MeshDrawableBinding* const drawable = proxyView.meshDrawable;
+                const MeshDrawableInfo* const drawableInfo = drawable != nullptr ? drawable->GetDrawable() : nullptr;
+                if (drawableInfo == nullptr || !drawableInfo->renderable.IsValid() ||
+                    drawableInfo->firstGpuPrimitive == InvalidGpuSceneIndex || drawableInfo->gpuPrimitiveCount == 0)
+                    continue;
+
+                for (u32 placementIndex = 0; placementIndex < drawableInfo->placementCount; ++placementIndex)
+                {
+                    const GeometryBatchPlacement* const placement = drawable->GetPlacement(placementIndex);
+                    if (placement == nullptr || placement->normalState.phase != transparentPhase ||
+                        placement->sourceSubmesh >= drawableInfo->gpuPrimitiveCount)
+                        continue;
+                    const GeometryBatchId shell = mirrored ? placement->mirroredShell : placement->normalShell;
+                    const GeometryBatchId bin = mirrored ? placement->mirroredBin : placement->normalBin;
+                    const GeometryBinKey& geometry = mirrored ? placement->mirroredGeometry : placement->normalGeometry;
+                    if (!shell.IsValid() || !bin.IsValid() || !geometry.geometry.IsValid() || !placement->material.IsValid())
+                        return RenderFrameExecutionStatus::Failure("transparent geometry placement is incomplete");
+                    const f64 center[3]{
+                        static_cast<f64>(transform.row0[3]) + static_cast<f64>(placement->sortCenter[0]) * transform.row0[0] +
+                            static_cast<f64>(placement->sortCenter[1]) * transform.row1[0] + static_cast<f64>(placement->sortCenter[2]) * transform.row2[0],
+                        static_cast<f64>(transform.row1[3]) + static_cast<f64>(placement->sortCenter[0]) * transform.row0[1] +
+                            static_cast<f64>(placement->sortCenter[1]) * transform.row1[1] + static_cast<f64>(placement->sortCenter[2]) * transform.row2[1],
+                        static_cast<f64>(transform.row2[3]) + static_cast<f64>(placement->sortCenter[0]) * transform.row0[2] +
+                            static_cast<f64>(placement->sortCenter[1]) * transform.row1[2] + static_cast<f64>(placement->sortCenter[2]) * transform.row2[2]};
+                    const f64 dx = center[0] - camera[0];
+                    const f64 dy = center[1] - camera[1];
+                    const f64 dz = center[2] - camera[2];
+                    const f64 clipZ = dx * view.matrices.worldToClip[2] + dy * view.matrices.worldToClip[6] +
+                                      dz * view.matrices.worldToClip[10] + view.matrices.worldToClip[14];
+                    const f64 clipW = dx * view.matrices.worldToClip[3] + dy * view.matrices.worldToClip[7] +
+                                      dz * view.matrices.worldToClip[11] + view.matrices.worldToClip[15];
+                    if (!std::isfinite(clipZ) || !std::isfinite(clipW) || clipW == 0.0)
+                        continue;
+                    const f64 sortDepth = clipZ / clipW;
+                    if (work.m_transparentDraws.Size() >= work.GetCapacity().geometryWorkItems)
+                        return RenderFrameExecutionStatus::Failure("transparent geometry draw plan exceeds the bounded geometry work budget");
+                    GeometryTransparentDraw draw;
+                    draw.shell = shell;
+                    draw.bin = bin;
+                    draw.instance = {*proxyView.gpuInstanceIndex, drawableInfo->firstGpuPrimitive + placement->sourceSubmesh,
+                                     geometry.geometry.index, placement->material.index};
+                    draw.sortDepth = sortDepth;
+                    draw.stableOrder = (static_cast<u64>(proxy.index) << 32u) | placementIndex;
+                    const u32 before = work.m_transparentDraws.Size();
+                    work.m_transparentDraws.PushBack(draw);
+                    if (work.m_transparentDraws.Size() != before + 1u)
+                        return RenderFrameExecutionStatus::Failure("transparent geometry draw plan allocation failed");
+                }
+            }
+
+            range.drawCount = work.m_transparentDraws.Size() - range.firstDraw;
+            if (range.drawCount > 1u)
+            {
+                auto* const begin = work.m_transparentDraws.TypedData() + range.firstDraw;
+                std::sort(begin, begin + range.drawCount, [reverseDepth](const GeometryTransparentDraw& left, const GeometryTransparentDraw& right) noexcept
+                          {
+                              if (left.sortDepth != right.sortDepth)
+                                  return reverseDepth ? left.sortDepth < right.sortDepth : left.sortDepth > right.sortDepth;
+                              return left.stableOrder < right.stableOrder;
+                          });
+            }
+            if (work.m_transparentInstances.Size() != range.firstDraw)
+                return RenderFrameExecutionStatus::Failure("transparent geometry instance stream lost draw ordering");
+            for (u32 ordinal = 0; ordinal < range.drawCount; ++ordinal)
+            {
+                const u32 before = work.m_transparentInstances.Size();
+                work.m_transparentInstances.PushBack(work.m_transparentDraws[range.firstDraw + ordinal].instance);
+                if (work.m_transparentInstances.Size() != before + 1u)
+                    return RenderFrameExecutionStatus::Failure("transparent geometry instance stream allocation failed");
+            }
+        }
+        return RenderFrameExecutionStatus::Success();
+    }
+
     void FrameRenderer::FinishBuiltGraph(RetainedRenderFrameRef& retainedFrame, RenderNodeGraph& graph) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("RFCPU/Finish/Total");
         // Called after the node branch and its continuations, or after setup
         // failed before dispatching any node and the kickoff gate has completed.
         // Allocator abandonment below must never serve as concurrent cancellation.
@@ -1192,11 +1464,21 @@ namespace vanguard::rendering
         RenderFlowResourceFailure executionFailure;
         if (retainedFrame.GetResourceBindings().GetFirstExecutionFailure(executionFailure))
             retainedFrame.RecordFailure(executionFailure);
+        // Node execution and all continuations are joined at this point. Warm
+        // binding templates borrow graph-cache contract storage, so sever those
+        // views before either graph unlock below can permit cache eviction.
+        retainedFrame.GetResourceBindings().ReleaseWarmContractViews();
 
-        commandLists.FinalizeSubmissions(retainedFrame.HasFailure());
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/Finish/FinalizeSubmissions");
+            commandLists.FinalizeSubmissions(retainedFrame.HasFailure());
+        }
         if (commandLists.GetFirstSubmissionFailure(submissionFailure))
             retainedFrame.RecordFailure(FailureMessage(submissionFailure.message, "render-frame command-list submission failed"));
-        FinalizeGpuTiming(retainedFrame.GetGeometryFrameWork(), commandLists.GetCommandScopeReceipts(), commandLists.WasDeviceLost());
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/Finish/FinalizeGpuTiming");
+            FinalizeGpuTiming(retainedFrame.GetGeometryFrameWork(), commandLists.GetCommandScopeReceipts(), commandLists.WasDeviceLost());
+        }
 
         bool allocatorCompleted = false;
         const ExecutionGenerationId generation = m_resourceAllocator.GetExecutionGeneration();
@@ -1208,7 +1490,12 @@ namespace vanguard::rendering
             const TerminalExecutionReceipt receipt{generation, completion, commandLists.GetCommandScopeReceipts(), TerminalJoinToken::CompletedSynchronously(generation),
                                                    commandLists.GetQueueDependencyReceipts()};
             RenderFlowResourceFailure terminalFailure;
-            if (!m_resourceAllocator.Finish(receipt, &terminalFailure))
+            bool allocatorSuccess = false;
+            {
+                VG_PROFILE_ZONE_NAMED("RFCPU/Finish/AllocatorFinish");
+                allocatorSuccess = m_resourceAllocator.Finish(receipt, &terminalFailure);
+            }
+            if (!allocatorSuccess)
             {
                 retainedFrame.RecordFailure(terminalFailure);
                 m_resourceAllocator.AbandonPublishedExecution();
@@ -1311,11 +1598,19 @@ namespace vanguard::rendering
                 const rhi::DeviceState ownerDeviceState = rhi::IsInitialized() ? rhi::TestDeviceState() : rhi::DeviceState::Unknown;
                 const bool ownerRequiresTerminalResolution =
                     ownerDeviceState == rhi::DeviceState::Removed || ownerDeviceState == rhi::DeviceState::ResetRequired;
-                retainedFrame.PublishOwnerCompletion(ownerRequiresTerminalResolution);
+                {
+                    VG_PROFILE_ZONE_NAMED("RFCPU/Finish/PublishOwner");
+                    retainedFrame.PublishOwnerCompletion(ownerRequiresTerminalResolution);
+                }
                 ownerBoundaryPublished = true;
 
                 ViewportFailure outputFailure;
-                if (!output.m_viewport->Present(output.m_acquisition, &outputFailure))
+                bool presentSuccess = false;
+                {
+                    VG_PROFILE_ZONE_NAMED("RFCPU/Finish/ViewportPresent");
+                    presentSuccess = output.m_viewport->Present(output.m_acquisition, &outputFailure);
+                }
+                if (!presentSuccess)
                 {
                     retainedFrame.RecordFailure(FailureMessage(outputFailure.message, "render-frame presentation failed"));
                     output.m_viewport->DeviceLostOutput(output.m_acquisition);
@@ -1326,7 +1621,10 @@ namespace vanguard::rendering
         }
 
         auto& diagnosticWork = retainedFrame.GetGeometryFrameWork();
-        m_geometryDiagnostics.Complete(diagnosticWork.diagnosticSlot, diagnosticWork, commandLists.GetCommandScopeReceipts(), retainedFrame.HasFailure());
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/Finish/Diagnostics");
+            m_geometryDiagnostics.Complete(diagnosticWork.diagnosticSlot, diagnosticWork, commandLists.GetCommandScopeReceipts(), retainedFrame.HasFailure());
+        }
         diagnosticWork.diagnosticSlot = GeometryDiagnosticReadbacks::InvalidSlot;
         if (!ownerBoundaryPublished)
         {
@@ -1346,7 +1644,8 @@ namespace vanguard::rendering
     }
 
     RenderFrameExecutionStatus FrameRenderer::ExecuteBuiltGraph(RenderFrameContext& context, RenderNodeGraph& graph,
-                                                                 const FrameResourcePolicy& resourcePolicy) noexcept
+                                                                 const FrameResourcePolicy& resourcePolicy,
+                                                                 RenderGraphCache::CacheEntry* const graphCacheEntry) noexcept
     {
         RetainedRenderFrameRef retainedFrame = context.RetainFrame();
         const RenderFrameInfo& frame = retainedFrame.GetFrame();
@@ -1413,7 +1712,7 @@ namespace vanguard::rendering
                     VG_FATAL("render-node setup failure could not join frame preparation before cleanup");
                 FinishBuiltGraph(retainedFrame, *graphPointer);
             });
-        jobs::Task resolveResourcesTask = jobs::Task::Create([this, retainedFrame](const jobs::JobContext&) mutable noexcept
+        jobs::Task resolveResourcesTask = jobs::Task::Create([this, retainedFrame, graphPointer = &graph, graphCacheEntry](const jobs::JobContext&) mutable noexcept
         {
             RenderNodeResourcePreparationFailures& failures = retainedFrame.GetResourcePreparationFailures();
             if (retainedFrame.HasFailure() || failures.HasFailure())
@@ -1425,13 +1724,33 @@ namespace vanguard::rendering
             }
 
             RenderFlowResourceFailure resourceFailure;
-            bool planningSealed = false;
+            const bool coldContractCompilation = graphCacheEntry != nullptr && m_resourceAllocator.GetState() == RenderFlowResourceSessionState::Planning;
+            if (coldContractCompilation &&
+                !graphPointer->CaptureResourceContract(graphCacheEntry->resourceContract, retainedFrame.GetResourceBindings(), m_resourceAllocator, &resourceFailure))
             {
-                VG_PROFILE_ZONE_NAMED("RenderFlow/SealPlanning");
-                planningSealed = m_resourceAllocator.SealPlanning(PlanningJoinToken::CompletedSynchronously(), &resourceFailure);
+                retainedFrame.RecordFailure(resourceFailure);
+                m_resourceAllocator.CancelBeforePublication();
+                return;
             }
-            if (!planningSealed)
+            if (m_resourceAllocator.GetState() == RenderFlowResourceSessionState::Planning)
             {
+                bool planningSealed = false;
+                {
+                    VG_PROFILE_ZONE_NAMED("RenderFlow/SealPlanning");
+                    planningSealed = m_resourceAllocator.SealPlanning(PlanningJoinToken::CompletedSynchronously(), &resourceFailure);
+                }
+                if (!planningSealed)
+                {
+                    retainedFrame.RecordFailure(resourceFailure);
+                    m_resourceAllocator.CancelBeforePublication();
+                    return;
+                }
+            }
+            else if (m_resourceAllocator.GetState() != RenderFlowResourceSessionState::CandidatesSealed)
+            {
+                resourceFailure.code = RenderFlowResourceFailureCode::InvalidPhase;
+                resourceFailure.phase = m_resourceAllocator.GetState();
+                resourceFailure.message = "resource contract entered Resolve from an invalid allocator phase";
                 retainedFrame.RecordFailure(resourceFailure);
                 m_resourceAllocator.CancelBeforePublication();
                 return;
@@ -1445,6 +1764,26 @@ namespace vanguard::rendering
             {
                 retainedFrame.RecordFailure(resourceFailure);
                 m_resourceAllocator.CancelBeforePublication();
+                return;
+            }
+            if (coldContractCompilation)
+            {
+                const u64 publicationSerial = graphCacheEntry->resourceContract.GetPublicationSerial();
+                if (publicationSerial != 0 && publicationSerial != graphCacheEntry->resourceContractPublicationSerial)
+                {
+                    const GeometryFrameWork& work = retainedFrame.GetGeometryFrameWork();
+                    const RenderFrameOutputTransaction& currentOutput = retainedFrame.GetOutputTransaction();
+                    const bool hasFrameOutput = currentOutput.IsValid();
+                    const RenderViewportOutputKind outputKind = hasFrameOutput ? currentOutput.GetKind() : RenderViewportOutputKind::Presentation;
+                    const RenderOutputColorEncoding outputEncoding =
+                        hasFrameOutput ? currentOutput.m_viewport->GetOutputColorEncoding() : RenderOutputColorEncoding::SceneLinear;
+                    const RenderTextureOutputContract* const textureOutputContract =
+                        hasFrameOutput && outputKind == RenderViewportOutputKind::Texture ? &currentOutput.m_viewport->GetTextureOutputContract() : nullptr;
+                    graphCacheEntry->resourceContractRevision = BuildResourceContractRevision(
+                        *graphCacheEntry, work, work.diagnosticSlot != GeometryDiagnosticReadbacks::InvalidSlot,
+                        hasFrameOutput, outputKind, outputEncoding, textureOutputContract);
+                    graphCacheEntry->resourceContractPublicationSerial = publicationSerial;
+                }
             }
         });
         jobs::Task finishResourceResolutionTask = jobs::Task::Create(
@@ -1486,7 +1825,7 @@ namespace vanguard::rendering
         if (output.IsValid() && output.GetKind() == RenderViewportOutputKind::Presentation)
         {
             ImportedResourceId imported;
-            if (!m_resourceAllocator.RegisterPresentationImport(output.GetBackBuffer(), imported, &resourceFailure))
+            if (!m_resourceAllocator.RegisterPresentationImport(output.GetBackBuffer(), FrameOutputImportPatch, imported, &resourceFailure))
             {
                 m_resourceAllocator.CancelBeforePublication();
                 return RenderFrameExecutionStatus::Failure(FailureMessage(resourceFailure.message, "render-flow presentation import failed"));
@@ -1499,6 +1838,7 @@ namespace vanguard::rendering
             RetainedTextureImportDesc desc;
             desc.texture = output.GetTexture();
             desc.token = {rhi::ResourceRef(desc.texture).value};
+            desc.contractPatch = FrameOutputImportPatch;
             rhi::Failure nativeFailure;
             if (!rhi::GetTextureDesc(desc.texture, desc.expected, &nativeFailure))
             {
@@ -1512,7 +1852,7 @@ namespace vanguard::rendering
             desc.terminalQueue = contract.restingQueue;
             desc.readiness = ImportReadinessKind::SameQueueContinuation;
             ExportSlotId exportSlot;
-            if (!m_resourceAllocator.ReserveExportSlot(exportSlot, &resourceFailure))
+            if (!m_resourceAllocator.ReserveExportSlot(FrameOutputExportPatch, exportSlot, &resourceFailure))
             {
                 m_resourceAllocator.CancelBeforePublication();
                 return RenderFrameExecutionStatus::Failure(FailureMessage(resourceFailure.message, "render-flow texture output export reservation failed"));
@@ -1547,6 +1887,7 @@ namespace vanguard::rendering
                 RetainedBufferImportDesc desc;
                 desc.buffer = m_geometryDiagnostics.GetBuffer(diagnosticWork.diagnosticSlot);
                 desc.token = {rhi::ResourceRef(desc.buffer).value};
+                desc.contractPatch = GeometryDiagnosticPatch;
                 const bool described = rhi::GetBufferDesc(desc.buffer, desc.expected);
                 desc.initialState = desc.terminalState = rhi::ResourceState::CopyDestination;
                 bool imported = false;
@@ -1577,6 +1918,47 @@ namespace vanguard::rendering
 
         graph.AcquireExclusiveUpdateFlag();
 
+        bool warmResourceContract = false;
+        if (graphCacheEntry != nullptr)
+        {
+            const bool hasFrameOutput = output.IsValid();
+            const RenderViewportOutputKind outputKind = hasFrameOutput ? output.GetKind() : RenderViewportOutputKind::Presentation;
+            const RenderOutputColorEncoding outputEncoding =
+                hasFrameOutput ? output.m_viewport->GetOutputColorEncoding() : RenderOutputColorEncoding::SceneLinear;
+            const RenderTextureOutputContract* const textureOutputContract =
+                hasFrameOutput && outputKind == RenderViewportOutputKind::Texture ? &output.m_viewport->GetTextureOutputContract() : nullptr;
+            const RenderFlowResourceContractRevisionKey resourceContractRevision = BuildResourceContractRevision(
+                *graphCacheEntry, diagnosticWork, diagnosticWork.diagnosticSlot != GeometryDiagnosticReadbacks::InvalidSlot,
+                hasFrameOutput, outputKind, outputEncoding, textureOutputContract);
+            if (graphCacheEntry->resourceContract.IsValid() &&
+                graphCacheEntry->resourceContractPublicationSerial == graphCacheEntry->resourceContract.GetPublicationSerial() &&
+                graphCacheEntry->resourceContractRevision == resourceContractRevision)
+            {
+                RenderFlowResourceFailure warmFailure;
+                if (graph.InstantiateResourceContract(graphCacheEntry->resourceContract, resourceBindings, m_resourceAllocator, &warmFailure) &&
+                    graph.PatchResourceContract(declarationContext, m_resourceAllocator, resourceBindings, &warmFailure) &&
+                    m_resourceAllocator.BindResourceContract(graphCacheEntry->resourceContract, &warmFailure))
+                {
+                    warmResourceContract = true;
+                }
+            }
+            if (!warmResourceContract)
+            {
+                // A partially-instantiated warm view may exist when patching or
+                // backend-incarnation validation rejects the cache hit. Detach it
+                // before cold compilation can eventually republish contract nodes.
+                resourceBindings.ReleaseWarmContractViews();
+                if (!m_resourceAllocator.BeginResourceContractCompilation(graphCacheEntry->resourceContract, &resourceFailure))
+                {
+                    m_geometryDiagnostics.Cancel(diagnosticWork.diagnosticSlot);
+                    diagnosticWork.diagnosticSlot = GeometryDiagnosticReadbacks::InvalidSlot;
+                    graph.ReleaseExclusiveUpdateFlag();
+                    m_resourceAllocator.CancelBeforePublication();
+                    return RenderFrameExecutionStatus::Failure(FailureMessage(resourceFailure.message, "resource-contract cold compilation setup failed"));
+                }
+            }
+        }
+
         retainedFrame.InstallJobsRenderFrame();
         static jobs::JobName runRenderNodeJobsName{"RenderGraph/RunNodeJobs"};
         const bool nodeJobsDispatched = renderNodeJobsBuilder.Dispatch(runRenderNodeJobsName, static_cast<jobs::Task&&>(runRenderNodeJobsTask));
@@ -1585,6 +1967,7 @@ namespace vanguard::rendering
             m_geometryDiagnostics.Cancel(diagnosticWork.diagnosticSlot);
             diagnosticWork.diagnosticSlot = GeometryDiagnosticReadbacks::InvalidSlot;
             retainedFrame.ClearJobsRenderFrame();
+            resourceBindings.ReleaseWarmContractViews();
             graph.ReleaseExclusiveUpdateFlag();
             m_resourceAllocator.CancelBeforePublication();
             return RenderFrameExecutionStatus::Failure("render-node setup task dispatch failed");
@@ -1626,7 +2009,7 @@ namespace vanguard::rendering
         const RenderFrameExecutionStatus customDataStatus = prepareCustomData();
         if (!customDataStatus)
             retainedFrame.RecordFailure(customDataStatus.message);
-        if (!retainedFrame.HasFailure())
+        if (!retainedFrame.HasFailure() && !warmResourceContract)
             graph.PrepareResourcesParallel(declarationContext, m_resourceAllocator, resourceBindings, preparationFailures, context.GetBuilder());
 
         static jobs::JobName resolveResourcesName{"RenderGraph/ResolveResources"};

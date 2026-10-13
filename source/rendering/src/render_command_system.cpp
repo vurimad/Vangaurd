@@ -7,6 +7,7 @@
 #include <vanguard/concurrency/synchronization.hpp>
 #include <vanguard/concurrency/thread.hpp>
 #include <vanguard/memory/pool.hpp>
+#include <vanguard/profiling/profiling.hpp>
 #include <vanguard/system/assert.hpp>
 
 #include <new>
@@ -239,6 +240,7 @@ namespace vanguard::rendering
             }
             else if (submitted && !submission.Empty())
             {
+                VG_PROFILE_ZONE_NAMED("RFCPU/Submit/CallRHI");
                 submitted = rhi::SubmitCommandLists(scopeName, containers::ArraySpan<const rhi::CommandListRef>(submission), sync, submissionReceipt, &submissionFailure);
             }
             const bool workSubmitted = submissionReceipt.WasSubmitted();
@@ -253,6 +255,7 @@ namespace vanguard::rendering
             }
             m_deviceLost = m_deviceLost || (!submitted && (workSubmitted || submissionFailure.code == rhi::FailureCode::DeviceLost));
 
+            VG_PROFILE_ZONE_NAMED("RFCPU/Submit/PublishReceipts");
             for (u32 index = firstIndex; index <= upToIndex; ++index)
             {
                 Entry& entry = m_commandLists[index];
@@ -663,6 +666,7 @@ namespace vanguard::rendering
         m_impl = nullptr;
         if (value == nullptr || value->references.Decrement() != 0)
             return;
+        VG_PROFILE_ZONE_NAMED("RFCPU/Frame/FinalRetainedCleanup");
         value->~Impl();
         memory::MemoryBlock block{value, sizeof(Impl), memory::PoolId::Rendering};
         memory::Free(block);
@@ -773,7 +777,7 @@ namespace vanguard::rendering
                 // fully drains this tail in RenderUpdate before FrameTick/render submission.
                 if (cpuTail.IsValid() && !ownerTail.IsValid())
                     return Fail(failure, RenderCommandFailureCode::InvalidState,
-                                "previous render-frame terminal boundary must be consumed before starting a new render-frame owner chain");
+                                "previous render-frame terminal boundary must be consumed before starting another render-frame owner chain");
 
                 // Retain everything the asynchronous renderer needs before dispatch.
                 RetainedRenderFrameRef retained = detail::RenderCommandRetainedFrameAccess::Create(frame, static_cast<RenderFrameOutputTransaction&&>(output), *owner->commandSystem);

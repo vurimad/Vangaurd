@@ -735,8 +735,15 @@ bool glTF2Exporter::GetMatSpecular(const aiMaterial &mat, glTF2::MaterialSpecula
     } else if (colorFactorIsZero) {
         specular.specularColorFactor[0] = specular.specularColorFactor[1] = specular.specularColorFactor[2] = 1.0f;
     }
-    GetMatTex(mat, specular.specularTexture, aiTextureType_SPECULAR, 0);
-    GetMatTex(mat, specular.specularColorTexture, aiTextureType_SPECULAR, 1);
+    int colorSlot = 1;
+    if (mat.Get(AI_MATKEY_GLTF_SPECULAR_COLOR_TEXTURE_SLOT, colorSlot) != AI_SUCCESS || colorSlot < 0 || colorSlot > 1) {
+        colorSlot = 1;
+    }
+    if (colorSlot != 0) {
+        GetMatTex(mat, specular.specularTexture, aiTextureType_SPECULAR, 0);
+    }
+    // Slot 0 may be the color-only map; never interpret it as specular strength.
+    GetMatTex(mat, specular.specularColorTexture, aiTextureType_SPECULAR, colorSlot);
     return true;
 }
 

@@ -9,7 +9,7 @@ the production contract while retaining its complexity.
 
 ## Provenance and ownership
 
-- The implementation image is `source/imported/common/redIO`.
+- The implementation image is `imported/common/redIO`.
 - Its source/header inventory and contents match
   `D:/root/R6.Root/Mainline/dev/src/common/redIO`; Vanguard owns a separate
   Premake definition because generated project ownership belongs to this repo.

@@ -39,6 +39,64 @@ namespace vanguard::assets
         AssetFileTransactionResult transaction = AssetFileTransactionResult::Success;
     };
 
+    // Neutral immutable authoring witness used by higher-level format planners.
+    // The project pipeline revalidates these snapshots and owns the durable
+    // transaction; format modules only translate their reviewed plans into this DTO.
+    struct PlannedAssetDependencyWitness
+    {
+        resources::ResourcePath sourceIdentity;
+        filesystem::AbsolutePath physicalPath;
+        AssetId asset;
+        resources::ResourceReference selectedResource;
+        crypto::Digest256 sourceContentFingerprint;
+        crypto::Digest256 metadataFingerprint;
+        bool sourceExists = false;
+        bool metadataExists = false;
+        bool hasSourceContentFingerprint = false;
+        bool hasMetadataFingerprint = false;
+        bool adoptCandidate = false;
+    };
+
+    // Exact generic result of a same-transaction candidate adoption. Format
+    // planners can use these receipts to replace temporary source-identity
+    // decisions with the durable resource identity that was actually authored.
+    struct PlannedAssetAdoptionReceipt
+    {
+        resources::ResourcePath sourceIdentity;
+        AssetId asset;
+        resources::ResourceReference selectedResource;
+    };
+
+    using FinalizePlannedAssetSettingsFunction = AssetOperationResult (*)(
+        u32 settingsVersion, containers::ArraySpan<const u8> reviewedSettings,
+        containers::ArraySpan<const PlannedAssetAdoptionReceipt> adoptions,
+        containers::DynamicArray<u8>& finalizedSettings, void* userData) noexcept;
+
+    struct PlannedAssetImportRequest
+    {
+        const SourceImportDescription* importDescription = nullptr;
+        AssetId parentAsset;
+        SourceImporterId importer = InvalidSourceImporterId;
+        u32 importerVersion = 0;
+        u64 sourceDatabaseGeneration = 0;
+        u64 acceptedStateGeneration = 0;
+        filesystem::AbsolutePath sourceOrigin;
+        filesystem::AbsolutePath sourceRoot;
+        filesystem::AbsolutePath sourceDestination;
+        resources::ResourcePath sourceIdentity;
+        crypto::Digest256 sourceFingerprint;
+        crypto::Digest256 persistedMetadataFingerprint;
+        bool hasPersistedMetadataFingerprint = false;
+        bool copySourceToDestination = false;
+        containers::ArraySpan<const u8> sourceBytes;
+        containers::ArraySpan<const PlannedAssetDependencyWitness> dependencyWitnesses;
+        // Optional format-owned settings-only finalization after the generic
+        // pipeline has assigned exact identities/outputs to auxiliary adoptions.
+        // The pipeline retains the reviewed settingsVersion and output schema.
+        FinalizePlannedAssetSettingsFunction finalizeSettings = nullptr;
+        void* finalizeSettingsUserData = nullptr;
+    };
+
     struct AssetReferenceRewrite
     {
         AssetReference reference;

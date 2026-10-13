@@ -18,6 +18,23 @@ namespace vanguard::asset_streaming
             }
             return key;
         }
+
+        [[nodiscard]] bool SamePhysicalPath(const filesystem::AbsolutePath& left,
+                                            const filesystem::AbsolutePath& right) noexcept
+        {
+            const containers::StringView leftView = left.AsStringView();
+            const containers::StringView rightView = right.AsStringView();
+            return leftView.Length() == rightView.Length() && leftView.StartsWithIgnoreCase(rightView);
+        }
+
+        [[nodiscard]] bool IsOwnedPath(const containers::ArraySpan<const filesystem::AbsolutePath> ownedPaths,
+                                       const filesystem::AbsolutePath& path) noexcept
+        {
+            for (const filesystem::AbsolutePath& owned : ownedPaths)
+                if (SamePhysicalPath(owned, path))
+                    return true;
+            return false;
+        }
     } // namespace
 
     SourceChangeAccumulator::SourceChangeAccumulator() noexcept
@@ -456,6 +473,94 @@ namespace vanguard::asset_streaming
         if (m_changeGeneration != expected.generation || m_overflow != expected.overflow || m_overflow)
             return false;
         return commit(userData);
+    }
+
+    bool SourceChangeAccumulator::CommitIfUnchangedOrOwnedChanges(
+        const SourceChangeSnapshot expected, const containers::ArraySpan<const filesystem::AbsolutePath> ownedPaths,
+        const StableSourceChangeCommitFunction commit, void* const userData, SourceChangeSnapshot& accepted) const noexcept
+    {
+        accepted = {};
+        if (commit == nullptr || (ownedPaths.Count() != 0u && ownedPaths.Data() == nullptr))
+            return false;
+        concurrency::ScopedLock<concurrency::Mutex> lock(m_mutex);
+        if (m_overflow != expected.overflow || m_overflow)
+            return false;
+
+        bool representedNewChange = m_changeGeneration == expected.generation;
+        for (const PendingPath& entry : m_pending)
+        {
+            if (entry.generation <= expected.generation || entry.generation <= m_discardThroughGeneration)
+                continue;
+            representedNewChange = true;
+            if (!IsOwnedPath(ownedPaths, entry.path))
+                return false;
+        }
+        for (const PendingPath& entry : m_ready)
+        {
+            if (entry.generation <= expected.generation)
+                continue;
+            representedNewChange = true;
+            if (!IsOwnedPath(ownedPaths, entry.path))
+                return false;
+        }
+        // Every Publish() generation increment is represented by a pending/ready
+        // path unless it forced overflow. If that provenance disappeared, fail
+        // conservatively instead of guessing that an untracked change was ours.
+        if (!representedNewChange)
+            return false;
+
+        const SourceChangeSnapshot current{m_changeGeneration, m_overflow};
+        if (!commit(userData))
+            return false;
+        accepted = current;
+        return true;
+    }
+
+    void SourceChangeAccumulator::AcknowledgeAuthoritativeRescan(const u64 generation) noexcept
+    {
+        concurrency::ScopedLock<concurrency::Mutex> lock(m_mutex);
+        if (generation > m_discardThroughGeneration)
+            m_discardThroughGeneration = generation;
+
+        // Unlike the ordinary bounded reconcile acknowledgement, this follows a
+        // complete authoritative root rescan. Reclaim represented pending hints
+        // immediately so they cannot force a redundant second rescan after a
+        // successful planned-import commit.
+        for (u32 index = 0; index < m_pending.Size();)
+        {
+            if (m_pending[index].generation <= generation)
+            {
+                if (!RemovePendingAt(index))
+                {
+                    ++m_changeGeneration;
+                    m_overflowGeneration = m_changeGeneration;
+                    m_overflow = true;
+                    break;
+                }
+                continue;
+            }
+            ++index;
+        }
+        m_activePendingPaths = 0u;
+        for (const PendingPath& entry : m_pending)
+            if (entry.generation > m_discardThroughGeneration)
+                ++m_activePendingPaths;
+
+        for (u32 index = 0; index < m_ready.Size();)
+        {
+            if (m_ready[index].generation <= generation)
+            {
+                static_cast<void>(m_ready.RemoveAtReorder(index));
+                continue;
+            }
+            ++index;
+        }
+        if (m_pending.Empty() || m_scanCursor >= m_pending.Size())
+            m_scanCursor = 0u;
+        if (!m_rootCaptureIncomplete && m_overflowGeneration <= generation)
+            m_overflow = false;
+        if (generation != 0u)
+            ++m_rescansCompleted;
     }
 
     ProjectAssetObservationStatus SourceChangeAccumulator::GetStatus() const noexcept

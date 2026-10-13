@@ -99,7 +99,7 @@ namespace vanguard::entities
 
         void TransformUpdated() noexcept;
         void RefreshHierarchyCache() noexcept;
-        void CascadeLocalToWorld(bool forceCallback, u32 depth) noexcept;
+        void CascadeLocalToWorld(bool parentWorldChanged, bool forceCallback, u32 depth) noexcept;
         void ApplyLocalToWorld(const math::WorldTransform& parentLocalToWorld) noexcept;
         void ApplyLocalToWorldNoParentTransform() noexcept;
         void ApplyLocalToWorldToSelfOnly(const math::WorldTransform& parentLocalToWorld) noexcept;
@@ -116,6 +116,7 @@ namespace vanguard::entities
         bool m_forceUpdateCallbackOnce = true;
         bool m_refreshHierarchyCache = true;
         bool m_scheduled = false;
+        bool m_subtreeTransformDirty = false;
         bool m_registered = false;
     };
 } // namespace vanguard::entities

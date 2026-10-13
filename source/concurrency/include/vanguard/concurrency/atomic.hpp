@@ -23,11 +23,11 @@
 #define RED_CONFIGURATION_FINAL
 #endif
 
-#include "../../../../imported/common/redSystem/include/architecture.h"
-#include "../../../../imported/common/redSystem/include/compilerExtensions.h"
-#include "../../../../imported/common/redSystem/include/os.h"
-#include "../../../../imported/common/redSystem/include/types.h"
-#include "../../../../imported/common/redSystem/include/redThreadsAtomicWinAPI.inl"
+#include "../../../../../imported/common/redSystem/include/architecture.h"
+#include "../../../../../imported/common/redSystem/include/compilerExtensions.h"
+#include "../../../../../imported/common/redSystem/include/os.h"
+#include "../../../../../imported/common/redSystem/include/types.h"
+#include "../../../../../imported/common/redSystem/include/redThreadsAtomicWinAPI.inl"
 
 namespace vanguard::concurrency
 {

@@ -119,6 +119,7 @@ void FBXImporter::SetupProperties(const Importer *pImp) {
     mSettings.convertToMeters = pImp->GetPropertyBool(AI_CONFIG_FBX_CONVERT_TO_M, false);
     mSettings.ignoreUpDirection = pImp->GetPropertyBool(AI_CONFIG_IMPORT_FBX_IGNORE_UP_DIRECTION, false);
     mSettings.useSkeleton = pImp->GetPropertyBool(AI_CONFIG_FBX_USE_SKELETON_BONE_CONTAINER, false);
+    mVanguardModelProvenance = static_cast<aiVanguardModelProvenanceSink *>(pImp->GetPropertyPointer(AI_CONFIG_VANGUARD_MODEL_PROVENANCE));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -166,7 +167,7 @@ void FBXImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
 		Document doc(parser, mSettings);
 
 		// convert the FBX DOM to aiScene
-		ConvertToAssimpScene(pScene, doc, mSettings.removeEmptyBones);
+		ConvertToAssimpScene(pScene, doc, mSettings.removeEmptyBones, mVanguardModelProvenance);
 
 		// size relative to cm
 		float size_relative_to_cm = doc.GlobalSettings().UnitScaleFactor();

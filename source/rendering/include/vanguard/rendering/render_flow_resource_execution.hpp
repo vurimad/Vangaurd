@@ -151,6 +151,7 @@ namespace vanguard::rendering
     // only steps that carry real semantic work (transition/UAV/clear/alias).
     struct CompiledExecutionRange
     {
+        u32 generation = 0;
         u32 beginStepOffset = 0;
         u32 beginStepCount = 0;
         u32 endStepOffset = 0;

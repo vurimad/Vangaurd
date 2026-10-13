@@ -1,6 +1,7 @@
 #include <vanguard/prefabs/prefabs.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 namespace
 {
@@ -10,7 +11,8 @@ namespace
 
     constexpr serialization::Version FileVersion{1, 0};
     constexpr u32 PrefabSection = serialization::MakeFourCC('P', 'R', 'O', 'T');
-    constexpr u32 BodyWireVersion = 1;
+    constexpr u32 BodyWireVersion = 2;
+    constexpr u32 MinimumBodyWireVersion = 1;
     constexpr u32 BodyPrefixSize = 36;
     constexpr u16 KnownEntityFlags = static_cast<u16>(prefab::EntityFlags::Root) | static_cast<u16>(prefab::EntityFlags::DisabledByDefault) |
                                      static_cast<u16>(prefab::EntityFlags::EditorOnly);
@@ -22,7 +24,8 @@ namespace
     {
         CanonicalData() noexcept
             : entities(memory::pools::World::GetInstance()), components(memory::pools::World::GetInstance()),
-              dependencies(memory::pools::Resources::GetInstance()), componentData(memory::pools::World::GetInstance())
+              placedComponents(memory::pools::World::GetInstance()), dependencies(memory::pools::Resources::GetInstance()),
+              componentData(memory::pools::World::GetInstance())
         {
         }
 
@@ -30,6 +33,7 @@ namespace
         crypto::Digest256 sourceFingerprint;
         containers::DynamicArray<prefab::EntityRecord> entities;
         containers::DynamicArray<prefab::ComponentRecord> components;
+        containers::DynamicArray<prefab::PlacedComponentRecord> placedComponents;
         containers::DynamicArray<prefab::DependencyRecord> dependencies;
         ByteArray componentData;
     };
@@ -37,6 +41,12 @@ namespace
     struct ComponentSource
     {
         const prefab::ComponentBuildRecord* source = nullptr;
+    };
+
+    struct ComponentLookup
+    {
+        u64 stableId = prefab::InvalidStableId;
+        u32 index = 0;
     };
 
     [[nodiscard]] prefab::Result Convert(const serialization::Result result) noexcept
@@ -129,6 +139,147 @@ namespace
         if (left.source->entityStableId != right.source->entityStableId)
             return left.source->entityStableId < right.source->entityStableId;
         return left.source->stableId < right.source->stableId;
+    }
+
+    [[nodiscard]] bool ComponentLookupLess(const ComponentLookup& left, const ComponentLookup& right) noexcept
+    {
+        return left.stableId < right.stableId;
+    }
+
+    [[nodiscard]] const prefab::ComponentRecord* FindComponent(const containers::ArraySpan<const prefab::ComponentRecord> components,
+                                                                const containers::DynamicArray<ComponentLookup>& lookup,
+                                                                const u64 stableId) noexcept
+    {
+        u32 first = 0;
+        u32 count = lookup.Size();
+        while (count != 0)
+        {
+            const u32 step = count / 2u;
+            const u32 index = first + step;
+            if (lookup[index].stableId < stableId)
+            {
+                first = index + 1u;
+                count -= step + 1u;
+            }
+            else
+                count = step;
+        }
+        return first < lookup.Size() && lookup[first].stableId == stableId && lookup[first].index < components.Size()
+                   ? &components[lookup[first].index]
+                   : nullptr;
+    }
+
+    [[nodiscard]] bool PlacedComponentLess(const prefab::PlacedComponentRecord& left, const prefab::PlacedComponentRecord& right) noexcept
+    {
+        return left.componentStableId < right.componentStableId;
+    }
+
+    [[nodiscard]] const prefab::PlacedComponentRecord* FindPlacedComponent(
+        const containers::ArraySpan<const prefab::PlacedComponentRecord> placements, const u64 componentStableId) noexcept
+    {
+        u32 first = 0;
+        u32 count = placements.Size();
+        while (count != 0)
+        {
+            const u32 step = count / 2u;
+            const u32 index = first + step;
+            if (placements[index].componentStableId < componentStableId)
+            {
+                first = index + 1u;
+                count -= step + 1u;
+            }
+            else
+                count = step;
+        }
+        return first < placements.Size() && placements[first].componentStableId == componentStableId ? &placements[first] : nullptr;
+    }
+
+    [[nodiscard]] bool ValidPlacement(const prefab::PlacedComponentRecord& placement) noexcept
+    {
+        for (const f32 value : placement.translation)
+            if (!std::isfinite(value))
+                return false;
+        f32 lengthSquared = 0.0f;
+        for (const f32 value : placement.rotation)
+        {
+            if (!std::isfinite(value))
+                return false;
+            lengthSquared += value * value;
+        }
+        return std::isfinite(lengthSquared) && std::abs(lengthSquared - 1.0f) <= 1.0e-4f;
+    }
+
+    [[nodiscard]] prefab::Result ValidateComponentHierarchy(const containers::ArraySpan<const prefab::ComponentRecord> components,
+                                                            const containers::ArraySpan<const prefab::PlacedComponentRecord> placements) noexcept
+    {
+        containers::DynamicArray<ComponentLookup> lookup(memory::pools::World::GetInstance());
+        lookup.Reserve(components.Size());
+        for (u32 index = 0; index < components.Size(); ++index)
+        {
+            const prefab::ComponentRecord& component = components[index];
+            lookup.PushBack({component.stableId, index});
+            if (lookup.Size() != index + 1u)
+                return prefab::Result::LimitExceeded;
+        }
+        std::sort(lookup.Begin(), lookup.End(), ComponentLookupLess);
+        for (u32 index = 1; index < lookup.Size(); ++index)
+            if (lookup[index - 1u].stableId == lookup[index].stableId)
+                return prefab::Result::DuplicateIdentifier;
+
+        for (u32 index = 0; index < placements.Size(); ++index)
+        {
+            const prefab::PlacedComponentRecord& placement = placements[index];
+            if (placement.componentStableId == prefab::InvalidStableId ||
+                (index > 0 && placements[index - 1u].componentStableId >= placement.componentStableId) || !ValidPlacement(placement) ||
+                placement.parentComponentStableId == placement.componentStableId)
+                return prefab::Result::InvalidArgument;
+            const prefab::ComponentRecord* const component = FindComponent(components, lookup, placement.componentStableId);
+            if (component == nullptr)
+                return prefab::Result::MissingParent;
+            if (placement.parentComponentStableId == prefab::InvalidStableId)
+                continue;
+            const prefab::ComponentRecord* const parent = FindComponent(components, lookup, placement.parentComponentStableId);
+            if (parent == nullptr || parent->entityStableId != component->entityStableId ||
+                FindPlacedComponent(placements, placement.parentComponentStableId) == nullptr)
+                return prefab::Result::MissingParent;
+        }
+
+        containers::DynamicArray<u8> states(memory::pools::World::GetInstance());
+        states.Resize(placements.Size());
+        if (states.Size() != placements.Size())
+            return prefab::Result::LimitExceeded;
+        for (u32 index = 0; index < states.Size(); ++index)
+            states[index] = 0;
+        containers::DynamicArray<u32> path(memory::pools::World::GetInstance());
+        path.Reserve(placements.Size());
+        for (u32 start = 0; start < placements.Size(); ++start)
+        {
+            if (states[start] == 2)
+                continue;
+            path.Clear();
+            u32 cursor = start;
+            for (;;)
+            {
+                if (states[cursor] == 2)
+                    break;
+                if (states[cursor] == 1)
+                    return prefab::Result::HierarchyCycle;
+                states[cursor] = 1;
+                path.PushBack(cursor);
+                if (path.Empty())
+                    return prefab::Result::LimitExceeded;
+                const u64 parentStableId = placements[cursor].parentComponentStableId;
+                if (parentStableId == prefab::InvalidStableId)
+                    break;
+                const prefab::PlacedComponentRecord* const parent = FindPlacedComponent(placements, parentStableId);
+                if (parent == nullptr)
+                    return prefab::Result::MissingParent;
+                cursor = static_cast<u32>(parent - placements.Data());
+            }
+            for (const u32 index : path)
+                states[index] = 2;
+        }
+        return prefab::Result::Success;
     }
 
     [[nodiscard]] bool DependencyLess(const prefab::DependencyRecord& left, const prefab::DependencyRecord& right) noexcept
@@ -335,6 +486,48 @@ namespace
             output.components.PushBack(record);
         }
 
+        containers::DynamicArray<ComponentLookup> componentLookup(memory::pools::World::GetInstance());
+        componentLookup.Reserve(output.components.Size());
+        for (u32 index = 0; index < output.components.Size(); ++index)
+            componentLookup.PushBack({output.components[index].stableId, index});
+        if (componentLookup.Size() != output.components.Size())
+            return prefab::Result::LimitExceeded;
+        std::sort(componentLookup.Begin(), componentLookup.End(), ComponentLookupLess);
+
+        output.placedComponents.Reserve(description.placedComponents.Size());
+        for (const prefab::PlacedComponentBuildRecord& source : description.placedComponents)
+        {
+            if (source.componentStableId == prefab::InvalidStableId)
+                return prefab::Result::InvalidArgument;
+            const prefab::ComponentRecord* const component = FindComponent(output.components, componentLookup, source.componentStableId);
+            if (component == nullptr)
+            {
+                const prefab::ComponentBuildRecord* authored = nullptr;
+                for (const prefab::ComponentBuildRecord& candidate : description.components)
+                    if (candidate.stableId == source.componentStableId)
+                    {
+                        authored = &candidate;
+                        break;
+                    }
+                if (authored != nullptr && !description.includeEditorData &&
+                    (static_cast<u16>(authored->flags) & static_cast<u16>(prefab::ComponentFlags::EditorOnly)) != 0)
+                    continue;
+                return prefab::Result::MissingParent;
+            }
+            prefab::PlacedComponentRecord record;
+            record.componentStableId = source.componentStableId;
+            record.parentComponentStableId = source.parentComponentStableId;
+            for (u32 axis = 0; axis < 3; ++axis)
+                record.translation[axis] = source.translation[axis];
+            for (u32 axis = 0; axis < 4; ++axis)
+                record.rotation[axis] = source.rotation[axis];
+            output.placedComponents.PushBack(record);
+        }
+        std::sort(output.placedComponents.Begin(), output.placedComponents.End(), PlacedComponentLess);
+        result = ValidateComponentHierarchy(output.components, output.placedComponents);
+        if (result != prefab::Result::Success)
+            return result;
+
         u32 componentIndex = 0;
         for (prefab::EntityRecord& entity : output.entities)
         {
@@ -392,6 +585,22 @@ namespace
         return true;
     }
 
+    [[nodiscard]] bool WritePlacedComponent(serialization::BinaryWriter& writer, const prefab::PlacedComponentRecord& value) noexcept
+    {
+        return writer.WriteU64(value.componentStableId) && writer.WriteU64(value.parentComponentStableId) &&
+               writer.WriteF32(value.translation[0]) && writer.WriteF32(value.translation[1]) && writer.WriteF32(value.translation[2]) &&
+               writer.WriteF32(value.rotation[0]) && writer.WriteF32(value.rotation[1]) && writer.WriteF32(value.rotation[2]) &&
+               writer.WriteF32(value.rotation[3]);
+    }
+
+    [[nodiscard]] bool ReadPlacedComponent(serialization::BinaryReader& reader, prefab::PlacedComponentRecord& value) noexcept
+    {
+        return reader.ReadU64(value.componentStableId) && reader.ReadU64(value.parentComponentStableId) &&
+               reader.ReadF32(value.translation[0]) && reader.ReadF32(value.translation[1]) && reader.ReadF32(value.translation[2]) &&
+               reader.ReadF32(value.rotation[0]) && reader.ReadF32(value.rotation[1]) && reader.ReadF32(value.rotation[2]) &&
+               reader.ReadF32(value.rotation[3]);
+    }
+
     [[nodiscard]] bool WriteDependency(serialization::BinaryWriter& writer, const prefab::DependencyRecord& value) noexcept
     {
         return WriteReference(writer, value.resource) && writer.WriteU8(static_cast<u8>(value.kind)) && writer.WriteU8(0) && writer.WriteU16(0);
@@ -413,13 +622,17 @@ namespace
         filesystem::MemoryFileWriter file(body);
         serialization::BinaryWriter writer(file);
         if (!writer.WriteU64(data.name) || !WriteDigest(writer, data.sourceFingerprint) || !writer.WriteU32(data.entities.Size()) ||
-            !writer.WriteU32(data.components.Size()) || !writer.WriteU32(data.dependencies.Size()) || !writer.WriteU64(data.componentData.Size()))
+            !writer.WriteU32(data.components.Size()) || !writer.WriteU32(data.placedComponents.Size()) || !writer.WriteU32(data.dependencies.Size()) ||
+            !writer.WriteU64(data.componentData.Size()))
             return WriterResult(writer);
         for (const prefab::EntityRecord& entity : data.entities)
             if (!WriteEntity(writer, entity))
                 return WriterResult(writer);
         for (const prefab::ComponentRecord& component : data.components)
             if (!WriteComponent(writer, component))
+                return WriterResult(writer);
+        for (const prefab::PlacedComponentRecord& placement : data.placedComponents)
+            if (!WritePlacedComponent(writer, placement))
                 return WriterResult(writer);
         for (const prefab::DependencyRecord& dependency : data.dependencies)
             if (!WriteDependency(writer, dependency))
@@ -482,6 +695,7 @@ namespace
     {
         const auto entities = file.GetEntities();
         const auto components = file.GetComponents();
+        const auto placedComponents = file.GetPlacedComponents();
         const auto dependencies = file.GetDependencies();
         if (file.GetName() == 0 || entities.Empty())
             return prefab::Result::InvalidLayout;
@@ -534,6 +748,9 @@ namespace
         for (u32 index = 1; index < componentIds.Size(); ++index)
             if (componentIds[index - 1u] == componentIds[index])
                 return prefab::Result::DuplicateIdentifier;
+        const prefab::Result componentHierarchyResult = ValidateComponentHierarchy(components, placedComponents);
+        if (componentHierarchyResult != prefab::Result::Success)
+            return componentHierarchyResult;
         for (u32 index = 0; index < dependencies.Size(); ++index)
         {
             const prefab::DependencyRecord& dependency = dependencies[index];
@@ -585,7 +802,8 @@ namespace vanguard::prefabs
 
     PrefabFile::PrefabFile() noexcept
         : m_entities(memory::pools::World::GetInstance()), m_components(memory::pools::World::GetInstance()),
-          m_dependencies(memory::pools::Resources::GetInstance()), m_componentData(memory::pools::World::GetInstance())
+          m_placedComponents(memory::pools::World::GetInstance()), m_dependencies(memory::pools::Resources::GetInstance()),
+          m_componentData(memory::pools::World::GetInstance())
     {
     }
 
@@ -622,20 +840,26 @@ namespace vanguard::prefabs
         u32 bodyVersion = 0;
         if (!bodyReader.ReadU32(bodyVersion) || !ReadDigest(bodyReader, m_contentFingerprint))
             return ReaderResult(bodyReader);
-        if (bodyVersion != BodyWireVersion)
+        if (bodyVersion < MinimumBodyWireVersion || bodyVersion > BodyWireVersion)
             return Result::UnsupportedVersion;
         if (crypto::Sha256(payload.TypedData() + BodyPrefixSize, payload.Size() - BodyPrefixSize) != m_contentFingerprint)
             return Result::IntegrityFailure;
         u32 entityCount = 0;
         u32 componentCount = 0;
+        u32 placedComponentCount = 0;
         u32 dependencyCount = 0;
         u64 componentDataSize = 0;
         if (!bodyReader.ReadU64(m_name) || !ReadDigest(bodyReader, m_sourceFingerprint) || !bodyReader.ReadU32(entityCount) ||
-            !bodyReader.ReadU32(componentCount) || !bodyReader.ReadU32(dependencyCount) || !bodyReader.ReadU64(componentDataSize))
+            !bodyReader.ReadU32(componentCount))
+            return ReaderResult(bodyReader);
+        if (bodyVersion >= 2u && !bodyReader.ReadU32(placedComponentCount))
+            return ReaderResult(bodyReader);
+        if (!bodyReader.ReadU32(dependencyCount) || !bodyReader.ReadU64(componentDataSize))
             return ReaderResult(bodyReader);
         const u32 maximumComponentData = limits.maximumComponentDataBytes > 0xffffffffull ? 0xffffffffu : static_cast<u32>(limits.maximumComponentDataBytes);
         if (componentDataSize > limits.maximumComponentDataBytes || componentDataSize > 0xffffffffull ||
             !ResizeChecked(m_entities, entityCount, limits.maximumEntities) || !ResizeChecked(m_components, componentCount, limits.maximumComponents) ||
+            !ResizeChecked(m_placedComponents, placedComponentCount, limits.maximumPlacedComponents) ||
             !ResizeChecked(m_dependencies, dependencyCount, limits.maximumDependencies) ||
             !ResizeChecked(m_componentData, static_cast<u32>(componentDataSize), maximumComponentData))
             return Result::LimitExceeded;
@@ -644,6 +868,9 @@ namespace vanguard::prefabs
                 return Result::InvalidLayout;
         for (ComponentRecord& component : m_components)
             if (!ReadComponent(bodyReader, component))
+                return Result::InvalidLayout;
+        for (PlacedComponentRecord& placement : m_placedComponents)
+            if (!ReadPlacedComponent(bodyReader, placement))
                 return Result::InvalidLayout;
         for (DependencyRecord& dependency : m_dependencies)
             if (!ReadDependency(bodyReader, dependency))
@@ -666,6 +893,7 @@ namespace vanguard::prefabs
         m_contentFingerprint = {};
         m_entities.Clear();
         m_components.Clear();
+        m_placedComponents.Clear();
         m_dependencies.Clear();
         m_componentData.Clear();
         m_open = false;
@@ -695,6 +923,10 @@ namespace vanguard::prefabs
     {
         return m_components;
     }
+    containers::ArraySpan<const PlacedComponentRecord> PrefabFile::GetPlacedComponents() const noexcept
+    {
+        return m_placedComponents;
+    }
     containers::ArraySpan<const DependencyRecord> PrefabFile::GetDependencies() const noexcept
     {
         return m_dependencies;
@@ -721,6 +953,11 @@ namespace vanguard::prefabs
             if (component.stableId == stableId)
                 return &component;
         return nullptr;
+    }
+
+    const PlacedComponentRecord* PrefabFile::FindPlacedComponent(const u64 componentStableId) const noexcept
+    {
+        return m_open ? ::FindPlacedComponent(m_placedComponents, componentStableId) : nullptr;
     }
 
     resources::ResourceTypeId PrefabResource::GetType() const noexcept

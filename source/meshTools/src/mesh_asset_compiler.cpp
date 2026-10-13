@@ -203,10 +203,12 @@ namespace
 
     [[nodiscard]] crypto::Digest256 ToolFingerprint(const tools::MeshCookingProfile& profile) noexcept
     {
+        crypto::Digest256 profileFingerprint;
+        if (!tools::GetMeshCookingProfileFingerprint(profile.id, profileFingerprint))
+            return {};
         crypto::Sha256Builder builder;
         static_cast<void>(builder.Update(CompilerPolicy, sizeof(CompilerPolicy) - 1u));
-        static_cast<void>(builder.Update(&profile.id, sizeof(profile.id)));
-        static_cast<void>(builder.Update(&profile.version, sizeof(profile.version)));
+        static_cast<void>(builder.Update(profileFingerprint.bytes, sizeof(profileFingerprint.bytes)));
         crypto::Digest256 result;
         static_cast<void>(builder.Finalize(result));
         return result;
@@ -378,6 +380,15 @@ namespace vanguard::mesh_tools
             return true;
         }
 
+        [[nodiscard]] bool EstimateResources(const assets::BuildRequest&, containers::ArraySpan<const assets::BuildDependency>,
+                                             assets::BuildResourceEstimate& estimate, void* userData) noexcept
+        {
+            const MeshAssetCompiler::Impl& implementation = *static_cast<const MeshAssetCompiler::Impl*>(userData);
+            estimate.compilerTransientBytes = implementation.config.estimatedCompilerTransientBytes;
+            estimate.artifactBytes = implementation.config.maximumArtifactBytes;
+            return estimate.IsValid() && estimate.compilerTransientBytes != 0u;
+        }
+
         [[nodiscard]] bool WriteMutation(const assets::SourceRecord& source, const assets::SourceDataView& data,
                                          ParsedSettings& settings, const char* const sourceName,
                                          containers::DynamicArray<u8>& rewrittenSource,
@@ -486,7 +497,8 @@ namespace vanguard::mesh_tools
 
     bool MeshAssetCompiler::Initialize(const MeshAssetCompilerConfig& config) noexcept
     {
-        if (m_impl != nullptr || !vanguard::mesh_tools::IsInitialized() || config.resolveSourceFile == nullptr || config.resolveDependency == nullptr || config.maximumDependencies == 0)
+        if (m_impl != nullptr || !vanguard::mesh_tools::IsInitialized() || config.resolveSourceFile == nullptr || config.resolveDependency == nullptr ||
+            config.maximumDependencies == 0 || config.maximumArtifactBytes == 0u || config.estimatedCompilerTransientBytes == 0u)
             return false;
         Impl* const implementation = VANGUARD_NEW(Impl, memory::pools::Tools);
         if (implementation == nullptr)
@@ -522,7 +534,8 @@ namespace vanguard::mesh_tools
     {
         if (m_impl == nullptr)
             return {};
-        return {m_impl->compilerId, CompilerName, MeshAssetCompilerVersion, MeshSourceResourceType, meshes::MeshResourceType, Discover, CompileAsset, m_impl};
+        return {m_impl->compilerId, CompilerName, MeshAssetCompilerVersion, MeshSourceResourceType, meshes::MeshResourceType, Discover, CompileAsset, m_impl,
+                EstimateResources};
     }
 
     assets::SourceImporterDescriptor MeshAssetCompiler::GetImporterDescriptor() noexcept

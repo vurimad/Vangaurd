@@ -41,11 +41,16 @@ source metadata digest, build-settings digest, and sorted dependency identity,
 role, requirement, and content digest. Hash encoding is explicitly
 little-endian and does not hash C++ object padding.
 
-This follows RED `backendData`'s separation between lightweight dependency
-collection and expensive generation/cooking. It also retains RED's tool
-version, target platform, prerequisite hash, explicit outputs, exact cache
-lookup, and rebuild-on-input-change principles. Vanguard uses its own resource
-identities, contracts, SHA-256 fingerprints, memory pools, and containers.
+This is the **current Vanguard production path**, originally derived from RED
+`backendData` ideas. It remains in service for unmigrated domains and during
+shadow validation.
+
+It is not the target authority model. The approved migration adopts actual RED
+authored resources, import metadata and `backendData` source. For a migrated
+domain, RED `Task`/`TaskSystem` owns dependency freshness, cache/build decisions,
+cooking and stale-output cleanup. The Vanguard BuildGraph/VDDC/VADI/recooker
+path then becomes transitional and must not remain as a second permanent
+authority. See [`red-asset-execution-kernel.md`](red-asset-execution-kernel.md).
 
 ## Ownership and threading
 
@@ -57,7 +62,7 @@ identities, contracts, SHA-256 fingerprints, memory pools, and containers.
 - A compiler cannot be unregistered while one of its builds is active.
 - Cache limits are explicit; eviction is deterministic FIFO.
 
-## Deliberate current boundary
+## Current Vanguard boundary during migration
 
 The in-memory cache proves process-local keys, invalidation, copying, limits,
 and eviction. The persistent local DDC uses exact SHA-256 filenames, versioned
@@ -97,7 +102,8 @@ index publications as one atomic transaction. Failure and cancellation roll
 the complete batch back. See
 [`incremental-recooking.md`](incremental-recooking.md).
 
-The following phases remain:
+For this Vanguard path, the following phases remain useful only where the domain
+has not yet moved to RED or where they are needed to support migration:
 
 1. editor build progress, error, notification, and hot-reload integration;
 2. persistent-cache disk budgets and optional shared/distributed transports;

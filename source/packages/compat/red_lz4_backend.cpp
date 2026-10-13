@@ -1,6 +1,6 @@
 #include <vanguard/packages/package_codec_backend.hpp>
 
-#include "../../imported/common/redCompression/src/lz4/lz4.h"
+#include "../../../imported/common/redCompression/src/lz4/lz4.h"
 
 #include <limits>
 

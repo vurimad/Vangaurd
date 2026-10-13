@@ -70,6 +70,12 @@ namespace vanguard::assets
         u32 maximumDependenciesPerRecord = 4096;
         u32 maximumArtifactsPerRecord = 4096;
         u64 maximumSerializedBytes = 512ull * 1024ull * 1024ull;
+        // Ordinary startup may discard invalid persistence and rebuild from
+        // source/build authority. Safety-critical owners that still depend on
+        // exact historical rows (for example a P5 predecessor cohort) disable
+        // this so corruption/incompatibility or a temp-only image remains on
+        // disk and initialization fails closed instead of erasing evidence.
+        bool allowDestructiveRecovery = true;
     };
 
     struct DependencyIndexStats
@@ -88,6 +94,33 @@ namespace vanguard::assets
         u64 ioFailures = 0;
         u64 transactionCommits = 0;
         u64 transactionRollbacks = 0;
+    };
+
+    // Exact loose/publication evidence used to release a durable retirement
+    // protection batch. A batch is released only after every successor witness
+    // captured with that retirement is present in the caller's visible set.
+    struct DependencyPublicationWitness
+    {
+        resources::ResourceReference output;
+        BuildFingerprint buildFingerprint;
+        BuildFingerprint contentFingerprint;
+        // True when the successor output path already existed in the committed
+        // pre-transaction index. Restart uses this to distinguish unchanged
+        // predecessor members from newly introduced cohort outputs.
+        bool predecessorPresent = false;
+
+        [[nodiscard]] bool IsValid() const noexcept
+        {
+            return output.IsValid() && output.IsTyped() && !buildFingerprint.IsEmpty() && !contentFingerprint.IsEmpty();
+        }
+    };
+
+    struct DependencyRetirementProtectionBatch
+    {
+        u32 recordOffset = 0u;
+        u32 recordCount = 0u;
+        u32 successorOffset = 0u;
+        u32 successorCount = 0u;
     };
 
     [[nodiscard]] BuildFingerprint ComputeSourceInputFingerprint(const BuildRequest& request) noexcept;
@@ -140,10 +173,37 @@ namespace vanguard::assets
         // no mutable index storage escapes this owner.
         [[nodiscard]] IndexResult CaptureProtectionKeys(containers::DynamicArray<ArtifactSetKey>& keys,
                                                         u32 maximumRecords, u64 maximumBytes) const noexcept;
+        // Deep-copy durable last-known-good rows retained by topology retirement.
+        // These rows are not returned by Find/Evaluate and therefore cannot become
+        // current build authority, but their exact VDDC keys remain protected.
+        [[nodiscard]] IndexResult CaptureRetiredProtectionRecords(containers::DynamicArray<DependencyRecord>& records,
+                                                                 u32 maximumRecords, u64 maximumBytes) const noexcept;
+        // Captures the exact persisted retirement journal, preserving batch
+        // boundaries for restart restore. All returned arrays own their data.
+        [[nodiscard]] IndexResult CaptureRetirementProtectionSnapshot(
+            containers::DynamicArray<DependencyRetirementProtectionBatch>& batches,
+            containers::DynamicArray<DependencyRecord>& records,
+            containers::DynamicArray<DependencyPublicationWitness>& successors,
+            u32 maximumRecords, u64 maximumBytes) const noexcept;
+        // Removes only retirement batches whose complete exact successor set is
+        // already visible. The cleanup is durably saved before protection drops;
+        // a save failure leaves every retained row protected for retry/restart.
+        [[nodiscard]] IndexResult ReleaseSatisfiedRetirementProtections(
+            containers::ArraySpan<const DependencyPublicationWitness> visible) noexcept;
 
         [[nodiscard]] IndexResult Save() noexcept;
         [[nodiscard]] bool HasChanges() const noexcept;
         [[nodiscard]] IndexResult BeginTransaction() noexcept;
+        // Stage retirement of an existing exact typed output. Retirement remains
+        // invisible to committed readers until CommitTransaction durably saves
+        // it together with all staged replacement/build records. Rollback
+        // discards the retirement without touching the committed index.
+        [[nodiscard]] IndexResult StageRemoval(resources::ResourceReference output) noexcept;
+        // Declares the exact current output set whose successful visibility is
+        // required before this transaction's retired rows may lose LKG protection.
+        // Every successor must also be staged by this transaction.
+        [[nodiscard]] IndexResult StageRetirementSuccessors(
+            containers::ArraySpan<const resources::ResourceReference> outputs) noexcept;
         // Deep-copy the currently staged transaction records for validation.
         // Normal Find/Evaluate readers remain committed-only. The returned
         // snapshot owns all dependency/artifact arrays, so callers may perform
@@ -154,6 +214,7 @@ namespace vanguard::assets
         [[nodiscard]] IndexResult CommitTransaction() noexcept;
         [[nodiscard]] IndexResult RollbackTransaction() noexcept;
         [[nodiscard]] bool HasActiveTransaction() const noexcept;
+        [[nodiscard]] bool HasRetirementProtections() const noexcept;
         [[nodiscard]] DependencyIndexStats GetStats() const noexcept;
 
     private:

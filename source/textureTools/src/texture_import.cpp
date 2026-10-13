@@ -375,6 +375,15 @@ namespace vanguard::texture_tools
                RegisterTextureImporter(OpenExrImporter()) == TextureImporterRegistrationResult::Success;
     }
 
+    void ResetTextureImporterRegistry() noexcept
+    {
+        for (u32 index = 0; index < g_importerCount; ++index)
+            g_importers[index] = {};
+        g_importerCount = 0;
+        g_importerRegistrySealed = false;
+        g_importerRegistryFingerprint = {};
+    }
+
     TextureImportResult ImportTexture(const TextureImportRequest& request, ImportedTexture& output, TextureImportReport* const report) noexcept
     {
         output.Reset();

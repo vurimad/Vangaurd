@@ -117,55 +117,26 @@ namespace vanguard::rendering
             return false;
         }
 
-        containers::DynamicArray<RenderNodeGraph::ItemId> orderedNodes{memory::pools::Rendering::GetInstance()};
-        graph.BuildFlattenedNodesArray(orderedNodes, RenderNodeDependencyType::Cpu);
-        if (orderedNodes.Size() != nodeCount)
+        if (graph.m_cpuOrderedNodes.Size() != nodeCount || graph.m_cpuParentOffsets.Size() != nodeCount + 1u ||
+            graph.m_cpuParentOffsets[nodeCount] != graph.m_cpuParentUsageIndices.Size())
         {
             if (failure != nullptr)
             {
                 failure->code = RenderFlowResourceFailureCode::BackendContractViolation;
                 failure->phase = RenderFlowResourceSessionState::Executing;
-                failure->message = "render-node CPU graph is not a complete acyclic ordering";
+                failure->message = "render-node CPU graph has no complete compiled execution topology";
             }
             return false;
         }
-        containers::DynamicArray<jobs::Task> nodeTasks{memory::pools::Rendering::GetInstance()};
         containers::DynamicArray<jobs::Counter> nodeCounters{memory::pools::Rendering::GetInstance()};
-        containers::DynamicArray<u32> incomingCounts{memory::pools::Rendering::GetInstance()};
-        containers::DynamicArray<u32> outgoingCounts{memory::pools::Rendering::GetInstance()};
-        nodeTasks.Resize(nodeCount);
         nodeCounters.Resize(nodeCount);
-        incomingCounts.Resize(nodeCount);
-        outgoingCounts.Resize(nodeCount);
-        for (u32 index = 0; index < nodeCount; ++index)
-        {
-            incomingCounts[index] = 0;
-            outgoingCounts[index] = 0;
-        }
-
-        for (u32 dependencyIndex = 0; dependencyIndex < graph.m_dependencies.GetNumItems(); ++dependencyIndex)
-        {
-            const RenderNodeGraph::DependencyData& dependency = graph.m_dependencies[graph.m_dependencies.GetItemIdByUsageIndex(dependencyIndex)];
-            if (dependency.m_type != RenderNodeDependencyType::Cpu)
-                continue;
-            ++outgoingCounts[graph.GetNodeIndex(dependency.m_nodes[static_cast<u32>(RenderNodeGraph::RelationType::Parent)])];
-            ++incomingCounts[graph.GetNodeIndex(dependency.m_nodes[static_cast<u32>(RenderNodeGraph::RelationType::Child)])];
-        }
-
-        u32 rootCount = 0;
-        u32 leafCount = 0;
-        for (u32 index = 0; index < nodeCount; ++index)
-        {
-            rootCount += incomingCounts[index] == 0 ? 1u : 0u;
-            leafCount += outgoingCounts[index] == 0 ? 1u : 0u;
-        }
-        if (nodeCount != 0 && (rootCount == 0 || leafCount != 1))
+        if (nodeCount != 0 && (graph.m_cpuRootCount == 0 || graph.m_cpuLeafCount != 1 || graph.m_cpuTerminalLeafUsageIndex >= nodeCount))
         {
             if (failure != nullptr)
             {
                 failure->code = RenderFlowResourceFailureCode::BackendContractViolation;
                 failure->phase = RenderFlowResourceSessionState::Executing;
-                failure->message = rootCount == 0 ? "render-node CPU graph has no root" : "render-node CPU graph does not have exactly one terminal leaf";
+                failure->message = graph.m_cpuRootCount == 0 ? "render-node CPU graph has no root" : "render-node CPU graph does not have exactly one terminal leaf";
             }
             return false;
         }
@@ -173,7 +144,7 @@ namespace vanguard::rendering
         static jobs::JobName occurrenceName{"RenderGraph/Node"};
         for (u32 orderIndex = 0; orderIndex < nodeCount; ++orderIndex)
         {
-            const RenderNodeGraph::ItemId nodeId = orderedNodes[orderIndex];
+            const RenderNodeGraph::ItemId nodeId = graph.m_cpuOrderedNodes[orderIndex];
             const u32 usageIndex = graph.GetNodeIndex(nodeId);
             RenderNodeResourceBindings::Entry& entry = resourceBindings.m_entries[usageIndex];
             if (entry.node != RenderFlowNodeId{nodeId} || entry.executionContext == nullptr)
@@ -191,40 +162,7 @@ namespace vanguard::rendering
             entry.executionContext->~RenderNodeImplContext();
             static_cast<void>(new (entry.executionContext) RenderNodeImplContext(baseContext, 0));
             entry.executionContext->SetupNodeData(graph.m_nodes[nodeId].m_renderNodeContext, graph.m_nodes[nodeId].m_renderNodeParameters);
-            nodeTasks[usageIndex] = jobs::Task::Create([node = &graph.m_nodes[nodeId], entryPointer = &entry](const jobs::JobContext& jobContext) noexcept
-            {
-                RenderNodeImpl* const impl = node->m_renderNodeParameters.m_impl;
-                if (impl == nullptr)
-                    return;
-                VG_PROFILE_ZONE_DYNAMIC_VALUE(impl->GetName(), reinterpret_cast<std::uintptr_t>(entryPointer));
-                // Setup failures are published before kickoff; no recording has begun for this occurrence.
-                if (entryPointer->executionFailure.code != RenderFlowResourceFailureCode::None)
-                    return;
-                RenderNodeImplContext& context = *entryPointer->executionContext;
-                context.m_dispatcherThreadIndex = jobContext.dispatcherThreadIndex;
-                context.BeginResourceExecution(entryPointer->packet.IsValid() ? &entryPointer->packet : nullptr, entryPointer->cursor, entryPointer->resources,
-                                               entryPointer->executionFailure);
-                if (!impl->GetJobBuilderUsage())
-                {
-                    impl->Process(context, nullptr);
-                    return;
-                }
-                jobs::Builder occurrenceBuilder(jobContext);
-                if (!occurrenceBuilder.IsValid())
-                    VG_FATAL("render-node continuation builder creation failed");
-                impl->Process(context, &occurrenceBuilder);
-            });
-            if (!nodeTasks[usageIndex])
-            {
-                if (failure != nullptr)
-                {
-                    failure->code = RenderFlowResourceFailureCode::CapacityExceeded;
-                    failure->phase = RenderFlowResourceSessionState::Executing;
-                    failure->node = RenderFlowNodeId{nodeId};
-                    failure->message = "render-node task allocation failed";
-                }
-                return false;
-            }
+            entry.executionImpl = graph.m_nodes[nodeId].m_renderNodeParameters.m_impl;
         }
 
         RenderNodeBuilderStorage nodeBuilders;
@@ -244,21 +182,44 @@ namespace vanguard::rendering
             return false;
         }
 
+        const auto executeNode = [](void* const state, const jobs::JobContext& jobContext) noexcept
+        {
+            auto* const entryPointer = static_cast<RenderNodeResourceBindings::Entry*>(state);
+            RenderNodeImpl* const impl = entryPointer->executionImpl;
+            if (impl == nullptr)
+                return;
+            VG_PROFILE_ZONE_DYNAMIC_VALUE(impl->GetName(), reinterpret_cast<std::uintptr_t>(entryPointer));
+            // Setup failures are published before kickoff; no recording has begun for this occurrence.
+            if (entryPointer->executionFailure.code != RenderFlowResourceFailureCode::None)
+                return;
+            RenderNodeImplContext& context = *entryPointer->executionContext;
+            context.m_dispatcherThreadIndex = jobContext.dispatcherThreadIndex;
+            context.BeginResourceExecution(entryPointer->packet.IsValid() ? &entryPointer->packet : nullptr, entryPointer->cursor, entryPointer->resources,
+                                           entryPointer->executionFailure);
+            if (!impl->GetJobBuilderUsage())
+            {
+                impl->Process(context, nullptr);
+                return;
+            }
+            jobs::Builder occurrenceBuilder(jobContext);
+            if (!occurrenceBuilder.IsValid())
+                VG_FATAL("render-node continuation builder creation failed");
+            impl->Process(context, &occurrenceBuilder);
+        };
+
         for (u32 orderIndex = 0; orderIndex < nodeCount; ++orderIndex)
         {
-            const RenderNodeGraph::ItemId nodeId = orderedNodes[orderIndex];
+            const RenderNodeGraph::ItemId nodeId = graph.m_cpuOrderedNodes[orderIndex];
             const u32 usageIndex = graph.GetNodeIndex(nodeId);
             jobs::Builder& nodeBuilder = nodeBuilders[usageIndex];
-            if (incomingCounts[usageIndex] == 0)
+            const u32 parentBegin = graph.m_cpuParentOffsets[usageIndex];
+            const u32 parentEnd = graph.m_cpuParentOffsets[usageIndex + 1u];
+            if (parentBegin == parentEnd)
                 nodeBuilder.AddDependency(kickoff);
-            for (RenderNodeGraph::ItemId dependency = graph.m_nodes[nodeId].m_dependencies[static_cast<u32>(RenderNodeGraph::RelationType::Parent)][static_cast<u32>(RenderNodeDependencyType::Cpu)];
-                 dependency != RenderNodeGraph::InvalidItemId;
-                 dependency = graph.m_dependencies[dependency].m_nextDependencies[static_cast<u32>(RenderNodeGraph::RelationType::Child)])
-            {
-                const RenderNodeGraph::ItemId parentNode = graph.m_dependencies[dependency].m_nodes[static_cast<u32>(RenderNodeGraph::RelationType::Parent)];
-                nodeBuilder.AddDependency(nodeCounters[graph.GetNodeIndex(parentNode)]);
-            }
-            if (!nodeBuilder.Dispatch(occurrenceName, static_cast<jobs::Task&&>(nodeTasks[usageIndex])))
+            for (u32 parentIndex = parentBegin; parentIndex < parentEnd; ++parentIndex)
+                nodeBuilder.AddDependency(nodeCounters[graph.m_cpuParentUsageIndices[parentIndex]]);
+            jobs::Task nodeTask = jobs::Task::CreateBorrowed(&resourceBindings.m_entries[usageIndex], executeNode);
+            if (!nodeBuilder.Dispatch(occurrenceName, static_cast<jobs::Task&&>(nodeTask)))
                 VG_FATAL("render-node task dispatch failed after scheduling began");
             nodeCounters[usageIndex] = nodeBuilder.ExtractCounter();
             if (!nodeCounters[usageIndex].IsValid())
@@ -268,9 +229,7 @@ namespace vanguard::rendering
         if (nodeCount == 0)
             finishBuilder.AddDependency(kickoff);
         else
-            for (u32 index = 0; index < nodeCount; ++index)
-                if (outgoingCounts[index] == 0)
-                    finishBuilder.AddDependency(nodeCounters[index]);
+            finishBuilder.AddDependency(nodeCounters[graph.m_cpuTerminalLeafUsageIndex]);
         static jobs::JobName completionName{"RenderGraph/NodesComplete"};
         if (!finishBuilder.Dispatch(completionName, static_cast<jobs::Task&&>(completion)))
             VG_FATAL("render-node terminal continuation dispatch failed after scheduling began");

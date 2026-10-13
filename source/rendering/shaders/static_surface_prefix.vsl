@@ -10,7 +10,7 @@ struct StaticSurfaceDrawContext
     uint viewDescriptor;
     uint viewIndex;
     float worldCellSize;
-    uint reserved;
+    uint directionalLightSelectionDescriptor;
 };
 [[vk::push_constant]] ConstantBuffer<StaticSurfaceDrawContext> surfaceDraw : register(b0);
 
@@ -28,6 +28,8 @@ struct StaticSurfaceOutput
     float metallic;
     float3 emissive;
     float opacityCutoff;
+    float3 specularColor;
+    float occlusion;
 };
 
 // Invocation-private evaluation context, set by each pixel entry before calling

@@ -467,6 +467,7 @@ namespace vanguard::asset_streaming
         outputs.Clear();
         references.Clear();
         backwardReferences.Clear();
+        cohortIntent.Reset();
         changes.Clear();
         changePreviousOutputs.Clear();
         changeCurrentOutputs.Clear();
@@ -493,6 +494,7 @@ namespace vanguard::asset_streaming
         outputs.Swap(other.outputs);
         references.Swap(other.references);
         backwardReferences.Swap(other.backwardReferences);
+        cohortIntent.Swap(other.cohortIntent);
         changes.Swap(other.changes);
         changePreviousOutputs.Swap(other.changePreviousOutputs);
         changeCurrentOutputs.Swap(other.changeCurrentOutputs);
@@ -541,6 +543,8 @@ namespace vanguard::asset_streaming
             return ProjectAssetComparisonResult::InvalidArgument;
 
         ProjectAssetAcceptedBaseline result(previous.limits);
+        if (!result.cohortIntent.CopyFrom(previous.cohortIntent))
+            return ProjectAssetComparisonResult::LimitExceeded;
         containers::DynamicArray<u32> candidateAssets(memory::pools::Assets::GetInstance());
         containers::DynamicArray<AssetSlice> slices(memory::pools::Assets::GetInstance());
         containers::DynamicArray<PendingChange> pendingChanges(memory::pools::Assets::GetInstance());

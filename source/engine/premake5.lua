@@ -17,7 +17,7 @@ project "engine"
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include",
         "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include",
-        "../imported/common/redMath/include", "../math/adapted/include",
+        "../../imported/common/redMath/include", "../math/adapted/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
         "../rendering/include", "../rhi/include",
         "../gameInput/include", path.join(flecs_root, "distr")
@@ -47,7 +47,7 @@ project "engineServicesTests"
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include",
         "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include",
-        "../imported/common/redMath/include", "../math/adapted/include",
+        "../../imported/common/redMath/include", "../math/adapted/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
         "../rendering/include", "../rhi/include", "../gameInput/include",
         path.join(flecs_root, "distr")
@@ -79,7 +79,7 @@ project "resourceStreamingServiceTests"
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include",
-        "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include", "../imported/common/redMath/include", "../math/adapted/include",
+        "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include", "../../imported/common/redMath/include", "../math/adapted/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
         "../rendering/include", "../rhi/include", "../gameInput/include", path.join(flecs_root, "distr")
     }
@@ -109,7 +109,7 @@ project "framePipelineCycleTests"
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include", "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include",
-        "../imported/common/redMath/include", "../math/adapted/include",
+        "../../imported/common/redMath/include", "../math/adapted/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include",
         "../rendering/include", "../rhi/include", path.join(flecs_root, "distr")
     }
@@ -141,7 +141,7 @@ project "textureResidencyServiceTests"
         "../streaming/include", "../packages/include", "../assets/include", "../textureTools/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include", "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include",
-        "../imported/common/redMath/include", "../math/adapted/include", "../entities/include", "../gameWorld/include", "../ecs/include",
+        "../../imported/common/redMath/include", "../math/adapted/include", "../entities/include", "../gameWorld/include", "../ecs/include",
         "../input/include", "../window/include", "../rendering/include", "../rhi/include", "../rhi/nvrhi/include", "../rhi/nvrhi/private",
         "../gameInput/include", path.join(flecs_root, "distr"), path.join(directx_headers_root, "include"),
         path.join(nvrhi_root, "include"), path.join(nvrhi_root, "src")
@@ -160,7 +160,8 @@ project "textureResidencyServiceTests"
     vpaths { ["Tests/*"] = { "tests/texture_residency_service_tests.cpp" } }
 
 project "materialRuntimeServiceTests"
-    includedirs { "../shaderTools/include", "../materialTools/include", "../materialTools/tests" }
+    includedirs { "../shaderTools/include", "../materialTools/include", "../materialTools/tests",
+                  "../assets/include", "../textureTools/include" }
     files { "../materialTools/tests/material_static_surface_tests.cpp", "tests/static_surface_native_tests.cpp" }
     libdirs { path.join(slang_root, "lib") }
     links { "materialTools", "shaderTools", "slang-compiler" }
@@ -186,7 +187,7 @@ project "materialRuntimeServiceTests"
         "../streaming/include", "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../system/include", "../memory/include", "../diagnostics/include", "../containers/include", "../concurrency/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include", "../shaders/include",
-        "../pipelines/include", "../materials/include", "../pipelineCache/include", "../imported/common/redMath/include", "../math/adapted/include",
+        "../pipelines/include", "../materials/include", "../pipelineCache/include", "../../imported/common/redMath/include", "../math/adapted/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../input/include", "../window/include", "../rendering/include",
         "../rhi/include", "../rhi/nvrhi/include", "../rhi/nvrhi/private", "../gameInput/include", path.join(flecs_root, "distr"),
         path.join(directx_headers_root, "include"), path.join(nvrhi_root, "include"), path.join(nvrhi_root, "src")
@@ -219,7 +220,7 @@ project "inputServiceTests"
         "../containers/include", "../concurrency/include", "../resources/include", "../streaming/include",
         "../packages/include", "../schemas/include", "../reflection/include", "../serialization/include",
         "../world/include", "../meshes/include", "../textures/include", "../prefabs/include", "../crypto/include", "../shaders/include", "../pipelines/include", "../materials/include", "../pipelineCache/include",
-        "../imported/common/redMath/include", "../math/adapted/include",
+        "../../imported/common/redMath/include", "../math/adapted/include",
         "../entities/include", "../gameWorld/include", "../ecs/include", "../rendering/include", "../rhi/include",
         "../gameInput/include", path.join(flecs_root, "distr")
     }

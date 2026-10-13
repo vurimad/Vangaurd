@@ -103,6 +103,15 @@ namespace vanguard::resources
             DestroyResourceFunction destroy = nullptr;
             void* userData = nullptr;
             ResourceRequest::Control* request = nullptr;
+            concurrency::Atomic<u32>* pendingCounter = nullptr;
+
+            void Arm(concurrency::Atomic<u32>& counter) noexcept
+            {
+                if (resource == nullptr || destroy == nullptr || pendingCounter != nullptr)
+                    return;
+                pendingCounter = &counter;
+                static_cast<void>(pendingCounter->Increment());
+            }
 
             void Execute() noexcept
             {
@@ -113,6 +122,12 @@ namespace vanguard::resources
                 if (request != nullptr)
                 {
                     request->Release();
+                }
+                if (pendingCounter != nullptr)
+                {
+                    const u32 remaining = pendingCounter->Decrement();
+                    VG_ASSERT_MSG(remaining != 0xffffffffu, "resource-registry pending destruction accounting underflow");
+                    pendingCounter = nullptr;
                 }
             }
         };
@@ -135,6 +150,7 @@ namespace vanguard::resources
         u64 nextRequestSerial = 1;
         u64 issuedRequests = 0;
         u64 coalescedRequests = 0;
+        concurrency::Atomic<u32> pendingDestructions{0};
 
         [[nodiscard]] u32 AllocateSlot() noexcept
         {
@@ -580,6 +596,11 @@ namespace vanguard::resources
         }
 
         m_impl->lock.Acquire();
+        if (m_impl->pendingDestructions.GetValue() != 0)
+        {
+            m_impl->lock.Release();
+            return false;
+        }
         for (RegistryEntry* const entry : m_impl->entries)
         {
             if (entry->strongHandles != 0 || entry->weakHandles != 0 || (entry->activeRequest != nullptr && entry->activeRequest->references.GetValue() != 1))
@@ -640,6 +661,8 @@ namespace vanguard::resources
             return false;
         }
         VG_SCOPE_LOCK(m_impl->lock);
+        if (m_impl->pendingDestructions.GetValue() != 0)
+            return false;
         for (const RegistryEntry* const entry : m_impl->entries)
         {
             if (entry->key.type == type && (entry->state == State::Queued || entry->state == State::Loading || entry->state == State::Loaded ||
@@ -955,6 +978,7 @@ namespace vanguard::resources
         request.m_control->failure.SetValue(static_cast<u32>(Failure::None));
         request.m_control->state.SetValue(static_cast<u32>(State::Loaded));
         request.m_control->completion.Signal();
+        retired.Arm(m_impl->pendingDestructions);
         m_impl->lock.Release();
         retired.Execute();
         return true;
@@ -1012,6 +1036,7 @@ namespace vanguard::resources
             entry->state = State::Unloaded;
             entry->failure = Failure::None;
             m_impl->RecycleSlotIfPossible(failedSlot);
+            pending.Arm(m_impl->pendingDestructions);
             m_impl->lock.Release();
             if (registryReference != nullptr)
                 registryReference->Release();
@@ -1073,6 +1098,7 @@ namespace vanguard::resources
             entry->state = State::Unloaded;
             entry->failure = Failure::None;
             m_impl->RecycleSlotIfPossible(cancelledSlot);
+            pending.Arm(m_impl->pendingDestructions);
             m_impl->lock.Release();
             if (registryReference != nullptr)
                 registryReference->Release();
@@ -1148,6 +1174,7 @@ namespace vanguard::resources
             entry->failure = Failure::None;
             m_impl->RecycleSlotIfPossible(slot);
         }
+        pending.Arm(m_impl->pendingDestructions);
         m_impl->lock.Release();
         pending.Execute();
         return true;
@@ -1195,6 +1222,7 @@ namespace vanguard::resources
             entry->evictAfterReplacement = false;
             m_impl->RecycleSlotIfPossible(slot);
         }
+        pending.Arm(m_impl->pendingDestructions);
         m_impl->lock.Release();
         pending.Execute();
         return true;
@@ -1317,6 +1345,7 @@ namespace vanguard::resources
                 }
             }
         }
+        pending.Arm(m_impl->pendingDestructions);
         m_impl->lock.Release();
         pending.Execute();
     }

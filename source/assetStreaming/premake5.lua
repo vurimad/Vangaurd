@@ -53,19 +53,19 @@ project "assetStreamingTests"
         "../schemas/include",
         "../assets/include",
         "../streaming/include",
-        "../imported/common/redFileSystem/include",
-        "../imported/common/redFileSystem/src",
-        "../imported/common/redCompression/include",
-        "../imported/common/redCompression/src",
-        "../imported/common/redSystem/include",
-        "../imported/common/redMemory/include",
-        "../imported/common/redMemory/src",
-        "../imported/common/redMath/include",
-        "../imported/common/redContainers/include",
-        "../imported/common/redIO/include",
-        "../imported/common/redCore/include"
+        "../../imported/common/redFileSystem/include",
+        "../../imported/common/redFileSystem/src",
+        "../../imported/common/redCompression/include",
+        "../../imported/common/redCompression/src",
+        "../../imported/common/redSystem/include",
+        "../../imported/common/redMemory/include",
+        "../../imported/common/redMemory/src",
+        "../../imported/common/redMath/include",
+        "../../imported/common/redContainers/include",
+        "../../imported/common/redIO/include",
+        "../../imported/common/redCore/include"
     }
-    libdirs { path.getabsolute("../imported/external/nvToolsExt/lib/x64.Release") }
+    libdirs { path.getabsolute("../../imported/external/nvToolsExt/lib/x64.Release") }
     links {
         "assetStreaming",
         "streaming",
@@ -110,15 +110,15 @@ project "assetStreamingTests"
         "ws2_32"
     }
     filter "configurations:Debug"
-        libdirs { path.getabsolute("../imported/external/oodle/lib/x64.Debug") }
+        libdirs { path.getabsolute("../../imported/external/oodle/lib/x64.Debug") }
         links { "oo2ext_win64_debug" }
     filter "configurations:not Debug"
-        libdirs { path.getabsolute("../imported/external/oodle/lib/x64.Release") }
+        libdirs { path.getabsolute("../../imported/external/oodle/lib/x64.Release") }
         links { "oo2ext_win64" }
     filter "configurations:not Shipping"
         libdirs {
-            path.getabsolute("../imported/internal/FileSync/lib/release_x64"),
-            path.getabsolute("../imported/external/udt/lib/release_x64")
+            path.getabsolute("../../imported/internal/FileSync/lib/release_x64"),
+            path.getabsolute("../../imported/external/udt/lib/release_x64")
         }
         links { "FileSync", "udt" }
     filter {}

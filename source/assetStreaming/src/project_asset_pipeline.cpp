@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <source_location>
 
 namespace vanguard::asset_streaming
 {
@@ -285,6 +286,74 @@ namespace vanguard::asset_streaming
             return true;
         }
 
+        [[nodiscard]] bool ReadMetadataSnapshot(filesystem::Manager& files, const filesystem::AbsolutePath& path,
+                                                assets::AssetMetadata& metadata, crypto::Digest256& rawDigest,
+                                                crypto::Digest256& canonicalDigest) noexcept
+        {
+            rawDigest = {};
+            canonicalDigest = {};
+            if (!path.IsFilePath() || !files.FileExist(path))
+                return false;
+            auto reader = files.CreateFileReader(path, filesystem::FOF_Buffered);
+            if (!reader)
+                return false;
+            const u64 size = reader->GetSize();
+            if (size == 0u || size > assets::MaximumAssetMetadataBytes || size > ~u32{0})
+                return false;
+            containers::DynamicArray<u8> bytes(memory::pools::Assets::GetInstance());
+            bytes.Resize(static_cast<u32>(size));
+            if (bytes.Size() != size)
+                return false;
+            reader->Serialize(bytes.TypedData(), bytes.Size());
+            if (reader->HasErrors())
+                return false;
+            rawDigest = crypto::Sha256(bytes.TypedData(), bytes.Size());
+            if (rawDigest.IsEmpty() ||
+                assets::ParseMetadata({reinterpret_cast<const char*>(bytes.TypedData()), bytes.Size()}, metadata) !=
+                    assets::MetadataResult::Success)
+                return false;
+            containers::String canonical;
+            if (assets::EncodeMetadata(metadata, canonical) != assets::MetadataResult::Success)
+                return false;
+            canonicalDigest = crypto::Sha256(canonical.AsChar(), canonical.Length());
+            return !canonicalDigest.IsEmpty();
+        }
+
+        [[nodiscard]] bool DecodeMetadataSnapshot(const containers::ArraySpan<const u8> bytes,
+                                                  assets::AssetMetadata& metadata,
+                                                  crypto::Digest256& rawDigest,
+                                                  crypto::Digest256& canonicalDigest) noexcept
+        {
+            rawDigest = {};
+            canonicalDigest = {};
+            if (bytes.Empty() || bytes.Data() == nullptr || bytes.Count() > assets::MaximumAssetMetadataBytes)
+                return false;
+            rawDigest = crypto::Sha256(bytes.Data(), bytes.Count());
+            if (rawDigest.IsEmpty() ||
+                assets::ParseMetadata({reinterpret_cast<const char*>(bytes.Data()), bytes.Count()}, metadata) !=
+                    assets::MetadataResult::Success)
+                return false;
+            containers::String canonical;
+            if (assets::EncodeMetadata(metadata, canonical) != assets::MetadataResult::Success)
+                return false;
+            canonicalDigest = crypto::Sha256(canonical.AsChar(), canonical.Length());
+            return !canonicalDigest.IsEmpty();
+        }
+
+        [[nodiscard]] bool SourceIdentityMatchesRoot(const filesystem::AbsolutePath& root,
+                                                     const filesystem::AbsolutePath& source,
+                                                     const resources::ResourcePath identity) noexcept
+        {
+            if (!root.IsDirectoryPath() || !source.IsFilePath() || !identity.IsValid() ||
+                !source.AsStringView().StartsWithIgnoreCase(root.AsStringView()) ||
+                source.AsStringView().Length() <= root.AsStringView().Length())
+                return false;
+            const containers::StringView relative =
+                source.AsStringView().Slice(root.AsStringView().Length(), source.AsStringView().Length());
+            const resources::ResourcePath expected = resources::ResourcePath::FromString(relative);
+            return expected.IsValid() && expected == identity;
+        }
+
         [[nodiscard]] bool SetHistoryExpectedPostFromDesired(AssetHistoryRecord& record,
                                                               const AssetHistoryRecord& desired) noexcept
         {
@@ -451,6 +520,55 @@ namespace vanguard::asset_streaming
                         return false;
                     }
                 }
+            return true;
+        }
+
+        // A durable cohort intent is a temporary visibility override, not a
+        // second source/catalog authority. Until the exact successor cohort owns
+        // the cutover, generic reconciliation must keep the previous generation
+        // visible for this asset and must not restore successor-only members one
+        // by one. Same-identity content refreshes remain in the set so the current
+        // (still predecessor) VADI row can be restored after restart.
+        [[nodiscard]] bool ApplyCohortIntentDesired(
+            const ProjectAssetCohortIntent& intent,
+            containers::DynamicArray<resources::ResourceReference>& desired,
+            containers::HashMap<resources::ResourceId, u8>& lookup,
+            const u32 maximumPublishedResources) noexcept
+        {
+            if (!intent.IsActive())
+                return true;
+            const auto contains = [](const containers::DynamicArray<resources::ResourceReference>& values,
+                                     const resources::ResourceReference value) noexcept
+            {
+                for (const resources::ResourceReference candidate : values)
+                    if (candidate == value)
+                        return true;
+                return false;
+            };
+
+            for (u32 index = desired.Size(); index != 0u; --index)
+            {
+                const resources::ResourceReference output = desired[index - 1u];
+                if (!contains(intent.successorOutputs, output) || contains(intent.predecessorOutputs, output))
+                    continue;
+                if (!lookup.Remove(output.GetPath().Id()).IsSuccessful() || !desired.RemoveAtReorder(index - 1u).IsSuccessful())
+                    return false;
+            }
+            for (const resources::ResourceReference predecessor : intent.predecessorOutputs)
+            {
+                u8 present = 0u;
+                if (lookup.Find(predecessor.GetPath().Id(), present))
+                    continue;
+                if (desired.Size() >= maximumPublishedResources)
+                    return false;
+                const u32 before = desired.Size();
+                desired.PushBack(predecessor);
+                if (desired.Size() != before + 1u || !lookup.Insert(predecessor.GetPath().Id(), 1u).IsSuccessful())
+                {
+                    desired.Resize(before);
+                    return false;
+                }
+            }
             return true;
         }
 
@@ -700,9 +818,7 @@ namespace vanguard::asset_streaming
 
         [[nodiscard]] bool IsRecoverableSnapshotLoad(const ProjectAssetSnapshotResult result) noexcept
         {
-            return result == ProjectAssetSnapshotResult::Success || result == ProjectAssetSnapshotResult::NotFound ||
-                   result == ProjectAssetSnapshotResult::Corrupt || result == ProjectAssetSnapshotResult::Incompatible ||
-                   result == ProjectAssetSnapshotResult::LimitExceeded;
+            return result == ProjectAssetSnapshotResult::Success || result == ProjectAssetSnapshotResult::NotFound;
         }
 
         [[nodiscard]] ProjectAssetSnapshotResult PersistProjectAssetCandidate(
@@ -712,6 +828,19 @@ namespace vanguard::asset_streaming
             if (previous.generation == proposed.generation)
                 return ProjectAssetSnapshotResult::Success;
             const ProjectAssetSnapshotResult staged = StageProjectAssetAcceptedSnapshot(files, root, proposed);
+            if (staged != ProjectAssetSnapshotResult::Success)
+                return staged;
+            const ProjectAssetSnapshotResult committed = CommitStagedProjectAssetAcceptedSnapshot(files, root);
+            if (committed != ProjectAssetSnapshotResult::Success)
+                static_cast<void>(DiscardStagedProjectAssetAcceptedSnapshot(files, root));
+            return committed;
+        }
+
+        [[nodiscard]] ProjectAssetSnapshotResult PersistProjectAssetSnapshot(
+            filesystem::Manager& files, const filesystem::AbsolutePath& root,
+            const ProjectAssetAcceptedBaseline& snapshot) noexcept
+        {
+            const ProjectAssetSnapshotResult staged = StageProjectAssetAcceptedSnapshot(files, root, snapshot);
             if (staged != ProjectAssetSnapshotResult::Success)
                 return staged;
             const ProjectAssetSnapshotResult committed = CommitStagedProjectAssetAcceptedSnapshot(files, root);
@@ -871,6 +1000,171 @@ namespace vanguard::asset_streaming
         bool managedLooseRootRegistered = false;
         ProjectAssetPipelineConfig config;
         ProjectAssetAcceptedBaseline accepted;
+        // The planned-import owner may rescan the just-committed source state
+        // while its durable cohort intent is live. All other source mutations are
+        // excluded until that intent is settled or safely abandoned.
+        bool plannedImportIntentOwner = false;
+
+        struct DeferredPlannedImport final
+        {
+            [[nodiscard]] bool IsActive() const noexcept
+            {
+                return asset.IsValid() && sourceIdentity.IsValid() && sourceDestination.IsFilePath() &&
+                       !sourceFingerprint.IsEmpty() && !targetMetadataFingerprint.IsEmpty() &&
+                       baseAcceptedGeneration != 0u;
+            }
+
+            void Reset() noexcept
+            {
+                asset = {};
+                sourceIdentity = {};
+                sourceDestination = {};
+                sourceFingerprint = {};
+                targetMetadataFingerprint = {};
+                baseAcceptedGeneration = 0u;
+                acceptedGeneration = 0u;
+                awaitingOwnedAcceptance = false;
+            }
+
+            assets::AssetId asset;
+            resources::ResourcePath sourceIdentity;
+            filesystem::AbsolutePath sourceDestination;
+            crypto::Digest256 sourceFingerprint;
+            crypto::Digest256 targetMetadataFingerprint;
+            u64 baseAcceptedGeneration = 0u;
+            u64 acceptedGeneration = 0u;
+            bool awaitingOwnedAcceptance = false;
+        };
+        DeferredPlannedImport deferredPlannedImport;
+        ProjectAssetDeferredPlannedImportStatus deferredPlannedImportStatus;
+
+        struct DeferredPlannedImportPrepare final
+        {
+            DeferredPlannedImportPrepare() noexcept
+                : historyPaths(memory::pools::Assets::GetInstance()), postConditions(memory::pools::Assets::GetInstance()),
+                  stagedOutputPaths(memory::pools::Assets::GetInstance()), jobName("Assets/PlannedImportPrepare")
+            {
+            }
+
+            [[nodiscard]] bool IsActive() const noexcept { return active; }
+            [[nodiscard]] bool HasWork() const noexcept { return active || workRunning; }
+
+            static bool IsCancellationRequested(void* const userData) noexcept
+            {
+                const auto* const state = static_cast<const DeferredPlannedImportPrepare*>(userData);
+                return state != nullptr && state->cancellationRequested.GetValue();
+            }
+
+            static void ReportProgress(const assets::AssetFileTransactionPrepareProgress& progress, void* const userData) noexcept
+            {
+                auto* const state = static_cast<DeferredPlannedImportPrepare*>(userData);
+                if (state == nullptr)
+                    return;
+                state->progressPhase.SetValue(
+                    progress.phase == assets::AssetFileTransactionPreparePhase::Verifying ? 2u : 1u);
+                state->progressCompleted.SetValue(progress.completedBytes);
+                state->progressTotal.SetValue(progress.totalBytes);
+            }
+
+            struct WorkCompletion final
+            {
+                explicit WorkCompletion(DeferredPlannedImportPrepare& value) noexcept : owner(&value) {}
+                ~WorkCompletion()
+                {
+                    owner->workCompleted.SetValue(true);
+                    owner->workCompletedEvent.Signal();
+                }
+                DeferredPlannedImportPrepare* owner = nullptr;
+            };
+
+            [[nodiscard]] bool Dispatch(assets::AssetFileTransaction& transaction) noexcept
+            {
+                if (!active || workRunning)
+                    return false;
+                cancellationRequested.SetValue(false);
+                workCompleted.SetValue(false);
+                progressPhase.SetValue(0u);
+                progressCompleted.SetValue(0u);
+                progressTotal.SetValue(0u);
+                workerResult = assets::AssetFileTransactionResult::InvalidState;
+                workCompletedEvent.Reset();
+                jobs::Builder builder({jobs::Priority::Latent, jobs::Affinity::AnyWorker}, this);
+                jobs::Task task = jobs::Task::Create([this, transactionOwner = &transaction](const jobs::JobContext&) noexcept
+                {
+                    WorkCompletion completion(*this);
+                    const assets::AssetFileTransactionPrepareObserver observer{
+                        &DeferredPlannedImportPrepare::IsCancellationRequested,
+                        &DeferredPlannedImportPrepare::ReportProgress, this};
+                    workerResult = transactionOwner->Prepare(observer);
+                });
+                if (!builder.IsValid() || !task || !builder.Dispatch(jobName, static_cast<jobs::Task&&>(task)))
+                {
+                    workCompleted.SetValue(true);
+                    workCompletedEvent.Signal();
+                    return false;
+                }
+                workRunning = true;
+                return true;
+            }
+
+            void CancelAndJoin() noexcept
+            {
+                if (workRunning && !workCompleted.GetValue())
+                {
+                    cancellationRequested.SetValue(true);
+                    workCompletedEvent.Wait();
+                }
+                workRunning = false;
+                cancellationRequested.SetValue(false);
+            }
+
+            void Reset() noexcept
+            {
+                CancelAndJoin();
+                inverse = AssetHistoryRecord{};
+                historyPaths.Clear();
+                postConditions.Clear();
+                cohortIntent.Reset();
+                stagedOutputPaths.Clear();
+                asset = {};
+                importer = assets::InvalidSourceImporterId;
+                sourceRoot = {};
+                sourceIdentity = {};
+                sourceDestination = {};
+                sourceFingerprint = {};
+                baseAcceptedGeneration = 0u;
+                active = false;
+                workerResult = assets::AssetFileTransactionResult::InvalidState;
+                workCompleted.SetValue(true);
+                progressPhase.SetValue(0u);
+                progressCompleted.SetValue(0u);
+                progressTotal.SetValue(0u);
+            }
+
+            AssetHistoryRecord inverse;
+            containers::DynamicArray<filesystem::AbsolutePath> historyPaths;
+            containers::DynamicArray<assets::AssetFileTransactionPostCondition> postConditions;
+            ProjectAssetCohortIntent cohortIntent;
+            containers::DynamicArray<resources::ResourcePath> stagedOutputPaths;
+            assets::AssetId asset;
+            assets::SourceImporterId importer = assets::InvalidSourceImporterId;
+            filesystem::AbsolutePath sourceRoot;
+            resources::ResourcePath sourceIdentity;
+            filesystem::AbsolutePath sourceDestination;
+            crypto::Digest256 sourceFingerprint;
+            u64 baseAcceptedGeneration = 0u;
+            jobs::JobName jobName;
+            concurrency::Atomic<bool> workCompleted{true};
+            concurrency::Atomic<bool> cancellationRequested{false};
+            concurrency::ManualResetEvent workCompletedEvent{true};
+            concurrency::Atomic<u32> progressPhase{0u};
+            concurrency::Atomic<u64> progressCompleted{0u};
+            concurrency::Atomic<u64> progressTotal{0u};
+            assets::AssetFileTransactionResult workerResult = assets::AssetFileTransactionResult::InvalidState;
+            bool active = false;
+            bool workRunning = false;
+        };
+        DeferredPlannedImportPrepare deferredPlannedImportPrepare;
 
         struct LooseGenerationKey final
         {
@@ -1667,6 +1961,60 @@ namespace vanguard::asset_streaming
                 Publish
             };
 
+            struct ExplicitDeliveryCohort final
+            {
+                ExplicitDeliveryCohort() noexcept
+                    : outputs(memory::pools::Assets::GetInstance()), predecessorOutputs(memory::pools::Assets::GetInstance()) {}
+
+                [[nodiscard]] bool IsActive() const noexcept
+                {
+                    return asset.IsValid() && acceptedGeneration != 0u && !outputs.Empty();
+                }
+
+                [[nodiscard]] bool Contains(const resources::ResourceReference output) const noexcept
+                {
+                    for (const resources::ResourceReference candidate : outputs)
+                        if (candidate == output)
+                            return true;
+                    return false;
+                }
+
+                void Reset() noexcept
+                {
+                    asset = {};
+                    acceptedGeneration = 0u;
+                    outputs.Clear();
+                    predecessorOutputs.Clear();
+                    deliveryComplete = false;
+                    publicationBlocked = false;
+                }
+
+                void Swap(ExplicitDeliveryCohort& other) noexcept
+                {
+                    const assets::AssetId swappedAsset = asset;
+                    asset = other.asset;
+                    other.asset = swappedAsset;
+                    const u64 swappedGeneration = acceptedGeneration;
+                    acceptedGeneration = other.acceptedGeneration;
+                    other.acceptedGeneration = swappedGeneration;
+                    outputs.Swap(other.outputs);
+                    predecessorOutputs.Swap(other.predecessorOutputs);
+                    const bool swappedComplete = deliveryComplete;
+                    deliveryComplete = other.deliveryComplete;
+                    other.deliveryComplete = swappedComplete;
+                    const bool swappedBlocked = publicationBlocked;
+                    publicationBlocked = other.publicationBlocked;
+                    other.publicationBlocked = swappedBlocked;
+                }
+
+                assets::AssetId asset;
+                u64 acceptedGeneration = 0u;
+                containers::DynamicArray<resources::ResourceReference> outputs;
+                containers::DynamicArray<resources::ResourceReference> predecessorOutputs;
+                bool deliveryComplete = false;
+                bool publicationBlocked = false;
+            };
+
             explicit AutomaticRecookState(const ProjectAssetAutomaticRecookConfig& automaticConfig,
                                           const u32 outputStatusLimit) noexcept
                 : config(automaticConfig), planningName("Assets/ProjectAutomaticRecook/Plan"),
@@ -1694,6 +2042,7 @@ namespace vanguard::asset_streaming
             assets::RecookStats workerStats;
             assets::RecookState workerState = assets::RecookState::Succeeded;
             assets::RecookFailure workerFailure = assets::RecookFailure::None;
+            assets::RecookRootFailureDetail workerRootFailure;
             WorkKind workKind = WorkKind::None;
             concurrency::Atomic<bool> workCompleted{true};
             concurrency::ManualResetEvent workCompletedEvent{true};
@@ -1702,6 +2051,7 @@ namespace vanguard::asset_streaming
             bool workerRecoveryRequired = false;
             bool workerWasRecovery = false;
             bool recoveryRequested = false;
+            bool startupRecoveryDeferred = false;
             bool admissionOwned = false;
             bool staleRejected = false;
             bool pollDispatchFailed = false;
@@ -1711,6 +2061,7 @@ namespace vanguard::asset_streaming
             bool workerDeliveryAdoptionFailed = false;
             bool workerPublicationSucceeded = false;
             bool workerPublicationStale = false;
+            bool workerPublishedExplicitCohort = false;
             resources::ResourceReference workerRepairRequiredOutput;
             bool publicationSettlementPending = false;
             ProjectLoosePublicationResult workerPublicationResult = ProjectLoosePublicationResult::Success;
@@ -1726,6 +2077,7 @@ namespace vanguard::asset_streaming
             containers::HashMap<DeliveryKey, u32> committedDeliveryIndex;
             containers::DynamicArray<ProjectAssetOutputDeliveryStatus> outputStatuses;
             containers::HashMap<DeliveryKey, u32> outputStatusIndex;
+            ExplicitDeliveryCohort explicitCohort;
             containers::DynamicArray<resources::ResourceReference> workerPublicationOutputs;
             containers::DynamicArray<ProjectLoosePublicationInfo> workerPublicationInfos;
             containers::DynamicArray<RetiredLooseCapture> workerRetiredLooseCaptures;
@@ -1749,8 +2101,30 @@ namespace vanguard::asset_streaming
             [[nodiscard]] static bool Resolve(const resources::ResourceReference output, assets::OwnedBuildRequest& request,
                                               void* const userData) noexcept
             {
-                auto* const builds = static_cast<assets::ProjectAssetBuildSystem*>(userData);
-                return builds != nullptr && builds->Resolve(output, request) == assets::ProjectAssetBuildResult::Success;
+                auto* const state = static_cast<AutomaticRecookState*>(userData);
+                if (state == nullptr || state->validationBuilds == nullptr)
+                    return false;
+                // The recooker resolves exactly the same immutable accepted
+                // current requests the owner already retained. Share their
+                // lifetime-pinned source payload instead of reconstructing
+                // another 60 MB copy for every root of one imported GLB.
+                // Non-current indexed dependants still resolve canonically.
+                for (const assets::OwnedBuildRequest& current : state->active.currentRequests)
+                    if (current.outputReference == output)
+                        return request.CopyFromSharingSource(current) &&
+                               request.View().IsValid() && request.outputReference == output;
+                return state->validationBuilds->Resolve(output, request) == assets::ProjectAssetBuildResult::Success;
+            }
+
+            [[nodiscard]] static bool IsConfirmedHistoricalOutput(const resources::ResourceReference output,
+                                                                   void* const userData) noexcept
+            {
+                const auto* const state = static_cast<const AutomaticRecookState*>(userData);
+                // SourceDatabase is stable for the entire admitted recook. A
+                // missing output owner is historical; an importer failure on a
+                // PRESENT owner must remain a hard error, never silently skipped.
+                return state != nullptr && state->validationSources != nullptr &&
+                       state->validationSources->LookupOutput(output) == nullptr;
             }
 
             [[nodiscard]] static u64 DeliveryRecordBytes(const assets::DependencyRecord& record) noexcept
@@ -1892,7 +2266,8 @@ namespace vanguard::asset_streaming
             }
 
             [[nodiscard]] bool AdoptCommittedDelivery(containers::DynamicArray<assets::DependencyRecord>& records,
-                                                      const u64 authoredGeneration) noexcept
+                                                      const u64 authoredGeneration,
+                                                      const bool retainInstalled = false) noexcept
             {
                 if (records.Empty())
                     return true;
@@ -1917,7 +2292,7 @@ namespace vanguard::asset_streaming
                                                   statusEntry.publishedContentFingerprint == incoming.contentFingerprint &&
                                                   !statusEntry.publishedPhysicalPath.Empty();
                     u32 deliveryIndex = 0;
-                    if (alreadyInstalled)
+                    if (alreadyInstalled && !retainInstalled)
                     {
                         statusEntry.publicationState = ProjectAssetDeliveryStageState::Installed;
                         statusEntry.publicationReason = ProjectAssetDeliveryReason::None;
@@ -1926,12 +2301,16 @@ namespace vanguard::asset_streaming
                         continue;
                     }
 
-                    statusEntry.publicationState = statusEntry.publishedBuildFingerprint.IsEmpty()
-                                                       ? ProjectAssetDeliveryStageState::Pending
-                                                       : ProjectAssetDeliveryStageState::Stale;
-                    statusEntry.publicationReason = statusEntry.publishedBuildFingerprint.IsEmpty()
-                                                        ? ProjectAssetDeliveryReason::AwaitingPublication
-                                                        : ProjectAssetDeliveryReason::BuildAdvancedPastPublication;
+                    statusEntry.publicationState = alreadyInstalled
+                                                       ? ProjectAssetDeliveryStageState::Installed
+                                                       : statusEntry.publishedBuildFingerprint.IsEmpty()
+                                                             ? ProjectAssetDeliveryStageState::Pending
+                                                             : ProjectAssetDeliveryStageState::Stale;
+                    statusEntry.publicationReason = alreadyInstalled
+                                                        ? ProjectAssetDeliveryReason::None
+                                                        : statusEntry.publishedBuildFingerprint.IsEmpty()
+                                                              ? ProjectAssetDeliveryReason::AwaitingPublication
+                                                              : ProjectAssetDeliveryReason::BuildAdvancedPastPublication;
 
                     const u64 incomingBytes = DeliveryRecordBytes(incoming);
                     if (committedDeliveryIndex.Find(KeyOf(incoming.output), deliveryIndex))
@@ -1952,6 +2331,67 @@ namespace vanguard::asset_streaming
                 }
                 records.Clear();
                 return true;
+            }
+
+            [[nodiscard]] bool CompleteExplicitCohortDelivery() noexcept
+            {
+                if (!explicitCohort.IsActive())
+                    return true;
+                if (validationIndex == nullptr || explicitCohort.outputs.Size() > config.maximumPendingOutputs)
+                    return false;
+
+                containers::DynamicArray<assets::DependencyRecord> exact(memory::pools::Assets::GetInstance());
+                exact.Reserve(explicitCohort.outputs.Size());
+                if (exact.Capacity() < explicitCohort.outputs.Size())
+                    return false;
+                for (const resources::ResourceReference output : explicitCohort.outputs)
+                {
+                    assets::DependencyRecord record;
+                    if (validationIndex->Find(output, record) != assets::IndexResult::Success || record.output != output)
+                        return false;
+                    const u32 previous = exact.Size();
+                    exact.PushBack(static_cast<assets::DependencyRecord&&>(record));
+                    if (exact.Size() != previous + 1u)
+                        return false;
+                }
+                if (!AdoptCommittedDelivery(exact, explicitCohort.acceptedGeneration, true))
+                    return false;
+
+                concurrency::ScopedLock<concurrency::Mutex> lock(deliveryMutex);
+                for (const resources::ResourceReference output : explicitCohort.outputs)
+                {
+                    u32 deliveryIndex = 0u;
+                    u32 statusIndex = 0u;
+                    if (!committedDeliveryIndex.Find(KeyOf(output), deliveryIndex) || deliveryIndex >= committedDelivery.Size() ||
+                        committedDelivery[deliveryIndex].output != output ||
+                        !outputStatusIndex.Find(KeyOf(output), statusIndex) || statusIndex >= outputStatuses.Size() ||
+                        outputStatuses[statusIndex].resource != output ||
+                        outputStatuses[statusIndex].authoredGeneration != explicitCohort.acceptedGeneration ||
+                        outputStatuses[statusIndex].committedBuildFingerprint != committedDelivery[deliveryIndex].buildFingerprint ||
+                        outputStatuses[statusIndex].committedContentFingerprint != committedDelivery[deliveryIndex].contentFingerprint)
+                        return false;
+                }
+                explicitCohort.deliveryComplete = true;
+                return true;
+            }
+
+            void DropExplicitCohortDelivery() noexcept
+            {
+                if (!explicitCohort.IsActive())
+                    return;
+                concurrency::ScopedLock<concurrency::Mutex> lock(deliveryMutex);
+                for (const resources::ResourceReference output : explicitCohort.outputs)
+                {
+                    u32 deliveryIndex = 0u;
+                    if (!committedDeliveryIndex.Find(KeyOf(output), deliveryIndex) || deliveryIndex >= committedDelivery.Size())
+                        continue;
+                    u32 statusIndex = 0u;
+                    if (!outputStatusIndex.Find(KeyOf(output), statusIndex) || statusIndex >= outputStatuses.Size() ||
+                        outputStatuses[statusIndex].authoredGeneration != explicitCohort.acceptedGeneration)
+                        continue;
+                    RemoveCommittedDeliveryLocked(deliveryIndex);
+                }
+                explicitCohort.Reset();
             }
 
             [[nodiscard]] bool CanTrackPublication(const resources::ResourceReference output) const noexcept
@@ -2296,6 +2736,38 @@ namespace vanguard::asset_streaming
             [[nodiscard]] bool HasPublishableDelivery() const noexcept
             {
                 concurrency::ScopedLock<concurrency::Mutex> lock(deliveryMutex);
+                if (explicitCohort.IsActive())
+                {
+                    if (explicitCohort.publicationBlocked)
+                    {
+                        for (const assets::DependencyRecord& record : committedDelivery)
+                        {
+                            if (explicitCohort.Contains(record.output))
+                                continue;
+                            u32 statusIndex = 0u;
+                            if (outputStatusIndex.Find(KeyOf(record.output), statusIndex) && statusIndex < outputStatuses.Size() &&
+                                !outputStatuses[statusIndex].publicationRetryRequired)
+                                return true;
+                        }
+                        return false;
+                    }
+                    if (!explicitCohort.deliveryComplete)
+                        return false;
+                    for (const resources::ResourceReference output : explicitCohort.outputs)
+                    {
+                        u32 deliveryIndex = 0u;
+                        u32 statusIndex = 0u;
+                        if (!committedDeliveryIndex.Find(KeyOf(output), deliveryIndex) || deliveryIndex >= committedDelivery.Size() ||
+                            committedDelivery[deliveryIndex].output != output ||
+                            !outputStatusIndex.Find(KeyOf(output), statusIndex) || statusIndex >= outputStatuses.Size())
+                            return false;
+                        const ProjectAssetOutputDeliveryStatus& statusEntry = outputStatuses[statusIndex];
+                        if (statusEntry.resource != output || statusEntry.authoredGeneration != explicitCohort.acceptedGeneration ||
+                            statusEntry.publicationRetryRequired)
+                            return false;
+                    }
+                    return true;
+                }
                 for (const assets::DependencyRecord& record : committedDelivery)
                 {
                     u32 statusIndex = 0;
@@ -2308,11 +2780,34 @@ namespace vanguard::asset_streaming
             }
 
             void MarkPublishableDeliveriesFailed(
-                const ProjectAssetDeliveryReason reason = ProjectAssetDeliveryReason::PublicationFailed) noexcept
+                const ProjectAssetDeliveryReason reason = ProjectAssetDeliveryReason::PublicationFailed,
+                const bool cohortAware = true) noexcept
             {
                 concurrency::ScopedLock<concurrency::Mutex> lock(deliveryMutex);
+                if (cohortAware && explicitCohort.IsActive())
+                {
+                    explicitCohort.publicationBlocked = true;
+                    for (const resources::ResourceReference output : explicitCohort.outputs)
+                    {
+                        u32 statusIndex = 0u;
+                        if (!outputStatusIndex.Find(KeyOf(output), statusIndex) || statusIndex >= outputStatuses.Size())
+                            continue;
+                        ProjectAssetOutputDeliveryStatus& statusEntry = outputStatuses[statusIndex];
+                        if (statusEntry.resource != output ||
+                            statusEntry.authoredGeneration != explicitCohort.acceptedGeneration)
+                            continue;
+                        statusEntry.publicationRetryRequired = true;
+                        statusEntry.publicationReason = reason;
+                        statusEntry.publicationState = statusEntry.publishedPhysicalPath.Empty()
+                                                           ? ProjectAssetDeliveryStageState::Failed
+                                                           : ProjectAssetDeliveryStageState::Stale;
+                    }
+                    return;
+                }
                 for (const assets::DependencyRecord& record : committedDelivery)
                 {
+                    if (explicitCohort.IsActive() && explicitCohort.Contains(record.output))
+                        continue;
                     u32 statusIndex = 0;
                     if (!outputStatusIndex.Find(KeyOf(record.output), statusIndex) || statusIndex >= outputStatuses.Size())
                         continue;
@@ -2330,6 +2825,43 @@ namespace vanguard::asset_streaming
             [[nodiscard]] bool RetryPublication(const resources::ResourceReference output) noexcept
             {
                 concurrency::ScopedLock<concurrency::Mutex> lock(deliveryMutex);
+                if (explicitCohort.IsActive())
+                {
+                    if (!explicitCohort.Contains(output) || !explicitCohort.deliveryComplete)
+                        return false;
+                    bool anyRetry = false;
+                    for (const resources::ResourceReference cohortOutput : explicitCohort.outputs)
+                    {
+                        u32 deliveryIndex = 0u;
+                        u32 statusIndex = 0u;
+                        if (!committedDeliveryIndex.Find(KeyOf(cohortOutput), deliveryIndex) ||
+                            deliveryIndex >= committedDelivery.Size() || committedDelivery[deliveryIndex].output != cohortOutput ||
+                            !outputStatusIndex.Find(KeyOf(cohortOutput), statusIndex) || statusIndex >= outputStatuses.Size())
+                            return false;
+                        ProjectAssetOutputDeliveryStatus& statusEntry = outputStatuses[statusIndex];
+                        if (statusEntry.resource != cohortOutput ||
+                            statusEntry.authoredGeneration != explicitCohort.acceptedGeneration)
+                            return false;
+                        anyRetry = anyRetry || statusEntry.publicationRetryRequired;
+                    }
+                    if (!anyRetry)
+                        return false;
+                    for (const resources::ResourceReference cohortOutput : explicitCohort.outputs)
+                    {
+                        u32 statusIndex = 0u;
+                        static_cast<void>(outputStatusIndex.Find(KeyOf(cohortOutput), statusIndex));
+                        ProjectAssetOutputDeliveryStatus& statusEntry = outputStatuses[statusIndex];
+                        statusEntry.publicationRetryRequired = false;
+                        statusEntry.publicationReason = statusEntry.publishedPhysicalPath.Empty()
+                                                            ? ProjectAssetDeliveryReason::AwaitingPublication
+                                                            : ProjectAssetDeliveryReason::BuildAdvancedPastPublication;
+                        statusEntry.publicationState = statusEntry.publishedPhysicalPath.Empty()
+                                                           ? ProjectAssetDeliveryStageState::Pending
+                                                           : ProjectAssetDeliveryStageState::Stale;
+                    }
+                    explicitCohort.publicationBlocked = false;
+                    return true;
+                }
                 u32 deliveryIndex = 0;
                 u32 statusIndex = 0;
                 if (!committedDeliveryIndex.Find(KeyOf(output), deliveryIndex) || deliveryIndex >= committedDelivery.Size() ||
@@ -2401,7 +2933,8 @@ namespace vanguard::asset_streaming
                 if (buildSystem == nullptr)
                     return DeliveryValidationResult::Unavailable;
                 assets::OwnedBuildRequest owned;
-                if (validationBuilds->Resolve(*validationSources, record.output, owned) != assets::ProjectAssetBuildResult::Success)
+                if (validationBuilds->ResolveForValidation(*validationSources, record.output, owned) !=
+                    assets::ProjectAssetBuildResult::Success)
                     return DeliveryValidationResult::Stale;
                 const assets::BuildRequest request = owned.View();
                 assets::BuildPlan plan;
@@ -2438,7 +2971,7 @@ namespace vanguard::asset_streaming
                     for (const assets::OwnedBuildRequest& expected : state->active.currentRequests)
                     {
                         assets::OwnedBuildRequest owned;
-                        if (state->validationBuilds->Resolve(*state->validationSources, expected.outputReference, owned) !=
+                        if (state->validationBuilds->ResolveForValidation(*state->validationSources, expected.outputReference, owned) !=
                             assets::ProjectAssetBuildResult::Success)
                             return assets::RecookPreCommitValidationResult::Reject;
                         const assets::BuildRequest request = owned.View();
@@ -2452,7 +2985,7 @@ namespace vanguard::asset_streaming
                 for (const assets::DependencyRecord& record : records)
                 {
                     assets::OwnedBuildRequest owned;
-                    if (state->validationBuilds->Resolve(*state->validationSources, record.output, owned) !=
+                    if (state->validationBuilds->ResolveForValidation(*state->validationSources, record.output, owned) !=
                         assets::ProjectAssetBuildResult::Success)
                         return assets::RecookPreCommitValidationResult::Reject;
                     const assets::BuildRequest request = owned.View();
@@ -2463,12 +2996,158 @@ namespace vanguard::asset_streaming
                         return assets::RecookPreCommitValidationResult::Reject;
                 }
 
+                if (state->explicitCohort.IsActive())
+                {
+                    containers::DynamicArray<u64> cohortRecordBytes(memory::pools::Assets::GetInstance());
+                    cohortRecordBytes.Resize(state->explicitCohort.outputs.Size());
+                    if (cohortRecordBytes.Size() != state->explicitCohort.outputs.Size())
+                        return assets::RecookPreCommitValidationResult::Failed;
+
+                    for (u32 cohortIndex = 0u; cohortIndex < state->explicitCohort.outputs.Size(); ++cohortIndex)
+                    {
+                        const resources::ResourceReference output = state->explicitCohort.outputs[cohortIndex];
+                        assets::OwnedBuildRequest owned;
+                        if (state->validationBuilds->ResolveForValidation(*state->validationSources, output, owned) !=
+                            assets::ProjectAssetBuildResult::Success)
+                            return assets::RecookPreCommitValidationResult::Reject;
+                        const assets::BuildRequest request = owned.View();
+                        assets::BuildPlan plan;
+                        if (buildSystem->Prepare(request, plan) != assets::Result::Success ||
+                            state->validationIndex->MaterializeGeneratedDependencyContent(plan, records) != assets::IndexResult::Success)
+                            return assets::RecookPreCommitValidationResult::Reject;
+
+                        const assets::DependencyRecord* evidence = nullptr;
+                        for (const assets::DependencyRecord& staged : records)
+                            if (staged.output == output)
+                            {
+                                evidence = &staged;
+                                break;
+                            }
+                        assets::DependencyRecord committed;
+                        if (evidence == nullptr)
+                        {
+                            if (state->validationIndex->Find(output, committed) != assets::IndexResult::Success)
+                                return assets::RecookPreCommitValidationResult::Reject;
+                            evidence = &committed;
+                        }
+                        if (evidence->output != output || evidence->buildFingerprint.IsEmpty() ||
+                            evidence->contentFingerprint.IsEmpty() || !SameBuildEvidence(*evidence, request, plan))
+                            return assets::RecookPreCommitValidationResult::Reject;
+                        cohortRecordBytes[cohortIndex] = DeliveryRecordBytes(*evidence);
+                    }
+
+                    concurrency::ScopedLock<concurrency::Mutex> lock(state->deliveryMutex);
+                    u32 addedRecords = 0u;
+                    u32 addedStatuses = 0u;
+                    u64 prospectiveBytes = state->committedDeliveryBytes;
+                    for (u32 recordIndex = 0u; recordIndex < records.Count(); ++recordIndex)
+                    {
+                        const assets::DependencyRecord& record = records[recordIndex];
+                        if (!record.output.IsValid() || !record.output.IsTyped() || record.buildFingerprint.IsEmpty() ||
+                            record.contentFingerprint.IsEmpty())
+                            return assets::RecookPreCommitValidationResult::Failed;
+                        for (u32 previous = 0u; previous < recordIndex; ++previous)
+                            if (records[previous].output.GetPath().Id() == record.output.GetPath().Id())
+                                return assets::RecookPreCommitValidationResult::Failed;
+
+                        u32 existing = 0u;
+                        if (state->committedDeliveryIndex.Find(KeyOf(record.output), existing))
+                        {
+                            if (existing >= state->committedDelivery.Size() || state->committedDelivery[existing].output != record.output)
+                                return assets::RecookPreCommitValidationResult::Failed;
+                            const u64 previousBytes = DeliveryRecordBytes(state->committedDelivery[existing]);
+                            if (prospectiveBytes < previousBytes)
+                                return assets::RecookPreCommitValidationResult::Failed;
+                            prospectiveBytes -= previousBytes;
+                        }
+                        else
+                        {
+                            ++addedRecords;
+                        }
+                        const u64 recordBytes = DeliveryRecordBytes(record);
+                        if (prospectiveBytes > state->config.maximumCapturedEvidenceBytes ||
+                            recordBytes > state->config.maximumCapturedEvidenceBytes - prospectiveBytes)
+                        {
+                            state->workerDeliveryCapacityExceeded = true;
+                            return assets::RecookPreCommitValidationResult::Failed;
+                        }
+                        prospectiveBytes += recordBytes;
+
+                        if (state->outputStatusIndex.Find(KeyOf(record.output), existing))
+                        {
+                            if (existing >= state->outputStatuses.Size() || state->outputStatuses[existing].resource != record.output)
+                                return assets::RecookPreCommitValidationResult::Failed;
+                        }
+                        else
+                        {
+                            ++addedStatuses;
+                        }
+                    }
+                    for (u32 cohortIndex = 0u; cohortIndex < state->explicitCohort.outputs.Size(); ++cohortIndex)
+                    {
+                        const resources::ResourceReference output = state->explicitCohort.outputs[cohortIndex];
+                        bool stagedOutput = false;
+                        for (const assets::DependencyRecord& record : records)
+                            if (record.output.GetPath().Id() == output.GetPath().Id())
+                            {
+                                if (record.output != output)
+                                    return assets::RecookPreCommitValidationResult::Failed;
+                                stagedOutput = true;
+                                break;
+                            }
+                        if (stagedOutput)
+                            continue;
+                        u32 existing = 0u;
+                        if (state->committedDeliveryIndex.Find(KeyOf(output), existing))
+                        {
+                            if (existing >= state->committedDelivery.Size() || state->committedDelivery[existing].output != output)
+                                return assets::RecookPreCommitValidationResult::Failed;
+                            const u64 previousBytes = DeliveryRecordBytes(state->committedDelivery[existing]);
+                            if (prospectiveBytes < previousBytes)
+                                return assets::RecookPreCommitValidationResult::Failed;
+                            prospectiveBytes -= previousBytes;
+                        }
+                        else
+                        {
+                            ++addedRecords;
+                        }
+                        const u64 recordBytes = cohortRecordBytes[cohortIndex];
+                        if (prospectiveBytes > state->config.maximumCapturedEvidenceBytes ||
+                            recordBytes > state->config.maximumCapturedEvidenceBytes - prospectiveBytes)
+                        {
+                            state->workerDeliveryCapacityExceeded = true;
+                            return assets::RecookPreCommitValidationResult::Failed;
+                        }
+                        prospectiveBytes += recordBytes;
+
+                        if (state->outputStatusIndex.Find(KeyOf(output), existing))
+                        {
+                            if (existing >= state->outputStatuses.Size() || state->outputStatuses[existing].resource != output)
+                                return assets::RecookPreCommitValidationResult::Failed;
+                        }
+                        else
+                        {
+                            ++addedStatuses;
+                        }
+                    }
+                    if (state->committedDelivery.Size() + addedRecords > state->config.maximumPendingOutputs ||
+                        state->committedDelivery.Size() + addedRecords > state->committedDelivery.Capacity() ||
+                        state->committedDeliveryIndex.Size() + addedRecords > state->committedDeliveryIndex.Capacity() ||
+                        state->outputStatuses.Size() + addedStatuses > state->maximumOutputStatuses ||
+                        state->outputStatuses.Size() + addedStatuses > state->outputStatuses.Capacity() ||
+                        state->outputStatusIndex.Size() + addedStatuses > state->outputStatusIndex.Capacity())
+                    {
+                        state->workerDeliveryCapacityExceeded = true;
+                        return assets::RecookPreCommitValidationResult::Failed;
+                    }
+                }
+
                 // P1 must know before VADI visibility that the exact committed
                 // evidence and its per-output status can be retained. A failure
                 // here rolls the transaction back through the existing validator
                 // contract instead of committing an output whose delivery token
                 // the pipeline cannot own.
-                if (!records.Empty() && !state->CanAcceptCommittedDelivery(records))
+                if (!state->explicitCohort.IsActive() && !records.Empty() && !state->CanAcceptCommittedDelivery(records))
                 {
                     state->workerDeliveryCapacityExceeded = true;
                     return assets::RecookPreCommitValidationResult::Failed;
@@ -2478,6 +3157,37 @@ namespace vanguard::asset_streaming
                 return !after.overflow && after.generation == before.generation
                            ? assets::RecookPreCommitValidationResult::Accept
                            : assets::RecookPreCommitValidationResult::Reject;
+            }
+
+            [[nodiscard]] static assets::RecookPreCommitValidationResult ValidateRetirements(
+                const containers::ArraySpan<const assets::DependencyRecord> records,
+                const containers::ArraySpan<const resources::ResourceReference> retirements, void* const userData) noexcept
+            {
+                const assets::RecookPreCommitValidationResult fresh = ValidatePreCommit(records, userData);
+                if (fresh != assets::RecookPreCommitValidationResult::Accept)
+                    return fresh;
+                auto* const state = static_cast<AutomaticRecookState*>(userData);
+                if (state == nullptr)
+                    return assets::RecookPreCommitValidationResult::Failed;
+
+                containers::DynamicArray<resources::ResourceReference> expectedRetirements(memory::pools::Assets::GetInstance());
+                containers::DynamicArray<resources::ResourceReference> successors(memory::pools::Assets::GetInstance());
+                if (!state->BuildExplicitCohortRetirementPlan(expectedRetirements, successors) || successors.Empty() ||
+                    expectedRetirements.Size() != retirements.Count())
+                    return assets::RecookPreCommitValidationResult::Reject;
+                for (const resources::ResourceReference expected : expectedRetirements)
+                {
+                    bool found = false;
+                    for (const resources::ResourceReference retired : retirements)
+                        if (retired == expected)
+                        {
+                            found = true;
+                            break;
+                        }
+                    if (!found)
+                        return assets::RecookPreCommitValidationResult::Reject;
+                }
+                return assets::RecookPreCommitValidationResult::Accept;
             }
 
             [[nodiscard]] bool Initialize(assets::ProjectAssetBuildSystem& builds, const assets::SourceDatabase& sources,
@@ -2494,6 +3204,8 @@ namespace vanguard::asset_streaming
                 recookConfig.maximumRootRequestsPerBatch = config.maximumPendingOutputs;
                 recookConfig.maximumValidationRecordsPerBatch = config.maximumPendingOutputs;
                 recookConfig.maximumValidationEvidenceBytes = config.maximumCapturedEvidenceBytes;
+                recookConfig.isConfirmedHistoricalOutput = &IsConfirmedHistoricalOutput;
+                recookConfig.historicalOutputUserData = this;
                 validationBuilds = &builds;
                 validationSources = &sources;
                 validationIndex = index;
@@ -2509,7 +3221,7 @@ namespace vanguard::asset_streaming
                     outputStatusIndex.Capacity() < maximumOutputStatuses ||
                     workerRetiredLooseCaptures.Capacity() < config.maximumPendingOutputs)
                     return false;
-                return recooker.Initialize(*buildSystem, *graph, *index, &Resolve, &builds, recookConfig);
+                return recooker.Initialize(*buildSystem, *graph, *index, &Resolve, this, recookConfig);
             }
 
             [[nodiscard]] bool IsEnabled() const noexcept
@@ -2521,7 +3233,135 @@ namespace vanguard::asset_streaming
 
             [[nodiscard]] bool HasExplicitActivity() const noexcept { return explicitActivity; }
 
+            [[nodiscard]] bool HasExplicitCohort() const noexcept { return explicitCohort.IsActive(); }
+
+            [[nodiscard]] bool MatchesExplicitCohort(const ProjectAssetCohortIntent& intent) const noexcept
+            {
+                if (!explicitCohort.IsActive() || !intent.IsActive() || !(explicitCohort.asset == intent.asset) ||
+                    explicitCohort.outputs.Size() != intent.successorOutputs.Size())
+                    return false;
+                for (const resources::ResourceReference expected : intent.successorOutputs)
+                {
+                    bool found = false;
+                    for (const resources::ResourceReference output : explicitCohort.outputs)
+                        if (output == expected)
+                        {
+                            found = true;
+                            break;
+                        }
+                    if (!found)
+                        return false;
+                }
+                return true;
+            }
+
             [[nodiscard]] bool OwnsAdmission() const noexcept { return admissionOwned; }
+
+            [[nodiscard]] bool BuildExplicitCohortRetirementPlan(
+                containers::DynamicArray<resources::ResourceReference>& retirements,
+                containers::DynamicArray<resources::ResourceReference>& successors) const noexcept
+            {
+                retirements.Clear();
+                successors.Clear();
+                if (!explicitCohort.IsActive())
+                    return true;
+
+                const ProjectAssetAutomaticPendingAsset* topology = nullptr;
+                for (const ProjectAssetAutomaticPendingAsset& asset : active.assets)
+                    if (asset.asset == explicitCohort.asset)
+                    {
+                        if (topology != nullptr)
+                            return false;
+                        topology = &asset;
+                    }
+
+                const auto contains = [](const containers::DynamicArray<resources::ResourceReference>& values,
+                                         const resources::ResourceReference value) noexcept
+                {
+                    for (const resources::ResourceReference candidate : values)
+                        if (candidate == value)
+                            return true;
+                    return false;
+                };
+                if (topology != nullptr)
+                {
+                    if (topology->current.outputs.Size() != explicitCohort.outputs.Size())
+                        return false;
+                    for (const resources::ResourceReference output : topology->current.outputs)
+                        if (!contains(explicitCohort.outputs, output))
+                            return false;
+                    for (const resources::ResourceReference output : explicitCohort.outputs)
+                        if (!contains(topology->current.outputs, output))
+                            return false;
+                }
+
+                successors.Reserve(explicitCohort.outputs.Size());
+                retirements.Reserve(topology != nullptr ? topology->previous.outputs.Size() : 0u);
+                if (successors.Capacity() < explicitCohort.outputs.Size() ||
+                    (topology != nullptr && retirements.Capacity() < topology->previous.outputs.Size()))
+                    return false;
+                for (const resources::ResourceReference output : explicitCohort.outputs)
+                {
+                    const u32 previous = successors.Size();
+                    successors.PushBack(output);
+                    if (successors.Size() != previous + 1u)
+                        return false;
+                }
+                const containers::ArraySpan<const resources::ResourceReference> predecessors =
+                    !explicitCohort.predecessorOutputs.Empty()
+                        ? containers::ArraySpan<const resources::ResourceReference>{explicitCohort.predecessorOutputs.TypedData(),
+                                                                                   explicitCohort.predecessorOutputs.Size()}
+                        : topology != nullptr
+                              ? containers::ArraySpan<const resources::ResourceReference>{topology->previous.outputs.TypedData(),
+                                                                                         topology->previous.outputs.Size()}
+                              : containers::ArraySpan<const resources::ResourceReference>{};
+                retirements.Reserve(predecessors.Count());
+                if (retirements.Capacity() < predecessors.Count())
+                    return false;
+                for (const resources::ResourceReference output : predecessors)
+                    if (!contains(explicitCohort.outputs, output))
+                    {
+                        const u32 previous = retirements.Size();
+                        retirements.PushBack(output);
+                        if (retirements.Size() != previous + 1u)
+                            return false;
+                    }
+                return !successors.Empty();
+            }
+
+            [[nodiscard]] bool ProtectsTopologyPredecessor(const resources::ResourceReference output) const noexcept
+            {
+                if (explicitCohort.IsActive())
+                    for (const resources::ResourceReference predecessor : explicitCohort.predecessorOutputs)
+                        if (predecessor == output)
+                            return true;
+                const auto protectedBy = [output](const ProjectAssetAutomaticPendingState& state) noexcept
+                {
+                    for (const ProjectAssetAutomaticPendingAsset& asset : state.assets)
+                    {
+                        bool previous = false;
+                        for (const resources::ResourceReference candidate : asset.previous.outputs)
+                            if (candidate == output)
+                            {
+                                previous = true;
+                                break;
+                            }
+                        if (!previous)
+                            continue;
+                        bool current = false;
+                        for (const resources::ResourceReference candidate : asset.current.outputs)
+                            if (candidate == output)
+                            {
+                                current = true;
+                                break;
+                            }
+                        if (!current)
+                            return true;
+                    }
+                    return false;
+                };
+                return protectedBy(pending) || protectedBy(active);
+            }
 
             [[nodiscard]] bool IsRecoveryAdmission() const noexcept { return admissionOwned && workerWasRecovery; }
 
@@ -2551,6 +3391,8 @@ namespace vanguard::asset_streaming
             {
                 status.activeRoots = workerStats.rootRequests;
                 status.completedRoots = workerStats.succeededRoots + workerStats.failedRoots;
+                status.buildOperations = workerStats.buildOperations;
+                status.completedBuildOperations = workerStats.completedBuildOperations;
             }
 
             void RefreshRetryStatus() noexcept
@@ -2595,7 +3437,9 @@ namespace vanguard::asset_streaming
                 staleRejected = false;
                 pending.Reset();
                 active.Reset();
+                DropExplicitCohortDelivery();
                 recoveryRequested = false;
+                startupRecoveryDeferred = false;
                 admissionOwned = false;
                 pollDispatchFailed = false;
                 pollDispatchRetryRequested = false;
@@ -2604,6 +3448,17 @@ namespace vanguard::asset_streaming
 
             void AdoptPending(ProjectAssetAutomaticPendingState& staged) noexcept
             {
+                if (explicitCohort.IsActive())
+                {
+                    for (const ProjectAssetAutomaticPendingAsset& changed : staged.assets)
+                        if (changed.asset == explicitCohort.asset && changed.latestAcceptedGeneration != 0u &&
+                            changed.latestAcceptedGeneration != explicitCohort.acceptedGeneration)
+                        {
+                            DropExplicitCohortDelivery();
+                            explicitActivity = false;
+                            break;
+                        }
+                }
                 const bool terminalBeforeAdopt = status.state == ProjectAssetAutomaticRecookState::Failed ||
                                                  status.state == ProjectAssetAutomaticRecookState::RecoveryRequired;
                 pending.Swap(staged);
@@ -2639,6 +3494,8 @@ namespace vanguard::asset_streaming
                 if (!output.IsValid() || !output.IsTyped() || validationBuilds == nullptr || validationSources == nullptr ||
                     validationIndex == nullptr)
                     return false;
+                if (explicitCohort.IsActive() && !explicitCohort.Contains(output) && !explicitCohort.publicationBlocked)
+                    return false;
                 // Repeated reconciliation/publication probes for the same broken
                 // exact record must not turn a sticky failed batch back into work.
                 if (HasRepairRequirement(output))
@@ -2666,7 +3523,7 @@ namespace vanguard::asset_streaming
 
             [[nodiscard]] bool QueueExplicitReimport(const ProjectAssetState& asset, const u64 acceptedGeneration) noexcept
             {
-                if (validationBuilds == nullptr || validationSources == nullptr || validationIndex == nullptr)
+                if (explicitCohort.IsActive() || validationBuilds == nullptr || validationSources == nullptr || validationIndex == nullptr)
                     return false;
                 ProjectAssetAutomaticPendingState emptyBase;
                 const bool startingExplicitOnly = !policyEnabled && !explicitActivity;
@@ -2697,6 +3554,131 @@ namespace vanguard::asset_streaming
                 if (!admissionOwned)
                     status.state = status.recoveryRequired ? ProjectAssetAutomaticRecookState::RecoveryRequired
                                                            : ProjectAssetAutomaticRecookState::Pending;
+                return true;
+            }
+
+            [[nodiscard]] bool QueueExplicitCohort(
+                const ProjectAssetState& asset, const u64 acceptedGeneration, const u64 coordinationGeneration,
+                const containers::ArraySpan<const resources::ResourceReference> predecessorOutputs = {},
+                const bool supersedeStartupRecovery = false,
+                const containers::ArraySpan<const assets::OwnedBuildRequest> alreadyResolved = {}) noexcept
+            {
+                const bool replaceStartupRecovery = supersedeStartupRecovery && recoveryRequested && policyEnabled &&
+                                                    !explicitActivity && !workRunning && !admissionOwned &&
+                                                    active.assets.Empty() && active.inputs.Empty() && active.outputs.Empty() &&
+                                                    status.state != ProjectAssetAutomaticRecookState::Failed &&
+                                                    status.state != ProjectAssetAutomaticRecookState::RecoveryRequired;
+                // A durable reviewed cohort may be restored while an earlier
+                // automatic batch has retained terminal/retry recovery evidence.
+                // It cannot be recovered as *ordinary* automatic work because
+                // CanAcquireAutomaticAdmission fences the durable successor
+                // until its exact explicit cohort is installed. Admit that
+                // cohort without discarding active/pending invalidations.
+                const bool retainedRecovery = supersedeStartupRecovery && !explicitActivity &&
+                                               !explicitCohort.IsActive() && !workRunning && !admissionOwned &&
+                                               !publicationSettlementPending &&
+                                               (status.state == ProjectAssetAutomaticRecookState::Failed ||
+                                                status.state == ProjectAssetAutomaticRecookState::RecoveryRequired ||
+                                                !active.assets.Empty() || !active.inputs.Empty() || !active.outputs.Empty());
+                if (validationBuilds == nullptr || validationSources == nullptr || validationIndex == nullptr ||
+                    workRunning || admissionOwned || (recoveryRequested && !replaceStartupRecovery && !retainedRecovery) ||
+                    publicationSettlementPending ||
+                    (explicitActivity && !explicitCohort.IsActive()) ||
+                    ((status.state == ProjectAssetAutomaticRecookState::Failed ||
+                      status.state == ProjectAssetAutomaticRecookState::RecoveryRequired) && !retainedRecovery) ||
+                    ((!active.assets.Empty() || !active.inputs.Empty() || !active.outputs.Empty()) && !retainedRecovery) ||
+                    acceptedGeneration == 0u || coordinationGeneration == 0u || asset.outputs.Empty() ||
+                    asset.outputs.Count() > config.maximumPendingOutputs || predecessorOutputs.Count() > config.maximumPendingOutputs ||
+                    (!predecessorOutputs.Empty() && predecessorOutputs.Data() == nullptr))
+                    return false;
+
+                if (explicitCohort.IsActive())
+                {
+                    if (!(explicitCohort.asset == asset.asset) || explicitCohort.acceptedGeneration == acceptedGeneration)
+                        return false;
+                    DropExplicitCohortDelivery();
+                }
+
+                ProjectAssetAutomaticPendingState emptyBase;
+                const ProjectAssetAutomaticPendingState& base = replaceStartupRecovery ? emptyBase : pending;
+                ProjectAssetAutomaticPendingState staged;
+                if (PrepareProjectAssetAutomaticReimport(base, asset, coordinationGeneration, *validationSources,
+                                                         *validationBuilds, *validationIndex, config, staged, alreadyResolved) !=
+                    ProjectAssetAutomaticPendingPrepareResult::Success)
+                    return false;
+
+                const u64 cohortOutputCount = static_cast<u64>(asset.outputs.Count()) + predecessorOutputs.Count();
+                const u64 cohortBytes = cohortOutputCount * sizeof(resources::ResourceReference);
+                if (staged.capturedEvidenceBytes > config.maximumCapturedEvidenceBytes ||
+                    cohortBytes > config.maximumCapturedEvidenceBytes - staged.capturedEvidenceBytes)
+                    return false;
+
+                ExplicitDeliveryCohort cohort;
+                cohort.outputs.Reserve(asset.outputs.Count());
+                cohort.predecessorOutputs.Reserve(predecessorOutputs.Count());
+                if (cohort.outputs.Capacity() < asset.outputs.Count() ||
+                    cohort.predecessorOutputs.Capacity() < predecessorOutputs.Count())
+                    return false;
+                cohort.asset = asset.asset;
+                cohort.acceptedGeneration = acceptedGeneration;
+                for (const ProjectAssetOutputState& acceptedOutput : asset.outputs)
+                {
+                    const resources::ResourceReference output = acceptedOutput.resource;
+                    if (!output.IsValid() || !output.IsTyped())
+                        return false;
+                    for (const resources::ResourceReference existing : cohort.outputs)
+                        if (existing.GetPath().Id() == output.GetPath().Id())
+                            return false;
+                    const u32 previous = cohort.outputs.Size();
+                    cohort.outputs.PushBack(output);
+                    if (cohort.outputs.Size() != previous + 1u)
+                        return false;
+                }
+                for (const resources::ResourceReference output : predecessorOutputs)
+                {
+                    if (!output.IsValid() || !output.IsTyped())
+                        return false;
+                    for (const resources::ResourceReference existing : cohort.predecessorOutputs)
+                        if (existing.GetPath().Id() == output.GetPath().Id())
+                            return false;
+                    const u32 previous = cohort.predecessorOutputs.Size();
+                    cohort.predecessorOutputs.PushBack(output);
+                    if (cohort.predecessorOutputs.Size() != previous + 1u)
+                        return false;
+                }
+
+                if (!policyEnabled && !retainedRecovery)
+                {
+                    status = {};
+                    staleRejected = false;
+                    recoveryRequested = false;
+                }
+                else if (replaceStartupRecovery)
+                {
+                    // The durable cohort is the only safe successor work while
+                    // its VPAS marker is active. Defer, rather than discard, the
+                    // generic startup recovery that SetEnabled requested; after
+                    // coherent cutover it is reconstructed authoritatively.
+                    recoveryRequested = false;
+                    startupRecoveryDeferred = true;
+                    status.recoveryRequired = false;
+                }
+                else if (retainedRecovery)
+                {
+                    // Recover retained active invalidations together with the
+                    // exact newly-admitted successor; a generic retry cannot
+                    // cross the durable cohort fence safely. The recovery
+                    // planner merges active and pending as one authoritative
+                    // set, and this explicit cohort keeps publication atomic.
+                    recoveryRequested = true;
+                    status.recoveryRequired = false;
+                }
+                pending.Swap(staged);
+                explicitCohort.Swap(cohort);
+                explicitActivity = true;
+                status.dirtyReasons |= ProjectAssetAutomaticRecookDirtyReason::ExplicitReimport;
+                RefreshPendingStatus();
+                status.state = ProjectAssetAutomaticRecookState::Pending;
                 return true;
             }
 
@@ -2784,14 +3766,18 @@ namespace vanguard::asset_streaming
                 if (workerState != assets::RecookState::Succeeded || !batch)
                     return;
                 containers::DynamicArray<assets::DependencyRecord> committed(memory::pools::Assets::GetInstance());
-                if (!batch.TakeCommittedRecords(committed))
-                    return;
-                if (!AdoptCommittedDelivery(committed, workerAcceptedGeneration))
+                if (batch.TakeCommittedRecords(committed) && !AdoptCommittedDelivery(committed, workerAcceptedGeneration))
                 {
                     // The validator already preflighted this exact payload and
                     // all backing containers are reserved. If adoption still
                     // fails, surface explicit recovery rather than claiming the
                     // committed generation has a retained delivery token.
+                    workerDeliveryAdoptionFailed = true;
+                    workerRecoveryRequired = true;
+                    return;
+                }
+                if (explicitCohort.IsActive() && !CompleteExplicitCohortDelivery())
+                {
                     workerDeliveryAdoptionFailed = true;
                     workerRecoveryRequired = true;
                 }
@@ -2807,6 +3793,10 @@ namespace vanguard::asset_streaming
                 workerStats = {};
                 workerState = assets::RecookState::Building;
                 workerFailure = assets::RecookFailure::None;
+                workerRootFailure = {};
+                status.lastRecookFailure = assets::RecookFailure::None;
+                status.firstFailedRoot = {};
+                status.failedRootCount = 0u;
                 workerFinished = false;
                 workerRecoveryRequired = false;
                 workerDeliveryCapacityExceeded = false;
@@ -2865,11 +3855,21 @@ namespace vanguard::asset_streaming
                             active.Swap(recovered);
                         }
 
-                        // Missing/unsupported/conflicting/current-resolution
-                        // failures are explicit dirty diagnostics. P3 never
-                        // fabricates a request for them and never erases them as
-                        // a side effect of successfully cooking unrelated roots.
+                        // Missing assets are accepted tombstones, not failed
+                        // *current* build requests. Preserve their old indexed
+                        // inputs for invalidation; the recooker may only skip a
+                        // retired root with a confirmed absence witness.
+                        // Present but unsupported/conflicted/request-unresolvable
+                        // assets must still fail closed before any build.
+                        bool blockingDiagnostic = false;
                         if (active.diagnostics != 0u)
+                            for (const ProjectAssetAutomaticPendingAsset& asset : active.assets)
+                                if (asset.diagnostic && asset.current.presence != ProjectAssetPresence::Missing)
+                                {
+                                    blockingDiagnostic = true;
+                                    break;
+                                }
+                        if (blockingDiagnostic)
                         {
                             workerState = assets::RecookState::Failed;
                             workerFailure = assets::RecookFailure::RequestResolutionFailed;
@@ -2928,11 +3928,30 @@ namespace vanguard::asset_streaming
                         for (u32 forcedIndex = 0; forcedIndex < active.forcedOutputs.Size(); ++forcedIndex)
                             forcedOutputs[forcedIndex] = active.forcedOutputs[forcedIndex].output;
 
-                        const assets::RecookPreCommitValidator validator{&ValidatePreCommit, this};
-                        batch = recooker.Request({changes.TypedData(), changes.Size()},
-                                                 {explicitOutputs.TypedData(), explicitOutputs.Size()},
-                                                 {forcedOutputs.TypedData(), forcedOutputs.Size()},
-                                                 assets::BuildPriority::Background, validator);
+                        containers::DynamicArray<resources::ResourceReference> retiredOutputs(memory::pools::Assets::GetInstance());
+                        containers::DynamicArray<resources::ResourceReference> retirementSuccessors(memory::pools::Assets::GetInstance());
+                        if (!BuildExplicitCohortRetirementPlan(retiredOutputs, retirementSuccessors))
+                        {
+                            workerState = assets::RecookState::Failed;
+                            workerFailure = assets::RecookFailure::PreCommitValidationFailed;
+                            workerFinished = true;
+                            return;
+                        }
+
+                        const assets::RecookPreCommitValidator validator{
+                            &ValidatePreCommit, this, retirementSuccessors.Empty() ? nullptr : &ValidateRetirements};
+                        if (!retirementSuccessors.Empty())
+                            batch = recooker.Request({changes.TypedData(), changes.Size()},
+                                                     {explicitOutputs.TypedData(), explicitOutputs.Size()},
+                                                     {forcedOutputs.TypedData(), forcedOutputs.Size()},
+                                                     {retiredOutputs.TypedData(), retiredOutputs.Size()},
+                                                     {retirementSuccessors.TypedData(), retirementSuccessors.Size()},
+                                                     assets::BuildPriority::Background, validator);
+                        else
+                            batch = recooker.Request({changes.TypedData(), changes.Size()},
+                                                     {explicitOutputs.TypedData(), explicitOutputs.Size()},
+                                                     {forcedOutputs.TypedData(), forcedOutputs.Size()},
+                                                     assets::BuildPriority::Background, validator);
                         if (!batch)
                         {
                             workerState = assets::RecookState::Failed;
@@ -2943,6 +3962,8 @@ namespace vanguard::asset_streaming
                         workerStats = batch.GetStats();
                         workerState = batch.GetStatus();
                         workerFailure = batch.GetError();
+                        if (batch.HasFinished())
+                            workerRootFailure = batch.GetRootFailureDetail();
                         workerFinished = batch.HasFinished();
                         if (workerFinished)
                         {
@@ -2981,6 +4002,8 @@ namespace vanguard::asset_streaming
                     workerState = batch.GetStatus();
                     workerFailure = batch.GetError();
                     if (workerFinished)
+                        workerRootFailure = batch.GetRootFailureDetail();
+                    if (workerFinished)
                     {
                         AdoptFinishedCommittedDelivery();
                         batch.Reset();
@@ -3001,13 +4024,15 @@ namespace vanguard::asset_streaming
 
             [[nodiscard]] bool DispatchPublication(ProjectLoosePublisher& publisher, filesystem::Manager& files,
                                                    LooseRetirementState& looseRetirement,
-                                                   const SourceChangeAccumulator& changes) noexcept
+                                                   const SourceChangeAccumulator& changes,
+                                                   const ProjectAssetAcceptedBaseline& accepted) noexcept
             {
                 if (workRunning)
                     return false;
                 workerWasRecovery = false;
                 workerPublicationSucceeded = false;
                 workerPublicationStale = false;
+                workerPublishedExplicitCohort = false;
                 workerRepairRequiredOutput = {};
                 workerPublicationResult = ProjectLoosePublicationResult::Success;
                 workerPublicationFailure = {};
@@ -3020,7 +4045,8 @@ namespace vanguard::asset_streaming
                 jobs::Builder builder({jobs::Priority::Latent, jobs::Affinity::AnyWorker}, this);
                 jobs::Task task = jobs::Task::Create([this, publisherPointer = &publisher, filesPointer = &files,
                                                       looseRetirementPointer = &looseRetirement,
-                                                      changesPointer = &changes](const jobs::JobContext&) noexcept
+                                                      changesPointer = &changes,
+                                                      acceptedPointer = &accepted](const jobs::JobContext&) noexcept
                 {
                     WorkCompletion completion(*this);
                     retired.Reset();
@@ -3041,112 +4067,262 @@ namespace vanguard::asset_streaming
                     bool conflict = false;
                     {
                         concurrency::ScopedLock<concurrency::Mutex> lock(deliveryMutex);
-                        u32 seed = committedDelivery.Size();
-                        for (u32 index = 0; index < committedDelivery.Size(); ++index)
+                        bool publishExplicitCohort = explicitCohort.IsActive() && !explicitCohort.publicationBlocked;
+                        // A reviewed cohort may consume generated material/shader
+                        // intermediates which are not themselves authored asset
+                        // outputs. Publish those committed dependencies first;
+                        // their absent visibility is pending work, not evidence
+                        // that the reviewed cohort is stale. The cohort remains
+                        // atomic and retains its original exact successor set.
+                        if (publishExplicitCohort)
                         {
-                            u32 statusIndex = 0;
-                            if (outputStatusIndex.Find(KeyOf(committedDelivery[index].output), statusIndex) &&
-                                statusIndex < outputStatuses.Size() && !outputStatuses[statusIndex].publicationRetryRequired)
+                            for (const resources::ResourceReference output : explicitCohort.outputs)
                             {
-                                seed = index;
-                                break;
-                            }
-                        }
-                        if (seed == committedDelivery.Size())
-                        {
-                            workerPublicationSucceeded = true;
-                            return;
-                        }
-                        included[seed] = 1u;
-
-                        bool changed = true;
-                        while (changed && !conflict)
-                        {
-                            changed = false;
-                            for (u32 index = 0; index < committedDelivery.Size() && !conflict; ++index)
-                            {
-                                const assets::DependencyRecord& record = committedDelivery[index];
-                                if (included[index] != 0u)
+                                u32 outputIndex = 0u;
+                                if (!committedDeliveryIndex.Find(KeyOf(output), outputIndex) ||
+                                    outputIndex >= committedDelivery.Size())
+                                    continue; // The ordinary cohort validator reports this mismatch.
+                                for (const assets::BuildDependency& dependency : committedDelivery[outputIndex].dependencies)
                                 {
-                                    for (const assets::BuildDependency& dependency : record.dependencies)
+                                    if (dependency.role != assets::DependencyRole::Generated ||
+                                        dependency.requirement == assets::DependencyRequirement::Soft ||
+                                        explicitCohort.Contains(dependency.identity))
+                                        continue;
+                                    u32 dependencyIndex = 0u;
+                                    u32 statusIndex = 0u;
+                                    if (!committedDeliveryIndex.Find(KeyOf(dependency.identity), dependencyIndex) ||
+                                        dependencyIndex >= committedDelivery.Size() ||
+                                        committedDelivery[dependencyIndex].contentFingerprint != dependency.content ||
+                                        !outputStatusIndex.Find(KeyOf(dependency.identity), statusIndex) ||
+                                        statusIndex >= outputStatuses.Size() ||
+                                        outputStatuses[statusIndex].publicationRetryRequired)
+                                        continue; // Preserve the existing strict rejection below.
+                                    const ProjectAssetOutputDeliveryStatus& status = outputStatuses[statusIndex];
+                                    if (status.publishedContentFingerprint != dependency.content ||
+                                        status.publishedPhysicalPath.Empty())
                                     {
-                                        if (dependency.role != assets::DependencyRole::Generated ||
-                                            dependency.requirement == assets::DependencyRequirement::Soft)
-                                            continue;
-                                        u32 dependencyIndex = 0;
-                                        if (!committedDeliveryIndex.Find(KeyOf(dependency.identity), dependencyIndex) ||
-                                            dependencyIndex >= committedDelivery.Size())
-                                        {
-                                            u32 publishedStatus = 0;
-                                            if (!outputStatusIndex.Find(KeyOf(dependency.identity), publishedStatus) ||
-                                                publishedStatus >= outputStatuses.Size() ||
-                                                outputStatuses[publishedStatus].publishedContentFingerprint != dependency.content ||
-                                                outputStatuses[publishedStatus].publishedPhysicalPath.Empty() ||
-                                                outputStatuses[publishedStatus].publicationRetryRequired)
-                                            {
-                                                conflict = true;
-                                                break;
-                                            }
-                                            continue;
-                                        }
-                                        if (committedDelivery[dependencyIndex].contentFingerprint != dependency.content)
-                                        {
-                                            conflict = true;
-                                            break;
-                                        }
-                                        u32 dependencyStatus = 0;
-                                        if (!outputStatusIndex.Find(KeyOf(committedDelivery[dependencyIndex].output), dependencyStatus) ||
-                                            dependencyStatus >= outputStatuses.Size() ||
-                                            outputStatuses[dependencyStatus].publicationRetryRequired)
-                                        {
-                                            conflict = true;
-                                            break;
-                                        }
-                                        if (included[dependencyIndex] == 0u)
-                                        {
-                                            included[dependencyIndex] = 1u;
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                                else
-                                {
-                                    bool connected = false;
-                                    for (const assets::BuildDependency& dependency : record.dependencies)
-                                    {
-                                        if (dependency.role != assets::DependencyRole::Generated ||
-                                            dependency.requirement == assets::DependencyRequirement::Soft)
-                                            continue;
-                                        u32 dependencyIndex = 0;
-                                        if (!committedDeliveryIndex.Find(KeyOf(dependency.identity), dependencyIndex) ||
-                                            dependencyIndex >= committedDelivery.Size() || included[dependencyIndex] == 0u)
-                                            continue;
-                                        if (committedDelivery[dependencyIndex].contentFingerprint != dependency.content)
-                                        {
-                                            conflict = true;
-                                            break;
-                                        }
-                                        connected = true;
+                                        publishExplicitCohort = false;
                                         break;
                                     }
-                                    if (conflict || !connected)
-                                        continue;
-                                    u32 recordStatus = 0;
-                                    if (!outputStatusIndex.Find(KeyOf(record.output), recordStatus) || recordStatus >= outputStatuses.Size() ||
-                                        outputStatuses[recordStatus].publicationRetryRequired)
+                                }
+                                if (!publishExplicitCohort)
+                                    break;
+                            }
+                        }
+                        workerPublishedExplicitCohort = publishExplicitCohort;
+                        if (publishExplicitCohort)
+                        {
+                            const ProjectAssetState* const currentAsset = acceptedPointer->LookupAsset(explicitCohort.asset);
+                            if (!explicitCohort.deliveryComplete || explicitCohort.outputs.Empty() ||
+                                explicitCohort.outputs.Size() > config.maximumPendingOutputs || currentAsset == nullptr ||
+                                currentAsset->acceptedGeneration != explicitCohort.acceptedGeneration ||
+                                currentAsset->presence != ProjectAssetPresence::Present ||
+                                currentAsset->outputs.Count() != explicitCohort.outputs.Size())
+                                conflict = true;
+
+                            if (!conflict)
+                            {
+                                for (const resources::ResourceReference output : explicitCohort.outputs)
+                                {
+                                    bool acceptedOutput = false;
+                                    for (const ProjectAssetOutputState& candidate : currentAsset->outputs)
+                                        if (candidate.resource == output)
+                                        {
+                                            acceptedOutput = true;
+                                            break;
+                                        }
+                                    if (!acceptedOutput)
                                     {
                                         conflict = true;
                                         break;
                                     }
-                                    included[index] = 1u;
-                                    changed = true;
+
+                                    u32 deliveryIndex = 0u;
+                                    u32 statusIndex = 0u;
+                                    if (!committedDeliveryIndex.Find(KeyOf(output), deliveryIndex) ||
+                                        deliveryIndex >= committedDelivery.Size() || committedDelivery[deliveryIndex].output != output ||
+                                        !outputStatusIndex.Find(KeyOf(output), statusIndex) || statusIndex >= outputStatuses.Size())
+                                    {
+                                        conflict = true;
+                                        break;
+                                    }
+                                    const ProjectAssetOutputDeliveryStatus& statusEntry = outputStatuses[statusIndex];
+                                    if (statusEntry.resource != output ||
+                                        statusEntry.authoredGeneration != explicitCohort.acceptedGeneration ||
+                                        statusEntry.publicationRetryRequired ||
+                                        statusEntry.committedBuildFingerprint != committedDelivery[deliveryIndex].buildFingerprint ||
+                                        statusEntry.committedContentFingerprint != committedDelivery[deliveryIndex].contentFingerprint)
+                                    {
+                                        conflict = true;
+                                        break;
+                                    }
+                                    included[deliveryIndex] = 1u;
+                                    group.PushBack(deliveryIndex);
                                 }
                             }
-                        }
 
-                        for (u32 index = 0; index < committedDelivery.Size(); ++index)
-                            if (included[index] != 0u)
-                                group.PushBack(index);
+                            for (const u32 index : group)
+                            {
+                                const assets::DependencyRecord& record = committedDelivery[index];
+                                for (const assets::BuildDependency& dependency : record.dependencies)
+                                {
+                                    if (dependency.role != assets::DependencyRole::Generated ||
+                                        dependency.requirement == assets::DependencyRequirement::Soft)
+                                        continue;
+                                    if (explicitCohort.Contains(dependency.identity))
+                                    {
+                                        u32 dependencyIndex = 0;
+                                        if (!committedDeliveryIndex.Find(KeyOf(dependency.identity), dependencyIndex) ||
+                                            dependencyIndex >= committedDelivery.Size() || included[dependencyIndex] == 0u ||
+                                            committedDelivery[dependencyIndex].contentFingerprint != dependency.content)
+                                        {
+                                            conflict = true;
+                                            break;
+                                        }
+                                        continue;
+                                    }
+
+                                    u32 publishedStatus = 0u;
+                                    if (!outputStatusIndex.Find(KeyOf(dependency.identity), publishedStatus) ||
+                                        publishedStatus >= outputStatuses.Size() ||
+                                        outputStatuses[publishedStatus].publishedContentFingerprint != dependency.content ||
+                                        outputStatuses[publishedStatus].publishedPhysicalPath.Empty() ||
+                                        outputStatuses[publishedStatus].publicationRetryRequired)
+                                    {
+                                        conflict = true;
+                                        break;
+                                    }
+                                }
+                                if (conflict)
+                                    break;
+                            }
+                        }
+                        else
+                        {
+                            u32 seed = committedDelivery.Size();
+                            for (u32 index = 0; index < committedDelivery.Size(); ++index)
+                            {
+                                if (explicitCohort.IsActive() && explicitCohort.Contains(committedDelivery[index].output))
+                                    continue;
+                                u32 statusIndex = 0;
+                                if (outputStatusIndex.Find(KeyOf(committedDelivery[index].output), statusIndex) &&
+                                    statusIndex < outputStatuses.Size() && !outputStatuses[statusIndex].publicationRetryRequired)
+                                {
+                                    seed = index;
+                                    break;
+                                }
+                            }
+                            if (seed == committedDelivery.Size())
+                            {
+                                workerPublicationSucceeded = true;
+                                return;
+                            }
+                            included[seed] = 1u;
+
+                            bool changed = true;
+                            while (changed && !conflict)
+                            {
+                                changed = false;
+                                for (u32 index = 0; index < committedDelivery.Size() && !conflict; ++index)
+                                {
+                                    const assets::DependencyRecord& record = committedDelivery[index];
+                                    if (included[index] == 0u && explicitCohort.IsActive() && explicitCohort.Contains(record.output))
+                                        continue;
+                                    if (included[index] != 0u)
+                                    {
+                                        for (const assets::BuildDependency& dependency : record.dependencies)
+                                        {
+                                            if (dependency.role != assets::DependencyRole::Generated ||
+                                                dependency.requirement == assets::DependencyRequirement::Soft)
+                                                continue;
+                                            if (explicitCohort.IsActive() && explicitCohort.Contains(dependency.identity))
+                                            {
+                                                u32 publishedStatus = 0u;
+                                                if (!outputStatusIndex.Find(KeyOf(dependency.identity), publishedStatus) ||
+                                                    publishedStatus >= outputStatuses.Size() ||
+                                                    outputStatuses[publishedStatus].publishedContentFingerprint != dependency.content ||
+                                                    outputStatuses[publishedStatus].publishedPhysicalPath.Empty())
+                                                {
+                                                    conflict = true;
+                                                    break;
+                                                }
+                                                continue;
+                                            }
+                                            u32 dependencyIndex = 0;
+                                            if (!committedDeliveryIndex.Find(KeyOf(dependency.identity), dependencyIndex) ||
+                                                dependencyIndex >= committedDelivery.Size())
+                                            {
+                                                u32 publishedStatus = 0;
+                                                if (!outputStatusIndex.Find(KeyOf(dependency.identity), publishedStatus) ||
+                                                    publishedStatus >= outputStatuses.Size() ||
+                                                    outputStatuses[publishedStatus].publishedContentFingerprint != dependency.content ||
+                                                    outputStatuses[publishedStatus].publishedPhysicalPath.Empty() ||
+                                                    outputStatuses[publishedStatus].publicationRetryRequired)
+                                                {
+                                                    conflict = true;
+                                                    break;
+                                                }
+                                                continue;
+                                            }
+                                            if (committedDelivery[dependencyIndex].contentFingerprint != dependency.content)
+                                            {
+                                                conflict = true;
+                                                break;
+                                            }
+                                            u32 dependencyStatus = 0;
+                                            if (!outputStatusIndex.Find(KeyOf(committedDelivery[dependencyIndex].output), dependencyStatus) ||
+                                                dependencyStatus >= outputStatuses.Size() ||
+                                                outputStatuses[dependencyStatus].publicationRetryRequired)
+                                            {
+                                                conflict = true;
+                                                break;
+                                            }
+                                            if (included[dependencyIndex] == 0u)
+                                            {
+                                                included[dependencyIndex] = 1u;
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        bool connected = false;
+                                        for (const assets::BuildDependency& dependency : record.dependencies)
+                                        {
+                                            if (dependency.role != assets::DependencyRole::Generated ||
+                                                dependency.requirement == assets::DependencyRequirement::Soft)
+                                                continue;
+                                            u32 dependencyIndex = 0;
+                                            if (!committedDeliveryIndex.Find(KeyOf(dependency.identity), dependencyIndex) ||
+                                                dependencyIndex >= committedDelivery.Size() || included[dependencyIndex] == 0u)
+                                                continue;
+                                            if (committedDelivery[dependencyIndex].contentFingerprint != dependency.content)
+                                            {
+                                                conflict = true;
+                                                break;
+                                            }
+                                            connected = true;
+                                            break;
+                                        }
+                                        if (conflict || !connected)
+                                            continue;
+                                        u32 recordStatus = 0;
+                                        if (!outputStatusIndex.Find(KeyOf(record.output), recordStatus) || recordStatus >= outputStatuses.Size() ||
+                                            outputStatuses[recordStatus].publicationRetryRequired)
+                                        {
+                                            conflict = true;
+                                            break;
+                                        }
+                                        included[index] = 1u;
+                                        changed = true;
+                                    }
+                                }
+                            }
+
+                            for (u32 index = 0; index < committedDelivery.Size(); ++index)
+                                if (included[index] != 0u)
+                                    group.PushBack(index);
+                        }
 
                         workerPublicationOutputs.Reserve(group.Size());
                         workerPublicationInfos.Reserve(group.Size());
@@ -3786,6 +4962,9 @@ namespace vanguard::asset_streaming
                         *files, {roots.TypedData(), roots.Size()}, {importers.TypedData(), importers.Size()}, target, sourceDataLimits,
                         journalPath, *accepted, maximumPublishedResources, looseRoot, maximumLooseFiles, candidate, proposed,
                         desired, desiredLookup, looseFiles, &scanFailure);
+                if (sourceResult == assets::SourceDatabaseResult::Success &&
+                    !ApplyCohortIntentDesired(proposed.cohortIntent, desired, desiredLookup, maximumPublishedResources))
+                    sourceResult = assets::SourceDatabaseResult::LimitExceeded;
                 if (sourceResult == assets::SourceDatabaseResult::Success && automaticRecook != nullptr && automaticRecook->IsPolicyEnabled() &&
                     builds != nullptr && index != nullptr)
                 {
@@ -3942,7 +5121,7 @@ namespace vanguard::asset_streaming
         // Single source of truth for source-mutation/build exclusion. An active
         // observation reconciliation, or any live BuildGraph work, forbids source
         // mutation and forbids starting a new observation session.
-        [[nodiscard]] bool CanMutateSources() noexcept
+        [[nodiscard]] bool CanMutateSourcesCoreUnfenced() noexcept
         {
             if (observation.reconcileActive || automaticRecook.OwnsAdmission() || vddcMaintenance.OwnsAdmission() ||
                 looseRetirement.OwnsAdmission())
@@ -3955,14 +5134,536 @@ namespace vanguard::asset_streaming
                    stats.queuedRequestBytes == 0 && stats.activeExecutionBytes == 0 && stats.retainedOutputBytes == 0;
         }
 
+        [[nodiscard]] bool CanMutateSourcesCore() noexcept
+        {
+            return !deferredPlannedImportPrepare.HasWork() && CanMutateSourcesCoreUnfenced();
+        }
+
+        [[nodiscard]] bool CanSettleDeferredPlannedImportPrepare() noexcept
+        {
+            if (!deferredPlannedImportPrepare.IsActive() || deferredPlannedImportPrepare.workRunning ||
+                !CanMutateSourcesCoreUnfenced())
+                return false;
+            const assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            return index != nullptr && !index->HasRetirementProtections();
+        }
+
+        [[nodiscard]] ProjectAssetPipelineResult VerifyIndependentPlannedImportDiskWitness(
+            const assets::AssetId asset, const filesystem::AbsolutePath& sourceRoot,
+            const filesystem::AbsolutePath& sourceDestination, const resources::ResourcePath sourceIdentity,
+            const containers::ArraySpan<const resources::ResourcePath> stagedOutputPaths,
+            ProjectAssetPipelineFailure* const failure, const bool collisionOnly = false) noexcept
+        {
+            const auto stale = [&](const std::source_location site = std::source_location::current()) noexcept
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::StalePlan;
+                    failure->stalePlanSite = site.line();
+                }
+                return ProjectAssetPipelineResult::StalePlan;
+            };
+            if (!asset.IsValid() || !sourceRoot.IsDirectoryPath() || !sourceDestination.IsFilePath() ||
+                !sourceIdentity.IsValid() || (stagedOutputPaths.Count() != 0u && stagedOutputPaths.Data() == nullptr))
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                          : ProjectAssetPipelineResult::InvalidState;
+
+            const containers::ArraySpan<const assets::SourceRoot> roots = sources->GetRoots();
+            bool writableRoot = false;
+            for (const assets::SourceRoot& root : roots)
+                writableRoot = writableRoot || (!root.readOnly && root.directory == sourceRoot);
+            if (!writableRoot || !SourceIdentityMatchesRoot(sourceRoot, sourceDestination, sourceIdentity))
+                return stale();
+
+            // This is the second authoritative admission proof for an async
+            // independent first import. The earlier preflight remains required,
+            // but a long Prepare window allows unrelated disk writers to race it.
+            // Rebuild the complete candidate immediately before owner Apply and
+            // repeat the exact independent-import collision facts. Check the two
+            // create-only authored paths directly as well: an orphan metadata file
+            // may not be represented as a candidate row, but it is still a stale
+            // reviewed witness and ApplyPrepared must never overwrite it.
+            if (files->FileExist(sourceDestination) || files->FileExist(MetadataPath(sourceDestination)))
+                return stale();
+
+            assets::SourceDatabase verifiedCatalog;
+            filesystem::ScanResult verificationScan = filesystem::ScanResult::Success;
+            assets::SourceDatabaseResult verification = assets::SourceDatabaseResult::Success;
+            if (collisionOnly)
+            {
+                // The complete precommit candidate was already validated on
+                // the owner before staging. The second proof is expressly for
+                // the race opened by asynchronous transaction Prepare: an
+                // unrelated source/VMETA/output identity may now exist on disk.
+                // Rescan still inventories ALL source roots and parses EVERY
+                // VMETA, rebuilding the same path/AssetId/source/output maps
+                // consumed below. Avoid rebuilding references, hashing every
+                // unrelated source, comparing accepted-state deltas or scanning
+                // cooked loose files when none of those results participates
+                // in the final independent-create collision decision.
+                const filesystem::AbsolutePath excludedFiles[] = {
+                    config.operationJournalPath, SuffixedPath(config.operationJournalPath, ".stage")};
+                verification = verifiedCatalog.Rescan(*files, roots, &verificationScan, {excludedFiles, 2u});
+            }
+            else
+            {
+                ProjectAssetAcceptedBaseline verifiedAccepted(config.changeState);
+                containers::DynamicArray<resources::ResourceReference> verifiedDesired(memory::pools::Assets::GetInstance());
+                containers::HashMap<resources::ResourceId, u8> verifiedDesiredLookup(memory::pools::Assets::GetInstance());
+                containers::DynamicArray<filesystem::AbsolutePath> verifiedLooseFiles(memory::pools::Assets::GetInstance());
+                verification = PrepareProjectAssetCandidate(
+                    *files, roots, builds.GetImporters(), config.build.target, config.build.sourceData,
+                    config.operationJournalPath, accepted, config.maximumPublishedResources, config.publication.looseRoot,
+                    config.maximumLooseFiles, verifiedCatalog, verifiedAccepted, verifiedDesired, verifiedDesiredLookup,
+                    verifiedLooseFiles, &verificationScan);
+            }
+            if (verification != assets::SourceDatabaseResult::Success)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::ReconciliationFailed;
+                    failure->sources = verification;
+                }
+                return ProjectAssetPipelineResult::ReconciliationFailed;
+            }
+            if (verifiedCatalog.ContainsAssetIdentity(asset) || verifiedCatalog.LookupResource(sourceDestination) != nullptr)
+                return stale();
+            for (const assets::SourceRecord& source : verifiedCatalog.GetResources())
+                if (source.sourceIdentity == sourceIdentity)
+                    return stale();
+            for (const resources::ResourcePath output : stagedOutputPaths)
+                if (!output.IsValid() || verifiedCatalog.ContainsOutputPath(output))
+                    return stale();
+            return ProjectAssetPipelineResult::Success;
+        }
+
+        [[nodiscard]] bool CanReconcileSources() noexcept
+        {
+            if (!CanMutateSourcesCore())
+                return false;
+            const assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            return index != nullptr && !index->HasRetirementProtections();
+        }
+
+        [[nodiscard]] bool CanMutateSources() noexcept
+        {
+            return CanReconcileSources() && (!accepted.cohortIntent.IsActive() || plannedImportIntentOwner);
+        }
+
+        [[nodiscard]] bool CohortIntentProtectsTopologyPredecessor(
+            const resources::ResourceReference output) const noexcept
+        {
+            if (!accepted.cohortIntent.IsActive())
+                return false;
+            for (const resources::ResourceReference predecessor : accepted.cohortIntent.predecessorOutputs)
+                if (predecessor == output)
+                    return true;
+            return false;
+        }
+
+        [[nodiscard]] ProjectAssetSnapshotResult ReplaceCohortIntent(ProjectAssetCohortIntent& desired) noexcept
+        {
+            accepted.cohortIntent.Swap(desired);
+            const ProjectAssetSnapshotResult persisted =
+                PersistProjectAssetSnapshot(*files, config.build.dependencyIndexRoot, accepted);
+            if (persisted != ProjectAssetSnapshotResult::Success)
+                accepted.cohortIntent.Swap(desired);
+            return persisted;
+        }
+
+        [[nodiscard]] ProjectAssetSnapshotResult ClearCohortIntent() noexcept
+        {
+            if (!accepted.cohortIntent.IsActive())
+                return ProjectAssetSnapshotResult::Success;
+            ProjectAssetCohortIntent empty;
+            return ReplaceCohortIntent(empty);
+        }
+
+        [[nodiscard]] bool CohortIntentMatchesCurrentAcceptedState() const noexcept
+        {
+            const ProjectAssetCohortIntent& intent = accepted.cohortIntent;
+            if (!intent.IsActive())
+                return false;
+            const ProjectAssetState* const state = accepted.LookupAsset(intent.asset);
+            if (state == nullptr || state->presence != ProjectAssetPresence::Present ||
+                state->sourceIdentity != intent.sourceIdentity || state->acceptedGeneration == 0u ||
+                state->outputs.Count() != intent.successorOutputs.Size())
+                return false;
+            for (const resources::ResourceReference expected : intent.successorOutputs)
+            {
+                bool found = false;
+                for (const ProjectAssetOutputState& output : state->outputs)
+                    if (output.resource == expected)
+                    {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool CohortIntentTargetsCurrentMetadata() const noexcept
+        {
+            const ProjectAssetCohortIntent& intent = accepted.cohortIntent;
+            if (!intent.IsActive())
+                return false;
+            const assets::SourceRecord* const source = sources->LookupAsset(intent.asset);
+            if (source == nullptr || source->sourceIdentity != intent.sourceIdentity ||
+                source->metadataResult != assets::MetadataResult::Success || !(source->metadata.id == intent.asset))
+                return false;
+            containers::String canonical;
+            if (assets::EncodeMetadata(source->metadata, canonical) != assets::MetadataResult::Success)
+                return false;
+            return crypto::Sha256(canonical.AsChar(), canonical.Length()) == intent.targetMetadataFingerprint;
+        }
+
+        [[nodiscard]] static bool SameDeferredDiagnostic(const ProjectAssetSourceDiagnostic& left,
+                                                         const ProjectAssetSourceDiagnostic& right) noexcept
+        {
+            return left.sourceRoot == right.sourceRoot && left.sourceIdentity == right.sourceIdentity &&
+                   left.physicalPath == right.physicalPath && left.asset == right.asset &&
+                   left.sourceIssues == right.sourceIssues && left.metadataResult == right.metadataResult &&
+                   left.importState == right.importState && left.referenceScanState == right.referenceScanState &&
+                   left.reasons == right.reasons && left.hasParsedAssetIdentity == right.hasParsedAssetIdentity;
+        }
+
+        [[nodiscard]] static bool SameDeferredDiagnostics(
+            const containers::ArraySpan<const ProjectAssetSourceDiagnostic> left,
+            const containers::ArraySpan<const ProjectAssetSourceDiagnostic> right) noexcept
+        {
+            if (left.Count() != right.Count())
+                return false;
+            for (u32 index = 0u; index < left.Count(); ++index)
+                if (!SameDeferredDiagnostic(left[index], right[index]))
+                    return false;
+            return true;
+        }
+
+        [[nodiscard]] static bool SameDeferredCohortIntent(const ProjectAssetCohortIntent& left,
+                                                           const ProjectAssetCohortIntent& right) noexcept
+        {
+            if (!left.IsActive() || !right.IsActive() || !(left.asset == right.asset) ||
+                left.sourceIdentity != right.sourceIdentity ||
+                left.reviewedAcceptedGeneration != right.reviewedAcceptedGeneration ||
+                left.targetMetadataFingerprint != right.targetMetadataFingerprint ||
+                left.predecessorOutputs.Size() != right.predecessorOutputs.Size() ||
+                left.successorOutputs.Size() != right.successorOutputs.Size())
+                return false;
+            for (u32 index = 0u; index < left.predecessorOutputs.Size(); ++index)
+                if (left.predecessorOutputs[index] != right.predecessorOutputs[index])
+                    return false;
+            for (u32 index = 0u; index < left.successorOutputs.Size(); ++index)
+                if (left.successorOutputs[index] != right.successorOutputs[index])
+                    return false;
+            return true;
+        }
+
+        [[nodiscard]] static bool DeferredOutputsMatchIntent(
+            const containers::ArraySpan<const ProjectAssetOutputState> outputs,
+            const ProjectAssetCohortIntent& intent) noexcept
+        {
+            if (!intent.IsActive() || outputs.Count() != intent.successorOutputs.Size())
+                return false;
+            for (const resources::ResourceReference expected : intent.successorOutputs)
+            {
+                bool found = false;
+                for (const ProjectAssetOutputState& output : outputs)
+                    if (output.resource == expected)
+                    {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool DeferredPlannedImportMatchesPreparedCatchUp(
+            const assets::SourceDatabase& candidate, const ProjectAssetAcceptedBaseline& proposed) const noexcept
+        {
+            const DeferredPlannedImport& deferred = deferredPlannedImport;
+            if (!deferred.IsActive() || !deferred.awaitingOwnedAcceptance || accepted.generation != deferred.baseAcceptedGeneration ||
+                deferred.baseAcceptedGeneration == ~u64{0} || proposed.generation != deferred.baseAcceptedGeneration + 1u ||
+                proposed.changes.Size() != 1u ||
+                !SameDeferredDiagnostics({accepted.diagnostics.TypedData(), accepted.diagnostics.Size()},
+                                         {proposed.diagnostics.TypedData(), proposed.diagnostics.Size()}))
+                return false;
+
+            const ProjectAssetChangeRecord& change = proposed.changes[0];
+            if (!(change.asset == deferred.asset) || change.previous.available || !change.current.available ||
+                change.current.presence != ProjectAssetPresence::Present ||
+                !HasChangeReason(change.reasons, ProjectAssetChangeReason::New) ||
+                change.current.sourceIdentity != deferred.sourceIdentity ||
+                change.current.physicalPath != deferred.sourceDestination ||
+                !change.current.hasSourceContentFingerprint ||
+                change.current.sourceContentFingerprint != deferred.sourceFingerprint ||
+                !SameDeferredCohortIntent(proposed.cohortIntent, accepted.cohortIntent) ||
+                !(proposed.cohortIntent.asset == deferred.asset) ||
+                proposed.cohortIntent.sourceIdentity != deferred.sourceIdentity ||
+                proposed.cohortIntent.targetMetadataFingerprint != deferred.targetMetadataFingerprint ||
+                !DeferredOutputsMatchIntent(change.current.outputs, proposed.cohortIntent))
+                return false;
+
+            const ProjectAssetState* const proposedAsset = proposed.LookupAsset(deferred.asset);
+            if (proposedAsset == nullptr || proposedAsset->presence != ProjectAssetPresence::Present ||
+                proposedAsset->sourceIdentity != deferred.sourceIdentity ||
+                proposedAsset->physicalPath != deferred.sourceDestination ||
+                !proposedAsset->hasSourceContentFingerprint ||
+                proposedAsset->sourceContentFingerprint != deferred.sourceFingerprint ||
+                proposedAsset->acceptedGeneration != proposed.generation ||
+                !DeferredOutputsMatchIntent(proposedAsset->outputs, proposed.cohortIntent))
+                return false;
+
+            const assets::SourceRecord* const source = candidate.LookupAsset(deferred.asset);
+            if (source == nullptr || source->sourceIdentity != deferred.sourceIdentity ||
+                source->path != deferred.sourceDestination || source->metadataResult != assets::MetadataResult::Success ||
+                !(source->metadata.id == deferred.asset))
+                return false;
+            containers::String canonical;
+            return assets::EncodeMetadata(source->metadata, canonical) == assets::MetadataResult::Success &&
+                   crypto::Sha256(canonical.AsChar(), canonical.Length()) == deferred.targetMetadataFingerprint;
+        }
+
+        [[nodiscard]] bool DeferredPlannedImportMatchesCurrentTruth() const noexcept
+        {
+            const DeferredPlannedImport& deferred = deferredPlannedImport;
+            if (!deferred.IsActive() || deferred.awaitingOwnedAcceptance || !accepted.cohortIntent.IsActive() ||
+                deferred.acceptedGeneration == 0u || accepted.generation != deferred.acceptedGeneration ||
+                !(accepted.cohortIntent.asset == deferred.asset) ||
+                accepted.cohortIntent.sourceIdentity != deferred.sourceIdentity ||
+                accepted.cohortIntent.targetMetadataFingerprint != deferred.targetMetadataFingerprint ||
+                !CohortIntentMatchesCurrentAcceptedState() || !CohortIntentTargetsCurrentMetadata())
+                return false;
+            const ProjectAssetState* const state = accepted.LookupAsset(deferred.asset);
+            return state != nullptr && state->presence == ProjectAssetPresence::Present &&
+                   state->sourceIdentity == deferred.sourceIdentity && state->physicalPath == deferred.sourceDestination &&
+                   state->hasSourceContentFingerprint && state->sourceContentFingerprint == deferred.sourceFingerprint &&
+                   state->acceptedGeneration == deferred.acceptedGeneration;
+        }
+
+        [[nodiscard]] bool CanAttemptDeferredPlannedImportCohort() const noexcept
+        {
+            if (!deferredPlannedImport.IsActive() || deferredPlannedImport.awaitingOwnedAcceptance ||
+                deferredPlannedImport.acceptedGeneration == 0u || accepted.generation != deferredPlannedImport.acceptedGeneration ||
+                observation.reconcileActive || observation.initialCatchUpRequired || accumulator.HasRescanRequired() ||
+                vddcMaintenance.OwnsAdmission() || looseRetirement.OwnsAdmission() || automaticRecook.IsRecoveryAdmission() ||
+                automaticRecook.workRunning || automaticRecook.admissionOwned || automaticRecook.publicationSettlementPending)
+                return false;
+            if (automaticRecook.HasExplicitCohort())
+                return automaticRecook.MatchesExplicitCohort(accepted.cohortIntent);
+            return !automaticRecook.HasExplicitActivity();
+        }
+
+        void BeginDeferredPlannedImport(const assets::AssetId asset, const resources::ResourcePath sourceIdentity,
+                                        const filesystem::AbsolutePath& sourceDestination,
+                                        const crypto::Digest256& sourceFingerprint) noexcept
+        {
+            deferredPlannedImport.Reset();
+            deferredPlannedImport.asset = asset;
+            deferredPlannedImport.sourceIdentity = sourceIdentity;
+            deferredPlannedImport.sourceDestination = sourceDestination;
+            deferredPlannedImport.sourceFingerprint = sourceFingerprint;
+            deferredPlannedImport.targetMetadataFingerprint = accepted.cohortIntent.targetMetadataFingerprint;
+            deferredPlannedImport.baseAcceptedGeneration = accepted.generation;
+            deferredPlannedImport.awaitingOwnedAcceptance = true;
+
+            deferredPlannedImportStatus = {};
+            deferredPlannedImportStatus.state = ProjectAssetDeferredPlannedImportState::AwaitingReconciliation;
+            deferredPlannedImportStatus.asset = asset;
+            deferredPlannedImportStatus.result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+        }
+
+        void FailDeferredPlannedImportContinuation(
+            const ProjectAssetPipelineResult result,
+            const ProjectAssetPipelineFailure* const continuationFailure = nullptr) noexcept
+        {
+            if (deferredPlannedImport.IsActive())
+            {
+                deferredPlannedImportStatus.state = ProjectAssetDeferredPlannedImportState::ContinuationFailed;
+                deferredPlannedImportStatus.asset = deferredPlannedImport.asset;
+                deferredPlannedImportStatus.acceptedGeneration = deferredPlannedImport.acceptedGeneration;
+                deferredPlannedImportStatus.result = result;
+                if (continuationFailure != nullptr)
+                {
+                    deferredPlannedImportStatus.build = continuationFailure->build;
+                    deferredPlannedImportStatus.buildRequestOutput = continuationFailure->buildRequestOutput;
+                    deferredPlannedImportStatus.buildRequestOutputIndex = continuationFailure->buildRequestOutputIndex;
+                }
+            }
+            deferredPlannedImport.Reset();
+        }
+
+        void CompleteDeferredPlannedImportContinuation() noexcept
+        {
+            if (deferredPlannedImport.IsActive())
+            {
+                deferredPlannedImportStatus.state = ProjectAssetDeferredPlannedImportState::CohortQueued;
+                deferredPlannedImportStatus.asset = deferredPlannedImport.asset;
+                deferredPlannedImportStatus.acceptedGeneration = deferredPlannedImport.acceptedGeneration;
+                deferredPlannedImportStatus.result = ProjectAssetPipelineResult::Success;
+                deferredPlannedImportStatus.build = assets::ProjectAssetBuildResult::Success;
+                deferredPlannedImportStatus.buildRequestOutput = {};
+                deferredPlannedImportStatus.buildRequestOutputIndex = ~u32{0};
+            }
+            deferredPlannedImport.Reset();
+        }
+
+        [[nodiscard]] ProjectAssetSnapshotResult RebaseCohortIntentToCurrentAccepted() noexcept
+        {
+            if (!accepted.cohortIntent.IsActive())
+                return ProjectAssetSnapshotResult::Success;
+            const ProjectAssetState* const state = accepted.LookupAsset(accepted.cohortIntent.asset);
+            if (state == nullptr)
+                return accepted.cohortIntent.predecessorOutputs.Empty() ? ClearCohortIntent()
+                                                                        : ProjectAssetSnapshotResult::InvalidState;
+            if (state->presence != ProjectAssetPresence::Present || state->outputs.Empty() ||
+                state->sourceIdentity != accepted.cohortIntent.sourceIdentity)
+                return ProjectAssetSnapshotResult::InvalidState;
+            const assets::SourceRecord* const source = sources->LookupAsset(state->asset);
+            if (source == nullptr || source->sourceIdentity != state->sourceIdentity ||
+                source->metadataResult != assets::MetadataResult::Success || !(source->metadata.id == state->asset))
+                return ProjectAssetSnapshotResult::InvalidState;
+
+            ProjectAssetCohortIntent rebased;
+            rebased.predecessorOutputs.Reserve(accepted.cohortIntent.predecessorOutputs.Size());
+            rebased.successorOutputs.Reserve(state->outputs.Count());
+            if (rebased.predecessorOutputs.Capacity() < accepted.cohortIntent.predecessorOutputs.Size() ||
+                rebased.successorOutputs.Capacity() < state->outputs.Count())
+                return ProjectAssetSnapshotResult::OutOfMemory;
+            for (const resources::ResourceReference predecessor : accepted.cohortIntent.predecessorOutputs)
+                rebased.predecessorOutputs.PushBack(predecessor);
+            for (const ProjectAssetOutputState& output : state->outputs)
+                rebased.successorOutputs.PushBack(output.resource);
+            if (rebased.predecessorOutputs.Size() != accepted.cohortIntent.predecessorOutputs.Size() ||
+                rebased.successorOutputs.Size() != state->outputs.Count())
+                return ProjectAssetSnapshotResult::OutOfMemory;
+
+            const auto less = [](const resources::ResourceReference left, const resources::ResourceReference right) noexcept
+            {
+                if (left.GetPath().Id() != right.GetPath().Id())
+                    return left.GetPath().Id() < right.GetPath().Id();
+                return left.ExpectedType() < right.ExpectedType();
+            };
+            if (rebased.successorOutputs.Size() > 1u)
+                std::sort(rebased.successorOutputs.Begin(), rebased.successorOutputs.End(), less);
+            for (u32 index = 1u; index < rebased.successorOutputs.Size(); ++index)
+                if (!less(rebased.successorOutputs[index - 1u], rebased.successorOutputs[index]))
+                    return ProjectAssetSnapshotResult::InvalidState;
+
+            containers::String canonical;
+            if (assets::EncodeMetadata(source->metadata, canonical) != assets::MetadataResult::Success)
+                return ProjectAssetSnapshotResult::InvalidState;
+            rebased.asset = state->asset;
+            rebased.sourceIdentity = state->sourceIdentity;
+            rebased.reviewedAcceptedGeneration = accepted.generation;
+            rebased.targetMetadataFingerprint = crypto::Sha256(canonical.AsChar(), canonical.Length());
+            if (!rebased.IsActive())
+                return ProjectAssetSnapshotResult::InvalidState;
+            return ReplaceCohortIntent(rebased);
+        }
+
+        [[nodiscard]] bool CohortIntentSuccessorVisibleExact() noexcept
+        {
+            const ProjectAssetCohortIntent& intent = accepted.cohortIntent;
+            const assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            if (!intent.IsActive() || index == nullptr || !CohortIntentMatchesCurrentAcceptedState())
+                return false;
+            for (const resources::ResourceReference output : intent.successorOutputs)
+            {
+                const i32 publicationIndexValue = FindPublication(output);
+                if (publicationIndexValue < 0)
+                    return false;
+                const PublishedResource& publication = publications[static_cast<u32>(publicationIndexValue)];
+                assets::DependencyRecord current;
+                if (index->Find(output, current) != assets::IndexResult::Success || current.output != output ||
+                    current.buildFingerprint != publication.buildFingerprint ||
+                    current.contentFingerprint != publication.contentFingerprint || publication.physicalPath.Empty())
+                    return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool CohortIntentMatchesCurrentSuccessorWitnesses(
+            const containers::ArraySpan<const assets::DependencyPublicationWitness> required) noexcept
+        {
+            if (!accepted.cohortIntent.IsActive() || required.Count() != accepted.cohortIntent.successorOutputs.Size() ||
+                !CohortIntentMatchesCurrentAcceptedState())
+                return false;
+            assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            if (index == nullptr)
+                return false;
+            for (const resources::ResourceReference expected : accepted.cohortIntent.successorOutputs)
+            {
+                const assets::DependencyPublicationWitness* matched = nullptr;
+                for (const assets::DependencyPublicationWitness& witness : required)
+                    if (witness.output == expected)
+                    {
+                        matched = &witness;
+                        break;
+                    }
+                if (matched == nullptr)
+                    return false;
+                assets::DependencyRecord current;
+                if (index->Find(expected, current) != assets::IndexResult::Success || current.output != expected ||
+                    current.buildFingerprint != matched->buildFingerprint ||
+                    current.contentFingerprint != matched->contentFingerprint)
+                    return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] ProjectAssetSnapshotResult ClearCohortIntentBeforeProtectionRelease(
+            const containers::ArraySpan<const assets::DependencyPublicationWitness> required) noexcept
+        {
+            if (!accepted.cohortIntent.IsActive() || !CohortIntentMatchesCurrentSuccessorWitnesses(required))
+                return ProjectAssetSnapshotResult::Success;
+            return ClearCohortIntent();
+        }
+
         [[nodiscard]] bool CanAcquireAutomaticAdmission() noexcept
         {
             if (observation.reconcileActive || automaticRecook.OwnsAdmission() || vddcMaintenance.OwnsAdmission() ||
                 looseRetirement.OwnsAdmission())
                 return false;
+            // A durable P5 cohort intent is the only authority allowed to advance
+            // build/VADI state for the committed successor schema. If cohort
+            // admission failed before its transient coordinator state existed,
+            // ordinary automatic pending work must remain parked until the exact
+            // cohort is explicitly resumed. Otherwise a single successor could
+            // replace current VADI or publish outside the atomic generation cutover.
+            if (accepted.cohortIntent.IsActive() && !automaticRecook.HasExplicitCohort())
+                return false;
+            const assets::BuildGraph* const graph = builds.GetBuildGraph();
+            const assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            if (graph == nullptr || index == nullptr || index->HasActiveTransaction() || index->HasChanges() ||
+                index->HasRetirementProtections())
+                return false;
+            const assets::BuildGraphStats stats = graph->GetStats();
+            return stats.externalRequests == 0 && stats.activeOperations == 0 && stats.waitingForAdmission == 0 &&
+                   stats.queuedRequestBytes == 0 && stats.activeExecutionBytes == 0 && stats.retainedOutputBytes == 0;
+        }
+
+        [[nodiscard]] bool CanAcquireAutomaticPublicationAdmission() noexcept
+        {
+            if (observation.reconcileActive || automaticRecook.OwnsAdmission() || vddcMaintenance.OwnsAdmission() ||
+                looseRetirement.OwnsAdmission())
+                return false;
+            if (accepted.cohortIntent.IsActive() && !automaticRecook.MatchesExplicitCohort(accepted.cohortIntent))
+                return false;
             const assets::BuildGraph* const graph = builds.GetBuildGraph();
             const assets::DependencyIndex* const index = builds.GetDependencyIndex();
             if (graph == nullptr || index == nullptr || index->HasActiveTransaction() || index->HasChanges())
+                return false;
+            // A committed P5 retirement journal intentionally outlives the recook
+            // transaction until the exact successor cohort is visible. It must not
+            // admit any ordinary publication, but it also must not deadlock the
+            // marker-matched cohort whose successful publication is the release
+            // condition for that journal.
+            if (index->HasRetirementProtections() &&
+                (!accepted.cohortIntent.IsActive() || !automaticRecook.MatchesExplicitCohort(accepted.cohortIntent)))
                 return false;
             const assets::BuildGraphStats stats = graph->GetStats();
             return stats.externalRequests == 0 && stats.activeOperations == 0 && stats.waitingForAdmission == 0 &&
@@ -3975,12 +5676,12 @@ namespace vanguard::asset_streaming
             // quiescence gate as automatic recook. Reuse it instead of allowing
             // the two admission predicates to drift (notably around dirty VADI
             // state or retained BuildGraph outputs).
-            return CanAcquireAutomaticAdmission();
+            return !accepted.cohortIntent.IsActive() && CanAcquireAutomaticAdmission();
         }
 
         [[nodiscard]] bool CanAcquireLooseMaintenanceAdmission() noexcept
         {
-            return CanAcquireAutomaticAdmission();
+            return !accepted.cohortIntent.IsActive() && CanAcquireAutomaticAdmission();
         }
 
         [[nodiscard]] ProjectAssetPipelineResult GenerateAvailableAssetIdentity(
@@ -4148,9 +5849,22 @@ namespace vanguard::asset_streaming
         {
             concurrency::ScopedLock<concurrency::Mutex> lock(automaticRecook.deliveryMutex);
             u32 additions = 0u;
-            for (const assets::DependencyRecord& record : automaticRecook.committedDelivery)
-                if (FindPublication(record.output) < 0)
-                    ++additions;
+            if (automaticRecook.explicitCohort.IsActive() && !automaticRecook.explicitCohort.publicationBlocked)
+            {
+                for (const resources::ResourceReference output : automaticRecook.explicitCohort.outputs)
+                    if (FindPublication(output) < 0)
+                        ++additions;
+            }
+            else
+            {
+                for (const assets::DependencyRecord& record : automaticRecook.committedDelivery)
+                {
+                    if (automaticRecook.explicitCohort.IsActive() && automaticRecook.explicitCohort.Contains(record.output))
+                        continue;
+                    if (FindPublication(record.output) < 0)
+                        ++additions;
+                }
+            }
             return publications.Size() + additions <= config.maximumPublishedResources &&
                    publications.Size() + additions <= publications.Capacity() &&
                    publicationIndex.Size() + additions <= publicationIndex.Capacity();
@@ -4184,6 +5898,569 @@ namespace vanguard::asset_streaming
             return true;
         }
 
+        [[nodiscard]] bool RetireSatisfiedPredecessorPublications(
+            const containers::ArraySpan<const assets::DependencyPublicationWitness> visible,
+            ProjectAssetPipelineFailure* const failure) noexcept
+        {
+            assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            if (index == nullptr || visible.Empty())
+                return index != nullptr;
+
+            containers::DynamicArray<assets::DependencyRetirementProtectionBatch> batches(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<assets::DependencyRecord> records(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<assets::DependencyPublicationWitness> successors(memory::pools::Assets::GetInstance());
+            const assets::IndexResult captured = index->CaptureRetirementProtectionSnapshot(
+                batches, records, successors, config.build.dependencyIndex.maximumRecords,
+                config.build.dependencyIndex.maximumSerializedBytes);
+            if (captured != assets::IndexResult::Success)
+            {
+                if (failure != nullptr)
+                    failure->index = captured;
+                return false;
+            }
+
+            containers::DynamicArray<resources::ResourceReference> retirements(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<resources::ResourcePath> paths(memory::pools::Assets::GetInstance());
+            retirements.Reserve(config.maximumPublishedResources);
+            paths.Reserve(config.maximumPublishedResources);
+            if (retirements.Capacity() < config.maximumPublishedResources || paths.Capacity() < config.maximumPublishedResources)
+            {
+                if (failure != nullptr)
+                    failure->index = assets::IndexResult::OutOfMemory;
+                return false;
+            }
+
+            const auto visibleExact = [&](const assets::DependencyPublicationWitness& required) noexcept
+            {
+                for (const assets::DependencyPublicationWitness& observed : visible)
+                    if (observed.output == required.output && observed.buildFingerprint == required.buildFingerprint &&
+                        observed.contentFingerprint == required.contentFingerprint)
+                        return true;
+                return false;
+            };
+            for (const assets::DependencyRetirementProtectionBatch& batch : batches)
+            {
+                if (batch.recordOffset > records.Size() || batch.recordCount > records.Size() - batch.recordOffset ||
+                    batch.successorOffset > successors.Size() || batch.successorCount == 0u ||
+                    batch.successorCount > successors.Size() - batch.successorOffset)
+                {
+                    if (failure != nullptr)
+                        failure->index = assets::IndexResult::Corrupt;
+                    return false;
+                }
+                bool satisfied = true;
+                for (u32 successorIndex = 0u; successorIndex < batch.successorCount; ++successorIndex)
+                    if (!visibleExact(successors[batch.successorOffset + successorIndex]))
+                    {
+                        satisfied = false;
+                        break;
+                    }
+                if (!satisfied)
+                    continue;
+
+                for (u32 recordIndex = 0u; recordIndex < batch.recordCount; ++recordIndex)
+                {
+                    const resources::ResourceReference old = records[batch.recordOffset + recordIndex].output;
+                    bool successorPath = false;
+                    for (u32 successorIndex = 0u; successorIndex < batch.successorCount; ++successorIndex)
+                        if (successors[batch.successorOffset + successorIndex].output.GetPath() == old.GetPath())
+                        {
+                            successorPath = true;
+                            break;
+                        }
+                    if (successorPath || FindPublication(old) < 0)
+                        continue;
+                    bool duplicate = false;
+                    for (const resources::ResourceReference retired : retirements)
+                        if (retired.GetPath() == old.GetPath())
+                        {
+                            duplicate = true;
+                            break;
+                        }
+                    if (duplicate)
+                        continue;
+                    retirements.PushBack(old);
+                    paths.PushBack(old.GetPath());
+                    if (retirements.Size() != paths.Size() || retirements.Size() > config.maximumPublishedResources)
+                    {
+                        if (failure != nullptr)
+                            failure->index = assets::IndexResult::OutOfMemory;
+                        return false;
+                    }
+                }
+            }
+
+            if (!paths.Empty() && !streamer->UnregisterLooseBatch({paths.TypedData(), paths.Size()}))
+                return false;
+            for (const resources::ResourceReference old : retirements)
+            {
+                const i32 publication = FindPublication(old);
+                if (publication < 0)
+                    continue;
+                automaticRecook.MarkUnpublished(old);
+                if (!RemovePublicationAt(static_cast<u32>(publication)))
+                    return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] ProjectAssetPipelineResult ReplayRetirementProtections(
+            ProjectAssetPipelineFailure* const failure) noexcept
+        {
+            assets::DependencyIndex* const index = builds.GetDependencyIndex();
+            if (index == nullptr)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    failure->index = assets::IndexResult::InvalidState;
+                }
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+
+            containers::DynamicArray<assets::DependencyRetirementProtectionBatch> batches(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<assets::DependencyRecord> retained(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<assets::DependencyPublicationWitness> successors(memory::pools::Assets::GetInstance());
+            const assets::IndexResult captured = index->CaptureRetirementProtectionSnapshot(
+                batches, retained, successors, config.build.dependencyIndex.maximumRecords,
+                config.build.dependencyIndex.maximumSerializedBytes);
+            if (captured != assets::IndexResult::Success)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    failure->index = captured;
+                }
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+            if (batches.Empty())
+                return ProjectAssetPipelineResult::Success;
+
+            containers::DynamicArray<resources::ResourceReference> preparedOutputs(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<ProjectLoosePublicationInfo> preparedInfos(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<u32> dependencyOffsets(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<u32> dependencyCounts(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<u64> contentCrc64(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<streaming::DependencyDescriptor> flattenedDependencies(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<streaming::DependencyDescriptor> recordDependencies(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<streaming::LooseResourceDescriptor> descriptors(memory::pools::Assets::GetInstance());
+
+            const auto resetPrepared = [&]() noexcept
+            {
+                preparedOutputs.Clear();
+                preparedInfos.Clear();
+                dependencyOffsets.Clear();
+                dependencyCounts.Clear();
+                contentCrc64.Clear();
+                flattenedDependencies.Clear();
+                descriptors.Clear();
+            };
+            const auto appendPrepared = [&](const assets::DependencyRecord& record,
+                                            ProjectLoosePublicationFailure& publicationFailure) noexcept -> bool
+            {
+                for (const resources::ResourceReference output : preparedOutputs)
+                    if (output.GetPath() == record.output.GetPath())
+                        return false;
+
+                ProjectLoosePublicationInfo info;
+                u64 crc64 = 0u;
+                const ProjectLoosePublicationResult prepared = publisher.PrepareRetainedExact(
+                    record, recordDependencies, crc64, &publicationFailure, &info);
+                if (prepared != ProjectLoosePublicationResult::Success)
+                    return false;
+
+                const u32 outputIndex = preparedOutputs.Size();
+                preparedOutputs.PushBack(record.output);
+                preparedInfos.PushBack(info);
+                dependencyOffsets.PushBack(flattenedDependencies.Size());
+                dependencyCounts.PushBack(recordDependencies.Size());
+                contentCrc64.PushBack(crc64);
+                if (preparedOutputs.Size() != outputIndex + 1u || preparedInfos.Size() != outputIndex + 1u ||
+                    dependencyOffsets.Size() != outputIndex + 1u || dependencyCounts.Size() != outputIndex + 1u ||
+                    contentCrc64.Size() != outputIndex + 1u)
+                    return false;
+                for (const streaming::DependencyDescriptor& dependency : recordDependencies)
+                {
+                    const u32 previous = flattenedDependencies.Size();
+                    flattenedDependencies.PushBack(dependency);
+                    if (flattenedDependencies.Size() != previous + 1u)
+                        return false;
+                }
+                return true;
+            };
+            const auto findRetainedExact = [&](const assets::DependencyPublicationWitness& witness) noexcept
+                -> const assets::DependencyRecord*
+            {
+                for (const assets::DependencyRecord& record : retained)
+                    if (record.output == witness.output && record.buildFingerprint == witness.buildFingerprint &&
+                        record.contentFingerprint == witness.contentFingerprint)
+                        return &record;
+                return nullptr;
+            };
+            const auto appendWitness = [&](const assets::DependencyPublicationWitness& witness,
+                                           ProjectLoosePublicationFailure& publicationFailure) noexcept -> bool
+            {
+                assets::DependencyRecord current;
+                const assets::IndexResult found = index->Find(witness.output, current);
+                if (found == assets::IndexResult::Success && current.output == witness.output &&
+                    current.buildFingerprint == witness.buildFingerprint && current.contentFingerprint == witness.contentFingerprint)
+                    return appendPrepared(current, publicationFailure);
+                const assets::DependencyRecord* const historical = findRetainedExact(witness);
+                if (historical == nullptr)
+                {
+                    publicationFailure = {};
+                    publicationFailure.result = ProjectLoosePublicationResult::RecordNotFound;
+                    publicationFailure.index = found;
+                    return false;
+                }
+                return appendPrepared(*historical, publicationFailure);
+            };
+            const auto commitPrepared = [&](ProjectLoosePublicationFailure& publicationFailure) noexcept -> bool
+            {
+                if (preparedOutputs.Empty() || preparedOutputs.Size() != preparedInfos.Size() ||
+                    preparedOutputs.Size() != dependencyOffsets.Size() || preparedOutputs.Size() != dependencyCounts.Size() ||
+                    preparedOutputs.Size() != contentCrc64.Size())
+                    return false;
+                descriptors.Reserve(preparedOutputs.Size());
+                if (descriptors.Capacity() < preparedOutputs.Size())
+                {
+                    publicationFailure = {};
+                    publicationFailure.result = ProjectLoosePublicationResult::OutOfMemory;
+                    return false;
+                }
+                for (u32 outputIndex = 0u; outputIndex < preparedOutputs.Size(); ++outputIndex)
+                {
+                    const u32 offset = dependencyOffsets[outputIndex];
+                    const u32 count = dependencyCounts[outputIndex];
+                    if (offset > flattenedDependencies.Size() || count > flattenedDependencies.Size() - offset)
+                        return false;
+                    const u32 previous = descriptors.Size();
+                    descriptors.PushBack({preparedOutputs[outputIndex], preparedInfos[outputIndex].physicalPath,
+                                          {flattenedDependencies.TypedData() + offset, count}, contentCrc64[outputIndex],
+                                          preparedInfos[outputIndex].priority});
+                    if (descriptors.Size() != previous + 1u)
+                    {
+                        publicationFailure = {};
+                        publicationFailure.result = ProjectLoosePublicationResult::OutOfMemory;
+                        return false;
+                    }
+                }
+                streaming::PreparedLooseBatch visibility;
+                if (!publisher.PrepareVisibility({descriptors.TypedData(), descriptors.Size()}, visibility) ||
+                    !publisher.CommitPreparedVisibility(visibility))
+                {
+                    publicationFailure = {};
+                    publicationFailure.result = ProjectLoosePublicationResult::StreamingPublicationFailure;
+                    return false;
+                }
+                return true;
+            };
+            const auto setPendingPublication = [&](const ProjectLoosePublicationFailure& publicationFailure) noexcept
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    failure->publication = publicationFailure;
+                }
+            };
+            const auto markCurrentPublication = [&](const resources::ResourceReference output,
+                                                    const ProjectLoosePublicationInfo& info) noexcept -> bool
+            {
+                assets::DependencyRecord current;
+                if (index->Find(output, current) != assets::IndexResult::Success || current.output != output ||
+                    current.buildFingerprint != info.buildFingerprint || current.contentFingerprint != info.contentFingerprint)
+                    return true;
+                return automaticRecook.MarkPublished(output, info);
+            };
+
+            for (const assets::DependencyRetirementProtectionBatch& batch : batches)
+            {
+                if (batch.recordOffset > retained.Size() || batch.recordCount > retained.Size() - batch.recordOffset ||
+                    batch.successorOffset > successors.Size() || batch.successorCount == 0u ||
+                    batch.successorCount > successors.Size() - batch.successorOffset)
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        failure->index = assets::IndexResult::Corrupt;
+                    }
+                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                }
+                const containers::ArraySpan<const assets::DependencyPublicationWitness> required{
+                    successors.TypedData() + batch.successorOffset, batch.successorCount};
+
+                bool exactAlreadyOwned = true;
+                for (const assets::DependencyPublicationWitness& witness : required)
+                {
+                    const i32 published = FindPublication(witness.output);
+                    if (published < 0)
+                    {
+                        exactAlreadyOwned = false;
+                        break;
+                    }
+                    const PublishedResource& current = publications[static_cast<u32>(published)];
+                    if (current.buildFingerprint != witness.buildFingerprint || current.contentFingerprint != witness.contentFingerprint ||
+                        current.physicalPath.Empty())
+                    {
+                        exactAlreadyOwned = false;
+                        break;
+                    }
+                }
+                if (exactAlreadyOwned)
+                {
+                    for (const assets::DependencyPublicationWitness& witness : required)
+                    {
+                        const PublishedResource& current = publications[static_cast<u32>(FindPublication(witness.output))];
+                        ProjectLoosePublicationInfo info;
+                        info.physicalPath = current.physicalPath;
+                        info.buildFingerprint = current.buildFingerprint;
+                        info.contentFingerprint = current.contentFingerprint;
+                        if (!markCurrentPublication(witness.output, info))
+                        {
+                            ProjectLoosePublicationFailure bookkeepingFailure;
+                            bookkeepingFailure.result = ProjectLoosePublicationResult::OutOfMemory;
+                            setPendingPublication(bookkeepingFailure);
+                            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        }
+                    }
+                    if (!RetireSatisfiedPredecessorPublications(required, failure))
+                    {
+                        if (failure != nullptr)
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    const ProjectAssetSnapshotResult clearedIntent = ClearCohortIntentBeforeProtectionRelease(required);
+                    if (clearedIntent != ProjectAssetSnapshotResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                            failure->acceptedSnapshot = clearedIntent;
+                        }
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    const assets::IndexResult released = index->ReleaseSatisfiedRetirementProtections(required);
+                    if (released != assets::IndexResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                            failure->index = released;
+                        }
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    continue;
+                }
+
+                // Prepare the complete exact successor set before changing any
+                // streamer-visible predecessor. Intermediate historical successors
+                // are resolved from later journal rows when current VADI has moved on.
+                resetPrepared();
+                ProjectLoosePublicationFailure successorFailure;
+                bool successorReady = true;
+                for (const assets::DependencyPublicationWitness& witness : required)
+                    if (!appendWitness(witness, successorFailure))
+                    {
+                        successorReady = false;
+                        break;
+                    }
+
+                if (successorReady && commitPrepared(successorFailure))
+                {
+                    u32 additions = 0u;
+                    for (const resources::ResourceReference output : preparedOutputs)
+                        if (FindPublication(output) < 0)
+                            ++additions;
+
+                    containers::DynamicArray<resources::ResourceReference> ownerRetirements(memory::pools::Assets::GetInstance());
+                    for (u32 recordIndex = 0u; recordIndex < batch.recordCount; ++recordIndex)
+                    {
+                        const resources::ResourceReference old = retained[batch.recordOffset + recordIndex].output;
+                        bool remains = false;
+                        for (const assets::DependencyPublicationWitness& witness : required)
+                            if (witness.output.GetPath() == old.GetPath())
+                            {
+                                remains = true;
+                                break;
+                            }
+                        if (!remains && FindPublication(old) >= 0)
+                            ownerRetirements.PushBack(old);
+                    }
+                    const u32 retainedOwnerCount = publications.Size() - ownerRetirements.Size();
+                    if (retainedOwnerCount + additions > config.maximumPublishedResources ||
+                        retainedOwnerCount + additions > publications.Capacity() ||
+                        publicationIndex.Size() - ownerRetirements.Size() + additions > publicationIndex.Capacity())
+                    {
+                        successorFailure = {};
+                        successorFailure.result = ProjectLoosePublicationResult::LimitExceeded;
+                        setPendingPublication(successorFailure);
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+
+                    if (publications.Size() + additions > config.maximumPublishedResources ||
+                        publications.Size() + additions > publications.Capacity() ||
+                        publicationIndex.Size() + additions > publicationIndex.Capacity())
+                    {
+                        containers::DynamicArray<resources::ResourcePath> paths(memory::pools::Assets::GetInstance());
+                        paths.Reserve(ownerRetirements.Size());
+                        if (paths.Capacity() < ownerRetirements.Size())
+                        {
+                            successorFailure = {};
+                            successorFailure.result = ProjectLoosePublicationResult::OutOfMemory;
+                            setPendingPublication(successorFailure);
+                            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        }
+                        for (const resources::ResourceReference old : ownerRetirements)
+                            paths.PushBack(old.GetPath());
+                        if (!paths.Empty() && !streamer->UnregisterLooseBatch({paths.TypedData(), paths.Size()}))
+                        {
+                            successorFailure = {};
+                            successorFailure.result = ProjectLoosePublicationResult::StreamingPublicationFailure;
+                            setPendingPublication(successorFailure);
+                            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        }
+                        for (const resources::ResourceReference old : ownerRetirements)
+                        {
+                            const i32 publication = FindPublication(old);
+                            if (publication >= 0)
+                            {
+                                automaticRecook.MarkUnpublished(old);
+                                if (!RemovePublicationAt(static_cast<u32>(publication)))
+                                {
+                                    successorFailure = {};
+                                    successorFailure.result = ProjectLoosePublicationResult::InvalidState;
+                                    setPendingPublication(successorFailure);
+                                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                                }
+                            }
+                        }
+                    }
+
+                    for (u32 outputIndex = 0u; outputIndex < preparedOutputs.Size(); ++outputIndex)
+                    {
+                        const resources::ResourceReference output = preparedOutputs[outputIndex];
+                        const ProjectLoosePublicationInfo& info = preparedInfos[outputIndex];
+                        const i32 existing = FindPublication(output);
+                        if (existing >= 0)
+                        {
+                            PublishedResource& publication = publications[static_cast<u32>(existing)];
+                            publication.physicalPath = info.physicalPath;
+                            publication.buildFingerprint = info.buildFingerprint;
+                            publication.contentFingerprint = info.contentFingerprint;
+                        }
+                        else if (!AddPublication(output, info.physicalPath, info.buildFingerprint, info.contentFingerprint))
+                        {
+                            successorFailure = {};
+                            successorFailure.result = ProjectLoosePublicationResult::OutOfMemory;
+                            setPendingPublication(successorFailure);
+                            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        }
+                        if (!markCurrentPublication(output, info))
+                        {
+                            successorFailure = {};
+                            successorFailure.result = ProjectLoosePublicationResult::OutOfMemory;
+                            setPendingPublication(successorFailure);
+                            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        }
+                    }
+                    if (!RetireSatisfiedPredecessorPublications(required, failure))
+                    {
+                        if (failure != nullptr)
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    const ProjectAssetSnapshotResult clearedIntent = ClearCohortIntentBeforeProtectionRelease(required);
+                    if (clearedIntent != ProjectAssetSnapshotResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                            failure->acceptedSnapshot = clearedIntent;
+                        }
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    const assets::IndexResult released = index->ReleaseSatisfiedRetirementProtections(required);
+                    if (released != assets::IndexResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                            failure->index = released;
+                        }
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    continue;
+                }
+
+                // Successor preparation/visibility could not complete. Restore the
+                // exact predecessor cohort from the durable journal before returning
+                // so restart never falls through to per-output current reconciliation.
+                resetPrepared();
+                ProjectLoosePublicationFailure predecessorFailure;
+                bool predecessorReady = true;
+                for (u32 recordIndex = 0u; recordIndex < batch.recordCount; ++recordIndex)
+                    if (!appendPrepared(retained[batch.recordOffset + recordIndex], predecessorFailure))
+                    {
+                        predecessorReady = false;
+                        break;
+                    }
+                for (u32 successorIndex = 0u; predecessorReady && successorIndex < required.Count(); ++successorIndex)
+                {
+                    const assets::DependencyPublicationWitness& witness = required[successorIndex];
+                    if (!witness.predecessorPresent)
+                        continue;
+                    bool retainedSamePath = false;
+                    for (u32 recordIndex = 0u; recordIndex < batch.recordCount; ++recordIndex)
+                        if (retained[batch.recordOffset + recordIndex].output.GetPath() == witness.output.GetPath())
+                        {
+                            retainedSamePath = true;
+                            break;
+                        }
+                    if (!retainedSamePath && !appendWitness(witness, predecessorFailure))
+                        predecessorReady = false;
+                }
+                if (!predecessorReady || preparedOutputs.Empty())
+                {
+                    setPendingPublication(predecessorReady ? successorFailure : predecessorFailure);
+                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                }
+
+                u32 predecessorAdditions = 0u;
+                for (const resources::ResourceReference output : preparedOutputs)
+                    if (FindPublication(output) < 0)
+                        ++predecessorAdditions;
+                if (publications.Size() + predecessorAdditions > config.maximumPublishedResources ||
+                    publications.Size() + predecessorAdditions > publications.Capacity() ||
+                    publicationIndex.Size() + predecessorAdditions > publicationIndex.Capacity() ||
+                    !commitPrepared(predecessorFailure))
+                {
+                    setPendingPublication(predecessorFailure);
+                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                }
+                for (u32 outputIndex = 0u; outputIndex < preparedOutputs.Size(); ++outputIndex)
+                {
+                    const resources::ResourceReference output = preparedOutputs[outputIndex];
+                    const ProjectLoosePublicationInfo& info = preparedInfos[outputIndex];
+                    const i32 existing = FindPublication(output);
+                    if (existing >= 0)
+                    {
+                        PublishedResource& publication = publications[static_cast<u32>(existing)];
+                        publication.physicalPath = info.physicalPath;
+                        publication.buildFingerprint = info.buildFingerprint;
+                        publication.contentFingerprint = info.contentFingerprint;
+                    }
+                    else if (!AddPublication(output, info.physicalPath, info.buildFingerprint, info.contentFingerprint))
+                    {
+                        setPendingPublication(predecessorFailure);
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                }
+                setPendingPublication(successorFailure);
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+            return ProjectAssetPipelineResult::Success;
+        }
+
         [[nodiscard]] ProjectAssetPipelineResult SettleCompletedAutomaticPublication(
             ProjectAssetPipelineFailure* const failure, const bool surfacePublicationFailure) noexcept
         {
@@ -4204,9 +6481,66 @@ namespace vanguard::asset_streaming
                         failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
                     return ProjectAssetPipelineResult::CommittedReconciliationPending;
                 }
+                containers::DynamicArray<assets::DependencyPublicationWitness> visible(memory::pools::Assets::GetInstance());
+                visible.Resize(outputs.Count());
+                if (visible.Size() != outputs.Count())
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        failure->index = assets::IndexResult::OutOfMemory;
+                    }
+                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                }
+                for (u32 index = 0u; index < outputs.Count(); ++index)
+                    visible[index] = {outputs[index], infos[index].buildFingerprint, infos[index].contentFingerprint};
+                assets::DependencyIndex* const index = builds.GetDependencyIndex();
+                if (!RetireSatisfiedPredecessorPublications({visible.TypedData(), visible.Size()}, failure))
+                {
+                    if (failure != nullptr)
+                        failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                }
+                if (automatic.workerPublishedExplicitCohort && automatic.explicitCohort.IsActive() &&
+                    accepted.cohortIntent.IsActive())
+                {
+                    if (!(accepted.cohortIntent.asset == automatic.explicitCohort.asset) ||
+                        !CohortIntentMatchesCurrentSuccessorWitnesses({visible.TypedData(), visible.Size()}))
+                    {
+                        if (failure != nullptr)
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                    const ProjectAssetSnapshotResult cleared = ClearCohortIntent();
+                    if (cleared != ProjectAssetSnapshotResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                            failure->acceptedSnapshot = cleared;
+                        }
+                        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    }
+                }
+                const assets::IndexResult released = index != nullptr
+                                                         ? index->ReleaseSatisfiedRetirementProtections(
+                                                               {visible.TypedData(), visible.Size()})
+                                                         : assets::IndexResult::InvalidState;
+                if (released != assets::IndexResult::Success)
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                        failure->index = released;
+                    }
+                    return ProjectAssetPipelineResult::CommittedReconciliationPending;
+                }
                 looseRetirement.Settle({automatic.workerRetiredLooseCaptures.TypedData(),
                                         automatic.workerRetiredLooseCaptures.Size()});
                 automatic.workerRetiredLooseCaptures.Clear();
+                if (automatic.workerPublishedExplicitCohort && automatic.explicitCohort.IsActive())
+                    automatic.explicitCohort.Reset();
+                automatic.workerPublishedExplicitCohort = false;
                 automatic.RefreshDeliveryStatus(automatic.status);
                 automatic.workerFinished = false;
                 automatic.publicationSettlementPending = false;
@@ -4237,6 +6571,7 @@ namespace vanguard::asset_streaming
                 automatic.RefreshDeliveryStatus(automatic.status);
                 automatic.workerRepairRequiredOutput = {};
                 automatic.workerRetiredLooseCaptures.Clear();
+                automatic.workerPublishedExplicitCohort = false;
                 automatic.publicationSettlementPending = false;
                 // Repair is now ordinary pending automatic-recook work. Do not
                 // surface this validation miss as a terminal publication failure
@@ -4248,8 +6583,10 @@ namespace vanguard::asset_streaming
             const ProjectAssetDeliveryReason reason = automatic.workerPublicationStale
                                                           ? ProjectAssetDeliveryReason::PublicationFreshnessRejected
                                                           : ProjectAssetDeliveryReason::PublicationFailed;
-            if (automatic.workerPublicationOutputs.Empty())
+            if (automatic.workerPublishedExplicitCohort && automatic.explicitCohort.IsActive())
                 automatic.MarkPublishableDeliveriesFailed(reason);
+            else if (automatic.workerPublicationOutputs.Empty())
+                automatic.MarkPublishableDeliveriesFailed(reason, false);
             else
             {
                 for (u32 index = 0; index < automatic.workerPublicationOutputs.Size(); ++index)
@@ -4257,6 +6594,7 @@ namespace vanguard::asset_streaming
             }
             automatic.RefreshDeliveryStatus(automatic.status);
             automatic.workerRetiredLooseCaptures.Clear();
+            automatic.workerPublishedExplicitCohort = false;
             automatic.publicationSettlementPending = false;
             if (surfacePublicationFailure)
             {
@@ -4524,6 +6862,9 @@ namespace vanguard::asset_streaming
                     u8 desired = 0;
                     if (state.desiredLookup.Find(publication.resource.GetPath().Id(), desired))
                         continue;
+                    if (automaticRecook.ProtectsTopologyPredecessor(publication.resource) ||
+                        CohortIntentProtectsTopologyPredecessor(publication.resource))
+                        continue;
                     const u32 previousResources = state.removeResources.Size();
                     const u32 previousPaths = state.removePaths.Size();
                     state.removeResources.PushBack(publication.resource);
@@ -4767,7 +7108,9 @@ namespace vanguard::asset_streaming
                     }
                     const PublishedResource& publication = publications[state.removeIndex++];
                     u8 desired = 0;
-                    if (!state.desiredLookup.Find(publication.resource.GetPath().Id(), desired))
+                    if (!state.desiredLookup.Find(publication.resource.GetPath().Id(), desired) &&
+                        !automaticRecook.ProtectsTopologyPredecessor(publication.resource) &&
+                        !CohortIntentProtectsTopologyPredecessor(publication.resource))
                     {
                         const u32 previousResources = state.removeResources.Size();
                         const u32 previousPaths = state.removePaths.Size();
@@ -4954,6 +7297,7 @@ namespace vanguard::asset_streaming
         case ProjectAssetPipelineResult::SnapshotSaveFailed: return "SnapshotSaveFailed";
         case ProjectAssetPipelineResult::OperationInitializationFailed: return "OperationInitializationFailed";
         case ProjectAssetPipelineResult::OperationFailed: return "OperationFailed";
+        case ProjectAssetPipelineResult::StalePlan: return "StalePlan";
         case ProjectAssetPipelineResult::IdentityGenerationFailed: return "IdentityGenerationFailed";
         case ProjectAssetPipelineResult::HistoryLimitExceeded: return "HistoryLimitExceeded";
         case ProjectAssetPipelineResult::UndoUnavailable: return "UndoUnavailable";
@@ -5083,9 +7427,20 @@ namespace vanguard::asset_streaming
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::BuildInitializationFailed)
                                       : ProjectAssetPipelineResult::BuildInitializationFailed;
         }
+        containers::DynamicArray<filesystem::AbsolutePath> assertionRoots(memory::pools::Assets::GetInstance());
+        assertionRoots.Reserve(sources.GetRoots().Count());
+        if (assertionRoots.Capacity() < sources.GetRoots().Count())
+        {
+            VANGUARD_DELETE(implementation);
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::OperationInitializationFailed)
+                                      : ProjectAssetPipelineResult::OperationInitializationFailed;
+        }
         for (const assets::SourceRoot& root : sources.GetRoots())
+        {
+            assertionRoots.PushBack(root.directory);
             if (!root.readOnly)
                 implementation->writableRoots.PushBack(root.directory);
+        }
         assets::AssetFileRecoveryReport recovery;
         if (!implementation->writableRoots.Empty())
         {
@@ -5098,6 +7453,7 @@ namespace vanguard::asset_streaming
             const assets::AssetFileTransactionConfig transactionConfig{
                 config.operationJournalPath,
                 {implementation->writableRoots.TypedData(), implementation->writableRoots.Size()},
+                {assertionRoots.TypedData(), assertionRoots.Size()},
                 config.maximumOperationEntries,
                 config.maximumOperationFileBytes,
                 config.maximumOperationStagedBytes,
@@ -5132,11 +7488,10 @@ namespace vanguard::asset_streaming
                 return ProjectAssetPipelineResult::OperationInitializationFailed;
             }
         }
-        // P4 restart baseline. The persisted snapshot is historical comparison
-        // evidence only: it never mutates SourceDatabase. Recoverable unusable
-        // images leave `accepted` empty so the shared candidate path below
-        // classifies the current catalog as New. True I/O/allocation/state
-        // failures stop initialization rather than pretending recovery worked.
+        // P4/P5 restart baseline. VPAS now also owns the durable pre-VADI cohort
+        // cutover intent. A missing image is an explicit bootstrap; every present
+        // but unusable image must fail closed because silently rebuilding from the
+        // current catalog could discard last-known-good predecessor evidence.
         const ProjectAssetSnapshotResult snapshotLoad = LoadProjectAssetAcceptedSnapshot(
             files, config.build.dependencyIndexRoot, config.changeState, implementation->accepted);
         if (restore != nullptr)
@@ -5186,7 +7541,18 @@ namespace vanguard::asset_streaming
         // current storage, so the later O(1) catalog swap is visible to them.
         // Any initialization failure here is therefore still a true precommit
         // failure and cannot strand a newer VPAS/catalog baseline.
-        const assets::ProjectAssetBuildResult initialized = implementation->builds.Initialize(files, sources, compilers, importers, config.build);
+        assets::ProjectAssetBuildConfig startupBuildConfig = config.build;
+        if (implementation->accepted.cohortIntent.IsActive() &&
+            !implementation->accepted.cohortIntent.predecessorOutputs.Empty())
+        {
+            // A predecessor-bearing VPAS intent still depends on exact historical
+            // VADI rows for restart publication and VDDC protection. Never let
+            // index self-healing erase corrupt/incompatible/temp-only evidence;
+            // preserve it and fail initialization until an operator restores it.
+            startupBuildConfig.dependencyIndex.allowDestructiveRecovery = false;
+        }
+        const assets::ProjectAssetBuildResult initialized =
+            implementation->builds.Initialize(files, sources, compilers, importers, startupBuildConfig);
         if (initialized != assets::ProjectAssetBuildResult::Success)
         {
             if (failure != nullptr)
@@ -5254,6 +7620,33 @@ namespace vanguard::asset_streaming
         // source + committed-VADI recovery planning pass.
         implementation->automaticRecook.SetEnabled(config.automaticRecook.enabled, implementation->accepted.generation);
         m_impl = implementation;
+
+        // A write-ahead cohort marker can outlive either side of the source WAL
+        // boundary. If recovery explicitly rolled the source transaction back,
+        // rebase the marker to the recovered accepted metadata while preserving
+        // its original predecessor LKG set. A first-import rollback has no
+        // predecessor and simply clears the marker. Without a proven rollback,
+        // a metadata mismatch is ambiguous and must remain fail-closed.
+        if (m_impl->accepted.cohortIntent.IsActive() && !m_impl->CohortIntentTargetsCurrentMetadata())
+        {
+            if (!recovery.rolledBack)
+            {
+                if (failure != nullptr)
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+            const ProjectAssetSnapshotResult rebased = m_impl->RebaseCohortIntentToCurrentAccepted();
+            if (rebased != ProjectAssetSnapshotResult::Success)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    failure->acceptedSnapshot = rebased;
+                }
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+        }
+
         ProjectAssetRestoreReport reconciledReport;
         const ProjectAssetPipelineResult reconciled = Reconcile(&reconciledReport, failure);
         if (reconciled != ProjectAssetPipelineResult::Success)
@@ -5270,6 +7663,33 @@ namespace vanguard::asset_streaming
                 failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
             return ProjectAssetPipelineResult::CommittedReconciliationPending;
         }
+        if (m_impl->accepted.cohortIntent.IsActive())
+        {
+            if (!m_impl->CohortIntentTargetsCurrentMetadata() || !m_impl->CohortIntentMatchesCurrentAcceptedState())
+            {
+                if (failure != nullptr)
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+            const ProjectAssetState* const cohortAsset = m_impl->accepted.LookupAsset(m_impl->accepted.cohortIntent.asset);
+            if (cohortAsset == nullptr)
+            {
+                if (failure != nullptr)
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+            const ProjectAssetCohortDeliveryRequest cohortRequest{
+                cohortAsset->asset, cohortAsset->acceptedGeneration,
+                {m_impl->accepted.cohortIntent.successorOutputs.TypedData(),
+                 m_impl->accepted.cohortIntent.successorOutputs.Size()}};
+            const ProjectAssetPipelineResult resumed = RequestAssetCohortDelivery(cohortRequest, failure);
+            if (resumed != ProjectAssetPipelineResult::Success)
+            {
+                if (failure != nullptr)
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+        }
         if (restore != nullptr)
         {
             *restore = reconciledReport;
@@ -5283,6 +7703,8 @@ namespace vanguard::asset_streaming
         ClearFailure(failure);
         if (m_impl == nullptr)
             return ProjectAssetPipelineResult::Success;
+        if (QuiesceDeferredPlannedImport(failure) != ProjectAssetPipelineResult::Success)
+            return ProjectAssetPipelineResult::ShutdownFailed;
         // Stop new observation first. The source's Stop() must join every
         // producer thread, so no callback can reach this Impl after this point.
         // Unlike DisableObservation, full shutdown may cancel a partially
@@ -5325,7 +7747,7 @@ namespace vanguard::asset_streaming
         // authorities. Cancel/join it before descriptor/root teardown so an
         // exact-generation retire operation cannot race shutdown ownership.
         m_impl->looseRetirement.Drain();
-        if (!CanMutateSources())
+        if (!m_impl->CanReconcileSources())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
 
         // Remove every owned loose descriptor as one all-or-nothing streamer
@@ -5397,7 +7819,7 @@ namespace vanguard::asset_streaming
         ClearFailure(failure);
         if (m_impl == nullptr)
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState) : ProjectAssetPipelineResult::InvalidState;
-        if (m_impl->automaticRecook.HasExplicitActivity())
+        if (m_impl->deferredPlannedImportPrepare.HasWork() || m_impl->automaticRecook.HasExplicitActivity())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
         if (m_impl->automaticRecook.IsPolicyEnabled())
             return ProjectAssetPipelineResult::Success;
@@ -5436,7 +7858,8 @@ namespace vanguard::asset_streaming
         ClearFailure(failure);
         if (m_impl == nullptr || !m_impl->automaticRecook.IsEnabled())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState) : ProjectAssetPipelineResult::InvalidState;
-        if (m_impl->vddcMaintenance.OwnsAdmission() || m_impl->looseRetirement.OwnsAdmission())
+        if (m_impl->deferredPlannedImportPrepare.HasWork() || m_impl->vddcMaintenance.OwnsAdmission() ||
+            m_impl->looseRetirement.OwnsAdmission())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
         ProjectAssetAutomaticRecookStatus& status = m_impl->automaticRecook.status;
         if (status.state != ProjectAssetAutomaticRecookState::Failed && status.state != ProjectAssetAutomaticRecookState::RecoveryRequired)
@@ -5449,6 +7872,14 @@ namespace vanguard::asset_streaming
             status.state = ProjectAssetAutomaticRecookState::Cancelling;
             m_impl->automaticRecook.pollDispatchRetryRequested = true;
             return ProjectAssetPipelineResult::Success;
+        }
+        if (m_impl->automaticRecook.explicitCohort.IsActive())
+        {
+            const ProjectAssetState* const cohortAsset =
+                m_impl->accepted.LookupAsset(m_impl->automaticRecook.explicitCohort.asset);
+            if (cohortAsset == nullptr ||
+                cohortAsset->acceptedGeneration != m_impl->automaticRecook.explicitCohort.acceptedGeneration)
+                m_impl->automaticRecook.DropExplicitCohortDelivery();
         }
         status.retryRequested = true;
         status.dirtyReasons |= ProjectAssetAutomaticRecookDirtyReason::ExplicitRetry;
@@ -5465,9 +7896,19 @@ namespace vanguard::asset_streaming
         if (m_impl == nullptr || !m_impl->automaticRecook.IsEnabled() || !output.IsValid() || !output.IsTyped())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
                                       : ProjectAssetPipelineResult::InvalidState;
-        if (m_impl->automaticRecook.OwnsAdmission() || m_impl->observation.reconcileActive ||
+        if (m_impl->deferredPlannedImportPrepare.HasWork() || m_impl->automaticRecook.OwnsAdmission() ||
+            m_impl->observation.reconcileActive ||
             m_impl->vddcMaintenance.OwnsAdmission() || m_impl->looseRetirement.OwnsAdmission())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
+        if (m_impl->automaticRecook.explicitCohort.IsActive())
+        {
+            const ProjectAssetState* const cohortAsset =
+                m_impl->accepted.LookupAsset(m_impl->automaticRecook.explicitCohort.asset);
+            if (cohortAsset == nullptr ||
+                cohortAsset->acceptedGeneration != m_impl->automaticRecook.explicitCohort.acceptedGeneration)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                          : ProjectAssetPipelineResult::InvalidState;
+        }
         if (!m_impl->automaticRecook.RetryPublication(output))
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
                                       : ProjectAssetPipelineResult::InvalidState;
@@ -5484,7 +7925,9 @@ namespace vanguard::asset_streaming
         if (!asset.IsValid())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidArgument)
                                       : ProjectAssetPipelineResult::InvalidArgument;
-        if (m_impl->observation.reconcileActive || m_impl->vddcMaintenance.OwnsAdmission() ||
+        if (m_impl->deferredPlannedImportPrepare.HasWork() || m_impl->accepted.cohortIntent.IsActive() ||
+            m_impl->observation.reconcileActive ||
+            m_impl->vddcMaintenance.OwnsAdmission() ||
             m_impl->looseRetirement.OwnsAdmission())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
                                       : ProjectAssetPipelineResult::Busy;
@@ -5538,6 +7981,128 @@ namespace vanguard::asset_streaming
         return ProjectAssetPipelineResult::Success;
     }
 
+    ProjectAssetPipelineResult ProjectAssetPipeline::RequestAssetCohortDelivery(
+        const ProjectAssetCohortDeliveryRequest& request, ProjectAssetPipelineFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                      : ProjectAssetPipelineResult::InvalidState;
+        if (!request.asset.IsValid() || request.acceptedGeneration == 0u || request.outputs.Empty() ||
+            request.outputs.Data() == nullptr || request.outputs.Count() > m_impl->config.automaticRecook.maximumPendingOutputs)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidArgument)
+                                      : ProjectAssetPipelineResult::InvalidArgument;
+        if (m_impl->deferredPlannedImportPrepare.HasWork() || m_impl->observation.reconcileActive ||
+            m_impl->vddcMaintenance.OwnsAdmission() ||
+            m_impl->looseRetirement.OwnsAdmission() || m_impl->automaticRecook.IsRecoveryAdmission())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                      : ProjectAssetPipelineResult::Busy;
+
+        const ProjectAssetState* const accepted = m_impl->accepted.LookupAsset(request.asset);
+        if (accepted == nullptr || accepted->presence != ProjectAssetPresence::Present ||
+            accepted->acceptedGeneration != request.acceptedGeneration || accepted->outputs.Empty() ||
+            accepted->outputs.Count() != request.outputs.Count())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::StalePlan)
+                                      : ProjectAssetPipelineResult::StalePlan;
+        if (accepted->sourceIssues != assets::SourceIssueNone || accepted->importState != assets::SourceImportState::MetadataSelected ||
+            accepted->importer == assets::InvalidSourceImporterId || accepted->authoredImporterVersion == 0u ||
+            accepted->authoredImporterVersion != accepted->availableImporterVersion)
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::BuildRequestFailed;
+                failure->build = assets::ProjectAssetBuildResult::ImporterUnavailable;
+            }
+            return ProjectAssetPipelineResult::BuildRequestFailed;
+        }
+
+        for (u32 requestIndex = 0u; requestIndex < request.outputs.Count(); ++requestIndex)
+        {
+            const resources::ResourceReference output = request.outputs[requestIndex];
+            if (!output.IsValid() || !output.IsTyped())
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidArgument)
+                                          : ProjectAssetPipelineResult::InvalidArgument;
+            for (u32 previous = 0u; previous < requestIndex; ++previous)
+                if (request.outputs[previous].GetPath().Id() == output.GetPath().Id())
+                    return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidArgument)
+                                              : ProjectAssetPipelineResult::InvalidArgument;
+
+            bool acceptedOutput = false;
+            for (const ProjectAssetOutputState& candidate : accepted->outputs)
+                if (candidate.resource == output)
+                {
+                    acceptedOutput = true;
+                    break;
+                }
+            if (!acceptedOutput)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::StalePlan)
+                                          : ProjectAssetPipelineResult::StalePlan;
+        }
+
+        // Resolve the entire accepted cohort once, with exact per-output error
+        // attribution. For a multi-output model the canonical group resolver
+        // loads the one underlying source a single time and publishes immutable
+        // shared backing across all validated child requests. Pass this same
+        // verified batch into pending-state staging; resolving the 60MB source
+        // a second time per output would do gigabytes of redundant UI-thread IO.
+        containers::DynamicArray<resources::ResourceReference> acceptedOutputs(memory::pools::Assets::GetInstance());
+        acceptedOutputs.Reserve(accepted->outputs.Size());
+        if (acceptedOutputs.Capacity() < accepted->outputs.Size())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::BuildRequestFailed,
+                                         failure->build = assets::ProjectAssetBuildResult::BuildRequestCreationFailed,
+                                         ProjectAssetPipelineResult::BuildRequestFailed)
+                                      : ProjectAssetPipelineResult::BuildRequestFailed;
+        for (const ProjectAssetOutputState& row : accepted->outputs)
+            acceptedOutputs.PushBack(row.resource);
+        containers::DynamicArray<assets::OwnedBuildRequest> validated(memory::pools::Assets::GetInstance());
+        u32 failedOutputIndex = ~u32{0};
+        const assets::ProjectAssetBuildResult preflight = m_impl->builds.ResolveCohort(
+            *m_impl->sources, {acceptedOutputs.TypedData(), acceptedOutputs.Size()}, validated, failedOutputIndex);
+        if (preflight != assets::ProjectAssetBuildResult::Success)
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::BuildRequestFailed;
+                failure->build = preflight;
+                if (failedOutputIndex < acceptedOutputs.Size())
+                    failure->buildRequestOutput = acceptedOutputs[failedOutputIndex];
+                failure->buildRequestOutputIndex = failedOutputIndex;
+            }
+            return ProjectAssetPipelineResult::BuildRequestFailed;
+        }
+
+        containers::ArraySpan<const resources::ResourceReference> predecessorOutputs;
+        const ProjectAssetCohortIntent& durableIntent = m_impl->accepted.cohortIntent;
+        if (durableIntent.IsActive())
+        {
+            if (!(durableIntent.asset == request.asset) || durableIntent.successorOutputs.Size() != request.outputs.Count())
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                          : ProjectAssetPipelineResult::Busy;
+            for (const resources::ResourceReference expected : durableIntent.successorOutputs)
+            {
+                bool found = false;
+                for (const resources::ResourceReference requested : request.outputs)
+                    if (requested == expected)
+                    {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::StalePlan)
+                                              : ProjectAssetPipelineResult::StalePlan;
+            }
+            predecessorOutputs = {durableIntent.predecessorOutputs.TypedData(), durableIntent.predecessorOutputs.Size()};
+        }
+
+        if (!m_impl->automaticRecook.QueueExplicitCohort(*accepted, request.acceptedGeneration,
+                                                         m_impl->accepted.generation, predecessorOutputs,
+                                                         durableIntent.IsActive(),
+                                                         {validated.TypedData(), validated.Size()}))
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                      : ProjectAssetPipelineResult::Busy;
+        return ProjectAssetPipelineResult::Success;
+    }
+
     ProjectAssetPipelineResult ProjectAssetPipeline::CancelAutomaticRecook(ProjectAssetPipelineFailure* const failure) noexcept
     {
         ClearFailure(failure);
@@ -5546,6 +8111,13 @@ namespace vanguard::asset_streaming
         ProjectAssetAutomaticRecookStatus& status = m_impl->automaticRecook.status;
         if (!m_impl->automaticRecook.OwnsAdmission())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState) : ProjectAssetPipelineResult::InvalidState;
+        // Publication is a visibility commit, not cancellable compiler work. Once
+        // it has been dispatched (or awaits owner-side settlement), accepting a
+        // cancellation request would only leave a stale cancellation flag behind
+        // after the committed publication settles and could cancel later work.
+        if (m_impl->automaticRecook.workKind == Impl::AutomaticRecookState::WorkKind::Publish ||
+            m_impl->automaticRecook.publicationSettlementPending)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
         status.cancellationRequested = true;
         status.state = ProjectAssetAutomaticRecookState::Cancelling;
         return ProjectAssetPipelineResult::Success;
@@ -5554,11 +8126,23 @@ namespace vanguard::asset_streaming
     ProjectAssetPipelineResult ProjectAssetPipeline::TickAutomaticRecook(ProjectAssetPipelineFailure* const failure) noexcept
     {
         ClearFailure(failure);
-        if (m_impl == nullptr || !m_impl->automaticRecook.IsEnabled())
+        if (m_impl == nullptr)
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
                                       : ProjectAssetPipelineResult::InvalidState;
 
         Impl::AutomaticRecookState& automatic = m_impl->automaticRecook;
+        if (!automatic.IsEnabled())
+        {
+            // Disabled policy must never start ordinary automatic work. Still,
+            // an unresolved durable explicit cohort is a pending ownership
+            // fence, not an absent operation. Report that truth without
+            // switching policy or mutating the Disabled state; EnableAutomaticRecook
+            // still owns the opt-in state transition on a later call.
+            if (m_impl->accepted.cohortIntent.IsActive() && !automatic.explicitCohort.IsActive())
+                return ProjectAssetPipelineResult::Pending;
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                      : ProjectAssetPipelineResult::InvalidState;
+        }
 
         // Visibility may already have committed even if owner bookkeeping could
         // not be adopted on the preceding tick. Keep that exact settlement
@@ -5601,6 +8185,9 @@ namespace vanguard::asset_streaming
 
             if (automatic.workerFinished)
             {
+                automatic.status.lastRecookFailure = automatic.workerFailure;
+                automatic.status.firstFailedRoot = automatic.workerRootFailure;
+                automatic.status.failedRootCount = automatic.workerStats.failedRoots;
                 const bool recoverAfterPollDispatchFailure = automatic.recoverAfterPollDispatchFailure;
                 automatic.recoverAfterPollDispatchFailure = false;
                 automatic.admissionOwned = false;
@@ -5632,11 +8219,12 @@ namespace vanguard::asset_streaming
                     automatic.RefreshPendingStatus();
                     const bool hasPending = !automatic.pending.assets.Empty() || !automatic.pending.inputs.Empty() ||
                                             !automatic.pending.outputs.Empty();
-                    automatic.status.state = hasPending ? ProjectAssetAutomaticRecookState::Pending
-                                                        : ProjectAssetAutomaticRecookState::Idle;
-                    if (!hasPending && !automatic.explicitActivity)
+                    const bool completionPending = hasPending || automatic.explicitActivity;
+                    automatic.status.state = completionPending ? ProjectAssetAutomaticRecookState::Pending
+                                                               : ProjectAssetAutomaticRecookState::Idle;
+                    if (!completionPending)
                         automatic.status.dirtyReasons = ProjectAssetAutomaticRecookDirtyReason::None;
-                    return hasPending ? ProjectAssetPipelineResult::Pending : ProjectAssetPipelineResult::Success;
+                    return completionPending ? ProjectAssetPipelineResult::Pending : ProjectAssetPipelineResult::Success;
                 }
                 else
                 {
@@ -5722,20 +8310,25 @@ namespace vanguard::asset_streaming
         }
         if (!automatic.recoveryRequested && !hasPending && automatic.HasPublishableDelivery())
         {
-            if (!m_impl->CanAcquireAutomaticAdmission())
+            if (!m_impl->CanAcquireAutomaticPublicationAdmission())
                 return ProjectAssetPipelineResult::Pending;
             if (!m_impl->CanAdoptPendingAutomaticPublications())
             {
-                automatic.MarkPublishableDeliveriesFailed();
+                automatic.MarkPublishableDeliveriesFailed(
+                    ProjectAssetDeliveryReason::PublicationFailed,
+                    !(automatic.explicitCohort.IsActive() && automatic.explicitCohort.publicationBlocked));
                 automatic.RefreshDeliveryStatus(automatic.status);
                 return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::ReconciliationFailed)
                                           : ProjectAssetPipelineResult::ReconciliationFailed;
             }
             automatic.admissionOwned = true;
-            if (!automatic.DispatchPublication(m_impl->publisher, *m_impl->files, m_impl->looseRetirement, m_impl->accumulator))
+            if (!automatic.DispatchPublication(m_impl->publisher, *m_impl->files, m_impl->looseRetirement,
+                                               m_impl->accumulator, m_impl->accepted))
             {
                 automatic.admissionOwned = false;
-                automatic.MarkPublishableDeliveriesFailed();
+                automatic.MarkPublishableDeliveriesFailed(
+                    ProjectAssetDeliveryReason::PublicationFailed,
+                    !(automatic.explicitCohort.IsActive() && automatic.explicitCohort.publicationBlocked));
                 automatic.RefreshDeliveryStatus(automatic.status);
                 return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::PublicationFailed)
                                           : ProjectAssetPipelineResult::PublicationFailed;
@@ -5744,16 +8337,44 @@ namespace vanguard::asset_streaming
         }
         if (!automatic.recoveryRequested && !hasPending)
         {
-            if (automatic.explicitActivity)
+            if (m_impl->accepted.cohortIntent.IsActive() && !automatic.explicitCohort.IsActive())
             {
-                automatic.explicitActivity = false;
+                // A durable successor intent can survive restart when its
+                // build-request admission is temporarily unbuildable. It still
+                // fences ordinary automatic work: reporting Idle/Success here
+                // would erase the pending successor from the owner-facing
+                // state even though its last-known-good predecessor remains
+                // protected. Only an explicit retry may re-admit that cohort.
+                automatic.status.state = ProjectAssetAutomaticRecookState::Pending;
+                return ProjectAssetPipelineResult::Pending;
+            }
+            if (automatic.explicitCohort.IsActive())
+            {
+                // A failed/stale cohort publication remains an explicit atomic
+                // retry unit. Do not silently retire the manual activity or let
+                // disabled-policy cleanup dissolve it into per-output delivery.
+                automatic.status.state = ProjectAssetAutomaticRecookState::Idle;
+                return ProjectAssetPipelineResult::Success;
+            }
+                if (automatic.explicitActivity)
+                {
+                    automatic.explicitActivity = false;
                 if (!automatic.policyEnabled)
                 {
-                    automatic.SetEnabled(false);
-                    return ProjectAssetPipelineResult::Success;
+                        automatic.SetEnabled(false);
+                        return ProjectAssetPipelineResult::Success;
+                    }
+                    if (automatic.startupRecoveryDeferred)
+                    {
+                        automatic.startupRecoveryDeferred = false;
+                        automatic.recoveryRequested = true;
+                        automatic.status.dirtyReasons = ProjectAssetAutomaticRecookDirtyReason::StartupRecovery;
+                        automatic.status.state = ProjectAssetAutomaticRecookState::Pending;
+                        automatic.RefreshRetryStatus();
+                        return ProjectAssetPipelineResult::Pending;
+                    }
+                    automatic.status.dirtyReasons = ProjectAssetAutomaticRecookDirtyReason::None;
                 }
-                automatic.status.dirtyReasons = ProjectAssetAutomaticRecookDirtyReason::None;
-            }
             automatic.status.state = ProjectAssetAutomaticRecookState::Idle;
             return ProjectAssetPipelineResult::Success;
         }
@@ -5784,6 +8405,8 @@ namespace vanguard::asset_streaming
         automatic.admissionOwned = true;
         automatic.workerWasRecovery = recovery;
         automatic.status.state = ProjectAssetAutomaticRecookState::Planning;
+        automatic.status.buildOperations = 0u;
+        automatic.status.completedBuildOperations = 0u;
         automatic.status.activeAcceptedGeneration = recovery ? m_impl->accepted.generation
                                                              : automatic.active.lastAcceptedGeneration;
         automatic.workerAcceptedGeneration = automatic.status.activeAcceptedGeneration;
@@ -6286,8 +8909,10 @@ namespace vanguard::asset_streaming
                 failure->result = ProjectAssetPipelineResult::InvalidState;
             return {};
         }
-        if (m_impl->observation.reconcileActive || m_impl->automaticRecook.OwnsAdmission() ||
-            m_impl->vddcMaintenance.OwnsAdmission() || m_impl->looseRetirement.OwnsAdmission())
+        if (m_impl->accepted.cohortIntent.IsActive() || m_impl->observation.reconcileActive ||
+            m_impl->automaticRecook.OwnsAdmission() ||
+            m_impl->vddcMaintenance.OwnsAdmission() || m_impl->looseRetirement.OwnsAdmission() ||
+            m_impl->builds.GetDependencyIndex() == nullptr || m_impl->builds.GetDependencyIndex()->HasRetirementProtections())
         {
             if (failure != nullptr)
                 failure->result = ProjectAssetPipelineResult::Busy;
@@ -6349,7 +8974,31 @@ namespace vanguard::asset_streaming
             *output = {};
         if (m_impl == nullptr)
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState) : ProjectAssetPipelineResult::InvalidState;
-        if (!CanMutateSources())
+        if (!m_impl->CanMutateSourcesCore())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
+        assets::DependencyIndex* const retirementIndex = m_impl->builds.GetDependencyIndex();
+        const bool hadRetirementProtections = retirementIndex != nullptr && retirementIndex->HasRetirementProtections();
+        const ProjectAssetPipelineResult replayed = m_impl->ReplayRetirementProtections(failure);
+        if (replayed != ProjectAssetPipelineResult::Success)
+            return replayed;
+        if (hadRetirementProtections && m_impl->accepted.cohortIntent.IsActive() && retirementIndex != nullptr &&
+            !retirementIndex->HasRetirementProtections())
+        {
+            if (!m_impl->CohortIntentSuccessorVisibleExact())
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending)
+                                          : ProjectAssetPipelineResult::CommittedReconciliationPending;
+            const ProjectAssetSnapshotResult cleared = m_impl->ClearCohortIntent();
+            if (cleared != ProjectAssetSnapshotResult::Success)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                    failure->acceptedSnapshot = cleared;
+                }
+                return ProjectAssetPipelineResult::CommittedReconciliationPending;
+            }
+        }
+        if (!m_impl->CanReconcileSources())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
 
         Impl::ReconcileState state;
@@ -6361,6 +9010,10 @@ namespace vanguard::asset_streaming
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::ReconciliationFailed)
                                       : ProjectAssetPipelineResult::ReconciliationFailed;
         state.report.catalogOutputs = state.desired.Size();
+        if (!ApplyCohortIntentDesired(m_impl->accepted.cohortIntent, state.desired, state.desiredLookup,
+                                      m_impl->config.maximumPublishedResources))
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::ReconciliationFailed)
+                                      : ProjectAssetPipelineResult::ReconciliationFailed;
         if (filesystem::ScanFiles(m_impl->config.publication.looseRoot, state.looseFiles, m_impl->config.maximumLooseFiles) !=
             filesystem::ScanResult::Success)
             state.looseFiles.Clear();
@@ -6389,7 +9042,7 @@ namespace vanguard::asset_streaming
         // never a window where callbacks are routed against stale root indices.
         if (m_impl->observation.running && !SameSourceRoots(roots, m_impl->sources->GetRoots()))
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
-        if (!CanMutateSources())
+        if (!m_impl->CanReconcileSources())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
         assets::SourceDatabase candidate;
         ProjectAssetAcceptedBaseline proposed(m_impl->config.changeState);
@@ -6444,6 +9097,13 @@ namespace vanguard::asset_streaming
         else if (automaticPendingResult == ProjectAssetAutomaticPendingPrepareResult::RecoveryRequired)
             m_impl->automaticRecook.MarkRecoveryRequired(m_impl->accepted.generation, true);
         state.report.catalogOutputs = state.desired.Size();
+        if (!ApplyCohortIntentDesired(m_impl->accepted.cohortIntent, state.desired, state.desiredLookup,
+                                      m_impl->config.maximumPublishedResources))
+        {
+            if (failure != nullptr)
+                failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+        }
 
         ProjectAssetPipelineResult result = ProjectAssetPipelineResult::Pending;
         while (result == ProjectAssetPipelineResult::Pending)
@@ -6914,6 +9574,29 @@ namespace vanguard::asset_streaming
         return cleanupPending ? ProjectAssetPipelineResult::CommittedCleanupPending : ProjectAssetPipelineResult::Success;
     }
 
+    ProjectAssetPipelineResult ProjectAssetPipeline::GenerateImportIdentityCandidate(
+        assets::AssetId& identity, ProjectAssetPipelineFailure* const failure) noexcept
+    {
+        identity = {};
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                      : ProjectAssetPipelineResult::InvalidState;
+        for (u32 attempt = 0u; attempt < m_impl->config.maximumIdentityGenerationAttempts; ++attempt)
+        {
+            assets::AssetId candidate;
+            if (!assets::GenerateAssetId(candidate))
+                break;
+            if (!m_impl->sources->ContainsAssetIdentity(candidate))
+            {
+                identity = candidate;
+                return ProjectAssetPipelineResult::Success;
+            }
+        }
+        return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::IdentityGenerationFailed)
+                                  : ProjectAssetPipelineResult::IdentityGenerationFailed;
+    }
+
     ProjectAssetPipelineResult ProjectAssetPipeline::UpdateAssetSettings(
         const ProjectAssetSettingsUpdateRequest& request, ProjectAssetRestoreReport* const report,
         ProjectAssetPipelineFailure* const failure) noexcept
@@ -7028,6 +9711,1207 @@ namespace vanguard::asset_streaming
             }
             return ProjectAssetPipelineResult::CommittedReconciliationPending;
         }
+        if (report != nullptr)
+            report->operationCleanupPending = cleanupPending;
+        m_impl->RecordCommittedHistory(static_cast<AssetHistoryRecord&&>(inverse));
+        return cleanupPending ? ProjectAssetPipelineResult::CommittedCleanupPending : ProjectAssetPipelineResult::Success;
+    }
+
+    bool ProjectAssetPipeline::CanCommitPlannedImportNow(const assets::AssetId parentAsset,
+                                                         const resources::ResourcePath sourceIdentity) const noexcept
+    {
+        if (m_impl == nullptr || !parentAsset.IsValid() || !sourceIdentity.IsValid() ||
+            m_impl->deferredPlannedImport.IsActive())
+            return false;
+        const bool replacingCohortIntent = m_impl->accepted.cohortIntent.IsActive() &&
+                                           m_impl->accepted.cohortIntent.asset == parentAsset &&
+                                           m_impl->accepted.cohortIntent.sourceIdentity == sourceIdentity;
+        return (replacingCohortIntent ? m_impl->CanReconcileSources() : m_impl->CanMutateSources()) &&
+               m_impl->transaction.GetState() == assets::AssetFileTransactionState::Ready &&
+               (!m_impl->observation.running || !m_impl->accumulator.HasRescanRequired());
+    }
+
+    ProjectAssetPipelineResult ProjectAssetPipeline::QuiesceDeferredPlannedImport(
+        ProjectAssetPipelineFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr || !m_impl->deferredPlannedImportPrepare.IsActive())
+            return ProjectAssetPipelineResult::Success;
+
+        // Jobs is a dependency of Project Workspace. Its drain barrier runs
+        // before workspace OnShutdown, so deferring this join to pipeline
+        // Shutdown leaves an outstanding task visible to Jobs OnDrain. Do it
+        // at workspace OnQuiesce while every file/transaction owner is alive.
+        Impl::DeferredPlannedImportPrepare& pending = m_impl->deferredPlannedImportPrepare;
+        pending.CancelAndJoin();
+        const assets::AssetFileTransactionState state = m_impl->transaction.GetState();
+        assets::AssetFileTransactionResult rollback = assets::AssetFileTransactionResult::Success;
+        if (state == assets::AssetFileTransactionState::Collecting ||
+            state == assets::AssetFileTransactionState::Prepared)
+            rollback = m_impl->transaction.Rollback();
+        else if (state != assets::AssetFileTransactionState::Ready)
+            rollback = assets::AssetFileTransactionResult::InvalidState;
+        if (rollback != assets::AssetFileTransactionResult::Success)
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::ShutdownFailed;
+                failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                failure->operation.transaction = rollback;
+            }
+            return ProjectAssetPipelineResult::ShutdownFailed;
+        }
+        pending.Reset();
+        m_impl->deferredPlannedImportStatus = {};
+        return ProjectAssetPipelineResult::Success;
+    }
+
+    ProjectAssetPipelineResult ProjectAssetPipeline::TickDeferredPlannedImport(
+        ProjectAssetPipelineFailure* const failure) noexcept
+    {
+        ClearFailure(failure);
+        if (m_impl == nullptr)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                      : ProjectAssetPipelineResult::InvalidState;
+
+        Impl::DeferredPlannedImportPrepare& pending = m_impl->deferredPlannedImportPrepare;
+        if (!pending.IsActive())
+            return ProjectAssetPipelineResult::Success;
+
+        const auto updateProgress = [&]() noexcept
+        {
+            if (m_impl->deferredPlannedImportStatus.state != ProjectAssetDeferredPlannedImportState::PreparingTransaction)
+                return;
+            const u32 phase = pending.progressPhase.GetValue();
+            m_impl->deferredPlannedImportStatus.preparePhase =
+                phase == 2u ? ProjectAssetDeferredPlannedImportPreparePhase::Verifying
+                            : phase == 1u ? ProjectAssetDeferredPlannedImportPreparePhase::Writing
+                                          : ProjectAssetDeferredPlannedImportPreparePhase::None;
+            m_impl->deferredPlannedImportStatus.prepareCompletedBytes = pending.progressCompleted.GetValue();
+            m_impl->deferredPlannedImportStatus.prepareTotalBytes = pending.progressTotal.GetValue();
+        };
+        const auto terminalFailure = [&](const ProjectAssetPipelineResult result) noexcept
+        {
+            updateProgress();
+            m_impl->deferredPlannedImportStatus.state = ProjectAssetDeferredPlannedImportState::ContinuationFailed;
+            m_impl->deferredPlannedImportStatus.asset = pending.asset;
+            m_impl->deferredPlannedImportStatus.result = result;
+            pending.Reset();
+            return result;
+        };
+        const auto failTransaction = [&](const assets::AssetFileTransactionResult transactionResult) noexcept
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::OperationFailed;
+                failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                failure->operation.source = pending.asset;
+                failure->operation.importer = pending.importer;
+                failure->operation.transaction = transactionResult;
+            }
+            return terminalFailure(ProjectAssetPipelineResult::OperationFailed);
+        };
+        const auto rollbackPrepared = [&]() noexcept -> assets::AssetFileTransactionResult
+        {
+            const assets::AssetFileTransactionState state = m_impl->transaction.GetState();
+            if (state != assets::AssetFileTransactionState::Collecting && state != assets::AssetFileTransactionState::Prepared)
+                return assets::AssetFileTransactionResult::InvalidState;
+            return m_impl->transaction.Rollback();
+        };
+
+        updateProgress();
+        if (pending.workRunning)
+        {
+            if (!pending.workCompleted.GetValue())
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Pending)
+                                          : ProjectAssetPipelineResult::Pending;
+            pending.workRunning = false;
+        }
+
+        if (pending.workerResult != assets::AssetFileTransactionResult::Success)
+        {
+            const assets::AssetFileTransactionResult prepareResult = pending.workerResult;
+            const assets::AssetFileTransactionResult rollback = rollbackPrepared();
+            if (rollback != assets::AssetFileTransactionResult::Success)
+                return failTransaction(rollback);
+            if (prepareResult == assets::AssetFileTransactionResult::Conflict)
+            {
+                if (failure != nullptr)
+                    failure->result = ProjectAssetPipelineResult::StalePlan;
+                return terminalFailure(ProjectAssetPipelineResult::StalePlan);
+            }
+            return failTransaction(prepareResult);
+        }
+
+        // The worker has reached the durable Prepared journal but has not touched
+        // any authored target. Keep the source/build owner quiescent until the
+        // owner can perform the final disk proof and apply the transaction as one
+        // continuation. Busy here is retryable and performs no expensive rescan.
+        if (!m_impl->CanSettleDeferredPlannedImportPrepare())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                      : ProjectAssetPipelineResult::Busy;
+
+        if (m_impl->accepted.generation != pending.baseAcceptedGeneration)
+        {
+            const assets::AssetFileTransactionResult rollback = rollbackPrepared();
+            if (rollback != assets::AssetFileTransactionResult::Success)
+                return failTransaction(rollback);
+            if (failure != nullptr)
+                failure->result = ProjectAssetPipelineResult::StalePlan;
+            return terminalFailure(ProjectAssetPipelineResult::StalePlan);
+        }
+
+        ProjectAssetPipelineFailure witnessFailure;
+        const ProjectAssetPipelineResult witness = m_impl->VerifyIndependentPlannedImportDiskWitness(
+            pending.asset, pending.sourceRoot, pending.sourceDestination, pending.sourceIdentity,
+            {pending.stagedOutputPaths.TypedData(), pending.stagedOutputPaths.Size()}, &witnessFailure, true);
+        if (witness != ProjectAssetPipelineResult::Success)
+        {
+            const assets::AssetFileTransactionResult rollback = rollbackPrepared();
+            if (rollback != assets::AssetFileTransactionResult::Success)
+                return failTransaction(rollback);
+            if (failure != nullptr)
+                *failure = witnessFailure;
+            return terminalFailure(witness);
+        }
+
+        assets::AssetFileTransactionResult transaction = m_impl->transaction.ApplyPrepared();
+        bool intentPersisted = false;
+        if (transaction == assets::AssetFileTransactionResult::Success && pending.cohortIntent.IsActive())
+        {
+            const ProjectAssetSnapshotResult persisted = m_impl->ReplaceCohortIntent(pending.cohortIntent);
+            if (persisted != ProjectAssetSnapshotResult::Success)
+            {
+                const assets::AssetFileTransactionResult rollback = rollbackPrepared();
+                if (failure != nullptr)
+                {
+                    failure->acceptedSnapshot = persisted;
+                    failure->result = rollback == assets::AssetFileTransactionResult::Success
+                                          ? ProjectAssetPipelineResult::SnapshotSaveFailed
+                                          : ProjectAssetPipelineResult::OperationFailed;
+                    if (rollback != assets::AssetFileTransactionResult::Success)
+                    {
+                        failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                        failure->operation.source = pending.asset;
+                        failure->operation.importer = pending.importer;
+                        failure->operation.transaction = rollback;
+                    }
+                }
+                return terminalFailure(rollback == assets::AssetFileTransactionResult::Success
+                                           ? ProjectAssetPipelineResult::SnapshotSaveFailed
+                                           : ProjectAssetPipelineResult::OperationFailed);
+            }
+            m_impl->plannedImportIntentOwner = true;
+            intentPersisted = true;
+        }
+
+        if (transaction == assets::AssetFileTransactionResult::Success)
+            transaction = m_impl->transaction.PublishCommit();
+        if (transaction == assets::AssetFileTransactionResult::Success)
+            transaction = m_impl->transaction.CompleteCommit(
+                {pending.historyPaths.TypedData(), pending.historyPaths.Size()},
+                {pending.postConditions.TypedData(), pending.postConditions.Size()});
+
+        if (transaction != assets::AssetFileTransactionResult::Success &&
+            transaction != assets::AssetFileTransactionResult::CommittedCleanupPending)
+        {
+            bool rolledBack = false;
+            const assets::AssetFileTransactionState state = m_impl->transaction.GetState();
+            if (state == assets::AssetFileTransactionState::Collecting || state == assets::AssetFileTransactionState::Prepared)
+            {
+                const assets::AssetFileTransactionResult rollback = m_impl->transaction.Rollback();
+                if (rollback != assets::AssetFileTransactionResult::Success)
+                    transaction = rollback;
+                else
+                    rolledBack = true;
+            }
+            if (rolledBack && intentPersisted)
+            {
+                const ProjectAssetSnapshotResult restored = m_impl->ReplaceCohortIntent(pending.cohortIntent);
+                if (restored != ProjectAssetSnapshotResult::Success)
+                {
+                    m_impl->plannedImportIntentOwner = false;
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::SnapshotSaveFailed;
+                        failure->acceptedSnapshot = restored;
+                    }
+                    return terminalFailure(ProjectAssetPipelineResult::SnapshotSaveFailed);
+                }
+                intentPersisted = false;
+            }
+            m_impl->plannedImportIntentOwner = false;
+            if (transaction == assets::AssetFileTransactionResult::Conflict)
+            {
+                if (failure != nullptr)
+                    failure->result = ProjectAssetPipelineResult::StalePlan;
+                return terminalFailure(ProjectAssetPipelineResult::StalePlan);
+            }
+            return failTransaction(transaction);
+        }
+
+        const assets::AssetId committedAsset = pending.asset;
+        const assets::SourceImporterId committedImporter = pending.importer;
+        const resources::ResourcePath committedSourceIdentity = pending.sourceIdentity;
+        const filesystem::AbsolutePath committedSourceDestination = pending.sourceDestination;
+        const crypto::Digest256 committedSourceFingerprint = pending.sourceFingerprint;
+        if (!AttachHistoryPostConditions(pending.inverse, pending.postConditions))
+        {
+            ClearAssetOperationHistory();
+            pending.inverse.files.Clear();
+        }
+        m_impl->RecordCommittedHistory(static_cast<AssetHistoryRecord&&>(pending.inverse));
+        m_impl->BeginDeferredPlannedImport(committedAsset, committedSourceIdentity,
+                                           committedSourceDestination, committedSourceFingerprint);
+        m_impl->plannedImportIntentOwner = false;
+        pending.Reset();
+
+        if (failure != nullptr)
+        {
+            failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+            failure->operation.source = committedAsset;
+            failure->operation.importer = committedImporter;
+            failure->operation.transaction = transaction;
+        }
+        return ProjectAssetPipelineResult::CommittedReconciliationPending;
+    }
+
+    ProjectAssetDeferredPlannedImportStatus ProjectAssetPipeline::GetDeferredPlannedImportStatus() const noexcept
+    {
+        if (m_impl == nullptr)
+            return {};
+        ProjectAssetDeferredPlannedImportStatus status = m_impl->deferredPlannedImportStatus;
+        if (status.state == ProjectAssetDeferredPlannedImportState::PreparingTransaction &&
+            m_impl->deferredPlannedImportPrepare.IsActive())
+        {
+            const u32 phase = m_impl->deferredPlannedImportPrepare.progressPhase.GetValue();
+            status.preparePhase = phase == 2u ? ProjectAssetDeferredPlannedImportPreparePhase::Verifying
+                                              : phase == 1u ? ProjectAssetDeferredPlannedImportPreparePhase::Writing
+                                                            : ProjectAssetDeferredPlannedImportPreparePhase::None;
+            status.prepareCompletedBytes = m_impl->deferredPlannedImportPrepare.progressCompleted.GetValue();
+            status.prepareTotalBytes = m_impl->deferredPlannedImportPrepare.progressTotal.GetValue();
+        }
+        return status;
+    }
+
+    ProjectAssetPipelineResult ProjectAssetPipeline::CommitPlannedImport(
+        const assets::PlannedAssetImportRequest& request, assets::AssetId& importedAsset,
+        ProjectAssetRestoreReport* const report, ProjectAssetPipelineFailure* const failure,
+        const bool deferPostCommitReconciliation) noexcept
+    {
+        importedAsset = {};
+        ClearFailure(failure);
+        if (report != nullptr)
+            *report = {};
+        if (m_impl == nullptr)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidState)
+                                      : ProjectAssetPipelineResult::InvalidState;
+        if (request.importDescription == nullptr || !request.parentAsset.IsValid() ||
+            request.importer == assets::InvalidSourceImporterId || request.importerVersion == 0u ||
+            request.sourceDatabaseGeneration == 0u || request.acceptedStateGeneration == 0u ||
+            !request.sourceOrigin.IsFilePath() || !request.sourceRoot.IsDirectoryPath() ||
+            !request.sourceDestination.IsFilePath() || !request.sourceIdentity.IsValid() ||
+            request.sourceFingerprint.IsEmpty() || request.sourceBytes.Empty() || request.sourceBytes.Data() == nullptr ||
+            (!request.dependencyWitnesses.Empty() && request.dependencyWitnesses.Data() == nullptr) ||
+            request.dependencyWitnesses.Count() > m_impl->config.maximumOperationEntries ||
+            request.dependencyWitnesses.Count() == ~u32{0})
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::InvalidArgument)
+                                      : ProjectAssetPipelineResult::InvalidArgument;
+        const bool replacingCohortIntent = m_impl->accepted.cohortIntent.IsActive() &&
+                                           m_impl->accepted.cohortIntent.asset == request.parentAsset &&
+                                           m_impl->accepted.cohortIntent.sourceIdentity == request.sourceIdentity;
+        if (m_impl->deferredPlannedImport.IsActive() ||
+            (replacingCohortIntent ? !m_impl->CanReconcileSources() : !CanMutateSources()) ||
+            m_impl->transaction.GetState() != assets::AssetFileTransactionState::Ready)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                      : ProjectAssetPipelineResult::Busy;
+
+        const auto stale = [&](const std::source_location site = std::source_location::current()) noexcept
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::StalePlan;
+                failure->stalePlanSite = site.line();
+            }
+            return ProjectAssetPipelineResult::StalePlan;
+        };
+        const bool observationFenceRequired = m_impl->observation.running;
+        SourceChangeSnapshot observationSnapshot;
+        SourceChangeSnapshot committedObservationSnapshot;
+        // A first import copied from outside the project with no adopted project
+        // dependencies is not bound to unrelated catalog revisions. The current
+        // destination/parent/output identities are checked below against the
+        // live catalog and the complete authoritative on-disk catalog before
+        // any durable mutation, rather than comparing global generations.
+        // Retain the strict catalog fence for existing project sources,
+        // reimports and imports that borrow project dependency identities.
+        const bool requiresGlobalCatalogFence = request.hasPersistedMetadataFingerprint ||
+                                                !request.copySourceToDestination ||
+                                                !request.dependencyWitnesses.Empty();
+        const auto pendingObservation = [&]() noexcept
+        {
+            // No files have been committed on this path. A first, independent
+            // external import can retain its review while a source watcher
+            // catches up; strict imports still require explicit reinspection.
+            if (requiresGlobalCatalogFence)
+                return stale();
+            if (failure != nullptr)
+                failure->result = ProjectAssetPipelineResult::Busy;
+            return ProjectAssetPipelineResult::Busy;
+        };
+        if ((requiresGlobalCatalogFence &&
+             (request.sourceDatabaseGeneration != m_impl->sources->GetGeneration() ||
+              request.acceptedStateGeneration != m_impl->accepted.generation)) ||
+            crypto::Sha256(request.sourceBytes.Data(), request.sourceBytes.Count()) != request.sourceFingerprint)
+            return stale();
+
+        const containers::ArraySpan<const assets::SourceRoot> roots = m_impl->sources->GetRoots();
+        bool writablePlanningRoot = false;
+        for (const assets::SourceRoot& root : roots)
+            writablePlanningRoot = writablePlanningRoot || (!root.readOnly && root.directory == request.sourceRoot);
+        if (!writablePlanningRoot || !SourceIdentityMatchesRoot(request.sourceRoot, request.sourceDestination, request.sourceIdentity) ||
+            request.copySourceToDestination != !(request.sourceOrigin == request.sourceDestination))
+            return stale();
+
+        const containers::ArraySpan<const assets::SourceImporterDescriptor> importers = m_impl->builds.GetImporters();
+        const assets::SourceImporterDescriptor* const importer =
+            FindAuthoringImporter(importers, request.importer, request.importerVersion);
+        if (importer == nullptr || importer->recognizeSource == nullptr || importer->validateSettings == nullptr ||
+            !importer->recognizeSource(request.sourceDestination.AsStringView(), importer->userData))
+            return stale();
+        const ImportDescriptionValidation descriptionValidation = ValidateImportDescription(*request.importDescription, *importer);
+        if (descriptionValidation != ImportDescriptionValidation::Success)
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::OperationFailed;
+                failure->operation.result = descriptionValidation == ImportDescriptionValidation::LimitExceeded
+                                                ? assets::AssetOperationResult::LimitExceeded
+                                                : assets::AssetOperationResult::SettingsInvalid;
+                failure->operation.importer = request.importer;
+                failure->operation.source = request.parentAsset;
+            }
+            return ProjectAssetPipelineResult::OperationFailed;
+        }
+
+        const bool reimport = request.hasPersistedMetadataFingerprint;
+        if (reimport && (request.persistedMetadataFingerprint.IsEmpty() || request.copySourceToDestination))
+            return stale();
+        if (!reimport && !request.persistedMetadataFingerprint.IsEmpty())
+            return stale();
+
+        const assets::SourceRecord* parentSource = nullptr;
+        if (reimport)
+        {
+            parentSource = m_impl->sources->LookupAsset(request.parentAsset);
+            if (parentSource == nullptr || parentSource->path != request.sourceDestination ||
+                parentSource->sourceIdentity != request.sourceIdentity || parentSource->metadataResult != assets::MetadataResult::Success ||
+                parentSource->importState != assets::SourceImportState::MetadataSelected || parentSource->importer != request.importer ||
+                parentSource->availableImporterVersion != request.importerVersion || !(parentSource->metadata.id == request.parentAsset) ||
+                parentSource->root >= roots.Count() || roots[parentSource->root].directory != request.sourceRoot || roots[parentSource->root].readOnly)
+                return stale();
+        }
+        else
+        {
+            if (m_impl->sources->ContainsAssetIdentity(request.parentAsset))
+                return stale();
+            if (!request.copySourceToDestination)
+            {
+                parentSource = m_impl->sources->LookupResource(request.sourceDestination);
+                if (parentSource == nullptr || parentSource->sourceIdentity != request.sourceIdentity ||
+                    parentSource->importState != assets::SourceImportState::Candidate ||
+                    parentSource->issues != assets::MetadataMissing || parentSource->metadataResult == assets::MetadataResult::Success ||
+                    parentSource->importer != request.importer || parentSource->availableImporterVersion != request.importerVersion ||
+                    parentSource->root >= roots.Count() || roots[parentSource->root].directory != request.sourceRoot || roots[parentSource->root].readOnly)
+                    return stale();
+            }
+            else if (m_impl->sources->LookupResource(request.sourceDestination) != nullptr)
+                return stale();
+        }
+
+        const filesystem::AbsolutePath parentMetadataPath = MetadataPath(request.sourceDestination);
+
+        struct PlannedAssertion final
+        {
+            filesystem::AbsolutePath path;
+            crypto::Digest256 digest;
+        };
+        containers::DynamicArray<PlannedAssertion> assertions(memory::pools::Assets::GetInstance());
+        const u32 maximumAssertions = request.dependencyWitnesses.Count() > (~u32{0} - 1u) / 2u
+                                          ? ~u32{0}
+                                          : request.dependencyWitnesses.Count() * 2u + 1u;
+        if (maximumAssertions == ~u32{0})
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+        assertions.Reserve(maximumAssertions);
+        if (assertions.Capacity() < maximumAssertions)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+        const auto appendAssertion = [&](const filesystem::AbsolutePath& path, const crypto::Digest256& digest) noexcept
+        {
+            if (!path.IsFilePath() || digest.IsEmpty())
+                return false;
+            for (const PlannedAssertion& existing : assertions)
+                if (existing.path == path)
+                    return existing.digest == digest;
+            const u32 previous = assertions.Size();
+            assertions.PushBack({path, digest});
+            return assertions.Size() == previous + 1u;
+        };
+        if (!request.copySourceToDestination && !appendAssertion(request.sourceDestination, request.sourceFingerprint))
+            return stale();
+
+        struct AuxiliaryAdoption final
+        {
+            AuxiliaryAdoption() noexcept = default;
+            const assets::SourceRecord* source = nullptr;
+            const assets::SourceImporterDescriptor* importer = nullptr;
+            assets::SourceImportDescription description;
+            assets::AssetId identity;
+            containers::String encodedMetadata;
+        };
+        containers::DynamicArray<AuxiliaryAdoption> adoptions(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<assets::PlannedAssetAdoptionReceipt> adoptionReceipts(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<resources::ResourcePath> stagedOutputPaths(memory::pools::Assets::GetInstance());
+        containers::DynamicArray<assets::AssetId> reservedAssetIds(memory::pools::Assets::GetInstance());
+        if (request.importDescription->outputs.Size() > ~u32{0} - request.dependencyWitnesses.Count())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+        const u32 maximumStagedOutputs = request.importDescription->outputs.Size() + request.dependencyWitnesses.Count();
+        const u32 maximumReservedIds = request.dependencyWitnesses.Count() + 1u;
+        adoptionReceipts.Reserve(request.dependencyWitnesses.Count());
+        stagedOutputPaths.Reserve(maximumStagedOutputs);
+        reservedAssetIds.Reserve(maximumReservedIds);
+        if (adoptionReceipts.Capacity() < request.dependencyWitnesses.Count() ||
+            stagedOutputPaths.Capacity() < maximumStagedOutputs || reservedAssetIds.Capacity() < maximumReservedIds)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+        reservedAssetIds.PushBack(request.parentAsset);
+        if (reservedAssetIds.Size() != 1u)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+        const auto appendOutputPaths = [&](const assets::AssetId identity, const assets::SourceImportDescription& description,
+                                           const assets::SourceRecord* const currentOwner) noexcept
+        {
+            const u32 originalCount = stagedOutputPaths.Size();
+            for (const assets::AssetOutput& output : description.outputs)
+            {
+                const resources::ResourcePath path = assets::GetAssetOutputResourcePath(identity, output.key);
+                if (!path.IsValid())
+                {
+                    stagedOutputPaths.Resize(originalCount);
+                    return false;
+                }
+                for (const resources::ResourcePath existing : stagedOutputPaths)
+                    if (existing == path)
+                    {
+                        stagedOutputPaths.Resize(originalCount);
+                        return false;
+                    }
+                const bool existingCatalogPath = m_impl->sources->ContainsOutputPath(path);
+                bool ownedCurrentPath = false;
+                if (currentOwner != nullptr)
+                    for (const assets::AssetOutput& current : currentOwner->metadata.outputs)
+                        ownedCurrentPath = ownedCurrentPath || assets::GetAssetOutputResourcePath(currentOwner->metadata.id, current.key) == path;
+                if ((existingCatalogPath && !ownedCurrentPath) || (m_impl->streamer->ContainsResourcePath(path) && !ownedCurrentPath))
+                {
+                    stagedOutputPaths.Resize(originalCount);
+                    return false;
+                }
+                const u32 previous = stagedOutputPaths.Size();
+                stagedOutputPaths.PushBack(path);
+                if (stagedOutputPaths.Size() != previous + 1u)
+                {
+                    stagedOutputPaths.Resize(originalCount);
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!appendOutputPaths(request.parentAsset, *request.importDescription, reimport ? parentSource : nullptr))
+            return stale();
+
+        for (const assets::PlannedAssetDependencyWitness& witness : request.dependencyWitnesses)
+        {
+            if (!witness.sourceIdentity.IsValid() || !witness.physicalPath.IsFilePath() || !witness.sourceExists ||
+                !witness.hasSourceContentFingerprint || witness.sourceContentFingerprint.IsEmpty())
+                return stale();
+            const assets::SourceRecord* const source = m_impl->sources->LookupSource(witness.sourceIdentity);
+            if (source == nullptr || source->path != witness.physicalPath ||
+                !appendAssertion(source->path, witness.sourceContentFingerprint))
+                return stale();
+
+            if (witness.adoptCandidate)
+            {
+                if (witness.metadataExists || witness.hasMetadataFingerprint || !witness.metadataFingerprint.IsEmpty() ||
+                    witness.selectedResource.IsValid() || source->importState != assets::SourceImportState::Candidate ||
+                    source->metadataResult == assets::MetadataResult::Success || source->issues != assets::MetadataMissing ||
+                    source->path == request.sourceDestination)
+                    return stale();
+                const bool writable = source->root < roots.Count() && !roots[source->root].readOnly;
+                if (!writable)
+                    return stale();
+                const assets::SourceImporterDescriptor* const dependencyImporter =
+                    FindAuthoringImporter(importers, source->importer, source->availableImporterVersion);
+                if (dependencyImporter == nullptr || dependencyImporter->createImportDescription == nullptr ||
+                    dependencyImporter->validateSettings == nullptr)
+                    return stale();
+                const u32 previousAdoptions = adoptions.Size();
+                AuxiliaryAdoption& adoption = adoptions.EmplaceBack();
+                if (adoptions.Size() != previousAdoptions + 1u)
+                    return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                              : ProjectAssetPipelineResult::HistoryLimitExceeded;
+                adoption.source = source;
+                adoption.importer = dependencyImporter;
+                if (!dependencyImporter->createImportDescription(*source, adoption.description, dependencyImporter->userData) ||
+                    ValidateImportDescription(adoption.description, *dependencyImporter) != ImportDescriptionValidation::Success)
+                    return stale();
+
+                bool identityReady = false;
+                for (u32 attempt = 0u; attempt < m_impl->config.maximumIdentityGenerationAttempts && !identityReady; ++attempt)
+                {
+                    ProjectAssetPipelineFailure generatedFailure;
+                    if (m_impl->GenerateAvailableAssetIdentity(adoption.description, dependencyImporter->id,
+                                                               adoption.identity, &generatedFailure) != ProjectAssetPipelineResult::Success)
+                        return failure != nullptr ? (*failure = generatedFailure, generatedFailure.result)
+                                                  : generatedFailure.result;
+                    bool reserved = false;
+                    for (const assets::AssetId& staged : reservedAssetIds)
+                        reserved = reserved || staged == adoption.identity;
+                    if (reserved || !appendOutputPaths(adoption.identity, adoption.description, nullptr))
+                    {
+                        adoption.identity = {};
+                        continue;
+                    }
+                    const u32 previousReserved = reservedAssetIds.Size();
+                    reservedAssetIds.PushBack(adoption.identity);
+                    if (reservedAssetIds.Size() != previousReserved + 1u)
+                        return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                                  : ProjectAssetPipelineResult::HistoryLimitExceeded;
+                    identityReady = true;
+                }
+                if (!identityReady)
+                    return stale();
+
+                const assets::AssetOutput* primaryOutput = nullptr;
+                for (const assets::AssetOutput& candidate : adoption.description.outputs)
+                {
+                    if (candidate.type != dependencyImporter->primaryOutputType)
+                        continue;
+                    if (primaryOutput != nullptr)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::OperationFailed;
+                            failure->operation.result = assets::AssetOperationResult::AmbiguousSource;
+                            failure->operation.source = adoption.identity;
+                            failure->operation.importer = dependencyImporter->id;
+                        }
+                        return ProjectAssetPipelineResult::OperationFailed;
+                    }
+                    primaryOutput = &candidate;
+                }
+                if (primaryOutput == nullptr)
+                    return stale();
+
+                const resources::ResourceReference adoptedResource =
+                    assets::GetAssetOutputReference(adoption.identity, *primaryOutput);
+                if (!adoptedResource.IsValid() || !adoptedResource.IsTyped())
+                    return stale();
+                const u32 previousReceipts = adoptionReceipts.Size();
+                adoptionReceipts.PushBack({source->sourceIdentity, adoption.identity, adoptedResource});
+                if (adoptionReceipts.Size() != previousReceipts + 1u)
+                    return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                              : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+                assets::AssetOperationFailure metadataFailure;
+                if (assets::EncodeAssetImportMetadata(*dependencyImporter, adoption.identity, adoption.description,
+                                                      adoption.encodedMetadata, &metadataFailure) != assets::AssetOperationResult::Success)
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::OperationFailed;
+                        failure->operation = metadataFailure;
+                    }
+                    return ProjectAssetPipelineResult::OperationFailed;
+                }
+            }
+            else
+            {
+                if (!witness.metadataExists || !witness.hasMetadataFingerprint || witness.metadataFingerprint.IsEmpty() ||
+                    !witness.asset.IsValid() || !witness.selectedResource.IsValid() || !witness.selectedResource.IsTyped() ||
+                    source->metadataResult != assets::MetadataResult::Success || source->importState != assets::SourceImportState::MetadataSelected ||
+                    !(source->metadata.id == witness.asset) || m_impl->sources->LookupOutput(witness.selectedResource) != source)
+                    return stale();
+                assets::AssetMetadata liveMetadata;
+                crypto::Digest256 rawMetadataDigest;
+                crypto::Digest256 canonicalMetadataDigest;
+                const filesystem::AbsolutePath metadataPath = MetadataPath(source->path);
+                if (!ReadMetadataSnapshot(*m_impl->files, metadataPath, liveMetadata, rawMetadataDigest, canonicalMetadataDigest) ||
+                    canonicalMetadataDigest != witness.metadataFingerprint || !(liveMetadata.id == witness.asset))
+                    return stale();
+                if (metadataPath == parentMetadataPath)
+                {
+                    if (!reimport || canonicalMetadataDigest != request.persistedMetadataFingerprint)
+                        return stale();
+                }
+                else if (!appendAssertion(metadataPath, rawMetadataDigest))
+                    return stale();
+            }
+        }
+
+        assets::SourceImportDescription finalizedParentDescription;
+        const assets::SourceImportDescription* parentDescription = request.importDescription;
+        if (request.finalizeSettings != nullptr && !adoptionReceipts.Empty())
+        {
+            finalizedParentDescription.settingsVersion = request.importDescription->settingsVersion;
+            const assets::AssetOperationResult finalized = request.finalizeSettings(
+                request.importDescription->settingsVersion,
+                {request.importDescription->settings.TypedData(), request.importDescription->settings.Size()},
+                {adoptionReceipts.TypedData(), adoptionReceipts.Size()}, finalizedParentDescription.settings,
+                request.finalizeSettingsUserData);
+            if (finalized != assets::AssetOperationResult::Success)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::OperationFailed;
+                    failure->operation.result = finalized;
+                    failure->operation.source = request.parentAsset;
+                    failure->operation.importer = request.importer;
+                }
+                return ProjectAssetPipelineResult::OperationFailed;
+            }
+            finalizedParentDescription.outputs.Reserve(request.importDescription->outputs.Size());
+            if (finalizedParentDescription.outputs.Capacity() < request.importDescription->outputs.Size())
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+            for (const assets::AssetOutput& reviewed : request.importDescription->outputs)
+            {
+                assets::AssetOutput copied;
+                copied.key = reviewed.key;
+                copied.type = reviewed.type;
+                if (copied.key != reviewed.key)
+                    return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                              : ProjectAssetPipelineResult::HistoryLimitExceeded;
+                const u32 previous = finalizedParentDescription.outputs.Size();
+                finalizedParentDescription.outputs.PushBack(static_cast<assets::AssetOutput&&>(copied));
+                if (finalizedParentDescription.outputs.Size() != previous + 1u)
+                    return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                              : ProjectAssetPipelineResult::HistoryLimitExceeded;
+            }
+            parentDescription = &finalizedParentDescription;
+        }
+
+        containers::String parentMetadata;
+        assets::AssetOperationFailure metadataFailure;
+        if (assets::EncodeAssetImportMetadata(*importer, request.parentAsset, *parentDescription,
+                                              parentMetadata, &metadataFailure) != assets::AssetOperationResult::Success)
+        {
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::OperationFailed;
+                failure->operation = metadataFailure;
+            }
+            return ProjectAssetPipelineResult::OperationFailed;
+        }
+
+        containers::DynamicArray<filesystem::AbsolutePath> historyPaths(memory::pools::Assets::GetInstance());
+        if ((request.copySourceToDestination &&
+             !AppendUniquePath(historyPaths, request.sourceDestination, m_impl->config.maximumOperationEntries)) ||
+            !AppendUniquePath(historyPaths, parentMetadataPath, m_impl->config.maximumOperationEntries))
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+        for (const AuxiliaryAdoption& adoption : adoptions)
+            if (!AppendUniquePath(historyPaths, MetadataPath(adoption.source->path), m_impl->config.maximumOperationEntries))
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+        AssetHistoryRecord inverse;
+        containers::DynamicArray<assets::AssetFileTransactionPostCondition> postConditions(memory::pools::Assets::GetInstance());
+        if (!CaptureHistory(*m_impl->files, historyPaths, m_impl->config, inverse) ||
+            !PrepareHistoryPostConditions(inverse, historyPaths, postConditions))
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+        crypto::Digest256 expectedParentMetadataRaw;
+        if (reimport)
+        {
+            bool found = false;
+            for (const AssetHistoryFile& state : inverse.files)
+            {
+                if (state.path != parentMetadataPath)
+                    continue;
+                assets::AssetMetadata parsed;
+                crypto::Digest256 canonical;
+                if (!state.existed ||
+                    !DecodeMetadataSnapshot({state.bytes.TypedData(), state.bytes.Size()}, parsed,
+                                            expectedParentMetadataRaw, canonical) ||
+                    canonical != request.persistedMetadataFingerprint || !(parsed.id == request.parentAsset) ||
+                    parsed.importer != request.importer || parsed.importerVersion != request.importerVersion)
+                    return stale();
+                found = true;
+                break;
+            }
+            if (!found)
+                return stale();
+        }
+        else
+        {
+            for (const AssetHistoryFile& state : inverse.files)
+                if ((state.path == parentMetadataPath || (request.copySourceToDestination && state.path == request.sourceDestination)) && state.existed)
+                    return stale();
+            for (const AuxiliaryAdoption& adoption : adoptions)
+                for (const AssetHistoryFile& state : inverse.files)
+                    if (state.path == MetadataPath(adoption.source->path) && state.existed)
+                        return stale();
+        }
+
+        u64 postMutationBytes = parentMetadata.Length();
+        if (request.copySourceToDestination)
+        {
+            if (request.sourceBytes.Count() > ~u64{0} - postMutationBytes)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+            postMutationBytes += request.sourceBytes.Count();
+        }
+        for (const AuxiliaryAdoption& adoption : adoptions)
+        {
+            if (adoption.encodedMetadata.Length() > ~u64{0} - postMutationBytes)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+            postMutationBytes += adoption.encodedMetadata.Length();
+        }
+        if (postMutationBytes > m_impl->config.maximumOperationHistoryBytes)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+        inverse.budgetBytes = std::max(inverse.byteCount, postMutationBytes);
+
+        if (assertions.Size() > m_impl->config.maximumOperationEntries ||
+            historyPaths.Size() > m_impl->config.maximumOperationEntries - assertions.Size())
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                      : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+        // Source-change callbacks are intentionally only advisory: a filesystem
+        // edit can exist before its watcher notification is delivered. Rebuild a
+        // complete, non-published candidate from disk immediately before durable
+        // admission and require it to compare unchanged against the exact
+        // accepted generation reviewed by the plan. This authoritatively covers
+        // catalog-wide identity/output/reference facts (including retirement
+        // blockers) without moving model policy into the pipeline. Changes after
+        // this admission point are ordered after this source transaction and are
+        // reconciled by the normal post-commit rescan.
+        if (requiresGlobalCatalogFence)
+        {
+            assets::SourceDatabase verifiedCatalog;
+            ProjectAssetAcceptedBaseline verifiedAccepted(m_impl->config.changeState);
+            containers::DynamicArray<resources::ResourceReference> verifiedDesired(memory::pools::Assets::GetInstance());
+            containers::HashMap<resources::ResourceId, u8> verifiedDesiredLookup(memory::pools::Assets::GetInstance());
+            containers::DynamicArray<filesystem::AbsolutePath> verifiedLooseFiles(memory::pools::Assets::GetInstance());
+            filesystem::ScanResult verificationScan = filesystem::ScanResult::Success;
+            const assets::SourceDatabaseResult verification = PrepareProjectAssetCandidate(
+                *m_impl->files, roots, importers, m_impl->config.build.target, m_impl->config.build.sourceData,
+                m_impl->config.operationJournalPath, m_impl->accepted, m_impl->config.maximumPublishedResources,
+                m_impl->config.publication.looseRoot, m_impl->config.maximumLooseFiles, verifiedCatalog, verifiedAccepted,
+                verifiedDesired, verifiedDesiredLookup, verifiedLooseFiles, &verificationScan);
+            if (verification != assets::SourceDatabaseResult::Success)
+            {
+                if (failure != nullptr)
+                {
+                    failure->result = ProjectAssetPipelineResult::ReconciliationFailed;
+                    failure->sources = verification;
+                }
+                return ProjectAssetPipelineResult::ReconciliationFailed;
+            }
+            if (verifiedAccepted.generation != request.acceptedStateGeneration)
+                return stale();
+        }
+        else
+        {
+            const ProjectAssetPipelineResult verified = m_impl->VerifyIndependentPlannedImportDiskWitness(
+                request.parentAsset, request.sourceRoot, request.sourceDestination, request.sourceIdentity,
+                {stagedOutputPaths.TypedData(), stagedOutputPaths.Size()}, failure);
+            if (verified != ProjectAssetPipelineResult::Success)
+                return verified;
+        }
+
+        // P5 durable cutover intent. Build the exact predecessor/successor sets
+        // before touching the source transaction so allocation/limit failure is
+        // still a clean precommit failure. If this planned import supersedes an
+        // earlier failed successor, retain that intent's original predecessor set
+        // rather than treating the un-published accepted schema as last-known-good.
+        ProjectAssetCohortIntent preparedCohortIntent;
+        if (!parentDescription->outputs.Empty())
+        {
+            const ProjectAssetCohortIntent& existingIntent = m_impl->accepted.cohortIntent;
+            const ProjectAssetState* const previousAccepted = m_impl->accepted.LookupAsset(request.parentAsset);
+            const u32 predecessorCount = replacingCohortIntent
+                                             ? existingIntent.predecessorOutputs.Size()
+                                             : previousAccepted != nullptr ? previousAccepted->outputs.Count() : 0u;
+            const u32 successorCount = parentDescription->outputs.Size();
+            if (predecessorCount > m_impl->config.automaticRecook.maximumPendingOutputs ||
+                successorCount > m_impl->config.automaticRecook.maximumPendingOutputs)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+            preparedCohortIntent.predecessorOutputs.Reserve(predecessorCount);
+            preparedCohortIntent.successorOutputs.Reserve(successorCount);
+            if (preparedCohortIntent.predecessorOutputs.Capacity() < predecessorCount ||
+                preparedCohortIntent.successorOutputs.Capacity() < successorCount)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+            if (replacingCohortIntent)
+            {
+                for (const resources::ResourceReference output : existingIntent.predecessorOutputs)
+                    preparedCohortIntent.predecessorOutputs.PushBack(output);
+            }
+            else if (previousAccepted != nullptr)
+            {
+                for (const ProjectAssetOutputState& output : previousAccepted->outputs)
+                    preparedCohortIntent.predecessorOutputs.PushBack(output.resource);
+            }
+            for (const assets::AssetOutput& output : parentDescription->outputs)
+            {
+                const resources::ResourceReference resource = assets::GetAssetOutputReference(request.parentAsset, output);
+                if (!resource.IsValid() || !resource.IsTyped())
+                    return stale();
+                preparedCohortIntent.successorOutputs.PushBack(resource);
+            }
+            if (preparedCohortIntent.predecessorOutputs.Size() != predecessorCount ||
+                preparedCohortIntent.successorOutputs.Size() != successorCount)
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::HistoryLimitExceeded)
+                                          : ProjectAssetPipelineResult::HistoryLimitExceeded;
+
+            const auto resourceLess = [](const resources::ResourceReference left,
+                                         const resources::ResourceReference right) noexcept
+            {
+                if (left.GetPath().Id() != right.GetPath().Id())
+                    return left.GetPath().Id() < right.GetPath().Id();
+                return left.ExpectedType() < right.ExpectedType();
+            };
+            if (preparedCohortIntent.predecessorOutputs.Size() > 1u)
+                std::sort(preparedCohortIntent.predecessorOutputs.Begin(), preparedCohortIntent.predecessorOutputs.End(), resourceLess);
+            if (preparedCohortIntent.successorOutputs.Size() > 1u)
+                std::sort(preparedCohortIntent.successorOutputs.Begin(), preparedCohortIntent.successorOutputs.End(), resourceLess);
+            for (u32 index = 1u; index < preparedCohortIntent.predecessorOutputs.Size(); ++index)
+                if (!resourceLess(preparedCohortIntent.predecessorOutputs[index - 1u],
+                                  preparedCohortIntent.predecessorOutputs[index]))
+                    return stale();
+            for (u32 index = 1u; index < preparedCohortIntent.successorOutputs.Size(); ++index)
+                if (!resourceLess(preparedCohortIntent.successorOutputs[index - 1u],
+                                  preparedCohortIntent.successorOutputs[index]))
+                    return stale();
+
+            assets::AssetMetadata targetMetadata;
+            crypto::Digest256 targetRawDigest;
+            crypto::Digest256 targetCanonicalDigest;
+            if (!DecodeMetadataSnapshot(
+                    {reinterpret_cast<const u8*>(parentMetadata.AsChar()), parentMetadata.Length()}, targetMetadata,
+                    targetRawDigest, targetCanonicalDigest) ||
+                !(targetMetadata.id == request.parentAsset))
+                return stale();
+            preparedCohortIntent.asset = request.parentAsset;
+            preparedCohortIntent.sourceIdentity = request.sourceIdentity;
+            preparedCohortIntent.reviewedAcceptedGeneration = request.acceptedStateGeneration;
+            preparedCohortIntent.targetMetadataFingerprint = targetCanonicalDigest;
+            if (!preparedCohortIntent.IsActive())
+                return stale();
+        }
+
+        if (observationFenceRequired)
+        {
+            observationSnapshot = m_impl->accumulator.GetChangeSnapshot();
+            if (observationSnapshot.overflow)
+                return stale();
+            if (m_impl->accumulator.HasRescanRequired())
+                return pendingObservation();
+        }
+
+        struct PlannedImportIntentOwnerGuard final
+        {
+            Impl* owner = nullptr;
+            ~PlannedImportIntentOwnerGuard()
+            {
+                if (owner != nullptr)
+                    owner->plannedImportIntentOwner = false;
+            }
+        } intentOwnerGuard;
+        const auto restorePreviousIntentAfterRollback = [&]() noexcept -> ProjectAssetSnapshotResult
+        {
+            if (intentOwnerGuard.owner == nullptr)
+                return ProjectAssetSnapshotResult::Success;
+            const ProjectAssetSnapshotResult restored = m_impl->ReplaceCohortIntent(preparedCohortIntent);
+            if (restored == ProjectAssetSnapshotResult::Success)
+            {
+                m_impl->plannedImportIntentOwner = false;
+                intentOwnerGuard.owner = nullptr;
+            }
+            return restored;
+        };
+
+        assets::AssetFileTransactionResult transaction = m_impl->transaction.Begin();
+        if (transaction != assets::AssetFileTransactionResult::Success)
+            return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                      : ProjectAssetPipelineResult::Busy;
+        for (const PlannedAssertion& assertion : assertions)
+        {
+            transaction = m_impl->transaction.StageAssertDigestMatches(assertion.path, assertion.digest);
+            if (transaction != assets::AssetFileTransactionResult::Success)
+                break;
+        }
+        if (transaction == assets::AssetFileTransactionResult::Success && request.copySourceToDestination)
+            transaction = m_impl->transaction.StageCreate(request.sourceDestination, request.sourceBytes);
+        if (transaction == assets::AssetFileTransactionResult::Success)
+            transaction = reimport
+                              ? m_impl->transaction.StageWriteIfDigestMatches(
+                                    parentMetadataPath, expectedParentMetadataRaw,
+                                    {reinterpret_cast<const u8*>(parentMetadata.AsChar()), parentMetadata.Length()})
+                              : m_impl->transaction.StageCreate(
+                                    parentMetadataPath,
+                                    {reinterpret_cast<const u8*>(parentMetadata.AsChar()), parentMetadata.Length()});
+        for (const AuxiliaryAdoption& adoption : adoptions)
+        {
+            if (transaction != assets::AssetFileTransactionResult::Success)
+                break;
+            transaction = m_impl->transaction.StageCreate(
+                MetadataPath(adoption.source->path),
+                {reinterpret_cast<const u8*>(adoption.encodedMetadata.AsChar()), adoption.encodedMetadata.Length()});
+        }
+        const bool asynchronousIndependentFirstImport =
+            transaction == assets::AssetFileTransactionResult::Success && deferPostCommitReconciliation &&
+            report == nullptr && !observationFenceRequired && !requiresGlobalCatalogFence &&
+            request.copySourceToDestination && !reimport && request.dependencyWitnesses.Empty() &&
+            !replacingCohortIntent && preparedCohortIntent.IsActive() &&
+            preparedCohortIntent.predecessorOutputs.Empty();
+        if (asynchronousIndependentFirstImport)
+        {
+            Impl::DeferredPlannedImportPrepare& pending = m_impl->deferredPlannedImportPrepare;
+            pending.Reset();
+            pending.inverse = static_cast<AssetHistoryRecord&&>(inverse);
+            pending.historyPaths.Swap(historyPaths);
+            pending.postConditions.Swap(postConditions);
+            pending.cohortIntent.Swap(preparedCohortIntent);
+            pending.stagedOutputPaths.Swap(stagedOutputPaths);
+            pending.asset = request.parentAsset;
+            pending.importer = request.importer;
+            pending.sourceRoot = request.sourceRoot;
+            pending.sourceIdentity = request.sourceIdentity;
+            pending.sourceDestination = request.sourceDestination;
+            pending.sourceFingerprint = request.sourceFingerprint;
+            pending.baseAcceptedGeneration = m_impl->accepted.generation;
+            pending.active = true;
+            if (!pending.Dispatch(m_impl->transaction))
+            {
+                pending.active = false;
+                const assets::AssetFileTransactionResult rollback = m_impl->transaction.Rollback();
+                pending.Reset();
+                if (rollback != assets::AssetFileTransactionResult::Success)
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::OperationFailed;
+                        failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                        failure->operation.source = request.parentAsset;
+                        failure->operation.importer = request.importer;
+                        failure->operation.transaction = rollback;
+                    }
+                    return ProjectAssetPipelineResult::OperationFailed;
+                }
+                return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
+                                          : ProjectAssetPipelineResult::Busy;
+            }
+
+            m_impl->deferredPlannedImportStatus = {};
+            m_impl->deferredPlannedImportStatus.state = ProjectAssetDeferredPlannedImportState::PreparingTransaction;
+            m_impl->deferredPlannedImportStatus.asset = request.parentAsset;
+            m_impl->deferredPlannedImportStatus.result = ProjectAssetPipelineResult::Pending;
+            return ProjectAssetPipelineResult::Pending;
+        }
+        if (transaction == assets::AssetFileTransactionResult::Success)
+            transaction = m_impl->transaction.Prepare();
+        if (transaction == assets::AssetFileTransactionResult::Success)
+            transaction = m_impl->transaction.ApplyPrepared();
+        if (transaction == assets::AssetFileTransactionResult::Success && preparedCohortIntent.IsActive())
+        {
+            const ProjectAssetSnapshotResult intentPersisted = m_impl->ReplaceCohortIntent(preparedCohortIntent);
+            if (intentPersisted != ProjectAssetSnapshotResult::Success)
+            {
+                const assets::AssetFileTransactionResult rollback = m_impl->transaction.Rollback();
+                if (failure != nullptr)
+                {
+                    failure->acceptedSnapshot = intentPersisted;
+                    failure->result = rollback == assets::AssetFileTransactionResult::Success
+                                          ? ProjectAssetPipelineResult::SnapshotSaveFailed
+                                          : ProjectAssetPipelineResult::OperationFailed;
+                    if (rollback != assets::AssetFileTransactionResult::Success)
+                    {
+                        failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                        failure->operation.source = request.parentAsset;
+                        failure->operation.importer = request.importer;
+                        failure->operation.transaction = rollback;
+                    }
+                }
+                return rollback == assets::AssetFileTransactionResult::Success
+                           ? ProjectAssetPipelineResult::SnapshotSaveFailed
+                           : ProjectAssetPipelineResult::OperationFailed;
+            }
+            m_impl->plannedImportIntentOwner = true;
+            intentOwnerGuard.owner = m_impl;
+        }
+        if (transaction == assets::AssetFileTransactionResult::Success)
+        {
+            if (observationFenceRequired)
+            {
+                struct StableTransactionPublication final
+                {
+                    assets::AssetFileTransaction* transaction = nullptr;
+                    assets::AssetFileTransactionResult result = assets::AssetFileTransactionResult::InvalidState;
+                    bool attempted = false;
+                };
+                StableTransactionPublication stable{&m_impl->transaction};
+                const auto publishPrepared = [](void* const userData) noexcept -> bool
+                {
+                    auto& state = *static_cast<StableTransactionPublication*>(userData);
+                    state.attempted = true;
+                    state.result = state.transaction->PublishCommit();
+                    return state.result == assets::AssetFileTransactionResult::Success;
+                };
+                const bool stableObservation =
+                    m_impl->accumulator.CommitIfUnchangedOrOwnedChanges(
+                        observationSnapshot, {historyPaths.TypedData(), historyPaths.Size()}, publishPrepared, &stable,
+                        committedObservationSnapshot);
+                if (!stableObservation && !stable.attempted)
+                {
+                    const assets::AssetFileTransactionResult rollback = m_impl->transaction.Rollback();
+                    if (rollback != assets::AssetFileTransactionResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::OperationFailed;
+                            failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                            failure->operation.source = request.parentAsset;
+                            failure->operation.importer = request.importer;
+                            failure->operation.transaction = rollback;
+                        }
+                        return ProjectAssetPipelineResult::OperationFailed;
+                    }
+                    const ProjectAssetSnapshotResult restoredIntent = restorePreviousIntentAfterRollback();
+                    if (restoredIntent != ProjectAssetSnapshotResult::Success)
+                    {
+                        if (failure != nullptr)
+                        {
+                            failure->result = ProjectAssetPipelineResult::SnapshotSaveFailed;
+                            failure->acceptedSnapshot = restoredIntent;
+                        }
+                        return ProjectAssetPipelineResult::SnapshotSaveFailed;
+                    }
+                    return pendingObservation();
+                }
+                transaction = stable.result;
+            }
+            else
+            {
+                transaction = m_impl->transaction.PublishCommit();
+            }
+        }
+        if (transaction == assets::AssetFileTransactionResult::Success)
+            transaction = m_impl->transaction.CompleteCommit(historyPaths, {postConditions.TypedData(), postConditions.Size()});
+        if (transaction != assets::AssetFileTransactionResult::Success &&
+            transaction != assets::AssetFileTransactionResult::CommittedCleanupPending)
+        {
+            bool rolledBack = false;
+            if (m_impl->transaction.GetState() == assets::AssetFileTransactionState::Collecting ||
+                m_impl->transaction.GetState() == assets::AssetFileTransactionState::Prepared)
+            {
+                const assets::AssetFileTransactionResult rollback = m_impl->transaction.Rollback();
+                if (rollback != assets::AssetFileTransactionResult::Success)
+                    transaction = rollback;
+                else
+                    rolledBack = true;
+            }
+            if (rolledBack)
+            {
+                const ProjectAssetSnapshotResult restoredIntent = restorePreviousIntentAfterRollback();
+                if (restoredIntent != ProjectAssetSnapshotResult::Success)
+                {
+                    if (failure != nullptr)
+                    {
+                        failure->result = ProjectAssetPipelineResult::SnapshotSaveFailed;
+                        failure->acceptedSnapshot = restoredIntent;
+                    }
+                    return ProjectAssetPipelineResult::SnapshotSaveFailed;
+                }
+            }
+            if (transaction == assets::AssetFileTransactionResult::Conflict)
+                return stale();
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::OperationFailed;
+                failure->operation.result = assets::AssetOperationResult::TransactionFailed;
+                failure->operation.source = request.parentAsset;
+                failure->operation.importer = request.importer;
+                failure->operation.transaction = transaction;
+            }
+            return ProjectAssetPipelineResult::OperationFailed;
+        }
+
+        // A completed newer planned-import transaction supersedes any terminal
+        // process-local continuation report from an earlier import. Keep the old
+        // report across stale/busy/rollback failures, but never let it be mistaken
+        // for the outcome of this newly durable mutation.
+        m_impl->deferredPlannedImportStatus = {};
+
+        if (!AttachHistoryPostConditions(inverse, postConditions))
+        {
+            ClearAssetOperationHistory();
+            inverse.files.Clear();
+        }
+        importedAsset = request.parentAsset;
+        const bool cleanupPending = transaction == assets::AssetFileTransactionResult::CommittedCleanupPending;
+        // A caller may defer only the post-commit authoritative catalog pass for
+        // an independent create-only first import. Every stale witness, collision
+        // proof, transaction assertion, cohort-intent write-ahead record and
+        // filesystem commit above remains synchronous and authoritative. The
+        // process-local marker is deliberately narrower than the durable cohort
+        // intent: it grants one observation-catch-up history exemption only when
+        // the worker later proves this exact import was the sole accepted change.
+        const bool deferredIndependentFirstImport =
+            deferPostCommitReconciliation && report == nullptr && !observationFenceRequired &&
+            !requiresGlobalCatalogFence && request.copySourceToDestination && !reimport &&
+            request.dependencyWitnesses.Empty() && m_impl->accepted.cohortIntent.IsActive() &&
+            m_impl->accepted.cohortIntent.predecessorOutputs.Empty() &&
+            m_impl->accepted.cohortIntent.asset == request.parentAsset &&
+            m_impl->accepted.cohortIntent.sourceIdentity == request.sourceIdentity;
+        if (deferredIndependentFirstImport)
+        {
+            m_impl->RecordCommittedHistory(static_cast<AssetHistoryRecord&&>(inverse));
+            m_impl->BeginDeferredPlannedImport(request.parentAsset, request.sourceIdentity,
+                                               request.sourceDestination, request.sourceFingerprint);
+            if (failure != nullptr)
+            {
+                failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                failure->operation.source = request.parentAsset;
+                failure->operation.importer = request.importer;
+                failure->operation.transaction = transaction;
+            }
+            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+        }
+        ProjectAssetPipelineFailure reconcileFailure;
+        if (Rescan(roots, report, nullptr, &reconcileFailure) != ProjectAssetPipelineResult::Success)
+        {
+            m_impl->RecordCommittedHistory(static_cast<AssetHistoryRecord&&>(inverse));
+            if (failure != nullptr)
+            {
+                *failure = reconcileFailure;
+                failure->result = ProjectAssetPipelineResult::CommittedReconciliationPending;
+                failure->operation.source = request.parentAsset;
+                failure->operation.importer = request.importer;
+                failure->operation.transaction = transaction;
+            }
+            return ProjectAssetPipelineResult::CommittedReconciliationPending;
+        }
+        if (observationFenceRequired)
+            m_impl->accumulator.AcknowledgeAuthoritativeRescan(committedObservationSnapshot.generation);
         if (report != nullptr)
             report->operationCleanupPending = cleanupPending;
         m_impl->RecordCommittedHistory(static_cast<AssetHistoryRecord&&>(inverse));
@@ -7697,11 +11581,13 @@ namespace vanguard::asset_streaming
         {
             if (impl.observation.running)
                 return ProjectAssetPipelineResult::ObservationAlreadyActive;
-            // Build/source exclusion is a precondition of starting an observation
-            // session. It must be checked before any startup side effect: no
-            // worker creation, no DirectoryObservationSource::Start, no
-            // accumulator/session state and no generation-zero reconciliation.
-            if (!impl.CanMutateSources())
+            // Source reconciliation may operate under a retained durable cohort
+            // intent: it preserves the predecessor set through
+            // ApplyCohortIntentDesired. Using ordinary mutation admission here
+            // would deadlock source catch-up against that intent and prevent a
+            // reviewed replacement from ever receiving its required observer
+            // clearance. Other automatic/maintenance/build owners remain fenced.
+            if (!impl.CanReconcileSources())
                 return ProjectAssetPipelineResult::Busy;
             if (!config.IsValid())
                 return ProjectAssetPipelineResult::InvalidArgument;
@@ -7824,7 +11710,10 @@ namespace vanguard::asset_streaming
         // A callback is still allowed to enter until DirectoryObservationSource::Stop
         // returns. Ensure we own a quiescent build graph so a last callback can be
         // repaired authoritatively before a successful disable is reported.
-        if (!CanMutateSources())
+        // Retained durable cohort intent fences mutation, not authoritative source
+        // reconciliation. A reviewed replacement must be able to pause its watcher
+        // without dropping the predecessor's protected publication evidence.
+        if (!m_impl->CanReconcileSources())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
         if (m_impl->observation.source == nullptr || !m_impl->observation.source->Stop())
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;
@@ -7871,6 +11760,44 @@ namespace vanguard::asset_streaming
         if (!m_impl->observation.running)
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::ObservationNotActive)
                                       : ProjectAssetPipelineResult::ObservationNotActive;
+
+        const auto continueDeferredPlannedImport = [&]() noexcept
+        {
+            if (!m_impl->deferredPlannedImport.IsActive())
+                return;
+            if (!m_impl->DeferredPlannedImportMatchesCurrentTruth())
+            {
+                m_impl->FailDeferredPlannedImportContinuation(ProjectAssetPipelineResult::CommittedReconciliationPending);
+                return;
+            }
+            if (!m_impl->CanAttemptDeferredPlannedImportCohort())
+            {
+                m_impl->FailDeferredPlannedImportContinuation(ProjectAssetPipelineResult::Busy);
+                return;
+            }
+            if (m_impl->automaticRecook.HasExplicitCohort())
+            {
+                m_impl->CompleteDeferredPlannedImportContinuation();
+                return;
+            }
+
+            const ProjectAssetState* const asset = m_impl->accepted.LookupAsset(m_impl->deferredPlannedImport.asset);
+            if (asset == nullptr)
+            {
+                m_impl->FailDeferredPlannedImportContinuation(ProjectAssetPipelineResult::CommittedReconciliationPending);
+                return;
+            }
+            const ProjectAssetCohortDeliveryRequest request{
+                asset->asset, asset->acceptedGeneration,
+                {m_impl->accepted.cohortIntent.successorOutputs.TypedData(),
+                 m_impl->accepted.cohortIntent.successorOutputs.Size()}};
+            ProjectAssetPipelineFailure continuationFailure;
+            const ProjectAssetPipelineResult continued = RequestAssetCohortDelivery(request, &continuationFailure);
+            if (continued == ProjectAssetPipelineResult::Success)
+                m_impl->CompleteDeferredPlannedImportContinuation();
+            else
+                m_impl->FailDeferredPlannedImportContinuation(continued, &continuationFailure);
+        };
 
         if (m_impl->observation.reconcileActive)
         {
@@ -7961,6 +11888,28 @@ namespace vanguard::asset_streaming
                     }
                 }
                 const bool acceptedExternalChange = worker->proposed.generation != m_impl->accepted.generation;
+                bool preserveOwnedCommitHistory = false;
+                const bool evaluatingDeferredOwnedCommit =
+                    m_impl->observation.reconcileGeneration == 0u &&
+                    m_impl->deferredPlannedImport.IsActive() &&
+                    m_impl->deferredPlannedImport.awaitingOwnedAcceptance;
+                if (evaluatingDeferredOwnedCommit)
+                {
+                    preserveOwnedCommitHistory =
+                        m_impl->DeferredPlannedImportMatchesPreparedCatchUp(worker->candidate, worker->proposed);
+                    if (preserveOwnedCommitHistory)
+                    {
+                        m_impl->deferredPlannedImport.awaitingOwnedAcceptance = false;
+                        m_impl->deferredPlannedImport.acceptedGeneration = worker->proposed.generation;
+                        m_impl->deferredPlannedImportStatus.acceptedGeneration = worker->proposed.generation;
+                    }
+                    else
+                    {
+                        ClearAssetOperationHistory();
+                        m_impl->FailDeferredPlannedImportContinuation(
+                            ProjectAssetPipelineResult::CommittedReconciliationPending);
+                    }
+                }
                 AcceptProjectAssetCandidate(*m_impl->sources, m_impl->accepted, worker->candidate, worker->proposed);
                 // Undo/redo snapshots are session-local captures of exact authored
                 // file bytes. A real authoritative observation transition means
@@ -7968,8 +11917,13 @@ namespace vanguard::asset_streaming
                 // would overwrite work that did not originate from this pipeline.
                 // A watcher echo of a just-committed pipeline mutation compares as
                 // the same accepted generation and deliberately preserves history.
-                if (acceptedExternalChange)
+                if (acceptedExternalChange && !preserveOwnedCommitHistory)
                     ClearAssetOperationHistory();
+                if (m_impl->deferredPlannedImport.IsActive() &&
+                    !m_impl->deferredPlannedImport.awaitingOwnedAcceptance && acceptedExternalChange &&
+                    m_impl->accepted.generation != m_impl->deferredPlannedImport.acceptedGeneration)
+                    m_impl->FailDeferredPlannedImportContinuation(
+                        ProjectAssetPipelineResult::CommittedReconciliationPending);
                 if (worker->automaticPendingResult == ProjectAssetAutomaticPendingPrepareResult::Success)
                     m_impl->automaticRecook.AdoptPending(worker->automaticPending);
                 else if (worker->automaticPendingResult == ProjectAssetAutomaticPendingPrepareResult::RecoveryRequired)
@@ -8031,8 +11985,14 @@ namespace vanguard::asset_streaming
             m_impl->observation.reconcileGeneration = 0;
             if (completedGeneration == 0u)
                 m_impl->observation.initialCatchUpRequired = false;
-            return m_impl->accumulator.HasRescanRequired() ? ProjectAssetPipelineResult::Pending
-                                                           : ProjectAssetPipelineResult::Success;
+            if (m_impl->accumulator.HasRescanRequired())
+                return ProjectAssetPipelineResult::Pending;
+            // The deferred continuation is generation-fenced and one-shot. It is
+            // attempted only on a successful observation reconciliation edge,
+            // never from ordinary idle ticks, so an expensive cohort resolve
+            // cannot repeat frame after frame after a terminal admission failure.
+            continueDeferredPlannedImport();
+            return ProjectAssetPipelineResult::Success;
         }
 
         // The lifecycle catch-up pass is generation zero and is started directly,
@@ -8042,7 +12002,7 @@ namespace vanguard::asset_streaming
         // on a later tick without manufacturing a filesystem observation.
         if (m_impl->observation.initialCatchUpRequired)
         {
-            if (!CanMutateSources())
+            if (!m_impl->CanReconcileSources())
                 return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy)
                                           : ProjectAssetPipelineResult::Busy;
             if (m_impl->observation.worker == nullptr)
@@ -8059,7 +12019,7 @@ namespace vanguard::asset_streaming
         const SourceChangeAdvance advance = m_impl->accumulator.Advance();
         if (!advance.reconcile)
             return advance.hasPending ? ProjectAssetPipelineResult::Pending : ProjectAssetPipelineResult::Success;
-        if (!CanMutateSources())
+        if (!m_impl->CanReconcileSources())
         {
             m_impl->accumulator.RequeueReady();
             return failure != nullptr ? (failure->result = ProjectAssetPipelineResult::Busy) : ProjectAssetPipelineResult::Busy;

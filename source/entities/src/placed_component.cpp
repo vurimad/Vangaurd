@@ -172,11 +172,15 @@ namespace vanguard::entities
     void IPlacedComponent::ForceUpdateCallback(const bool value) noexcept
     {
         m_forceUpdateCallback = value;
+        if (value && m_system != nullptr)
+            m_system->MarkTransformBranchDirty(*this);
     }
 
     void IPlacedComponent::ForceUpdateCallbackOnce() noexcept
     {
         m_forceUpdateCallbackOnce = true;
+        if (m_system != nullptr)
+            m_system->MarkTransformBranchDirty(*this);
     }
 
     void IPlacedComponent::RequestRefreshHierarchy() noexcept
@@ -211,7 +215,7 @@ namespace vanguard::entities
         m_refreshHierarchyCache = false;
     }
 
-    void IPlacedComponent::CascadeLocalToWorld(const bool forceCallback, const u32 depth) noexcept
+    void IPlacedComponent::CascadeLocalToWorld(const bool parentWorldChanged, const bool forceCallback, const u32 depth) noexcept
     {
         if (m_system == nullptr || m_refreshHierarchyCache || depth >= m_system->GetMaximumHierarchyDepth())
             return;
@@ -225,6 +229,10 @@ namespace vanguard::entities
                 m_refreshHierarchyCache = true;
                 continue;
             }
+            if (!parentWorldChanged && !forceCallback && !relationship.child->m_subtreeTransformDirty &&
+                !relationship.child->m_forceUpdateCallback && !relationship.child->m_forceUpdateCallbackOnce)
+                continue;
+            const math::WorldTransform previousChildWorld = relationship.child->m_localToWorld;
             if (relationship.attachment->ComputeFinalTransform(this, newLocalToWorld))
             {
                 WorldTransformUpdater updater(*relationship.child);
@@ -232,7 +240,13 @@ namespace vanguard::entities
             }
             if (forceCallback)
                 relationship.child->ForceUpdateCallbackOnce();
-            relationship.child->CascadeLocalToWorld(forceCallback, depth + 1u);
+            relationship.child->m_subtreeTransformDirty = false;
+            relationship.child->CascadeLocalToWorld(previousChildWorld != relationship.child->m_localToWorld, forceCallback, depth + 1u);
+            // Persistent force-callback clients must still be visited when some
+            // *other* branch next schedules this root. Preserve their ancestry
+            // hint rather than treating it as a one-shot local transform edit.
+            if (relationship.child->m_forceUpdateCallback || relationship.child->m_subtreeTransformDirty)
+                m_subtreeTransformDirty = true;
         }
     }
 
@@ -253,7 +267,8 @@ namespace vanguard::entities
         const bool forceCallback = m_forceUpdateCallbackOnce || m_forceUpdateCallback;
         if (previous != m_localToWorld || forceCallback)
             TransformUpdated();
-        CascadeLocalToWorld(forceCallback, 0u);
+        m_subtreeTransformDirty = false;
+        CascadeLocalToWorld(previous != m_localToWorld, forceCallback, 0u);
         m_forceUpdateCallbackOnce = false;
     }
 
@@ -264,7 +279,8 @@ namespace vanguard::entities
         const bool forceCallback = m_forceUpdateCallbackOnce || m_forceUpdateCallback;
         if (previous != m_localToWorld || forceCallback)
             TransformUpdated();
-        CascadeLocalToWorld(forceCallback, 0u);
+        m_subtreeTransformDirty = false;
+        CascadeLocalToWorld(previous != m_localToWorld, forceCallback, 0u);
         m_forceUpdateCallbackOnce = false;
     }
 
@@ -282,6 +298,7 @@ namespace vanguard::entities
     {
         m_localToWorld = localToWorld;
         TransformUpdated();
-        CascadeLocalToWorld(true, 0u);
+        m_subtreeTransformDirty = false;
+        CascadeLocalToWorld(true, true, 0u);
     }
 } // namespace vanguard::entities

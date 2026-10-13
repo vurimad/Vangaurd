@@ -245,15 +245,22 @@ namespace vanguard::mesh_tools
         u32 meshCookingProfileVersion = 0;
     };
 
-    // Installs meshoptimizer's process-global temporary allocator callbacks.
-    // The application composition root must call this once after memory and containers initialization.
+    // Legacy/root initialization is idempotent. Shutdown releases that root initialization.
+    // Scoped composition owners should use Acquire/Release so they do not disturb an inherited root.
     [[nodiscard]] bool Initialize() noexcept;
+    [[nodiscard]] bool Shutdown() noexcept;
+    [[nodiscard]] bool Acquire() noexcept;
+    [[nodiscard]] bool Release() noexcept;
     [[nodiscard]] bool IsInitialized() noexcept;
 
     /// Registers a build-time mesh layout policy. Registration is startup-only and becomes
     /// permanently sealed when the first mesh cook begins, allowing subsequent lock-free reads.
     [[nodiscard]] ProfileRegistrationResult RegisterMeshCookingProfile(const MeshCookingProfile& profile) noexcept;
     [[nodiscard]] const MeshCookingProfile* FindMeshCookingProfile(MeshCookingProfileId id) noexcept;
+    /// Stable build-policy fingerprint for the fully resolved registered profile. The fingerprint
+    /// includes the profile version and copied effective packing rules; callback implementations
+    /// remain versioned by the profile author rather than by process-specific function addresses.
+    [[nodiscard]] bool GetMeshCookingProfileFingerprint(MeshCookingProfileId id, crypto::Digest256& fingerprint) noexcept;
 
     // Source data is importer-neutral and caller-owned. The output is a complete, deterministic vmesh document.
     [[nodiscard]] Result CookMesh(const SourceMesh& source, filesystem::IFile& output, const CookSettings& settings = {},

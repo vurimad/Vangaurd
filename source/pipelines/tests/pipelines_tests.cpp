@@ -154,6 +154,18 @@ int main()
     Check(WriteFixture(reordered.description, second) == pipelines::Result::Success && EqualBytes(first, second),
           "canonical emission is independent of input ordering");
 
+    GraphicsFixture packed10(shaderFile);
+    packed10.attributes[1].componentCount = 4;
+    packed10.attributes[1].componentBits = 10;
+    packed10.attributes[1].format = pipelines::Format::R10G10B10A2UNorm;
+    Check(WriteFixture(packed10.description, second) == pipelines::Result::Success,
+          "packed 10-bit normalized vertex formats accepted by their declared native format traits");
+    GraphicsFixture packed11(shaderFile);
+    packed11.attributes[1].componentBits = 11;
+    packed11.attributes[1].format = pipelines::Format::R11G11B10Float;
+    Check(WriteFixture(packed11.description, second) == pipelines::Result::Success,
+          "packed 11-bit floating vertex formats accepted by their declared native format traits");
+
     filesystem::MemoryFileReader pipelineReader(first, 0);
     pipelines::PipelineFile pipeline;
     Check(pipeline.Open(pipelineReader) == pipelines::Result::Success, "open pipeline");

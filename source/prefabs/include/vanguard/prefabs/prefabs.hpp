@@ -77,6 +77,18 @@ namespace vanguard::prefabs
         ComponentFlags flags = ComponentFlags::None;
     };
 
+    /// Generic same-entity rigid placement relation for a stable object component.
+    /// parentComponentStableId == InvalidStableId attaches to the entity transform root.
+    /// This mirrors IPlacedComponent's translation + orientation contract without forcing
+    /// transform/attachment metadata into every serialized component payload.
+    struct PlacedComponentBuildRecord
+    {
+        u64 componentStableId = InvalidStableId;
+        u64 parentComponentStableId = InvalidStableId;
+        f32 translation[3]{};
+        f32 rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    };
+
     struct ExplicitDependency
     {
         resources::ResourceReference resource;
@@ -90,6 +102,7 @@ namespace vanguard::prefabs
         u64 name = 0;
         containers::ArraySpan<const EntityBuildRecord> entities;
         containers::ArraySpan<const ComponentBuildRecord> components;
+        containers::ArraySpan<const PlacedComponentBuildRecord> placedComponents;
         containers::ArraySpan<const ExplicitDependency> explicitDependencies;
         crypto::Digest256 sourceFingerprint;
         bool includeEditorData = false;
@@ -117,6 +130,14 @@ namespace vanguard::prefabs
         crypto::Digest256 dataFingerprint;
     };
 
+    struct PlacedComponentRecord
+    {
+        u64 componentStableId = InvalidStableId;
+        u64 parentComponentStableId = InvalidStableId;
+        f32 translation[3]{};
+        f32 rotation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    };
+
     struct DependencyRecord
     {
         resources::ResourceReference resource;
@@ -128,6 +149,7 @@ namespace vanguard::prefabs
         u64 maximumFileSize = 512ull * 1024ull * 1024ull;
         u32 maximumEntities = 1u << 20u;
         u32 maximumComponents = 1u << 22u;
+        u32 maximumPlacedComponents = 1u << 22u;
         u32 maximumDependencies = 1u << 20u;
         u64 maximumComponentDataBytes = 384ull * 1024ull * 1024ull;
     };
@@ -149,10 +171,12 @@ namespace vanguard::prefabs
         [[nodiscard]] const crypto::Digest256& GetContentFingerprint() const noexcept;
         [[nodiscard]] containers::ArraySpan<const EntityRecord> GetEntities() const noexcept;
         [[nodiscard]] containers::ArraySpan<const ComponentRecord> GetComponents() const noexcept;
+        [[nodiscard]] containers::ArraySpan<const PlacedComponentRecord> GetPlacedComponents() const noexcept;
         [[nodiscard]] containers::ArraySpan<const DependencyRecord> GetDependencies() const noexcept;
         [[nodiscard]] containers::ArraySpan<const u8> GetComponentData(const ComponentRecord& component) const noexcept;
         [[nodiscard]] const EntityRecord* FindEntity(u64 stableId) const noexcept;
         [[nodiscard]] const ComponentRecord* FindComponent(u64 stableId) const noexcept;
+        [[nodiscard]] const PlacedComponentRecord* FindPlacedComponent(u64 componentStableId) const noexcept;
 
     private:
         u64 m_name = 0;
@@ -160,6 +184,7 @@ namespace vanguard::prefabs
         crypto::Digest256 m_contentFingerprint;
         containers::DynamicArray<EntityRecord> m_entities;
         containers::DynamicArray<ComponentRecord> m_components;
+        containers::DynamicArray<PlacedComponentRecord> m_placedComponents;
         containers::DynamicArray<DependencyRecord> m_dependencies;
         containers::DynamicArray<u8> m_componentData;
         bool m_open = false;

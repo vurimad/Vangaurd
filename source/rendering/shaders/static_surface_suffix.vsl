@@ -16,7 +16,66 @@ struct StaticSurfaceGBuffer
     float4 baseColor : SV_Target0;
     float4 normalRoughness : SV_Target1;
     float4 emissiveMetallic : SV_Target2;
+    float4 specularColor : SV_Target3;
+    float4 viewDirection : SV_Target4;
 };
+
+static const float StaticSurfacePi = 3.14159265358979323846;
+
+float3 CompleteStaticSurfaceNormal(StaticSurfaceVarying varying, StaticSurfaceInput input,
+                                   StaticSurfaceOutput surface, bool frontFace)
+{
+    float3 normal = input.worldNormal;
+    float3 tangent = normalize(varying.tangent.xyz - normal * dot(normal, varying.tangent.xyz));
+    float3 bitangent = cross(normal, tangent) * varying.tangent.w;
+    normal = normalize(tangent * surface.normalTS.x + bitangent * surface.normalTS.y + normal * surface.normalTS.z);
+    return frontFace ? normal : -normal;
+}
+
+float3 StaticSurfaceFresnel(float cosine, float3 f0)
+{
+    float factor = pow(1.0 - saturate(cosine), 5.0);
+    return f0 + (1.0 - f0) * factor;
+}
+
+float StaticSurfaceDistribution(float nDotH, float roughness)
+{
+    float alpha = max(roughness * roughness, 0.0025);
+    float alphaSquared = alpha * alpha;
+    float denominator = nDotH * nDotH * (alphaSquared - 1.0) + 1.0;
+    return alphaSquared / max(StaticSurfacePi * denominator * denominator, 1.0e-6);
+}
+
+float StaticSurfaceGeometryTerm(float nDotV, float nDotL, float roughness)
+{
+    float k = roughness + 1.0;
+    k = (k * k) * 0.125;
+    float view = nDotV / max(nDotV * (1.0 - k) + k, 1.0e-6);
+    float light = nDotL / max(nDotL * (1.0 - k) + k, 1.0e-6);
+    return view * light;
+}
+
+float3 EvaluateStaticSurfaceDirect(float3 baseColor, float roughness, float metallic, float3 dielectricF0,
+                                   float3 normal, float3 viewDirection, float3 lightDirection)
+{
+    float nDotL = saturate(dot(normal, lightDirection));
+    float nDotV = saturate(dot(normal, viewDirection));
+    if (!(nDotL > 0.0) || !(nDotV > 0.0))
+        return float3(0, 0, 0);
+    float3 halfVector = normalize(viewDirection + lightDirection);
+    float nDotH = saturate(dot(normal, halfVector));
+    float vDotH = saturate(dot(viewDirection, halfVector));
+    float clampedMetallic = saturate(metallic);
+    float clampedRoughness = clamp(roughness, 0.045, 1.0);
+    float3 f0 = lerp(saturate(dielectricF0), saturate(baseColor), clampedMetallic);
+    float3 fresnel = StaticSurfaceFresnel(vDotH, f0);
+    float distribution = StaticSurfaceDistribution(nDotH, clampedRoughness);
+    float geometry = StaticSurfaceGeometryTerm(nDotV, nDotL, clampedRoughness);
+    float3 specular = distribution * geometry * fresnel / max(4.0 * nDotV * nDotL, 1.0e-6);
+    float3 diffuseWeight = (1.0 - fresnel) * (1.0 - clampedMetallic);
+    float3 diffuse = diffuseWeight * saturate(baseColor) * (1.0 / StaticSurfacePi);
+    return (diffuse + specular) * nDotL;
+}
 
 // Both masked passes evaluate the same generated closure with the same inputs.
 // Equality survives, matching clip's strictly-negative discard rule. Keep this
@@ -28,17 +87,55 @@ void ApplyStaticSurfaceCoverage(StaticSurfaceOutput surface)
 
 StaticSurfaceGBuffer BuildStaticSurfaceGBuffer(StaticSurfaceVarying varying, StaticSurfaceInput input, StaticSurfaceOutput surface, bool frontFace)
 {
-    float3 normal = input.worldNormal;
-    float3 tangent = normalize(varying.tangent.xyz - normal * dot(normal, varying.tangent.xyz));
-    float3 bitangent = cross(normal, tangent) * varying.tangent.w;
-    normal = normalize(tangent * surface.normalTS.x + bitangent * surface.normalTS.y + normal * surface.normalTS.z);
+    float3 normal = CompleteStaticSurfaceNormal(varying, input, surface, frontFace);
+    float viewLengthSquared = dot(input.viewRelativePosition, input.viewRelativePosition);
+    float3 viewDirection = viewLengthSquared > 0.0 ? -input.viewRelativePosition * rsqrt(viewLengthSquared) : float3(0, 0, 1);
     StaticSurfaceGBuffer output;
-    output.baseColor = surface.baseColor;
-    // Orient the completed normal-map result once for the back side. Mirrored
-    // PSOs preserve authored front-face identity even with culling disabled.
-    output.normalRoughness = float4(frontFace ? normal : -normal, surface.roughness);
+    // Opaque alpha has no coverage meaning after this point. Preserve authored
+    // occlusion for the future indirect-lighting pass without misapplying it to
+    // direct directional illumination.
+    output.baseColor = float4(surface.baseColor.rgb, saturate(surface.occlusion));
+    output.normalRoughness = float4(normal, surface.roughness);
     output.emissiveMetallic = float4(surface.emissive, surface.metallic);
+    output.specularColor = float4(saturate(surface.specularColor), 1.0);
+    output.viewDirection = float4(viewDirection, 1.0);
     return output;
+}
+
+float3 EvaluateTransparentDirectionalLighting(StaticSurfaceOutput surface, float3 normal, float3 viewDirection)
+{
+    float3 lighting = float3(0, 0, 0);
+    if (surfaceDraw.directionalLightSelectionDescriptor == VG_GPU_SCENE_INVALID_INDEX)
+        return lighting;
+    StructuredBuffer<GpuDirectionalLightSelection> selections =
+        ResourceDescriptorHeap[surfaceDraw.directionalLightSelectionDescriptor];
+    GpuDirectionalLightSelection selection = selections[surfaceDraw.viewIndex];
+    StructuredBuffer<GpuView> views = ResourceDescriptorHeap[surfaceDraw.viewDescriptor];
+    GpuView view = views[surfaceDraw.viewIndex];
+    StructuredBuffer<GpuSceneTableDirectory> tables = ResourceDescriptorHeap[surfaceDraw.tableDirectoryDescriptor];
+    StructuredBuffer<GpuScenePageDirectoryEntry> pages = ResourceDescriptorHeap[surfaceDraw.pageDirectoryDescriptor];
+    GpuSceneTableDirectory table = tables[VG_GPU_SCENE_TABLE_LIGHT];
+    uint count = min(selection.count, VG_MAXIMUM_DIRECTIONAL_LIGHTS_PER_VIEW);
+    for (uint index = 0u; index < count; ++index)
+    {
+        uint2 identity = selection.lights[index];
+        if (identity.x == VG_GPU_SCENE_INVALID_INDEX || identity.y == 0u)
+            continue;
+        uint2 address = DecodeGpuSceneIndex(identity.x, table);
+        if (address.x >= table.pageCapacity)
+            continue;
+        GpuScenePageDirectoryEntry page = pages[table.firstPageEntry + address.x];
+        if (page.shaderResourceDescriptor == VG_GPU_SCENE_INVALID_INDEX || address.y >= page.elementCount)
+            continue;
+        StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[NonUniformResourceIndex(page.shaderResourceDescriptor)];
+        GpuLight light = lights[address.y];
+        if (!IsGpuLightActive(light, identity.y, view.visibilityMask) || light.type != VG_GPU_LIGHT_DIRECTIONAL)
+            continue;
+        float3 brdf = EvaluateStaticSurfaceDirect(surface.baseColor.rgb, surface.roughness, surface.metallic,
+                                                  surface.specularColor, normal, viewDirection, -light.direction);
+        lighting += brdf * light.color * light.intensity;
+    }
+    return lighting;
 }
 
 [VanguardMaterialProgram("EvaluateStaticSurface", "StaticSurfaceParameters", "StaticSurfaceResources", 1)]
@@ -76,4 +173,17 @@ void StaticSurfaceMaskedDepthMain(StaticSurfaceVarying varying)
     StaticSurfaceInput input = BeginStaticSurface(varying);
     StaticSurfaceOutput surface = EvaluateStaticSurface(input);
     ApplyStaticSurfaceCoverage(surface);
+}
+
+[VanguardMaterialProgram("EvaluateStaticSurface", "StaticSurfaceParameters", "StaticSurfaceResources", 1)]
+[shader("fragment")]
+float4 StaticSurfaceTransparentMain(StaticSurfaceVarying varying, bool frontFace : SV_IsFrontFace) : SV_Target0
+{
+    StaticSurfaceInput input = BeginStaticSurface(varying);
+    StaticSurfaceOutput surface = EvaluateStaticSurface(input);
+    float3 normal = CompleteStaticSurfaceNormal(varying, input, surface, frontFace);
+    float viewLengthSquared = dot(input.viewRelativePosition, input.viewRelativePosition);
+    float3 viewDirection = viewLengthSquared > 0.0 ? -input.viewRelativePosition * rsqrt(viewLengthSquared) : float3(0, 0, 1);
+    float3 color = surface.emissive + EvaluateTransparentDirectionalLighting(surface, normal, viewDirection);
+    return float4(color, saturate(surface.baseColor.a));
 }

@@ -33,6 +33,7 @@ namespace vanguard::rhi
     {
         IBackend* g_backend = nullptr;
         Capabilities g_capabilities{};
+        u64 g_deviceIncarnation = 0;
         thread_local CommandListRef g_boundCommandList{};
         concurrency::Atomic<u64> g_submittedGraphics{0};
         concurrency::Atomic<u64> g_submittedCompute{0};
@@ -395,6 +396,9 @@ namespace vanguard::rhi
         g_submittedCompute.SetValue(0);
         g_submittedCopy.SetValue(0);
         g_submissionCoverageLost.SetValue(0);
+        ++g_deviceIncarnation;
+        if (g_deviceIncarnation == 0)
+            g_deviceIncarnation = 1;
         g_backend = &backend;
         g_boundCommandList = {};
         return true;
@@ -429,6 +433,10 @@ namespace vanguard::rhi
     bool IsInitialized() noexcept
     {
         return g_backend != nullptr;
+    }
+    u64 GetDeviceIncarnation() noexcept
+    {
+        return g_backend != nullptr ? g_deviceIncarnation : 0;
     }
     const Capabilities& GetCapabilities() noexcept
     {
@@ -1679,6 +1687,27 @@ namespace vanguard::rhi
         return Accept(g_backend->AddToResidencyWorkingSet(g_boundCommandList, resource), failure);
     }
 
+    bool AdmitCommandListResources(const containers::ArraySpan<const ResourceRef> resources, Failure* const failure) noexcept
+    {
+        if (!RequireBoundCommandList(failure))
+            return false;
+        ResourceRef previous;
+        for (const ResourceRef resource : resources)
+        {
+            if (!resource.IsValid() || (resource.GetKind() != ResourceKind::Texture && resource.GetKind() != ResourceKind::Buffer) ||
+                (previous.IsValid() && previous.value >= resource.value))
+                return Reject(failure, FailureCode::InvalidArgument, "command-list resource table must contain sorted unique texture/buffer references");
+            previous = resource;
+        }
+        const BackendStatus status = g_backend->AdmitCommandListResources(g_boundCommandList, resources);
+        if (!status && status.code == FailureCode::Unsupported)
+        {
+            ClearFailure(failure);
+            return true;
+        }
+        return Accept(status, failure);
+    }
+
     bool SetPipeline(const PipelineRef pipeline, Failure* const failure) noexcept
     {
         if (!RequireBoundCommandList(failure))
@@ -2198,6 +2227,35 @@ namespace vanguard::rhi
             if (!entry.resource.IsValid() || (entry.resource.GetKind() != ResourceKind::Texture && entry.resource.GetKind() != ResourceKind::Buffer) || !IsKnownResourceState(entry.state))
                 return Reject(failure, FailureCode::InvalidArgument, "command-list entry state requires a texture or buffer and an explicit known state");
         return Accept(g_backend->SeedCommandListStates(g_boundCommandList, entries), failure);
+    }
+
+    bool ExecuteCompiledBarriers(const containers::ArraySpan<const CompiledBarrier> barriers, Failure* const failure) noexcept
+    {
+        if (!RequireBoundCommandList(failure))
+            return false;
+        for (const CompiledBarrier& barrier : barriers)
+        {
+            if (barrier.resourceBinding == ~u32{0} || barrier.kind > CompiledBarrierKind::BufferUav)
+                return Reject(failure, FailureCode::InvalidArgument, "compiled barrier contains an invalid binding or kind");
+            const bool transition = barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::BufferTransition;
+            if (transition)
+            {
+                if (!IsKnownResourceState(barrier.before) || !IsKnownResourceState(barrier.after) || barrier.before == barrier.after)
+                    return Reject(failure, FailureCode::InvalidArgument, "compiled transition requires distinct explicit known states");
+                if (barrier.kind == CompiledBarrierKind::TextureTransition &&
+                    (barrier.textureSubresources.mipCount == 0 || barrier.textureSubresources.mipCount == 0xffffu ||
+                     barrier.textureSubresources.sliceCount == 0 || barrier.textureSubresources.sliceCount == 0xffffu))
+                    return Reject(failure, FailureCode::InvalidArgument, "compiled texture transition requires a resolved non-empty subresource range");
+            }
+            else if (barrier.before != ResourceState::Unknown || barrier.after != ResourceState::Unknown)
+                return Reject(failure, FailureCode::InvalidArgument, "compiled UAV barrier cannot carry transition states");
+        }
+        if (barriers.Empty())
+        {
+            ClearFailure(failure);
+            return true;
+        }
+        return Accept(g_backend->ExecuteCompiledBarriers(g_boundCommandList, barriers), failure);
     }
 
     bool TransitionTexture(const TextureRef texture, const ResourceState before, const ResourceState after, const SubresourceRange& range, Failure* const failure) noexcept

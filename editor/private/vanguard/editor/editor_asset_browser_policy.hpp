@@ -307,6 +307,24 @@ namespace vanguard::editor::detail
                acceptedGeneration == selectedAcceptedGeneration;
     }
 
+    // Accepted state may publish after the catalog's source generation without
+    // another catalog rebuild. In that case the selected row is still stable,
+    // but its accepted-generation witness must be rebound before mutation.
+    [[nodiscard]] inline bool ShouldRebindAssetBrowserAcceptedSelection(
+        const bool selectedRowValid, const bool sourceGenerationCurrent,
+        const bool acceptedGenerationResolved, const u64 selectedAcceptedGeneration,
+        const u64 acceptedGeneration) noexcept
+    {
+        return selectedRowValid && sourceGenerationCurrent && acceptedGenerationResolved &&
+               acceptedGeneration != 0u && acceptedGeneration != selectedAcceptedGeneration;
+    }
+
+    [[nodiscard]] inline bool ShouldClearAssetBrowserSelectionOnBackgroundClick(
+        const bool leftClicked, const bool contentHovered, const bool itemHovered) noexcept
+    {
+        return leftClicked && contentHovered && !itemHovered;
+    }
+
     [[nodiscard]] inline bool CanRunAssetBrowserAdoptedOperation(
         const bool selectionCurrent, const bool selectedReadOnly,
         const bool requiresWritableSource, const bool mutationDomainReady) noexcept

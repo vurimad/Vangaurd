@@ -46,37 +46,6 @@ namespace vanguard::rendering
             ReleaseGenerationRuntimeOwnersInternal(*generation);
     }
 
-    bool detail::RetireRetainedImportDescriptors(RenderFlowResourceAllocator::Impl& allocator,
-                                                 ExecutionGenerationRef::Impl& generation,
-                                                 const rhi::ResidencyFenceSet& fences,
-                                                 const bool deviceLost,
-                                                 RenderFlowResourceFailure* const failure) noexcept
-    {
-        if (!generation.hasNativeResourceBindings)
-            return true;
-        const rhi::DescriptorRetirement retirement{fences.graphics, fences.compute, fences.copy};
-        for (PhysicalBindingRecord& binding : generation.physicalBindings)
-        {
-            if (binding.kind != PhysicalBindingKind::RetainedImport)
-                continue;
-            for (rhi::DescriptorHandle* const descriptor : {&binding.shaderResource, &binding.unorderedAccess})
-            {
-                if (!descriptor->IsValid())
-                    continue;
-                if (!deviceLost)
-                {
-                    rhi::Failure rhiFailure;
-                    if (!rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), *descriptor, retirement, &rhiFailure))
-                        return Fail(failure, MapRhiFailure(rhiFailure, RhiFailureContext::BackendContract), allocator.state,
-                                    rhiFailure.message[0] != '\0' ? rhiFailure.message : "retained import descriptor retirement failed");
-                }
-                *descriptor = {};
-                allocator.descriptorLedger.Release(1);
-            }
-        }
-        return true;
-    }
-
     namespace
     {
         [[nodiscard]] bool PacketFailure(RenderFlowResourceFailure* const failure, const RenderFlowResourceFailureCode code, const char* const message, const detail::CompiledPacket* const packet = nullptr,
@@ -153,7 +122,176 @@ namespace vanguard::rendering
             return !generation.hasNativeResourceBindings || (commandList.IsValid() && rhi::GetBoundCommandList() == commandList);
         }
 
-        [[nodiscard]] bool ExecuteActions(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet, const u32 offset, const u32 count, const ResourceUseId use,
+        [[nodiscard]] bool ResolvePacketResourceBinding(const ExecutionGenerationRef::Impl& generation, const detail::CompiledPacket& packet,
+                                                        const u32 slot, const PhysicalResourceId expectedPhysical, rhi::ResourceRef& resource,
+                                                        RenderFlowResourceFailure* const failure, const ResourceUseId use = {}) noexcept
+        {
+            resource = {};
+            if (packet.resourceBindings.Size() != packet.resourceBindingPhysicals.Size() ||
+                packet.resourceBindings.Size() != packet.resourceBindingShaderResources.Size() ||
+                packet.resourceBindings.Size() != packet.resourceBindingUnorderedAccess.Size() || slot >= packet.resourceBindings.Size() ||
+                !expectedPhysical.IsValid() || expectedPhysical.generation != generation.id.generation ||
+                packet.resourceBindingPhysicals[slot] != expectedPhysical)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                     "compiled packet resource binding is stale or inconsistent", &packet, use);
+            resource = packet.resourceBindings[slot];
+            if (!resource.IsValid() || (resource.GetKind() != rhi::ResourceKind::Texture && resource.GetKind() != rhi::ResourceKind::Buffer))
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                     "compiled packet resource binding has an invalid native kind", &packet, use);
+            return true;
+        }
+
+        struct PendingCompiledBarrierRun
+        {
+            void Reset() noexcept
+            {
+                offset = InvalidRenderFlowResourceIndex;
+                count = 0;
+                batch = InvalidRenderFlowResourceIndex;
+            }
+
+            u32 offset = InvalidRenderFlowResourceIndex;
+            u32 count = 0;
+            u32 batch = InvalidRenderFlowResourceIndex;
+        };
+
+        [[nodiscard]] bool ReplayCompiledBarrier(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                 const rhi::CompiledBarrier& barrier, const ResourceUseId use,
+                                                 RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (barrier.resourceBinding >= packet.resourceBindingPhysicals.Size())
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                     "RF17 generic barrier escaped its packet binding table", &packet, use);
+            rhi::ResourceRef resource;
+            if (!ResolvePacketResourceBinding(generation, packet, barrier.resourceBinding,
+                                              packet.resourceBindingPhysicals[barrier.resourceBinding], resource, failure, use))
+                return false;
+
+            rhi::Failure rhiFailure;
+            bool succeeded = false;
+            if (barrier.kind == rhi::CompiledBarrierKind::TextureTransition && resource.GetKind() == rhi::ResourceKind::Texture)
+            {
+                succeeded = rhi::TransitionTexture({resource.Index(), resource.GetGeneration()}, barrier.before, barrier.after,
+                                                   barrier.textureSubresources, &rhiFailure);
+            }
+            else if (barrier.kind == rhi::CompiledBarrierKind::BufferTransition && resource.GetKind() == rhi::ResourceKind::Buffer)
+            {
+                succeeded = rhi::TransitionBuffer({resource.Index(), resource.GetGeneration()}, barrier.before, barrier.after, &rhiFailure);
+            }
+            else if (barrier.kind == rhi::CompiledBarrierKind::TextureUav && resource.GetKind() == rhi::ResourceKind::Texture)
+            {
+                // Preserve RF16's exact UAV precondition on the generic path.
+                // BarrierTextureUav would silently transition from a wrong state.
+                // Replay every cell explicitly: once NVRHI has expanded texture
+                // tracking, a whole-resource same-state request intentionally
+                // emits only one UAV ordering barrier, while RF16 orders the full
+                // resource. Per-cell replay preserves that stronger contract.
+                const PhysicalResourceId physical = packet.resourceBindingPhysicals[barrier.resourceBinding];
+                if (!physical.IsValid() || physical.generation != generation.id.generation || physical.index >= generation.physicalBindings.Size())
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                         "RF17 texture UAV fallback lost its physical state descriptor", &packet, use);
+                const detail::PhysicalBindingRecord& binding = generation.physicalBindings[physical.index];
+                if (binding.texture != rhi::TextureRef{resource.Index(), resource.GetGeneration()} || binding.buffer.IsValid() ||
+                    binding.textureMipCount == 0 || binding.textureArraySize == 0)
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                         "RF17 texture UAV fallback disagrees with its physical binding", &packet, use);
+                succeeded = true;
+                for (u32 slice = 0; succeeded && slice < binding.textureArraySize; ++slice)
+                    for (u32 mip = 0; succeeded && mip < binding.textureMipCount; ++mip)
+                        succeeded = rhi::TransitionTexture({resource.Index(), resource.GetGeneration()}, rhi::ResourceState::UnorderedAccess,
+                                                           rhi::ResourceState::UnorderedAccess,
+                                                           {static_cast<u16>(mip), 1, static_cast<u16>(slice), 1}, &rhiFailure);
+            }
+            else if (barrier.kind == rhi::CompiledBarrierKind::BufferUav && resource.GetKind() == rhi::ResourceKind::Buffer)
+            {
+                succeeded = rhi::TransitionBuffer({resource.Index(), resource.GetGeneration()}, rhi::ResourceState::UnorderedAccess,
+                                                  rhi::ResourceState::UnorderedAccess, &rhiFailure);
+            }
+            else
+            {
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                     "RF17 generic barrier kind disagrees with its packet binding", &packet, use);
+            }
+
+            return succeeded || PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
+                                              rhiFailure.message[0] != '\0' ? rhiFailure.message : "RF17 generic barrier replay failed", &packet, use);
+        }
+
+        [[nodiscard]] bool FlushCompiledBarrierRun(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                   PendingCompiledBarrierRun& pending, const ResourceUseId use,
+                                                   RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (pending.count == 0)
+                return true;
+            if (pending.offset >= packet.compiledBarriers.Size() || pending.count > packet.compiledBarriers.Size() - pending.offset ||
+                pending.batch == InvalidRenderFlowResourceIndex)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                     "RF17 compiled barrier run is malformed", &packet, use);
+
+            rhi::Failure rhiFailure;
+            const containers::ArraySpan<const rhi::CompiledBarrier> barriers(&packet.compiledBarriers[pending.offset], pending.count);
+            if (rhi::ExecuteCompiledBarriers(barriers, &rhiFailure))
+            {
+                pending.Reset();
+                return true;
+            }
+            if (rhiFailure.code != rhi::FailureCode::Unsupported)
+                return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
+                                     rhiFailure.message[0] != '\0' ? rhiFailure.message : "RF17 compiled barrier batch failed", &packet, use);
+
+            // Unsupported is the only RF16 failure guaranteed non-mutating. Replay
+            // the exact same independent run through the tracked generic path.
+            for (u32 index = pending.offset; index < pending.offset + pending.count; ++index)
+                if (!ReplayCompiledBarrier(generation, packet, packet.compiledBarriers[index], use, failure))
+                    return false;
+            pending.Reset();
+            return true;
+        }
+
+        [[nodiscard]] bool ExecuteCompiledBarrierSpan(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                      const u32 offset, const u32 count, PendingCompiledBarrierRun& pending,
+                                                      const ResourceUseId use, RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (count == 0)
+                return true;
+            if (packet.compiledBarriers.Size() != packet.compiledBarrierBatches.Size() || offset > packet.compiledBarriers.Size() ||
+                count > packet.compiledBarriers.Size() - offset)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                     "RF17 compiled barrier span is outside its packet program", &packet, use);
+
+            for (u32 index = offset; index < offset + count; ++index)
+            {
+                const rhi::CompiledBarrier& barrier = packet.compiledBarriers[index];
+                const u32 batch = packet.compiledBarrierBatches[index];
+                if (barrier.resourceBinding >= packet.resourceBindings.Size())
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                         "RF17 compiled barrier binding is outside its packet table", &packet, use);
+                if (batch == InvalidRenderFlowResourceIndex)
+                {
+                    if (!FlushCompiledBarrierRun(generation, packet, pending, use, failure) ||
+                        !ReplayCompiledBarrier(generation, packet, barrier, use, failure))
+                        return false;
+                    continue;
+                }
+                if (pending.count != 0 && (pending.batch != batch || pending.offset + pending.count != index))
+                    if (!FlushCompiledBarrierRun(generation, packet, pending, use, failure))
+                        return false;
+                if (pending.count == 0)
+                {
+                    pending.offset = index;
+                    pending.count = 1;
+                    pending.batch = batch;
+                }
+                else
+                {
+                    ++pending.count;
+                }
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool ExecuteActions(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet, const u32 offset, const u32 count,
+                                          const ResourceUseId use, PendingCompiledBarrierRun& pending,
                                           RenderFlowResourceFailure* const failure, const bool scopeExit = false) noexcept
         {
             const auto& actions = scopeExit ? packet.exitActions : packet.actions;
@@ -164,37 +302,55 @@ namespace vanguard::rendering
             for (u32 index = offset; index < offset + count; ++index)
             {
                 const detail::CompiledResourceAction& action = actions[index];
-                if (!action.physical.IsValid() || action.physical.generation != generation.id.generation || action.physical.index >= generation.physicalBindings.Size())
-                    return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled resource action references a stale physical assignment", &packet, use);
-                const detail::PhysicalBindingRecord& binding = generation.physicalBindings[action.physical.index];
+                const bool barrierAction = action.kind == detail::CompiledResourceActionKind::TextureTransition ||
+                                           action.kind == detail::CompiledResourceActionKind::BufferTransition ||
+                                           action.kind == detail::CompiledResourceActionKind::TextureUavBarrier ||
+                                           action.kind == detail::CompiledResourceActionKind::BufferUavBarrier;
+                if (barrierAction)
+                {
+                    if ((action.kind == detail::CompiledResourceActionKind::TextureUavBarrier || action.kind == detail::CompiledResourceActionKind::BufferUavBarrier) &&
+                        action.compiledBarrierCount == 0)
+                        return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                             "RF17 UAV action has no compiled barrier", &packet, use);
+                    if (!ExecuteCompiledBarrierSpan(generation, packet, action.compiledBarrierOffset, action.compiledBarrierCount, pending, use, failure))
+                        return false;
+                    continue;
+                }
+
+                if (action.compiledBarrierCount != 0)
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                         "RF17 non-barrier action owns compiled barrier metadata", &packet, use);
+                if (!FlushCompiledBarrierRun(generation, packet, pending, use, failure))
+                    return false;
+                rhi::ResourceRef resource;
+                if (!ResolvePacketResourceBinding(generation, packet, action.resourceBinding, action.physical, resource, failure, use))
+                    return false;
+                const bool texture = resource.GetKind() == rhi::ResourceKind::Texture;
+                const rhi::TextureRef textureRef = texture ? rhi::TextureRef{resource.Index(), resource.GetGeneration()} : rhi::TextureRef{};
+                const rhi::BufferRef bufferRef = !texture ? rhi::BufferRef{resource.Index(), resource.GetGeneration()} : rhi::BufferRef{};
                 rhi::Failure rhiFailure;
                 bool succeeded = false;
-                if (action.kind == detail::CompiledResourceActionKind::TextureTransition && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::TransitionTexture(binding.texture, action.before, action.after, action.textureSubresources, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::BufferTransition && binding.buffer.IsValid() && !binding.texture.IsValid())
-                    succeeded = rhi::TransitionBuffer(binding.buffer, action.before, action.after, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureUavBarrier && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::BarrierTextureUav(binding.texture, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::BufferUavBarrier && binding.buffer.IsValid() && !binding.texture.IsValid())
-                    succeeded = rhi::BarrierBufferUav(binding.buffer, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureColorTargetClear && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::ClearColorTarget(binding.texture, action.textureClearValue.color, action.textureSubresources, nullptr, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureDepthClear && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::ClearDepthTarget(binding.texture, action.textureClearValue.depth, action.textureSubresources, nullptr, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureStencilClear && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::ClearStencilTarget(binding.texture, action.textureClearValue.stencil, action.textureSubresources, nullptr, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureDepthStencilClear && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::ClearDepthStencilTarget(binding.texture, action.textureClearValue.depth, action.textureClearValue.stencil, action.textureSubresources, nullptr, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureUavFloatClear && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::ClearTextureUav(binding.texture, action.textureClearValue.color, action.textureSubresources, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::TextureUavUintClear && binding.texture.IsValid() && !binding.buffer.IsValid())
-                    succeeded = rhi::ClearTextureUav(binding.texture, action.textureClearValue.uintValue, action.textureSubresources, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::BufferUavUintClear && binding.buffer.IsValid() && !binding.texture.IsValid())
-                    succeeded = rhi::ClearBufferUav(binding.buffer, action.bufferClearValue.value, &rhiFailure);
-                else if (action.kind == detail::CompiledResourceActionKind::SwapChainPresentTransition &&
-                         binding.kind == detail::PhysicalBindingKind::RetainedImport && binding.texture.IsValid() && !binding.buffer.IsValid() &&
-                         binding.retainedImport < generation.retainedImports.Size())
+                if (action.kind == detail::CompiledResourceActionKind::TextureColorTargetClear && texture)
+                    succeeded = rhi::ClearColorTarget(textureRef, action.textureClearValue.color, action.textureSubresources, nullptr, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::TextureDepthClear && texture)
+                    succeeded = rhi::ClearDepthTarget(textureRef, action.textureClearValue.depth, action.textureSubresources, nullptr, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::TextureStencilClear && texture)
+                    succeeded = rhi::ClearStencilTarget(textureRef, action.textureClearValue.stencil, action.textureSubresources, nullptr, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::TextureDepthStencilClear && texture)
+                    succeeded = rhi::ClearDepthStencilTarget(textureRef, action.textureClearValue.depth, action.textureClearValue.stencil, action.textureSubresources, nullptr, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::TextureUavFloatClear && texture)
+                    succeeded = rhi::ClearTextureUav(textureRef, action.textureClearValue.color, action.textureSubresources, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::TextureUavUintClear && texture)
+                    succeeded = rhi::ClearTextureUav(textureRef, action.textureClearValue.uintValue, action.textureSubresources, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::BufferUavUintClear && !texture)
+                    succeeded = rhi::ClearBufferUav(bufferRef, action.bufferClearValue.value, &rhiFailure);
+                else if (action.kind == detail::CompiledResourceActionKind::SwapChainPresentTransition && texture && action.physical.index < generation.physicalBindings.Size())
                 {
+                    const detail::PhysicalBindingRecord& binding = generation.physicalBindings[action.physical.index];
+                    if (binding.kind != detail::PhysicalBindingKind::RetainedImport || binding.texture != textureRef || binding.buffer.IsValid() ||
+                        binding.retainedImport >= generation.retainedImports.Size())
+                        return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                             "compiled presentation action disagrees with its retained physical binding", &packet, use);
                     const detail::RetainedImportRecord& imported = generation.retainedImports[binding.retainedImport];
                     if (!imported.presentationAcquisition.IsValid() || imported.presentationAcquisition.texture != binding.texture ||
                         imported.presentationAcquisition.swapChain != generation.presentationAcquisition.swapChain ||
@@ -217,16 +373,19 @@ namespace vanguard::rendering
         {
             if (step.aliasPredecessorCount == 0)
                 return true;
-            if (step.aliasPredecessorOffset > packet.aliasPredecessors.Size() || step.aliasPredecessorCount > packet.aliasPredecessors.Size() - step.aliasPredecessorOffset || !step.physical.IsValid() ||
-                step.physical.generation != generation.id.generation || step.physical.index >= generation.physicalBindings.Size())
+            if (step.aliasPredecessorOffset > packet.aliasPredecessors.Size() || step.aliasPredecessorCount > packet.aliasPredecessors.Size() - step.aliasPredecessorOffset ||
+                packet.aliasPredecessorBindingSlots.Size() != packet.aliasPredecessors.Size())
                 return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled alias-activation range is invalid", &packet, use);
-            const detail::PhysicalBindingRecord& destinationBinding = generation.physicalBindings[step.physical.index];
-            if (destinationBinding.kind != detail::PhysicalBindingKind::PlacedPool || destinationBinding.texture.IsValid() == destinationBinding.buffer.IsValid())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "compiled alias activation does not target a placed resource", &packet, use);
+            rhi::ResourceRef destination;
+            if (!ResolvePacketResourceBinding(generation, packet, step.resourceBinding, step.physical, destination, failure, use))
+                return false;
             for (u32 index = 0; index < step.aliasPredecessorCount; ++index)
-                if (!packet.aliasPredecessors[step.aliasPredecessorOffset + index].IsValid())
+            {
+                const u32 aliasIndex = step.aliasPredecessorOffset + index;
+                const u32 slot = packet.aliasPredecessorBindingSlots[aliasIndex];
+                if (slot >= packet.resourceBindings.Size() || packet.resourceBindings[slot] != packet.aliasPredecessors[aliasIndex])
                     return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled alias activation contains an invalid predecessor", &packet, use);
-            const rhi::ResourceRef destination = destinationBinding.texture.IsValid() ? rhi::ResourceRef(destinationBinding.texture) : rhi::ResourceRef(destinationBinding.buffer);
+            }
             rhi::Failure rhiFailure;
             if (!rhi::ActivateAliasedResource(destination, containers::ArraySpan<const rhi::ResourceRef>(&packet.aliasPredecessors[step.aliasPredecessorOffset], step.aliasPredecessorCount), &rhiFailure))
                 return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
@@ -239,13 +398,13 @@ namespace vanguard::rendering
         {
             if (!step.finalizeForAlias)
                 return true;
-            if (!step.physical.IsValid() || step.physical.generation != generation.id.generation || step.physical.index >= generation.physicalBindings.Size())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled alias predecessor has no physical assignment", &packet, use);
-            const detail::PhysicalBindingRecord& binding = generation.physicalBindings[step.physical.index];
-            if (binding.kind != detail::PhysicalBindingKind::PlacedPool || binding.texture.IsValid() == binding.buffer.IsValid())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "compiled alias predecessor is not a placed resource", &packet, use);
+            rhi::ResourceRef resource;
+            if (!ResolvePacketResourceBinding(generation, packet, step.resourceBinding, step.physical, resource, failure, use))
+                return false;
             rhi::Failure rhiFailure;
-            const bool finalized = binding.texture.IsValid() ? rhi::MakeStateSafeToRetire(binding.texture, &rhiFailure) : rhi::MakeStateSafeToRetire(binding.buffer, &rhiFailure);
+            const bool finalized = resource.GetKind() == rhi::ResourceKind::Texture
+                                       ? rhi::MakeStateSafeToRetire(rhi::TextureRef{resource.Index(), resource.GetGeneration()}, &rhiFailure)
+                                       : rhi::MakeStateSafeToRetire(rhi::BufferRef{resource.Index(), resource.GetGeneration()}, &rhiFailure);
             if (!finalized)
                 return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
                                      "placed alias predecessor finalization failed", &packet, use);
@@ -314,6 +473,7 @@ namespace vanguard::rendering
             if (segment.offset > packet.actionTape.Size() || segment.count > packet.actionTape.Size() - segment.offset ||
                 stepOffset > packet.steps.Size() || stepCount > packet.steps.Size() - stepOffset)
                 return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled range action-tape segment is invalid", &packet);
+            PendingCompiledBarrierRun pending;
             for (u32 tapeIndex = segment.offset; tapeIndex < segment.offset + segment.count; ++tapeIndex)
             {
                 const detail::CompiledActionTapeEntry& entry = packet.actionTape[tapeIndex];
@@ -329,8 +489,10 @@ namespace vanguard::rendering
                         entry.actionOffset != step.beforeActionOffset || entry.actionCount != step.beforeActionCount)
                         return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
                                              "compiled begin action-tape entry disagrees with its step semantics", &packet, step.use);
-                    if (!ExecuteAliasActivation(generation, packet, step, step.use, failure) ||
-                        !ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, step.use, failure))
+                    if ((step.aliasPredecessorCount != 0 && !FlushCompiledBarrierRun(generation, packet, pending, step.use, failure)) ||
+                        !ExecuteAliasActivation(generation, packet, step, step.use, failure) ||
+                        !ExecuteCompiledBarrierSpan(generation, packet, step.compiledBarrierOffset, step.compiledBarrierCount, pending, step.use, failure) ||
+                        !ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, step.use, pending, failure))
                         return false;
                 }
                 else if (phase == detail::CompiledActionTapePhase::End)
@@ -338,7 +500,8 @@ namespace vanguard::rendering
                     if (step.kind != CompiledResourceStepKind::UseEnd || entry.actionOffset != step.afterActionOffset || entry.actionCount != step.afterActionCount)
                         return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
                                              "compiled end action-tape entry disagrees with its step semantics", &packet, step.use);
-                    if (!ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, step.use, failure) ||
+                    if (!ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, step.use, pending, failure) ||
+                        (step.finalizeForAlias && !FlushCompiledBarrierRun(generation, packet, pending, step.use, failure)) ||
                         !FinalizeAliasPredecessor(generation, packet, step, step.use, failure))
                         return false;
                 }
@@ -348,7 +511,30 @@ namespace vanguard::rendering
                                          step.use);
                 }
             }
-            return true;
+            return FlushCompiledBarrierRun(generation, packet, pending, {}, failure);
+        }
+
+        [[nodiscard]] bool ExecuteCompiledRangeBegins(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                      const u32 stepOffset, const u32 stepCount,
+                                                      RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (stepOffset > packet.steps.Size() || stepCount > packet.steps.Size() - stepOffset)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                     "compiled range begin span is invalid", &packet);
+            PendingCompiledBarrierRun pending;
+            for (u32 stepIndex = stepOffset; stepIndex < stepOffset + stepCount; ++stepIndex)
+            {
+                const detail::CompiledStep& step = packet.steps[stepIndex];
+                if (step.kind != CompiledResourceStepKind::TextureUseBegin && step.kind != CompiledResourceStepKind::BufferUseBegin)
+                    return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution,
+                                         "compiled range begin span contains a non-begin step", &packet, step.use);
+                if ((step.aliasPredecessorCount != 0 && !FlushCompiledBarrierRun(generation, packet, pending, step.use, failure)) ||
+                    !ExecuteAliasActivation(generation, packet, step, step.use, failure) ||
+                    !ExecuteCompiledBarrierSpan(generation, packet, step.compiledBarrierOffset, step.compiledBarrierCount, pending, step.use, failure) ||
+                    !ExecuteActions(generation, packet, step.beforeActionOffset, step.beforeActionCount, step.use, pending, failure))
+                    return false;
+            }
+            return FlushCompiledBarrierRun(generation, packet, pending, {}, failure);
         }
 
         [[nodiscard]] bool ExecutePacketExitTape(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
@@ -369,7 +555,34 @@ namespace vanguard::rendering
             if (entry.phase != detail::CompiledActionTapePhase::Exit || entry.stepIndex != InvalidRenderFlowResourceIndex || entry.actionOffset != 0 ||
                 entry.actionCount != packet.exitActions.Size())
                 return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled packet-exit action-tape entry disagrees with exit actions", &packet);
-            return ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, {}, failure, true);
+            PendingCompiledBarrierRun pending;
+            if (!ExecuteActions(generation, packet, entry.actionOffset, entry.actionCount, {}, pending, failure, true))
+                return false;
+            return FlushCompiledBarrierRun(generation, packet, pending, {}, failure);
+        }
+
+        [[nodiscard]] bool ExecuteCompiledUseBegin(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                   const detail::CompiledStep& step, const ResourceUseId use,
+                                                   RenderFlowResourceFailure* const failure) noexcept
+        {
+            PendingCompiledBarrierRun pending;
+            if (!ExecuteAliasActivation(generation, packet, step, use, failure) ||
+                !ExecuteCompiledBarrierSpan(generation, packet, step.compiledBarrierOffset, step.compiledBarrierCount, pending, use, failure) ||
+                !ExecuteActions(generation, packet, step.beforeActionOffset, step.beforeActionCount, use, pending, failure))
+                return false;
+            return FlushCompiledBarrierRun(generation, packet, pending, use, failure);
+        }
+
+        [[nodiscard]] bool ExecuteCompiledUseEnd(ExecutionGenerationRef::Impl& generation, detail::CompiledPacket& packet,
+                                                 const detail::CompiledStep& step, const ResourceUseId use,
+                                                 RenderFlowResourceFailure* const failure) noexcept
+        {
+            PendingCompiledBarrierRun pending;
+            if (!ExecuteActions(generation, packet, step.afterActionOffset, step.afterActionCount, use, pending, failure) ||
+                (step.finalizeForAlias && !FlushCompiledBarrierRun(generation, packet, pending, use, failure)) ||
+                !FinalizeAliasPredecessor(generation, packet, step, use, failure))
+                return false;
+            return FlushCompiledBarrierRun(generation, packet, pending, use, failure);
         }
 
     } // namespace
@@ -617,6 +830,7 @@ namespace vanguard::rendering
 
         ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
         const detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        range.generation = generation->id.generation;
         if (generation->terminal.GetValue())
             return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidPhase, "execution range packet generation is terminal", &packet);
         if (packet.beginStepByUseOrdinal.Size() != packet.endStepByUseOrdinal.Size() ||
@@ -735,14 +949,14 @@ namespace vanguard::rendering
         value.m_hasExplicitView = step.hasExplicitView;
         if (generation->hasNativeResourceBindings)
         {
-            if (step.physical.index >= generation->physicalBindings.Size())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "texture execution-image physical binding is missing", &packet, use);
-            const detail::PhysicalBindingRecord& binding = generation->physicalBindings[step.physical.index];
-            if (!binding.texture.IsValid() || binding.buffer.IsValid())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "texture execution-image physical binding has the wrong kind", &packet, use);
-            value.m_texture = binding.texture;
-            value.m_shaderResource = binding.shaderResource;
-            value.m_unorderedAccess = binding.unorderedAccess;
+            rhi::ResourceRef resource;
+            if (!ResolvePacketResourceBinding(*generation, packet, step.resourceBinding, step.physical, resource, failure, use))
+                return false;
+            if (resource.GetKind() != rhi::ResourceKind::Texture)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "texture execution-image packet binding has the wrong kind", &packet, use);
+            value.m_texture = {resource.Index(), resource.GetGeneration()};
+            value.m_shaderResource = packet.resourceBindingShaderResources[step.resourceBinding];
+            value.m_unorderedAccess = packet.resourceBindingUnorderedAccess[step.resourceBinding];
         }
         resolved = static_cast<ResolvedTextureUse&&>(value);
         return true;
@@ -780,14 +994,14 @@ namespace vanguard::rendering
         value.m_hasExplicitView = step.hasExplicitView;
         if (generation->hasNativeResourceBindings)
         {
-            if (step.physical.index >= generation->physicalBindings.Size())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "buffer execution-image physical binding is missing", &packet, use);
-            const detail::PhysicalBindingRecord& binding = generation->physicalBindings[step.physical.index];
-            if (!binding.buffer.IsValid() || binding.texture.IsValid())
-                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "buffer execution-image physical binding has the wrong kind", &packet, use);
-            value.m_buffer = binding.buffer;
-            value.m_shaderResource = binding.shaderResource;
-            value.m_unorderedAccess = binding.unorderedAccess;
+            rhi::ResourceRef resource;
+            if (!ResolvePacketResourceBinding(*generation, packet, step.resourceBinding, step.physical, resource, failure, use))
+                return false;
+            if (resource.GetKind() != rhi::ResourceKind::Buffer)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "buffer execution-image packet binding has the wrong kind", &packet, use);
+            value.m_buffer = {resource.Index(), resource.GetGeneration()};
+            value.m_shaderResource = packet.resourceBindingShaderResources[step.resourceBinding];
+            value.m_unorderedAccess = packet.resourceBindingUnorderedAccess[step.resourceBinding];
         }
         resolved = static_cast<ResolvedBufferUse&&>(value);
         return true;
@@ -837,6 +1051,13 @@ namespace vanguard::rendering
                     FailPacketExecution(packet);
                     return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction), "incoming queue wait recording failed; discard the command list", &packet);
                 }
+            }
+            const bool resourcesAdmitted = rhi::AdmitCommandListResources(containers::ArraySpan<const rhi::ResourceRef>(packet.resourceBindings), &rhiFailure);
+            if (!resourcesAdmitted)
+            {
+                FailPacketExecution(packet);
+                return PacketFailure(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::ExecutionAction),
+                                     "command-scope resource-table admission failed; discard the command list", &packet);
             }
             const bool statesSeeded = rhi::SeedCommandListStates(containers::ArraySpan<const rhi::CommandListEntryState>(packet.entryStates), &rhiFailure);
             if (!statesSeeded)
@@ -1126,7 +1347,7 @@ namespace vanguard::rendering
             step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use does not match the next compiled packet step", &packet, use);
         packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
-        if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
+        if (!ExecuteCompiledUseBegin(*generation, packet, step, use, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -1157,7 +1378,7 @@ namespace vanguard::rendering
             step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use does not match the next compiled packet step", &packet, use);
         packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
-        if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
+        if (!ExecuteCompiledUseBegin(*generation, packet, step, use, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -1188,7 +1409,7 @@ namespace vanguard::rendering
             step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "texture use does not match the next compiled packet step", &packet, use);
         packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
-        if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
+        if (!ExecuteCompiledUseBegin(*generation, packet, step, use, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -1204,11 +1425,16 @@ namespace vanguard::rendering
         value.m_runtimeUseSlot = step.runtimeUseSlot;
         value.m_use = use;
         value.m_physical = step.physical;
-        if (generation->hasNativeResourceBindings && step.physical.index < generation->physicalBindings.Size())
+        if (generation->hasNativeResourceBindings)
         {
-            value.m_texture = generation->physicalBindings[step.physical.index].texture;
-            value.m_shaderResource = generation->physicalBindings[step.physical.index].shaderResource;
-            value.m_unorderedAccess = generation->physicalBindings[step.physical.index].unorderedAccess;
+            rhi::ResourceRef resource;
+            if (!ResolvePacketResourceBinding(*generation, packet, step.resourceBinding, step.physical, resource, failure, use))
+                return false;
+            if (resource.GetKind() != rhi::ResourceKind::Texture)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "texture use packet binding has the wrong kind", &packet, use);
+            value.m_texture = {resource.Index(), resource.GetGeneration()};
+            value.m_shaderResource = packet.resourceBindingShaderResources[step.resourceBinding];
+            value.m_unorderedAccess = packet.resourceBindingUnorderedAccess[step.resourceBinding];
         }
         value.m_desc = step.texture;
         value.m_viewDesc = step.textureView;
@@ -1235,7 +1461,7 @@ namespace vanguard::rendering
             step.runtimeUseSlot >= packet.runtime.liveness->useActive.Size() || IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "buffer use does not match the next compiled packet step", &packet, use);
         packet.runtime.mode = detail::PacketExecutionMode::LegacyUseReplay;
-        if (!ExecuteAliasActivation(*generation, packet, step, use, failure) || !ExecuteActions(*generation, packet, step.beforeActionOffset, step.beforeActionCount, use, failure))
+        if (!ExecuteCompiledUseBegin(*generation, packet, step, use, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -1251,11 +1477,16 @@ namespace vanguard::rendering
         value.m_runtimeUseSlot = step.runtimeUseSlot;
         value.m_use = use;
         value.m_physical = step.physical;
-        if (generation->hasNativeResourceBindings && step.physical.index < generation->physicalBindings.Size())
+        if (generation->hasNativeResourceBindings)
         {
-            value.m_buffer = generation->physicalBindings[step.physical.index].buffer;
-            value.m_shaderResource = generation->physicalBindings[step.physical.index].shaderResource;
-            value.m_unorderedAccess = generation->physicalBindings[step.physical.index].unorderedAccess;
+            rhi::ResourceRef resource;
+            if (!ResolvePacketResourceBinding(*generation, packet, step.resourceBinding, step.physical, resource, failure, use))
+                return false;
+            if (resource.GetKind() != rhi::ResourceKind::Buffer)
+                return PacketFailure(failure, RenderFlowResourceFailureCode::BackendContractViolation, "buffer use packet binding has the wrong kind", &packet, use);
+            value.m_buffer = {resource.Index(), resource.GetGeneration()};
+            value.m_shaderResource = packet.resourceBindingShaderResources[step.resourceBinding];
+            value.m_unorderedAccess = packet.resourceBindingUnorderedAccess[step.resourceBinding];
         }
         value.m_desc = step.buffer;
         value.m_viewDesc = step.bufferView;
@@ -1280,7 +1511,7 @@ namespace vanguard::rendering
         const detail::CompiledStep& step = packet.steps[packet.runtime.nextStep];
         if (step.kind != CompiledResourceStepKind::UseEnd || step.use != use || !IsActiveUse(packet, step.runtimeUseSlot))
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "resource use end does not match the next compiled packet step", &packet, use);
-        if (!ExecuteActions(*generation, packet, step.afterActionOffset, step.afterActionCount, use, failure) || !FinalizeAliasPredecessor(*generation, packet, step, use, failure))
+        if (!ExecuteCompiledUseEnd(*generation, packet, step, use, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -1300,6 +1531,9 @@ namespace vanguard::rendering
             return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled execution range identity is invalid");
         ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (range.generation == 0 || range.generation != generation->id.generation)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                 "compiled execution range belongs to another execution generation", &packet);
         if (!RecorderMatches(*generation, m_commandList))
             return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed before compiled range begin", &packet);
         if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing)
@@ -1328,8 +1562,7 @@ namespace vanguard::rendering
             return PacketFailure(failure, RenderFlowResourceFailureCode::IncompleteExecution, "compiled child range has resource uses but no range-liveness owner", &packet);
         }
 
-        if (!ExecuteCompiledRangeTape(*generation, packet, range.beginActions, detail::CompiledActionTapePhase::Begin,
-                                      range.beginStepOffset, range.beginStepCount, failure))
+        if (!ExecuteCompiledRangeBegins(*generation, packet, range.beginStepOffset, range.beginStepCount, failure))
         {
             FailPacketExecution(packet);
             m_open = false;
@@ -1359,6 +1592,9 @@ namespace vanguard::rendering
             return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled execution range identity is invalid");
         ExecutionGenerationRef::Impl* const generation = m_generation.m_impl;
         detail::CompiledPacket& packet = generation->packets[m_packetIndex];
+        if (range.generation == 0 || range.generation != generation->id.generation)
+            return PacketFailure(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                 "compiled execution range belongs to another execution generation", &packet);
         if (!RecorderMatches(*generation, m_commandList))
             return PacketFailure(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "active command recorder changed before compiled range end", &packet);
         if (generation->terminal.GetValue() || packet.runtime.state != detail::PacketRuntimeState::Executing ||
@@ -1905,7 +2141,6 @@ namespace vanguard::rendering
         {
             if (receipt.completion == TerminalExecutionCompletionKind::DeviceLost)
             {
-                owner->structuralPlan.Clear();
                 detail::ReleasePersistentDedicatedPlan(*owner, false);
                 owner->dedicatedPool.DeviceLost(submittedFences);
                 owner->placedPool.DeviceLost(submittedFences);
@@ -1945,9 +2180,11 @@ namespace vanguard::rendering
                         }
                 owner->placedPool.Retire(generation->placedBatch, submittedFences, placedReusable);
             }
-            if (!detail::RetireRetainedImportDescriptors(*owner, *generation, submittedFences,
-                                                         receipt.completion == TerminalExecutionCompletionKind::DeviceLost, failure))
+            const bool deviceLost = receipt.completion == TerminalExecutionCompletionKind::DeviceLost;
+            if (!detail::ReleaseRetainedImportDescriptorBorrows(*owner, *generation, submittedFences, deviceLost, failure))
                 return false;
+            if (deviceLost)
+                detail::RetainedImportDescriptorCacheDeviceLost(*owner, submittedFences);
         }
 
         // The terminal receipt is the ownership boundary. Packet views may keep

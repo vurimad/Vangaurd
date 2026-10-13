@@ -3,6 +3,7 @@
 #include <vanguard/rendering/render_flow_resource_internal.hpp>
 #include <vanguard/system/assert.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <new>
@@ -32,7 +33,481 @@ namespace vanguard::rendering
             return readiness == ImportReadinessKind::ExplicitFenceWait && fence.IsValid() &&
                    detail::ValidQueue(fence.queue) && fence.queue == initialQueue;
         }
+
+        [[nodiscard]] ResourceContractPatchId SessionScopedContractPatch(const u32 sessionGeneration, const u64 identity) noexcept
+        {
+            if (sessionGeneration == 0 || identity == 0)
+                return {};
+            // Compatibility-only fallback: preserve equality for the same
+            // current-frame identity while deliberately changing across frame
+            // sessions. Explicit ResourceContractPatchId is required for warm
+            // semantic reuse across native replacement/reordering.
+            const u64 salt = static_cast<u64>(sessionGeneration) * 0x9e3779b97f4a7c15ull;
+            const u64 value = identity ^ salt;
+            return {value != 0 ? value : 1u};
+        }
+
+        [[nodiscard]] bool RetainedDescriptorLess(const RenderFlowResourceAllocator::Impl& allocator, const u32 left, const u32 right) noexcept
+        {
+            const detail::RetainedImportDescriptorOwner& a = allocator.retainedImportDescriptorOwners[left];
+            const detail::RetainedImportDescriptorOwner& b = allocator.retainedImportDescriptorOwners[right];
+            return a.descriptors.lastDemandFrame != b.descriptors.lastDemandFrame ? a.descriptors.lastDemandFrame < b.descriptors.lastDemandFrame : left < right;
+        }
+
+        void SwapRetainedDescriptorReusable(RenderFlowResourceAllocator::Impl& allocator, const u32 leftPosition, const u32 rightPosition) noexcept
+        {
+            const u32 left = allocator.retainedImportDescriptorReusable[leftPosition];
+            const u32 right = allocator.retainedImportDescriptorReusable[rightPosition];
+            allocator.retainedImportDescriptorReusable[leftPosition] = right;
+            allocator.retainedImportDescriptorReusable[rightPosition] = left;
+            allocator.retainedImportDescriptorOwners[left].reusablePosition = rightPosition;
+            allocator.retainedImportDescriptorOwners[right].reusablePosition = leftPosition;
+        }
+
+        void SiftRetainedDescriptorReusableUp(RenderFlowResourceAllocator::Impl& allocator, u32 position) noexcept
+        {
+            while (position != 0)
+            {
+                const u32 parent = (position - 1u) / 2u;
+                if (!RetainedDescriptorLess(allocator, allocator.retainedImportDescriptorReusable[position], allocator.retainedImportDescriptorReusable[parent]))
+                    break;
+                SwapRetainedDescriptorReusable(allocator, position, parent);
+                position = parent;
+            }
+        }
+
+        void SiftRetainedDescriptorReusableDown(RenderFlowResourceAllocator::Impl& allocator, u32 position) noexcept
+        {
+            for (;;)
+            {
+                const u32 left = position * 2u + 1u;
+                if (left >= allocator.retainedImportDescriptorReusable.Size())
+                    return;
+                const u32 right = left + 1u;
+                u32 best = left;
+                if (right < allocator.retainedImportDescriptorReusable.Size() &&
+                    RetainedDescriptorLess(allocator, allocator.retainedImportDescriptorReusable[right], allocator.retainedImportDescriptorReusable[left]))
+                    best = right;
+                if (!RetainedDescriptorLess(allocator, allocator.retainedImportDescriptorReusable[best], allocator.retainedImportDescriptorReusable[position]))
+                    return;
+                SwapRetainedDescriptorReusable(allocator, position, best);
+                position = best;
+            }
+        }
+
+        void InsertRetainedDescriptorReusable(RenderFlowResourceAllocator::Impl& allocator, const u32 index, const bool updateLedger = true) noexcept
+        {
+            detail::RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[index];
+            const u32 descriptorCount = detail::CanonicalDescriptorReferenceCount(owner.descriptors);
+            if (descriptorCount == 0 || owner.activeBorrows != 0 || owner.reusablePosition != InvalidRenderFlowResourceIndex)
+                return;
+            owner.reusablePosition = allocator.retainedImportDescriptorReusable.Size();
+            allocator.retainedImportDescriptorReusable.PushBack(index);
+            if (updateLedger)
+                allocator.descriptorLedger.MarkReusable(descriptorCount);
+            SiftRetainedDescriptorReusableUp(allocator, owner.reusablePosition);
+        }
+
+        void RemoveRetainedDescriptorReusable(RenderFlowResourceAllocator::Impl& allocator, const u32 index, const bool updateLedger = true) noexcept
+        {
+            detail::RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[index];
+            if (owner.reusablePosition == InvalidRenderFlowResourceIndex)
+                return;
+            const u32 descriptorCount = detail::CanonicalDescriptorReferenceCount(owner.descriptors);
+            const u32 position = owner.reusablePosition;
+            VG_ASSERT(position < allocator.retainedImportDescriptorReusable.Size() && allocator.retainedImportDescriptorReusable[position] == index);
+            const u32 last = allocator.retainedImportDescriptorReusable.Size() - 1u;
+            if (position != last)
+                SwapRetainedDescriptorReusable(allocator, position, last);
+            allocator.retainedImportDescriptorReusable.PopBack();
+            owner.reusablePosition = InvalidRenderFlowResourceIndex;
+            if (position < allocator.retainedImportDescriptorReusable.Size())
+            {
+                const u32 moved = allocator.retainedImportDescriptorReusable[position];
+                SiftRetainedDescriptorReusableUp(allocator, position);
+                SiftRetainedDescriptorReusableDown(allocator, allocator.retainedImportDescriptorOwners[moved].reusablePosition);
+            }
+            if (updateLedger && descriptorCount != 0)
+                allocator.descriptorLedger.MarkNotReusable(descriptorCount);
+        }
+
+        [[nodiscard]] rhi::DescriptorRetirement RetainedDescriptorRetirement(const rhi::ResidencyFenceSet& fences) noexcept
+        {
+            return {fences.graphics, fences.compute, fences.copy};
+        }
+
+        void IncludeRetainedSafeAfter(rhi::ResidencyFenceSet& target, const rhi::ResidencyFenceSet& source) noexcept
+        {
+            target.graphics = std::max(target.graphics, source.graphics);
+            target.compute = std::max(target.compute, source.compute);
+            target.copy = std::max(target.copy, source.copy);
+            target.neverSubmittedQueues |= source.neverSubmittedQueues;
+        }
+
+        [[nodiscard]] bool ValidateRetainedDescriptorCacheScope(const RenderFlowResourceAllocator::Impl& allocator) noexcept
+        {
+            const u64 deviceIncarnation = rhi::GetDeviceIncarnation();
+            const u64 domainIdentity = allocator.resourceDescriptors.IsValid() ? rhi::ResourceRef(allocator.resourceDescriptors.GetRef()).value : 0;
+            return allocator.rhiDeviceIncarnation == deviceIncarnation && allocator.descriptorDomainIdentity == domainIdentity;
+        }
+
+        void ReleaseRetainedDescriptorOwnerSlot(RenderFlowResourceAllocator::Impl& allocator, const u32 index) noexcept
+        {
+            detail::RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[index];
+            VG_ASSERT(owner.activeBorrows == 0 && detail::CanonicalDescriptorReferenceCount(owner.descriptors) == 0 &&
+                      owner.reusablePosition == InvalidRenderFlowResourceIndex);
+            if (owner.resource.IsValid())
+                static_cast<void>(allocator.retainedImportDescriptorOwnerByResource.Erase(owner.resource.value));
+            owner = {};
+            allocator.freeRetainedImportDescriptorOwners.PushBack(index);
+        }
+
+        [[nodiscard]] bool RetireRetainedDescriptorOwner(RenderFlowResourceAllocator::Impl& allocator, const u32 index, const bool pressure,
+                                                         RenderFlowResourceFailure* const failure) noexcept
+        {
+            if (!ValidateRetainedDescriptorCacheScope(allocator))
+                return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                                    "retained import descriptor eviction crossed an RHI/device or descriptor-domain incarnation");
+            if (index >= allocator.retainedImportDescriptorOwners.Size())
+                return false;
+            detail::RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[index];
+            if (owner.activeBorrows != 0)
+                return false;
+            const u32 descriptorCount = detail::CanonicalDescriptorReferenceCount(owner.descriptors);
+            if (descriptorCount == 0)
+                return false;
+            RemoveRetainedDescriptorReusable(allocator, index);
+            const rhi::DescriptorRetirement retirement = RetainedDescriptorRetirement(owner.safeAfter);
+            for (rhi::DescriptorHandle* const descriptor : {&owner.descriptors.shaderResource, &owner.descriptors.unorderedAccess})
+            {
+                if (!descriptor->IsValid())
+                    continue;
+                rhi::Failure rhiFailure;
+                if (!rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), *descriptor, retirement, &rhiFailure))
+                {
+                    if (detail::CanonicalDescriptorReferenceCount(owner.descriptors) != 0)
+                        InsertRetainedDescriptorReusable(allocator, index);
+                    return detail::Fail(failure, detail::MapRhiFailure(rhiFailure, detail::RhiFailureContext::BackendContract), allocator.state,
+                                        rhiFailure.message[0] != '\0' ? rhiFailure.message : "retained import canonical descriptor eviction failed");
+                }
+                *descriptor = {};
+                allocator.descriptorLedger.Release(1);
+            }
+            if (pressure)
+                allocator.descriptorLedger.RecordPressureEviction();
+            else
+                allocator.descriptorLedger.RecordMaintenanceEviction();
+            ReleaseRetainedDescriptorOwnerSlot(allocator, index);
+            return true;
+        }
     } // namespace
+
+    bool detail::BorrowRetainedImportCanonicalDescriptors(RenderFlowResourceAllocator::Impl& allocator, PhysicalBindingRecord& binding,
+                                                          const FrameResourceDesc& desc, CanonicalDescriptorPressure* const pressure,
+                                                          const bool recordStats, RenderFlowResourceFailure* const failure) noexcept
+    {
+        if (pressure != nullptr)
+            *pressure = {};
+        if (!allocator.resourceDescriptors.IsValid())
+            return true;
+        if (!ValidateRetainedDescriptorCacheScope(allocator))
+            return Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                        "retained import descriptor cache crossed an RHI/device or descriptor-domain incarnation");
+        const bool buffer = binding.buffer.IsValid();
+        if (buffer == binding.texture.IsValid())
+            return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                        "retained import canonical descriptor source kind is invalid");
+        const FrameResourceKind kind = buffer ? FrameResourceKind::Buffer : FrameResourceKind::Texture;
+        const rhi::ResourceRef resource = buffer ? rhi::ResourceRef(binding.buffer) : rhi::ResourceRef(binding.texture);
+        const bool needShaderResource = buffer ? HasAny(desc.buffer.active.usage, rhi::BufferUsage::ShaderResource)
+                                               : HasAny(desc.texture.active.usage, rhi::TextureUsage::ShaderResource);
+        const bool needUnorderedAccess = buffer ? HasAny(desc.buffer.active.usage, rhi::BufferUsage::UnorderedAccess)
+                                                : HasAny(desc.texture.active.usage, rhi::TextureUsage::UnorderedAccess);
+        if (!needShaderResource && !needUnorderedAccess)
+            return true;
+
+        u32 ownerIndex = InvalidRenderFlowResourceIndex;
+        const bool existing = allocator.retainedImportDescriptorOwnerByResource.Find(resource.value, ownerIndex);
+        if (existing && (ownerIndex >= allocator.retainedImportDescriptorOwners.Size() ||
+                         allocator.retainedImportDescriptorOwners[ownerIndex].resource != resource ||
+                         allocator.retainedImportDescriptorOwners[ownerIndex].kind != kind))
+            return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                        "retained import descriptor owner index is stale");
+
+        RetainedImportDescriptorOwner staged;
+        RetainedImportDescriptorOwner* owner = existing ? &allocator.retainedImportDescriptorOwners[ownerIndex] : &staged;
+        if (!existing)
+        {
+            owner->resource = resource;
+            owner->kind = kind;
+        }
+        const bool wasReusable = existing && owner->activeBorrows == 0 && owner->reusablePosition != InvalidRenderFlowResourceIndex;
+        if (wasReusable)
+            RemoveRetainedDescriptorReusable(allocator, ownerIndex);
+
+        const u32 missing = static_cast<u32>(needShaderResource && !owner->descriptors.shaderResource.IsValid()) +
+                            static_cast<u32>(needUnorderedAccess && !owner->descriptors.unorderedAccess.IsValid());
+        if (recordStats)
+        {
+            if (missing == 0)
+                allocator.descriptorLedger.RecordPublicationHit();
+            else
+                allocator.descriptorLedger.RecordPublicationMiss();
+        }
+        if (missing != 0 && !allocator.descriptorLedger.TryReserve(missing))
+        {
+            if (wasReusable)
+                InsertRetainedDescriptorReusable(allocator, ownerIndex);
+            if (pressure != nullptr)
+                *pressure = {CanonicalDescriptorPressureKind::LocalLimit, missing};
+            return false;
+        }
+
+        rhi::DescriptorHandle createdShaderResource;
+        rhi::DescriptorHandle createdUnorderedAccess;
+        rhi::Failure rhiFailure;
+        bool allocationCapacityFailure = false;
+        const auto create = [&](const bool writable, rhi::DescriptorHandle& created) noexcept
+        {
+            created = rhi::AllocateDescriptor(allocator.resourceDescriptors.GetRef(), &rhiFailure);
+            if (!created.IsValid())
+            {
+                allocationCapacityFailure = rhiFailure.code == rhi::FailureCode::CapacityExceeded;
+                return false;
+            }
+            if (buffer)
+            {
+                const rhi::BufferUsage usage = desc.buffer.active.usage;
+                const rhi::BindingType type = HasAny(usage, rhi::BufferUsage::Structured)
+                                                  ? (writable ? rhi::BindingType::StructuredBufferUnorderedAccess : rhi::BindingType::StructuredBufferShaderResource)
+                                              : HasAny(usage, rhi::BufferUsage::Raw)
+                                                  ? (writable ? rhi::BindingType::ByteAddressBufferUnorderedAccess : rhi::BindingType::ByteAddressBufferShaderResource)
+                                                  : (writable ? rhi::BindingType::TypedBufferUnorderedAccess : rhi::BindingType::TypedBufferShaderResource);
+                return rhi::WriteDescriptor(allocator.resourceDescriptors.GetRef(), created, binding.buffer, type, {}, &rhiFailure);
+            }
+            return rhi::WriteDescriptor(allocator.resourceDescriptors.GetRef(), created, binding.texture,
+                                        writable ? rhi::BindingType::TextureUnorderedAccess : rhi::BindingType::TextureShaderResource, {}, &rhiFailure);
+        };
+
+        bool published = true;
+        if (needShaderResource && !owner->descriptors.shaderResource.IsValid())
+            published = create(false, createdShaderResource);
+        if (published && needUnorderedAccess && !owner->descriptors.unorderedAccess.IsValid())
+            published = create(true, createdUnorderedAccess);
+        if (!published)
+        {
+            if (createdShaderResource.IsValid())
+                static_cast<void>(rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), createdShaderResource, {}));
+            if (createdUnorderedAccess.IsValid())
+                static_cast<void>(rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), createdUnorderedAccess, {}));
+            if (missing != 0)
+                allocator.descriptorLedger.Release(missing);
+            if (wasReusable)
+                InsertRetainedDescriptorReusable(allocator, ownerIndex);
+            if (allocationCapacityFailure && pressure != nullptr)
+            {
+                *pressure = {CanonicalDescriptorPressureKind::SharedDomain, missing};
+                return false;
+            }
+            return Fail(failure, allocationCapacityFailure ? RenderFlowResourceFailureCode::CapacityExceeded
+                                                           : MapRhiFailure(rhiFailure, RhiFailureContext::BackendContract), allocator.state,
+                        rhiFailure.message[0] != '\0' ? rhiFailure.message : "retained import canonical descriptor publication failed");
+        }
+
+        if (createdShaderResource.IsValid())
+            owner->descriptors.shaderResource = createdShaderResource;
+        if (createdUnorderedAccess.IsValid())
+            owner->descriptors.unorderedAccess = createdUnorderedAccess;
+        owner->descriptors.lastDemandFrame = allocator.frameSerial;
+        if (!existing)
+        {
+            if (!allocator.freeRetainedImportDescriptorOwners.Empty())
+            {
+                ownerIndex = allocator.freeRetainedImportDescriptorOwners.Back();
+                allocator.freeRetainedImportDescriptorOwners.PopBack();
+                allocator.retainedImportDescriptorOwners[ownerIndex] = staged;
+            }
+            else
+            {
+                ownerIndex = allocator.retainedImportDescriptorOwners.Size();
+                allocator.retainedImportDescriptorOwners.PushBack(staged);
+            }
+            if (!allocator.retainedImportDescriptorOwnerByResource.Insert(resource.value, ownerIndex))
+            {
+                RetainedImportDescriptorOwner& rollback = allocator.retainedImportDescriptorOwners[ownerIndex];
+                for (const rhi::DescriptorHandle descriptor : {rollback.descriptors.shaderResource, rollback.descriptors.unorderedAccess})
+                    if (descriptor.IsValid())
+                        static_cast<void>(rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), descriptor, {}));
+                allocator.descriptorLedger.Release(CanonicalDescriptorReferenceCount(rollback.descriptors));
+                rollback = {};
+                allocator.freeRetainedImportDescriptorOwners.PushBack(ownerIndex);
+                return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                            "retained import descriptor owner map rejected a prevalidated resource identity");
+            }
+            owner = &allocator.retainedImportDescriptorOwners[ownerIndex];
+        }
+        ++owner->activeBorrows;
+        binding.retainedDescriptorOwner = ownerIndex;
+        binding.shaderResource = owner->descriptors.shaderResource;
+        binding.unorderedAccess = owner->descriptors.unorderedAccess;
+        return true;
+    }
+
+    RenderFlowResourceContract::~RenderFlowResourceContract()
+    {
+        Reset();
+    }
+
+    RenderFlowResourceContract::RenderFlowResourceContract(RenderFlowResourceContract&& other) noexcept
+        : m_storage(other.m_storage)
+    {
+        other.m_storage = nullptr;
+    }
+
+    RenderFlowResourceContract& RenderFlowResourceContract::operator=(RenderFlowResourceContract&& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+        Reset();
+        m_storage = other.m_storage;
+        other.m_storage = nullptr;
+        return *this;
+    }
+
+    bool RenderFlowResourceContract::IsValid() const noexcept
+    {
+        const auto* const storage = static_cast<const detail::ResourceContractStorage*>(m_storage);
+        return storage != nullptr && storage->valid && storage->plan.valid;
+    }
+
+    u64 RenderFlowResourceContract::GetPublicationSerial() const noexcept
+    {
+        const auto* const storage = static_cast<const detail::ResourceContractStorage*>(m_storage);
+        return storage != nullptr ? storage->publicationSerial : 0;
+    }
+
+    void RenderFlowResourceContract::Reset() noexcept
+    {
+        auto* const storage = static_cast<detail::ResourceContractStorage*>(m_storage);
+        if (storage == nullptr)
+            return;
+        storage->~ResourceContractStorage();
+        memory::MemoryBlock block{storage, sizeof(detail::ResourceContractStorage), memory::PoolId::Rendering};
+        memory::Free(block);
+        m_storage = nullptr;
+    }
+
+    bool detail::ReleaseRetainedImportDescriptorBorrows(RenderFlowResourceAllocator::Impl& allocator, ExecutionGenerationRef::Impl& generation,
+                                                        const rhi::ResidencyFenceSet& fences, const bool deviceLost,
+                                                        RenderFlowResourceFailure* const failure) noexcept
+    {
+        if (!generation.hasNativeResourceBindings)
+            return true;
+        for (PhysicalBindingRecord& binding : generation.physicalBindings)
+        {
+            if (binding.kind != PhysicalBindingKind::RetainedImport || binding.retainedDescriptorOwner == InvalidRenderFlowResourceIndex)
+                continue;
+            if (binding.retainedDescriptorOwner >= allocator.retainedImportDescriptorOwners.Size())
+            {
+                if (!deviceLost)
+                    return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                "retained import descriptor borrow references a stale persistent owner");
+                binding.retainedDescriptorOwner = InvalidRenderFlowResourceIndex;
+                binding.shaderResource = {};
+                binding.unorderedAccess = {};
+                continue;
+            }
+            RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[binding.retainedDescriptorOwner];
+            const rhi::ResourceRef resource = binding.texture.IsValid() ? rhi::ResourceRef(binding.texture) : rhi::ResourceRef(binding.buffer);
+            if (owner.resource != resource || owner.activeBorrows == 0 || owner.descriptors.shaderResource != binding.shaderResource ||
+                owner.descriptors.unorderedAccess != binding.unorderedAccess)
+            {
+                if (!deviceLost)
+                    return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                "retained import descriptor borrow disagrees with its persistent owner");
+                binding.retainedDescriptorOwner = InvalidRenderFlowResourceIndex;
+                binding.shaderResource = {};
+                binding.unorderedAccess = {};
+                continue;
+            }
+            if (!deviceLost)
+                IncludeRetainedSafeAfter(owner.safeAfter, fences);
+            --owner.activeBorrows;
+            if (owner.activeBorrows == 0 && !deviceLost)
+                InsertRetainedDescriptorReusable(allocator, binding.retainedDescriptorOwner);
+            binding.retainedDescriptorOwner = InvalidRenderFlowResourceIndex;
+            binding.shaderResource = {};
+            binding.unorderedAccess = {};
+        }
+        return true;
+    }
+
+    bool detail::PrepareRetainedImportDescriptorCacheShutdown(RenderFlowResourceAllocator::Impl& allocator, bool& deviceLost,
+                                                              RenderFlowResourceFailure* const failure) noexcept
+    {
+        deviceLost = false;
+        if (!allocator.resourceDescriptors.IsValid())
+            return true;
+        if (!ValidateRetainedDescriptorCacheScope(allocator) && !allocator.retainedImportDescriptorOwners.Empty())
+            return Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                        "retained import descriptor cache shutdown crossed an RHI/device or descriptor-domain incarnation");
+        for (u32 index = 0; index < allocator.retainedImportDescriptorOwners.Size(); ++index)
+        {
+            RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[index];
+            if (!owner.resource.IsValid())
+                continue;
+            if (owner.activeBorrows != 0)
+                return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                            "retained import descriptor cache is still borrowed during allocator shutdown");
+            if (CanonicalDescriptorReferenceCount(owner.descriptors) == 0)
+                continue;
+            if (!RetireRetainedDescriptorOwner(allocator, index, false, failure))
+            {
+                const rhi::DeviceState state = rhi::IsInitialized() ? rhi::TestDeviceState() : rhi::DeviceState::Unknown;
+                deviceLost = state == rhi::DeviceState::Removed || state == rhi::DeviceState::ResetRequired;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void detail::CommitRetainedImportDescriptorCacheShutdown(RenderFlowResourceAllocator::Impl& allocator) noexcept
+    {
+        allocator.retainedImportDescriptorOwnerByResource.Reset();
+        allocator.retainedImportDescriptorOwners.Clear();
+        allocator.retainedImportDescriptorReusable.Clear();
+        allocator.freeRetainedImportDescriptorOwners.Clear();
+    }
+
+    void detail::RetainedImportDescriptorCacheDeviceLost(RenderFlowResourceAllocator::Impl& allocator, const rhi::ResidencyFenceSet& submittedFences) noexcept
+    {
+        const bool canRetireThroughRhi = allocator.resourceDescriptors.IsValid() && rhi::IsInitialized() && ValidateRetainedDescriptorCacheScope(allocator);
+        for (RetainedImportDescriptorOwner& owner : allocator.retainedImportDescriptorOwners)
+        {
+            const u32 descriptorCount = CanonicalDescriptorReferenceCount(owner.descriptors);
+            if (descriptorCount == 0)
+            {
+                owner = {};
+                continue;
+            }
+            IncludeRetainedSafeAfter(owner.safeAfter, submittedFences);
+            if (canRetireThroughRhi)
+            {
+                const rhi::DescriptorRetirement retirement = RetainedDescriptorRetirement(owner.safeAfter);
+                for (const rhi::DescriptorHandle descriptor : {owner.descriptors.shaderResource, owner.descriptors.unorderedAccess})
+                    if (descriptor.IsValid())
+                    {
+                        rhi::Failure ignored;
+                        static_cast<void>(rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), descriptor, retirement, &ignored));
+                    }
+            }
+            if (owner.reusablePosition != InvalidRenderFlowResourceIndex)
+                allocator.descriptorLedger.MarkNotReusable(descriptorCount);
+            allocator.descriptorLedger.Release(descriptorCount);
+            owner = {};
+        }
+        CommitRetainedImportDescriptorCacheShutdown(allocator);
+    }
 
     namespace
     {
@@ -97,14 +572,14 @@ namespace vanguard::rendering
             batch.bufferViews.Clear();
             batch.coldPayloads.Clear();
             batch.uses.Clear();
-            batch.useEndOrder.Clear();
+            batch.semanticEvents.Clear();
             batch.operations.Clear();
             batch.resources.Shrink();
             batch.textureViews.Shrink();
             batch.bufferViews.Shrink();
             batch.coldPayloads.Shrink();
             batch.uses.Shrink();
-            batch.useEndOrder.Shrink();
+            batch.semanticEvents.Shrink();
             batch.operations.Shrink();
             batch.ReleaseNamedResourceIndex();
             batch.ReleaseNameRetentionTracking();
@@ -129,14 +604,14 @@ namespace vanguard::rendering
                 batch.bufferViews.Shrink();
             if (batch.uses.Capacity() > viewFloor && batch.uses.Capacity() > (batch.uses.Size() > viewFloor ? batch.uses.Size() : viewFloor) * 4u)
                 batch.uses.Shrink();
-            if (batch.useEndOrder.Capacity() > viewFloor && batch.useEndOrder.Capacity() > (batch.useEndOrder.Size() > viewFloor ? batch.useEndOrder.Size() : viewFloor) * 4u)
-                batch.useEndOrder.Shrink();
+            if (batch.semanticEvents.Capacity() > viewFloor && batch.semanticEvents.Capacity() > (batch.semanticEvents.Size() > viewFloor ? batch.semanticEvents.Size() : viewFloor) * 4u)
+                batch.semanticEvents.Shrink();
             batch.TrimAuxiliaryRetentionBacking();
         }
 
         void ResetWriterReservation(detail::WriterReservation& reservation, const bool retainBoundedRecording = true) noexcept
         {
-            // RED's fixed per-group request array keeps its bounded backing and
+            // Fixed per-group request storage keeps its bounded backing and
             // clears only logical size. Do the same for active Vanguard groups;
             // the explicit per-writer cap prevents historical unbounded growth.
             // Rejected/canceled planning never reached the aggregate admission
@@ -250,9 +725,13 @@ namespace vanguard::rendering
             if (batch.semanticSequenceCount >= writerOperationLimit)
                 return FailWriter(&writer, failure, RenderFlowResourceFailureCode::CapacityExceeded, "planning writer operation capacity is exhausted");
             PrepareBoundedPlanningAppend(batch.operations, writerOperationLimit);
+            PrepareBoundedPlanningAppend(batch.semanticEvents, writerOperationLimit);
             const detail::CandidateOperationKind kind = operation.kind;
-            operation.sequence = batch.semanticSequenceCount++;
+            const u32 sequence = batch.semanticSequenceCount++;
+            operation.sequence = sequence;
+            const u32 operationIndex = batch.operations.Size();
             batch.operations.PushBack(std::move(operation));
+            batch.semanticEvents.PushBack(detail::CandidateSemanticEvent::Operation(operationIndex));
             switch (kind)
             {
             case detail::CandidateOperationKind::DeclareTexture:
@@ -463,6 +942,7 @@ namespace vanguard::rendering
                 batch.uses.PopBack();
                 return false;
             }
+            ++batch.openUseCount;
             use = result;
             return true;
         }
@@ -488,6 +968,7 @@ namespace vanguard::rendering
                 batch.uses.PopBack();
                 return false;
             }
+            ++batch.openUseCount;
             use = result;
             return true;
         }
@@ -610,6 +1091,8 @@ namespace vanguard::rendering
             resource = {};
             return false;
         }
+        batch.resources[resource.index].MarkFastPathExceptional();
+        batch.resources[source.index].MarkFastPathExceptional();
         return true;
     }
 
@@ -642,6 +1125,8 @@ namespace vanguard::rendering
             resource = {};
             return false;
         }
+        batch.resources[resource.index].MarkFastPathExceptional();
+        batch.resources[source.index].MarkFastPathExceptional();
         return true;
     }
 
@@ -744,12 +1229,16 @@ namespace vanguard::rendering
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "resource use was already ended", use);
         if (m_impl->failed)
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::IncompletePlanning, "planning writer is poisoned by an earlier rejected operation", use);
+        if (batch.openUseCount == 0)
+            return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                              "planning writer open-use summary is internally inconsistent", use);
         const u32 writerOperationLimit = m_impl->owner->config.maximumOperationsPerPlanningWriter;
         if (batch.semanticSequenceCount >= writerOperationLimit)
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::CapacityExceeded, "planning writer operation capacity is exhausted", use);
-        PrepareBoundedPlanningAppend(batch.useEndOrder, writerOperationLimit);
+        PrepareBoundedPlanningAppend(batch.semanticEvents, writerOperationLimit);
         candidate.endSequence = batch.semanticSequenceCount++;
-        batch.useEndOrder.PushBack(use.ordinal);
+        batch.semanticEvents.PushBack(detail::CandidateSemanticEvent::UseEnd(use.ordinal));
+        --batch.openUseCount;
         ++batch.stepCount;
         return true;
     }
@@ -760,7 +1249,10 @@ namespace vanguard::rendering
         if (m_impl == nullptr || !ValidResource(*m_impl, resource) || !scope.IsValid())
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "resource scope begin is invalid");
         detail::CandidateOperation operation = detail::CandidateOperation::OpenScope(resource.index, scope);
-        return PushOperation(*m_impl, std::move(operation), failure);
+        if (!PushOperation(*m_impl, std::move(operation), failure))
+            return false;
+        WriterBatch(*m_impl).resources[resource.index].MarkFastPathExceptional();
+        return true;
     }
 
     bool ResourcePlanningWriter::OpenResourceScope(const LogicalResourceId resource, RenderFlowResourceFailure* const failure) noexcept
@@ -768,8 +1260,16 @@ namespace vanguard::rendering
         detail::ClearFailure(failure);
         if (m_impl == nullptr || !ValidResource(*m_impl, resource))
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "named resource scope begin is invalid");
+        detail::CandidateWriterBatch& batch = WriterBatch(*m_impl);
         detail::CandidateOperation operation = detail::CandidateOperation::NamedScope(detail::CandidateOperationKind::NamedScopeOpen, resource.index);
-        return PushOperation(*m_impl, std::move(operation), failure);
+        if (!PushOperation(*m_impl, std::move(operation), failure))
+            return false;
+        detail::CandidateResource& candidate = batch.resources[resource.index];
+        if (candidate.namedScopeDepth != 0 || candidate.namedScopeDepth == 0xffu)
+            candidate.MarkFastPathExceptional();
+        if (candidate.namedScopeDepth != 0xffu)
+            ++candidate.namedScopeDepth;
+        return true;
     }
 
     bool ResourcePlanningWriter::CloseResourceScope(const ResourceScopeId scope, RenderFlowResourceFailure* const failure) noexcept
@@ -786,8 +1286,16 @@ namespace vanguard::rendering
         detail::ClearFailure(failure);
         if (m_impl == nullptr || !ValidResource(*m_impl, resource))
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "named resource scope end is invalid");
+        detail::CandidateWriterBatch& batch = WriterBatch(*m_impl);
         detail::CandidateOperation operation = detail::CandidateOperation::NamedScope(detail::CandidateOperationKind::NamedScopeClose, resource.index);
-        return PushOperation(*m_impl, std::move(operation), failure);
+        if (!PushOperation(*m_impl, std::move(operation), failure))
+            return false;
+        detail::CandidateResource& candidate = batch.resources[resource.index];
+        if (candidate.namedScopeDepth != 1u)
+            candidate.MarkFastPathExceptional();
+        if (candidate.namedScopeDepth != 0)
+            --candidate.namedScopeDepth;
+        return true;
     }
 
     bool ResourcePlanningWriter::SwapLogicalMappings(const LogicalResourceId left, const LogicalResourceId right, RenderFlowResourceFailure* const failure) noexcept
@@ -795,8 +1303,13 @@ namespace vanguard::rendering
         detail::ClearFailure(failure);
         if (m_impl == nullptr || !ValidResource(*m_impl, left) || !ValidResource(*m_impl, right) || left == right)
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "logical swap identities are invalid");
+        detail::CandidateWriterBatch& batch = WriterBatch(*m_impl);
         detail::CandidateOperation operation = detail::CandidateOperation::SwapMappings(left.index, right.index);
-        return PushOperation(*m_impl, std::move(operation), failure);
+        if (!PushOperation(*m_impl, std::move(operation), failure))
+            return false;
+        batch.resources[left.index].MarkFastPathExceptional();
+        batch.resources[right.index].MarkFastPathExceptional();
+        return true;
     }
 
     bool ResourcePlanningWriter::CaptureDecision(const bool value, DecisionId& decision, RenderFlowResourceFailure* const failure) noexcept
@@ -827,7 +1340,10 @@ namespace vanguard::rendering
         if (!detail::ValidQueue(desc.terminalQueue))
             return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "export terminal queue is invalid");
         detail::CandidateOperation operation = detail::CandidateOperation::Export(resource.index, slot.index, desc);
-        return PushOperation(*m_impl, std::move(operation), failure);
+        if (!PushOperation(*m_impl, std::move(operation), failure))
+            return false;
+        WriterBatch(*m_impl).resources[resource.index].MarkFastPathExceptional();
+        return true;
     }
 
     bool ResourcePlanningWriter::Close(RenderFlowResourceFailure* const failure) noexcept
@@ -842,7 +1358,6 @@ namespace vanguard::rendering
             detail::WriterReservation* const reservation = m_impl->reservation;
             if (reservation == nullptr || !reservation->open || reservation->node != m_impl->node || reservation->flowGroup != m_impl->flowGroup)
                 return FailWriter(m_impl, failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "planning writer reservation is not open");
-
             if (m_impl->rejectedOperations != 0)
                 static_cast<void>(owner.pendingRejectedOperations.ExchangeAdd(m_impl->rejectedOperations));
             if (m_impl->failed)
@@ -891,6 +1406,14 @@ namespace vanguard::rendering
     bool RenderFlowResourceAllocator::RegisterPresentationImport(const rhi::AcquiredBackBuffer& acquisition, ImportedResourceId& imported,
                                                                  RenderFlowResourceFailure* const failure) noexcept
     {
+        const ResourceContractPatchId defaultPatch =
+            SessionScopedContractPatch(m_impl != nullptr ? m_impl->sessionGeneration : 0u, rhi::ResourceRef(acquisition.texture).value);
+        return RegisterPresentationImport(acquisition, defaultPatch, imported, failure);
+    }
+
+    bool RenderFlowResourceAllocator::RegisterPresentationImport(const rhi::AcquiredBackBuffer& acquisition, const ResourceContractPatchId contractPatch,
+                                                                 ImportedResourceId& imported, RenderFlowResourceFailure* const failure) noexcept
+    {
         detail::ClearFailure(failure);
         imported = {};
         Impl* const owner = m_impl;
@@ -901,7 +1424,7 @@ namespace vanguard::rendering
         concurrency::ScopedLock<concurrency::SpinLock> guard(owner->writerLock);
         if (owner->preparedPlanningGroupCount != 0)
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state, "presentation import must be registered before creating planning writers");
-        if (owner->config.allowLogicalOnlyValidation || !acquisition.IsValid())
+        if (owner->config.allowLogicalOnlyValidation || !acquisition.IsValid() || !contractPatch.IsValid())
             return detail::Fail(failure, RenderFlowResourceFailureCode::UnsupportedCapability, owner->state, "presentation import requires a real acquired swap-chain back buffer");
 
         rhi::TextureDesc actual;
@@ -921,6 +1444,9 @@ namespace vanguard::rendering
         {
             if (existingIndex >= owner->retainedImports.Size())
                 return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "presentation import index is stale");
+            if (owner->retainedImports[existingIndex].contractPatch != contractPatch)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                    "repeated presentation acquisition disagrees with its resource-contract patch identity");
             imported = {existingIndex, owner->sessionGeneration};
             return true;
         }
@@ -929,15 +1455,20 @@ namespace vanguard::rendering
                                 "one acquired back buffer cannot be registered as multiple retained imports");
         if (owner->retainedImports.Size() >= owner->config.maximumRetainedImports)
             return detail::Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, owner->state, "retained import capacity is exhausted");
+        if (registrationScratch.retainedImportContractPatches.Find(contractPatch.value, existingIndex))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "resource-contract import patch identity is already bound to another retained import");
 
         registrationScratch.presentationImports.Reserve(owner->retainedImports.Size() + 1u);
         registrationScratch.retainedImportResources.Reserve(owner->retainedImports.Size() + 1u);
+        registrationScratch.retainedImportContractPatches.Reserve(owner->retainedImports.Size() + 1u);
         FrameTextureDesc frameDesc;
         frameDesc.active = actual;
         frameDesc.maximumExtent = actual.extent;
         frameDesc.maximumMipCount = actual.mipCount;
         frameDesc.initialization = FrameResourceInitialization::ImportedContents;
         detail::RetainedImportRecord& record = owner->retainedImports.EmplaceBack();
+        record.contractPatch = contractPatch;
         record.desc = FrameResourceDesc::Texture(frameDesc);
         record.texture = rhi::Texture(acquisition.texture);
         record.initialState = rhi::ResourceState::Present;
@@ -957,6 +1488,14 @@ namespace vanguard::rendering
             static_cast<void>(owner->retainedImports.PopBack());
             return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "presentation resource index rejected a prevalidated identity");
         }
+        if (!registrationScratch.retainedImportContractPatches.Insert(contractPatch.value, importIndex))
+        {
+            static_cast<void>(registrationScratch.retainedImportResources.Erase(resourceKey));
+            static_cast<void>(registrationScratch.presentationImports.Erase(presentationKey));
+            static_cast<void>(owner->retainedImports.PopBack());
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                "presentation contract-patch index rejected a prevalidated identity");
+        }
         imported = {importIndex, owner->sessionGeneration};
         return true;
     }
@@ -975,6 +1514,9 @@ namespace vanguard::rendering
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state, "retained imports must be registered before creating planning writers");
         if (!desc.token.IsValid() || !desc.texture.IsValid())
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, owner->state, "retained texture import identity is invalid");
+        const ResourceContractPatchId contractPatch = desc.contractPatch.IsValid()
+                                                          ? desc.contractPatch
+                                                          : SessionScopedContractPatch(owner->sessionGeneration, desc.token.value);
         const bool readinessValid = ValidImportReadiness(desc.readiness, desc.incomingWait, desc.initialQueue);
         if (!readinessValid)
             return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "import readiness requires either same-queue continuation or a fence from its initial queue");
@@ -1010,7 +1552,7 @@ namespace vanguard::rendering
             const detail::RetainedImportRecord& existing = owner->retainedImports[existingIndex];
             if (existing.texture.GetRef() != desc.texture || !detail::ResourceDescEqual(existing.desc, resourceDesc) || existing.initialState != desc.initialState ||
                 existing.terminalState != desc.terminalState || existing.initialQueue != desc.initialQueue || existing.terminalQueue != desc.terminalQueue ||
-                existing.readiness != desc.readiness || existing.incomingWait != desc.incomingWait)
+                existing.readiness != desc.readiness || existing.incomingWait != desc.incomingWait || existing.contractPatch != contractPatch)
                 return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state, "repeated external texture token disagrees with its registered contract");
             imported = {existingIndex, owner->sessionGeneration};
             return true;
@@ -1018,12 +1560,17 @@ namespace vanguard::rendering
         const u64 resourceKey = rhi::ResourceRef(desc.texture).value;
         if (registrationScratch.retainedImportResources.Find(resourceKey, existingIndex))
             return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state, "one external texture cannot be registered under multiple tokens");
+        if (registrationScratch.retainedImportContractPatches.Find(contractPatch.value, existingIndex))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "resource-contract import patch identity is already bound to another retained import");
         if (owner->retainedImports.Size() >= owner->config.maximumRetainedImports)
             return detail::Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, owner->state, "retained import capacity is exhausted");
         registrationScratch.retainedImportTokens.Reserve(owner->retainedImports.Size() + 1u);
         registrationScratch.retainedImportResources.Reserve(owner->retainedImports.Size() + 1u);
+        registrationScratch.retainedImportContractPatches.Reserve(owner->retainedImports.Size() + 1u);
         detail::RetainedImportRecord& record = owner->retainedImports.EmplaceBack();
         record.token = desc.token;
+        record.contractPatch = contractPatch;
         record.desc = resourceDesc;
         record.texture = rhi::Texture(desc.texture);
         record.readiness = desc.readiness;
@@ -1044,6 +1591,14 @@ namespace vanguard::rendering
             static_cast<void>(owner->retainedImports.PopBack());
             return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "retained texture resource index rejected a prevalidated identity");
         }
+        if (!registrationScratch.retainedImportContractPatches.Insert(contractPatch.value, importIndex))
+        {
+            static_cast<void>(registrationScratch.retainedImportResources.Erase(resourceKey));
+            static_cast<void>(registrationScratch.retainedImportTokens.Erase(desc.token.value));
+            static_cast<void>(owner->retainedImports.PopBack());
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                "retained texture contract-patch index rejected a prevalidated identity");
+        }
         imported = {importIndex, owner->sessionGeneration};
         return true;
     }
@@ -1062,6 +1617,9 @@ namespace vanguard::rendering
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state, "retained imports must be registered before creating planning writers");
         if (!desc.token.IsValid() || !desc.buffer.IsValid())
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, owner->state, "retained buffer import identity is invalid");
+        const ResourceContractPatchId contractPatch = desc.contractPatch.IsValid()
+                                                          ? desc.contractPatch
+                                                          : SessionScopedContractPatch(owner->sessionGeneration, desc.token.value);
         const bool readinessValid = ValidImportReadiness(desc.readiness, desc.incomingWait, desc.initialQueue);
         if (!readinessValid)
             return detail::Fail(failure, RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, owner->state, "import readiness requires either same-queue continuation or a fence from its initial queue");
@@ -1093,7 +1651,7 @@ namespace vanguard::rendering
             const detail::RetainedImportRecord& existing = owner->retainedImports[existingIndex];
             if (existing.buffer.GetRef() != desc.buffer || !detail::ResourceDescEqual(existing.desc, resourceDesc) || existing.initialState != desc.initialState ||
                 existing.terminalState != desc.terminalState || existing.initialQueue != desc.initialQueue || existing.terminalQueue != desc.terminalQueue ||
-                existing.readiness != desc.readiness || existing.incomingWait != desc.incomingWait)
+                existing.readiness != desc.readiness || existing.incomingWait != desc.incomingWait || existing.contractPatch != contractPatch)
                 return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state, "repeated external buffer token disagrees with its registered contract");
             imported = {existingIndex, owner->sessionGeneration};
             return true;
@@ -1101,12 +1659,17 @@ namespace vanguard::rendering
         const u64 resourceKey = rhi::ResourceRef(desc.buffer).value;
         if (registrationScratch.retainedImportResources.Find(resourceKey, existingIndex))
             return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state, "one external buffer cannot be registered under multiple tokens");
+        if (registrationScratch.retainedImportContractPatches.Find(contractPatch.value, existingIndex))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "resource-contract import patch identity is already bound to another retained import");
         if (owner->retainedImports.Size() >= owner->config.maximumRetainedImports)
             return detail::Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, owner->state, "retained import capacity is exhausted");
         registrationScratch.retainedImportTokens.Reserve(owner->retainedImports.Size() + 1u);
         registrationScratch.retainedImportResources.Reserve(owner->retainedImports.Size() + 1u);
+        registrationScratch.retainedImportContractPatches.Reserve(owner->retainedImports.Size() + 1u);
         detail::RetainedImportRecord& record = owner->retainedImports.EmplaceBack();
         record.token = desc.token;
+        record.contractPatch = contractPatch;
         record.desc = resourceDesc;
         record.buffer = rhi::Buffer(desc.buffer);
         record.readiness = desc.readiness;
@@ -1127,11 +1690,34 @@ namespace vanguard::rendering
             static_cast<void>(owner->retainedImports.PopBack());
             return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state, "retained buffer resource index rejected a prevalidated identity");
         }
+        if (!registrationScratch.retainedImportContractPatches.Insert(contractPatch.value, importIndex))
+        {
+            static_cast<void>(registrationScratch.retainedImportResources.Erase(resourceKey));
+            static_cast<void>(registrationScratch.retainedImportTokens.Erase(desc.token.value));
+            static_cast<void>(owner->retainedImports.PopBack());
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                "retained buffer contract-patch index rejected a prevalidated identity");
+        }
         imported = {importIndex, owner->sessionGeneration};
         return true;
     }
 
     bool RenderFlowResourceAllocator::ReserveExportSlot(ExportSlotId& slot, RenderFlowResourceFailure* const failure) noexcept
+    {
+        Impl* const owner = m_impl;
+        // Legacy callers have no semantic patch identity.  Make their fallback
+        // session-scoped so a cache-owned RF12 contract can never mistake
+        // positional reservation order for stable export semantics on a later
+        // frame.  Explicit-patch callers retain the zero-replay warm path.
+        const ResourceContractPatchId defaultPatch{
+            owner != nullptr && owner->sessionGeneration != 0
+                ? (static_cast<u64>(owner->sessionGeneration) << 32u) | (static_cast<u64>(owner->reservedExportSlots) + 1u)
+                : 0u};
+        return ReserveExportSlot(defaultPatch, slot, failure);
+    }
+
+    bool RenderFlowResourceAllocator::ReserveExportSlot(const ResourceContractPatchId contractPatch, ExportSlotId& slot,
+                                                        RenderFlowResourceFailure* const failure) noexcept
     {
         detail::ClearFailure(failure);
         slot = {};
@@ -1143,9 +1729,169 @@ namespace vanguard::rendering
         concurrency::ScopedLock<concurrency::SpinLock> guard(owner->writerLock);
         if (owner->preparedPlanningGroupCount != 0)
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state, "terminal export slots must be reserved before creating planning writers");
+        if (!contractPatch.IsValid())
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, owner->state,
+                                "terminal export slot requires a valid resource-contract patch identity");
         if (owner->reservedExportSlots >= owner->config.maximumTerminalExports)
             return detail::Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, owner->state, "terminal export slot capacity is exhausted");
-        slot = {owner->reservedExportSlots++, owner->sessionGeneration};
+        u32 existingPatch = InvalidRenderFlowResourceIndex;
+        if (owner->reservedExportContractPatchIndices.Find(contractPatch.value, existingPatch))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "resource-contract export patch identity is already reserved in this frame");
+        const u32 slotIndex = owner->reservedExportSlots++;
+        owner->reservedExportContractPatchIndices.Reserve(owner->reservedExportSlots);
+        if (!owner->reservedExportContractPatchIndices.Insert(contractPatch.value, slotIndex))
+        {
+            --owner->reservedExportSlots;
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                "resource-contract export patch index rejected a prevalidated identity");
+        }
+        owner->reservedExportContractPatches.PushBack(contractPatch);
+        slot = {slotIndex, owner->sessionGeneration};
+        return true;
+    }
+
+    bool RenderFlowResourceAllocator::BeginResourceContractCompilation(RenderFlowResourceContract& contract,
+                                                                       RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        Impl* const owner = m_impl;
+        if (owner == nullptr)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::NotInitialized, RenderFlowResourceSessionState::Idle,
+                                "render flow resource allocator is not initialized");
+        if (owner->state != RenderFlowResourceSessionState::Planning || owner->preparedPlanningGroupCount != 0 || owner->boundContract != nullptr)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state,
+                                "resource-contract compilation must begin before planning writers are created");
+
+        auto* storage = static_cast<detail::ResourceContractStorage*>(contract.m_storage);
+        if (storage == nullptr)
+        {
+            memory::MemoryBlock block = memory::Allocate(memory::PoolId::Rendering, sizeof(detail::ResourceContractStorage), alignof(detail::ResourceContractStorage));
+            if (!block)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, owner->state,
+                                    "resource-contract metadata allocation failed");
+            storage = new (block.address) detail::ResourceContractStorage();
+            storage->contractIdentity = detail::NextRenderFlowResourceContractIdentity();
+            contract.m_storage = storage;
+        }
+        storage->candidateNodes.Clear();
+        storage->candidateNodesReady = false;
+        owner->contractDecisionPatches.Reset();
+        owner->contractCompileTarget = storage;
+        ++owner->stats.structuralPlanMisses;
+        return true;
+    }
+
+    bool RenderFlowResourceAllocator::BindResourceContract(const RenderFlowResourceContract& contract,
+                                                           RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        Impl* const owner = m_impl;
+        if (owner == nullptr)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::NotInitialized, RenderFlowResourceSessionState::Idle,
+                                "render flow resource allocator is not initialized");
+        if (owner->state != RenderFlowResourceSessionState::Planning || owner->preparedPlanningGroupCount != 0 || owner->contractCompileTarget != nullptr)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state,
+                                "resource-contract warm binding must replace declaration planning before writers are created");
+        const auto* const storage = static_cast<const detail::ResourceContractStorage*>(contract.m_storage);
+        if (storage == nullptr || !storage->valid || !storage->plan.valid)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, owner->state,
+                                "resource-contract warm binding requires a published compiled contract");
+        const u64 currentDevice = rhi::IsInitialized() ? rhi::GetDeviceIncarnation() : 0;
+        const u64 currentDomain = owner->resourceDescriptors.IsValid() ? rhi::ResourceRef(owner->resourceDescriptors.GetRef()).value : 0;
+        if (storage->rhiDeviceIncarnation != currentDevice || storage->descriptorDomainIdentity != currentDomain)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, owner->state,
+                                "resource contract crossed an allocator RHI/device or descriptor-domain incarnation");
+
+        // Validate only current dynamic bindings. A mismatch leaves Planning
+        // untouched so FrameRenderer can take the cold compile path without
+        // destroying the previously published immutable contract.
+        const detail::PersistentStructuralPlan& plan = storage->plan;
+        // A warm contract must witness the complete registration/reservation
+        // topology, not merely prove that every old patch still exists.  A
+        // superset can be structural (geometry external buffers are the
+        // canonical example): accepting it would silently ignore a newly
+        // registered import/export site while skipping declaration replay.
+        // Patch identity still makes ordering irrelevant.
+        if (plan.importContracts.Size() != owner->retainedImports.Size())
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "current retained-import patch set cardinality differs from the cached resource contract");
+        for (const detail::StructuralImportContract& expected : plan.importContracts)
+        {
+            u32 importIndex = InvalidRenderFlowResourceIndex;
+            if (!expected.contractPatch.IsValid() ||
+                !owner->resolveScratch.retainedImportContractPatches.Find(expected.contractPatch.value, importIndex) ||
+                importIndex >= owner->retainedImports.Size())
+                return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                    "current retained imports do not satisfy the cached resource-contract patch set");
+            const detail::RetainedImportRecord& current = owner->retainedImports[importIndex];
+            const bool presentation = current.presentationAcquisition.IsValid();
+            if (current.contractPatch != expected.contractPatch || !detail::ResourceDescEqual(current.desc, expected.desc) ||
+                current.initialState != expected.initialState || current.terminalState != expected.terminalState ||
+                current.initialQueue != expected.initialQueue || current.terminalQueue != expected.terminalQueue ||
+                current.readiness != expected.readiness || presentation != expected.presentation ||
+                (current.readiness == ImportReadinessKind::ExplicitFenceWait && current.incomingWait.queue != expected.incomingWaitQueue))
+                return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                    "current retained import contract differs from the cached semantic resource contract");
+        }
+        if (plan.exportPatches.Size() != plan.pendingExports.Size())
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                "cached resource contract has malformed export patch metadata");
+        if (plan.exportPatches.Size() != owner->reservedExportSlots)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "current export-reservation patch set cardinality differs from the cached resource contract");
+        for (const ResourceContractPatchId patch : plan.exportPatches)
+        {
+            u32 slot = InvalidRenderFlowResourceIndex;
+            if (!patch.IsValid() || !owner->reservedExportContractPatchIndices.Find(patch.value, slot) || slot >= owner->reservedExportSlots)
+                return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                    "current export reservations do not satisfy the cached resource-contract patch set");
+        }
+        u32 expectedDecisionCount = 0;
+        for (const detail::StructuralPacketTemplate& packet : plan.packets)
+            expectedDecisionCount += packet.decisionCount;
+        if (owner->contractDecisionPatches.Size() != expectedDecisionCount)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                "current dynamic decisions do not satisfy the cached resource contract");
+        for (const detail::StructuralPacketTemplate& packet : plan.packets)
+            for (u32 ordinal = 0; ordinal < packet.decisionCount; ++ordinal)
+            {
+                const u64 key = (static_cast<u64>(packet.flowGroup.value) << 32u) | ordinal;
+                u32 value = 0;
+                if (!owner->contractDecisionPatches.Find(key, value) || value > 1u)
+                    return detail::Fail(failure, RenderFlowResourceFailureCode::DescriptorConflict, owner->state,
+                                        "current dynamic decision patch set is incomplete for the cached resource contract");
+            }
+        owner->boundContract = storage;
+        owner->state = RenderFlowResourceSessionState::CandidatesSealed;
+        owner->stats.state = owner->state;
+        ++owner->stats.structuralPlanHits;
+        return true;
+    }
+
+    bool RenderFlowResourceAllocator::PatchResourceContractDecision(const DecisionId decision, const bool value,
+                                                                    RenderFlowResourceFailure* const failure) noexcept
+    {
+        detail::ClearFailure(failure);
+        Impl* const owner = m_impl;
+        if (owner == nullptr)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::NotInitialized, RenderFlowResourceSessionState::Idle,
+                                "render flow resource allocator is not initialized");
+        if (owner->state != RenderFlowResourceSessionState::Planning || owner->contractCompileTarget != nullptr || owner->boundContract != nullptr)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, owner->state,
+                                "resource-contract decisions must be patched before warm contract binding");
+        if (!decision.IsValid() || decision.generation != owner->sessionGeneration)
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, owner->state,
+                                "resource-contract decision patch references a stale planning generation");
+        const u64 key = (static_cast<u64>(decision.flowGroup.value) << 32u) | decision.ordinal;
+        u32 existing = 0;
+        if (owner->contractDecisionPatches.Find(key, existing))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidUseOrScope, owner->state,
+                                "resource-contract decision was patched more than once in one frame");
+        owner->contractDecisionPatches.Reserve(owner->contractDecisionPatches.Size() + 1u);
+        if (!owner->contractDecisionPatches.Insert(key, value ? 1u : 0u))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, owner->state,
+                                "resource-contract decision patch index rejected a prevalidated identity");
         return true;
     }
 
@@ -1321,7 +2067,7 @@ namespace vanguard::rendering
         if (!join.IsReady())
             return detail::Fail(failure, RenderFlowResourceFailureCode::IncompletePlanning, owner->state, "every planning job and writer must complete successfully before sealing");
 
-        // RED records useful request cardinality and ordering metadata while the
+        // Record useful request cardinality and ordering metadata while the
         // per-group tapes are still the authoritative source. Seal in one
         // ascending group walk as well: validate writer identity, gather every
         // aggregate count, and preserve the dense writer/group stream that
@@ -1350,12 +2096,14 @@ namespace vanguard::rendering
         u64 textureViewCount = 0;
         u64 bufferViewCount = 0;
         u64 useBeginCount = 0;
+        u64 unterminatedUseCount = 0;
         u64 explicitScopeOpenCount = 0;
         u64 exportCount = 0;
         u64 resourceSlotOffset = 0;
         u64 textureViewOffset = 0;
         u64 bufferViewOffset = 0;
         u64 useRecordOffset = 0;
+        u64 semanticEventOffset = 0;
         for (u32 groupIndex = 0; groupIndex < owner->preparedPlanningGroupCount; ++groupIndex)
         {
             const detail::QueueRequestGroup& queueGroup = owner->queueRequestGroups[groupIndex];
@@ -1385,11 +2133,15 @@ namespace vanguard::rendering
             record.textureViewOffset = textureViewOffset <= 0xffffffffull ? static_cast<u32>(textureViewOffset) : InvalidRenderFlowResourceIndex;
             record.bufferViewOffset = bufferViewOffset <= 0xffffffffull ? static_cast<u32>(bufferViewOffset) : InvalidRenderFlowResourceIndex;
             record.useRecordOffset = useRecordOffset <= 0xffffffffull ? static_cast<u32>(useRecordOffset) : InvalidRenderFlowResourceIndex;
+            record.semanticEventOffset = semanticEventOffset <= 0xffffffffull ? static_cast<u32>(semanticEventOffset) : InvalidRenderFlowResourceIndex;
             owner->sealedWriters.PushBack(record);
             if (owner->sealedWriters.Size() != sealedIndex + 1u)
                 return failSeal(RenderFlowResourceFailureCode::CapacityExceeded, "sealed planning writer stream allocation failed", reservation.node);
 
             const detail::CandidateWriterBatch& batch = reservation.batch;
+            if (batch.semanticEvents.Size() != batch.semanticSequenceCount)
+                return failSeal(RenderFlowResourceFailureCode::BackendContractViolation,
+                                "planning writer semantic-event stream disagrees with its recorded sequence count", reservation.node);
             aggregateOperationCount += batch.semanticSequenceCount;
             logicalResourceCount += batch.resourceCount;
             viewCount += static_cast<u64>(batch.textureViews.Size()) + batch.bufferViews.Size();
@@ -1397,12 +2149,14 @@ namespace vanguard::rendering
             textureViewCount += batch.textureViews.Size();
             bufferViewCount += batch.bufferViews.Size();
             useBeginCount += batch.uses.Size();
+            unterminatedUseCount += batch.openUseCount;
             explicitScopeOpenCount += batch.explicitScopeOpenCount;
             exportCount += batch.exportCount;
             resourceSlotOffset += batch.resourceCount;
             textureViewOffset += batch.textureViews.Size();
             bufferViewOffset += batch.bufferViews.Size();
             useRecordOffset += batch.uses.Size();
+            semanticEventOffset += batch.semanticEvents.Size();
         }
         if (aggregateOperationCount > owner->config.maximumOperations || logicalResourceCount > owner->config.maximumLogicalResources || viewCount > owner->config.maximumViews)
             return failSeal(RenderFlowResourceFailureCode::CapacityExceeded, "sealed frame planning metadata exceeds an aggregate allocator capacity");
@@ -1413,8 +2167,10 @@ namespace vanguard::rendering
         sealed.textureViewCount = static_cast<u32>(textureViewCount);
         sealed.bufferViewCount = static_cast<u32>(bufferViewCount);
         sealed.useBeginCount = static_cast<u32>(useBeginCount);
+        sealed.unterminatedUseCount = static_cast<u32>(unterminatedUseCount);
         sealed.explicitScopeOpenCount = static_cast<u32>(explicitScopeOpenCount);
         sealed.exportCount = static_cast<u32>(exportCount);
+        sealed.semanticEventCount = static_cast<u32>(semanticEventOffset);
         owner->state = RenderFlowResourceSessionState::CandidatesSealed;
         owner->stats.state = owner->state;
         return true;
@@ -1476,6 +2232,7 @@ namespace vanguard::rendering
         if (m_impl != nullptr)
             return detail::Fail(failure, RenderFlowResourceFailureCode::AlreadyInitialized, m_impl->state, "render flow resource allocator is already initialized");
         if (config.maximumPlanningWriters == 0 || config.maximumOperationsPerPlanningWriter == 0 || config.maximumOperationsPerPlanningWriter > config.maximumOperations || config.maximumOperations == 0 ||
+            config.maximumOperations > detail::CandidateSemanticEvent::IndexMask ||
             config.maximumLogicalResources == 0 || config.maximumViews == 0 || config.maximumTrackedTextureSubresources == 0 ||
             config.maximumExecutionPackets == 0 || config.maximumCompiledResourceActions == 0 || config.maximumCommandScopeEntryStates == 0 || config.maximumRetainedImports == 0 || config.maximumTerminalExports == 0 ||
             config.maximumOutstandingPublishedExports == 0 || config.hardNativeByteLimit == 0 || config.descriptorCacheTarget > config.descriptorCacheMaximum)
@@ -1494,6 +2251,8 @@ namespace vanguard::rendering
         if (!block)
             return detail::Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, RenderFlowResourceSessionState::Idle, "render flow resource allocator metadata allocation failed");
         m_impl = new (block.address) Impl(config);
+        m_impl->rhiDeviceIncarnation = rhi::IsInitialized() ? rhi::GetDeviceIncarnation() : 0;
+        m_impl->descriptorDomainIdentity = m_impl->resourceDescriptors.IsValid() ? rhi::ResourceRef(m_impl->resourceDescriptors.GetRef()).value : 0;
         return true;
     }
 
@@ -1505,6 +2264,9 @@ namespace vanguard::rendering
         if ((m_impl->state != RenderFlowResourceSessionState::Idle && m_impl->state != RenderFlowResourceSessionState::DeviceUnavailable) || m_impl->publishedGeneration != nullptr)
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, m_impl->state, "render flow resource allocator still owns an active frame session");
         Impl* const impl = m_impl;
+        if (rhi::IsInitialized() && impl->resourceDescriptors.IsValid() && !ValidateRetainedDescriptorCacheScope(*impl))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, impl->state,
+                                "render flow resource allocator crossed an RHI/device or descriptor-domain incarnation before shutdown");
         if (!rhi::IsInitialized())
         {
             const detail::AllocatorNativeByteLedgerStats native = impl->nativeByteLedger.GetStats();
@@ -1528,8 +2290,8 @@ namespace vanguard::rendering
         {
             impl->publishedExports.Clear();
             impl->publishedExportIndices.Reset();
-            impl->structuralPlan.Clear();
             detail::ReleasePersistentDedicatedPlan(*impl, false);
+            detail::RetainedImportDescriptorCacheDeviceLost(*impl);
             impl->dedicatedPool.DeviceLost();
             impl->placedPool.DeviceLost();
             impl->state = RenderFlowResourceSessionState::DeviceUnavailable;
@@ -1552,6 +2314,13 @@ namespace vanguard::rendering
         if (!impl->placedPool.PrepareHealthyShutdown(placedDescriptorDeviceLost, failure))
         {
             if (placedDescriptorDeviceLost || ActualDeviceLoss())
+                return commitDeviceLoss();
+            return false;
+        }
+        bool retainedDescriptorDeviceLost = false;
+        if (!detail::PrepareRetainedImportDescriptorCacheShutdown(*impl, retainedDescriptorDeviceLost, failure))
+        {
+            if (retainedDescriptorDeviceLost || ActualDeviceLoss())
                 return commitDeviceLoss();
             return false;
         }
@@ -1585,6 +2354,7 @@ namespace vanguard::rendering
         }
         impl->dedicatedPool.CommitHealthyShutdown();
         impl->placedPool.CommitHealthyShutdown();
+        detail::CommitRetainedImportDescriptorCacheShutdown(*impl);
         impl->publishedExports.Clear();
         impl->publishedExportIndices.Reset();
         impl->state = RenderFlowResourceSessionState::DeviceUnavailable;
@@ -1616,9 +2386,23 @@ namespace vanguard::rendering
             return detail::Fail(failure, RenderFlowResourceFailureCode::NotInitialized, RenderFlowResourceSessionState::Idle, "render flow resource allocator is not initialized");
         if (m_impl->state != RenderFlowResourceSessionState::Idle || m_impl->publishedGeneration != nullptr)
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, m_impl->state, "persistent caches may be cleared only between frame sessions");
+        if (m_impl->resourceDescriptors.IsValid() && !ValidateRetainedDescriptorCacheScope(*m_impl))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, m_impl->state,
+                                "persistent cache clear crossed an RHI/device or descriptor-domain incarnation");
         if (!m_impl->placedPool.ClearPersistentCache(failure) || !m_impl->dedicatedPool.ClearPersistentCache(failure))
             return false;
-        m_impl->structuralPlan.Clear();
+        bool retainedDescriptorDeviceLost = false;
+        if (!detail::PrepareRetainedImportDescriptorCacheShutdown(*m_impl, retainedDescriptorDeviceLost, failure))
+        {
+            if (retainedDescriptorDeviceLost || ActualDeviceLoss())
+            {
+                detail::RetainedImportDescriptorCacheDeviceLost(*m_impl);
+                return detail::Fail(failure, RenderFlowResourceFailureCode::DeviceLostOrBackendFailure, m_impl->state,
+                                    "retained import descriptor cache clear observed device loss");
+            }
+            return false;
+        }
+        detail::CommitRetainedImportDescriptorCacheShutdown(*m_impl);
         detail::ReleasePersistentDedicatedPlan(*m_impl, false);
         return true;
     }
@@ -1632,13 +2416,11 @@ namespace vanguard::rendering
             return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidPhase, m_impl->state, "render flow resource allocator is not idle");
         if (!m_impl->config.allowLogicalOnlyValidation && !rhi::IsInitialized())
             return detail::Fail(failure, RenderFlowResourceFailureCode::NotInitialized, m_impl->state, "render flow resource allocator requires an initialized RHI for physical assignment");
+        if (m_impl->resourceDescriptors.IsValid() && !ValidateRetainedDescriptorCacheScope(*m_impl))
+            return detail::Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, m_impl->state,
+                                "render flow resource allocator crossed an RHI/device or descriptor-domain incarnation before BeginFrame");
         if (policy.enablePlacedResources && (m_impl->config.allowLogicalOnlyValidation || !rhi::GetCapabilities().placedResources.IsSupported()))
             return detail::Fail(failure, RenderFlowResourceFailureCode::UnsupportedCapability, m_impl->state, "placed resources require physical execution and a supported RHI placed-resource profile");
-        if (m_impl->structuralPlan.valid &&
-            (m_impl->structuralPlan.policy.enablePlacedResources != policy.enablePlacedResources ||
-             m_impl->structuralPlan.policy.processEviction != policy.processEviction))
-            m_impl->structuralPlan.Clear();
-
         if (!m_impl->config.allowLogicalOnlyValidation)
         {
             m_impl->dedicatedPool.Poll();
@@ -1663,9 +2445,14 @@ namespace vanguard::rendering
         detail::ResetPlanningStorage(*m_impl);
         m_impl->retainedImports.Clear();
         m_impl->reservedExportSlots = 0;
+        m_impl->reservedExportContractPatches.Clear();
+        m_impl->reservedExportContractPatchIndices.Reset();
+        m_impl->contractDecisionPatches.Reset();
+        m_impl->contractCompileTarget = nullptr;
+        m_impl->boundContract = nullptr;
         m_impl->frameSerial = frameSerial;
         m_impl->activePolicy = policy;
-        m_impl->sessionGeneration = detail::NextGeneration(m_impl->sessionGeneration);
+        m_impl->sessionGeneration = detail::NextRenderFlowSessionGeneration();
         m_impl->state = RenderFlowResourceSessionState::Planning;
         ++m_impl->stats.begunFrames;
         m_impl->stats.planningWriters = 0;
@@ -1750,11 +2537,6 @@ namespace vanguard::rendering
         allocator.AbandonPublishedExecution();
     }
 
-    bool detail::RenderFlowResourceShutdownTestAccess::HasStructuralPlan(const RenderFlowResourceAllocator& allocator) noexcept
-    {
-        return allocator.m_impl != nullptr && allocator.m_impl->structuralPlan.valid;
-    }
-
     void detail::ReleaseAllocator(RenderFlowResourceAllocator::Impl* const allocator) noexcept
     {
         if (allocator == nullptr || allocator->references.Decrement() != 0)
@@ -1786,12 +2568,24 @@ namespace vanguard::rendering
             selected = {};
             detail::CanonicalDescriptorEvictionCandidate dedicated;
             detail::CanonicalDescriptorEvictionCandidate placed;
+            detail::CanonicalDescriptorEvictionCandidate retained;
             static_cast<void>(allocator.dedicatedPool.GetColdestCanonicalDescriptorCandidate(dedicated));
             static_cast<void>(allocator.placedPool.GetColdestCanonicalDescriptorCandidate(placed));
-            if (CanonicalCandidateLess(dedicated, placed))
-                selected = dedicated;
-            else if (placed.IsValid())
-                selected = placed;
+            if (!allocator.retainedImportDescriptorReusable.Empty())
+            {
+                const u32 index = allocator.retainedImportDescriptorReusable[0];
+                if (index < allocator.retainedImportDescriptorOwners.Size())
+                {
+                    const detail::RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[index];
+                    retained.ownerClass = detail::CanonicalDescriptorOwnerClass::RetainedImport;
+                    retained.entry = index;
+                    retained.lastDemandFrame = owner.descriptors.lastDemandFrame;
+                    retained.descriptorCount = detail::CanonicalDescriptorReferenceCount(owner.descriptors);
+                }
+            }
+            selected = CanonicalCandidateLess(dedicated, placed) ? dedicated : placed;
+            if (CanonicalCandidateLess(retained, selected))
+                selected = retained;
             return selected.IsValid();
         }
 
@@ -1800,9 +2594,20 @@ namespace vanguard::rendering
                                                                                                  const bool pressure,
                                                                                                  RenderFlowResourceFailure* const failure) noexcept
         {
-            return candidate.ownerClass == detail::CanonicalDescriptorOwnerClass::Dedicated
-                       ? allocator.dedicatedPool.EvictCanonicalDescriptorCandidate(candidate, pressure, failure)
-                       : allocator.placedPool.EvictCanonicalDescriptorCandidate(candidate, pressure, failure);
+            if (candidate.ownerClass == detail::CanonicalDescriptorOwnerClass::Dedicated)
+                return allocator.dedicatedPool.EvictCanonicalDescriptorCandidate(candidate, pressure, failure);
+            if (candidate.ownerClass == detail::CanonicalDescriptorOwnerClass::Placed)
+                return allocator.placedPool.EvictCanonicalDescriptorCandidate(candidate, pressure, failure);
+            if (candidate.ownerClass != detail::CanonicalDescriptorOwnerClass::RetainedImport || candidate.entry >= allocator.retainedImportDescriptorOwners.Size())
+                return detail::CanonicalDescriptorEvictionResult::Skipped;
+            const detail::RetainedImportDescriptorOwner& owner = allocator.retainedImportDescriptorOwners[candidate.entry];
+            if (owner.activeBorrows != 0 || owner.reusablePosition == InvalidRenderFlowResourceIndex ||
+                owner.descriptors.lastDemandFrame != candidate.lastDemandFrame ||
+                detail::CanonicalDescriptorReferenceCount(owner.descriptors) != candidate.descriptorCount)
+                return detail::CanonicalDescriptorEvictionResult::Skipped;
+            return RetireRetainedDescriptorOwner(allocator, candidate.entry, pressure, failure)
+                       ? detail::CanonicalDescriptorEvictionResult::Evicted
+                       : detail::CanonicalDescriptorEvictionResult::Failed;
         }
 
         void RefreshCanonicalDescriptorVictims(RenderFlowResourceAllocator::Impl& allocator) noexcept
@@ -1817,6 +2622,9 @@ namespace vanguard::rendering
     {
         if (!pressure.IsRequired() || !allocator.resourceDescriptors.IsValid())
             return true;
+        if (!ValidateRetainedDescriptorCacheScope(allocator))
+            return Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                        "canonical descriptor pressure handling crossed an RHI/device or descriptor-domain incarnation");
         RefreshCanonicalDescriptorVictims(allocator);
         for (;;)
         {
@@ -1845,6 +2653,9 @@ namespace vanguard::rendering
     {
         if (!allocator.resourceDescriptors.IsValid())
             return true;
+        if (!ValidateRetainedDescriptorCacheScope(allocator))
+            return Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                        "canonical descriptor maintenance crossed an RHI/device or descriptor-domain incarnation");
         if (allocator.descriptorLedger.GetStats().reusableSlots <= allocator.descriptorLedger.GetTarget())
             return true;
         RefreshCanonicalDescriptorVictims(allocator);
@@ -1876,6 +2687,7 @@ namespace vanguard::rendering
         allocator.resolveScratch.identityIds.Reset();
         allocator.resolveScratch.retainedImportTokens.Reset();
         allocator.resolveScratch.retainedImportResources.Reset();
+        allocator.resolveScratch.retainedImportContractPatches.Reset();
         allocator.resolveScratch.presentationImports.Reset();
         allocator.recordedQueueRequestCount.SetValue(0);
         allocator.recordedQueueGroupCount.SetValue(0);
@@ -1942,21 +2754,31 @@ namespace vanguard::rendering
         }
         allocator.publishedGeneration = nullptr;
         allocator.stats.rejectedOperations += allocator.pendingRejectedOperations.Exchange(0);
+        if (allocator.contractCompileTarget != nullptr)
+        {
+            allocator.contractCompileTarget->candidateNodes.Clear();
+            allocator.contractCompileTarget->candidateNodesReady = false;
+        }
         ResetPlanningStorage(allocator);
         allocator.retainedImports.Clear();
         allocator.publishedExports.Clear();
         allocator.publishedExportIndices.Reset();
         allocator.reservedExportSlots = 0;
+        allocator.reservedExportContractPatches.Clear();
+        allocator.reservedExportContractPatchIndices.Reset();
+        allocator.contractDecisionPatches.Reset();
+        allocator.contractCompileTarget = nullptr;
+        allocator.boundContract = nullptr;
         allocator.activePolicy = {};
         const bool nowDeviceLost = deviceLost || ActualDeviceLoss();
-        RenderFlowResourceFailure descriptorRetirementFailure;
-        if (!RetireRetainedImportDescriptors(allocator, *published, submittedFences, nowDeviceLost, &descriptorRetirementFailure) && !nowDeviceLost)
-            VG_FATAL(descriptorRetirementFailure.message != nullptr ? descriptorRetirementFailure.message
-                                                                    : "healthy render flow abandonment could not retire retained import descriptors");
+        RenderFlowResourceFailure descriptorBorrowFailure;
+        if (!ReleaseRetainedImportDescriptorBorrows(allocator, *published, submittedFences, nowDeviceLost, &descriptorBorrowFailure) && !nowDeviceLost)
+            VG_FATAL(descriptorBorrowFailure.message != nullptr ? descriptorBorrowFailure.message
+                                                                : "healthy render flow abandonment could not release retained import descriptor borrows");
         if (!metadataOnlyWithoutRhi && nowDeviceLost)
         {
-            allocator.structuralPlan.Clear();
             ReleasePersistentDedicatedPlan(allocator, false);
+            RetainedImportDescriptorCacheDeviceLost(allocator, submittedFences);
             allocator.dedicatedPool.DeviceLost(submittedFences);
             allocator.placedPool.DeviceLost(submittedFences);
         }
@@ -1981,7 +2803,6 @@ namespace vanguard::rendering
         // they must not pin descriptors, imports, or native allocator bindings.
         ReleaseGenerationRuntimeOwners(published);
         allocator.state = RenderFlowResourceSessionState::DeviceUnavailable;
-        allocator.structuralPlan.Clear();
         allocator.stats.state = allocator.state;
         ++allocator.stats.abortedFrames;
         ReleaseGeneration(published);
@@ -1995,9 +2816,19 @@ namespace vanguard::rendering
             (allocator.state != RenderFlowResourceSessionState::Planning && allocator.state != RenderFlowResourceSessionState::CandidatesSealed && allocator.state != RenderFlowResourceSessionState::Resolving))
             return;
         allocator.stats.rejectedOperations += allocator.pendingRejectedOperations.Exchange(0);
+        if (allocator.contractCompileTarget != nullptr)
+        {
+            allocator.contractCompileTarget->candidateNodes.Clear();
+            allocator.contractCompileTarget->candidateNodesReady = false;
+        }
         ResetPlanningStorage(allocator);
         allocator.retainedImports.Clear();
         allocator.reservedExportSlots = 0;
+        allocator.reservedExportContractPatches.Clear();
+        allocator.reservedExportContractPatchIndices.Reset();
+        allocator.contractDecisionPatches.Reset();
+        allocator.contractCompileTarget = nullptr;
+        allocator.boundContract = nullptr;
         allocator.activePolicy = {};
         allocator.state = RenderFlowResourceSessionState::Idle;
         allocator.stats.state = allocator.state;

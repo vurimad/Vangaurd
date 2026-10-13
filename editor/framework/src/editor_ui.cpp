@@ -101,6 +101,25 @@ namespace
         }
     }
 
+    [[nodiscard]] const char* StartupAutomaticRecookStateName(
+        const vanguard::asset_streaming::ProjectAssetAutomaticRecookState state) noexcept
+    {
+        using State = vanguard::asset_streaming::ProjectAssetAutomaticRecookState;
+        switch (state)
+        {
+        case State::Disabled: return "Disabled";
+        case State::Idle: return "Ready";
+        case State::Pending: return "Queued";
+        case State::Planning: return "Planning";
+        case State::Building: return "Building";
+        case State::Validating: return "Validating";
+        case State::Cancelling: return "Cancelling";
+        case State::Failed: return "Failed";
+        case State::RecoveryRequired: return "Recovery required";
+        }
+        return "Unknown";
+    }
+
     template <size_t Capacity>
     void CopyStatusBarText(char (&destination)[Capacity], const char* const source) noexcept
     {
@@ -671,6 +690,8 @@ namespace
             m_candidatePanelFocus = {};
             m_candidatePanelFocus.frame = frame.frame;
             m_candidatePanelReceiver = nullptr;
+            m_contextMenuRequestedPanel = {};
+            m_contextMenuRequestedFocus = {};
             m_previousFocusedPanelAuthored = false;
             m_previousFocusedPanelHost = {};
             m_surfaceInteractionActive = false;
@@ -687,6 +708,9 @@ namespace
             DrawPersistentSurfaces();
             EnsurePrimaryDockspace();
             m_panels.VisitOpenForAuthoring(DrawPanelForAuthoring, this);
+            RefreshStartupReadinessLatch();
+            if (!m_startupReadinessComplete)
+                DrawStartupReadinessOverlay();
             return true;
         }
 
@@ -751,6 +775,8 @@ namespace
                 m_panels.DiscardPendingVisibility();
                 m_candidatePanelFocus = {};
                 m_candidatePanelReceiver = nullptr;
+                m_contextMenuRequestedPanel = {};
+                m_contextMenuRequestedFocus = {};
                 ClearCurrentAuthoringStamp();
                 ClearSurfaceInteractionState();
                 m_state = editor::EditorUiState::Ready;
@@ -822,7 +848,13 @@ namespace
             const ImVec2 mouse = ImGui::GetMousePos();
             const editor::detail::EditorUiStampedContextMenuRequest request{
                 panel, m_currentAuthoringHost, m_currentAuthoringOwner, surfaceId, surface, m_frame, {mouse.x, mouse.y}};
-            return m_surfaces.QueueContextMenuRequest(request, failure);
+            if (!m_surfaces.QueueContextMenuRequest(request, failure))
+                return false;
+            // A context request is an explicit interaction with the authored panel.
+            // ImGui may not mark its parent window focused until the next frame
+            // (notably for a restored selection inside a docked child).
+            m_contextMenuRequestedPanel = panel;
+            return true;
         }
 
         [[nodiscard]] bool RegisterSurfaceForOwner(const editor::EditorExtensionOwner& owner,
@@ -947,7 +979,8 @@ namespace
             m_windows = vanguard::engine::FindWindowService(context);
             m_input = vanguard::engine::FindInputService(context);
             m_resources = editor::FindEditorResourceService(context);
-            if (m_framePipeline == nullptr || m_windows == nullptr || m_input == nullptr || m_resources == nullptr ||
+            m_workspace = editor::FindProjectWorkspaceService(context);
+            if (m_framePipeline == nullptr || m_windows == nullptr || m_input == nullptr || m_resources == nullptr || m_workspace == nullptr ||
                 context.Find(vanguard::engine::RenderingServiceId) == nullptr)
                 return app::LifecycleStatus::Failure("Editor UI dependencies are unavailable");
             editor::EditorUiFailure surfaceFailure;
@@ -1059,6 +1092,9 @@ namespace
             m_windows = nullptr;
             m_input = nullptr;
             m_resources = nullptr;
+            m_workspace = nullptr;
+            m_startupReadinessComplete = false;
+            m_startupReadinessBeginSeconds = -1.0;
             return app::LifecycleStatus::Success();
         }
 
@@ -1103,6 +1139,133 @@ namespace
             DrawMainToolbar();
             DrawMainStatusBar();
             DrawNamedLayoutDialog();
+        }
+
+        void RefreshStartupReadinessLatch() noexcept
+        {
+            if (m_startupReadinessComplete)
+                return;
+            if (m_startupReadinessBeginSeconds < 0.0)
+                m_startupReadinessBeginSeconds = ImGui::GetTime();
+            const vanguard::asset_streaming::ProjectAssetPipeline* const pipeline =
+                m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+            if (pipeline != nullptr && pipeline->IsInitialized() && pipeline->CanStartAssetOperation())
+                m_startupReadinessComplete = true;
+        }
+
+        void DrawStartupReadinessOverlay() noexcept
+        {
+            ImGuiViewport* const viewport = ImGui::GetMainViewport();
+            if (viewport == nullptr)
+                return;
+            const vanguard::asset_streaming::ProjectAssetPipeline* const pipeline =
+                m_workspace != nullptr ? m_workspace->GetAssetPipeline() : nullptr;
+            if (pipeline == nullptr || !pipeline->IsInitialized())
+                return;
+
+            const auto observation = pipeline->GetObservationStatus();
+            const auto automatic = pipeline->GetAutomaticRecookStatus();
+            const double elapsedSeconds = m_startupReadinessBeginSeconds >= 0.0
+                                              ? std::max(0.0, ImGui::GetTime() - m_startupReadinessBeginSeconds)
+                                              : 0.0;
+
+            const ImGuiWindowFlags overlayFlags =
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNavFocus |
+                ImGuiWindowFlags_NoBringToFrontOnFocus;
+            ImGui::SetNextWindowPos(viewport->Pos);
+            ImGui::SetNextWindowSize(viewport->Size);
+            ImGui::SetNextWindowBgAlpha(0.965f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, editor::detail::EditorVisualColor(0x171717u));
+            if (ImGui::Begin("##VanguardStartupReadinessOverlay", nullptr, overlayFlags))
+            {
+                const float margin = editor::detail::EditorVisualPx(32.0f);
+                const float maximumWidth = editor::detail::EditorVisualPx(680.0f);
+                const float maximumHeight = editor::detail::EditorVisualPx(420.0f);
+                const ImVec2 available = ImGui::GetContentRegionAvail();
+                const ImVec2 cardSize{
+                    std::max(editor::detail::EditorVisualPx(360.0f), std::min(maximumWidth, available.x - margin * 2.0f)),
+                    std::max(editor::detail::EditorVisualPx(300.0f), std::min(maximumHeight, available.y - margin * 2.0f))};
+                const ImVec2 cardPos{
+                    std::max(0.0f, (available.x - cardSize.x) * 0.5f),
+                    std::max(0.0f, (available.y - cardSize.y) * 0.5f)};
+                ImGui::SetCursorPos(cardPos);
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, editor::detail::EditorVisualPx(6.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                                    {editor::detail::EditorVisualPx(28.0f), editor::detail::EditorVisualPx(24.0f)});
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, editor::detail::EditorVisualColor(0x232323u));
+                if (ImGui::BeginChild("##VanguardStartupReadinessCard", cardSize, true,
+                                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+                {
+                    ImGui::TextUnformatted("VANGUARD EDITOR");
+                    const char* const projectName =
+                        m_workspace->GetProject().name.Empty()
+                            ? m_workspace->GetProject().technicalName.AsChar()
+                            : m_workspace->GetProject().name.AsChar();
+                    ImGui::TextDisabled("%s", projectName != nullptr && projectName[0] != '\0' ? projectName : "Project");
+                    ImGui::Spacing();
+                    ImGui::TextUnformatted("Preparing project workspace");
+                    ImGui::TextDisabled("Asset operations stay locked until project state is authoritative.");
+                    ImGui::Separator();
+
+                    ImGui::Text("Editor services");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Ready");
+
+                    ImGui::Text("Source observation");
+                    ImGui::SameLine();
+                    if (!observation.running)
+                        ImGui::TextDisabled("Starting");
+                    else if (observation.rescanRequired || observation.reconcilePending)
+                        ImGui::TextDisabled("Scanning / reconciling");
+                    else
+                        ImGui::TextDisabled("Caught up");
+                    ImGui::TextDisabled("  watched roots: %u   pending paths: %u   ready paths: %u   reconciled records: %u",
+                                        observation.watchedRoots, observation.pendingPaths, observation.readyPaths,
+                                        observation.reconcileOperationsCompleted);
+
+                    ImGui::Text("Asset recovery");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", StartupAutomaticRecookStateName(automatic.state));
+                    if (automatic.buildOperations != 0u)
+                    {
+                        const vanguard::u32 completed = std::min(automatic.completedBuildOperations, automatic.buildOperations);
+                        const float fraction = static_cast<float>(completed) / static_cast<float>(automatic.buildOperations);
+                        char label[96]{};
+                        std::snprintf(label, sizeof(label), "%u / %u build operations",
+                                      completed, automatic.buildOperations);
+                        ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), label);
+                    }
+                    else if (automatic.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Pending ||
+                             automatic.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Planning ||
+                             automatic.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Building ||
+                             automatic.state == vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Validating)
+                    {
+                        ImGui::TextDisabled("  waiting for countable build work");
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("Project operations");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Waiting for safe asset-operation gate");
+                    ImGui::TextDisabled("Elapsed: %.1f s", elapsedSeconds);
+                    if (observation.rescanRequired || observation.reconcilePending)
+                        ImGui::TextDisabled("Current step: validating project sources and accepted asset state.");
+                    else if (automatic.state != vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Idle &&
+                             automatic.state != vanguard::asset_streaming::ProjectAssetAutomaticRecookState::Disabled)
+                        ImGui::TextDisabled("Current step: settling project asset recovery/build work.");
+                    else
+                        ImGui::TextDisabled("Current step: waiting for the final mutation-safety gate.");
+                }
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar(2);
+            }
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar();
         }
 
         void RefreshStatusBarSnapshot(app::ServiceContext& context,
@@ -1440,10 +1603,13 @@ namespace
                               ImGui::ColorConvertFloat4ToU32(editor::detail::EditorVisualColor(0x464646u)),
                               std::max(1.0f, editor::detail::EditorVisualPx(1.0f)));
 
-                const ImU32 stateColor = ImGui::ColorConvertFloat4ToU32(editor::detail::EditorVisualColor(0x88b47du));
+                const bool startupLoading = !m_startupReadinessComplete;
+                const char* const stateText = startupLoading ? "Loading" : m_statusBar.state;
+                const ImU32 stateColor = ImGui::ColorConvertFloat4ToU32(
+                    editor::detail::EditorVisualColor(startupLoading ? 0xd5aa63u : 0x88b47du));
                 const ImU32 secondaryText = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-                draw->AddText({left, textY}, stateColor, m_statusBar.state);
-                float leftEnd = left + ImGui::CalcTextSize(m_statusBar.state).x;
+                draw->AddText({left, textY}, stateColor, stateText);
+                float leftEnd = left + ImGui::CalcTextSize(stateText).x;
                 if (m_statusBar.project[0] != '\0')
                 {
                     leftEnd += spacing;
@@ -1826,6 +1992,8 @@ namespace
         void ClearSurfaceInteractionState() noexcept
         {
             m_surfaceInteractionActive = false;
+            m_contextMenuRequestedPanel = {};
+            m_contextMenuRequestedFocus = {};
             m_previousFocusedPanelAuthored = false;
             m_previousFocusedPanelHost = {};
             ClearCurrentAuthoringStamp();
@@ -1906,10 +2074,20 @@ namespace
             if (panel.initialPlacement == editor::EditorPanelInitialPlacement::Floating)
             {
                 const ImGuiViewport* const main = ImGui::GetMainViewport();
-                ImGui::SetNextWindowPos({main->WorkPos.x + main->WorkSize.x + editor::detail::EditorVisualPx(30.0f),
-                                         main->WorkPos.y + editor::detail::EditorVisualPx(50.0f)}, ImGuiCond_FirstUseEver);
-                ImGui::SetNextWindowSize({editor::detail::EditorVisualPx(440.0f), editor::detail::EditorVisualPx(340.0f)},
-                                         ImGuiCond_FirstUseEver);
+                if (!panel.allowDocking)
+                {
+                    ImGui::SetNextWindowPos({main->WorkPos.x + main->WorkSize.x * 0.15f,
+                                             main->WorkPos.y + main->WorkSize.y * 0.12f}, ImGuiCond_FirstUseEver);
+                    ImGui::SetNextWindowSize({editor::detail::EditorVisualPx(700.0f), editor::detail::EditorVisualPx(560.0f)},
+                                             ImGuiCond_FirstUseEver);
+                }
+                else
+                {
+                    ImGui::SetNextWindowPos({main->WorkPos.x + main->WorkSize.x + editor::detail::EditorVisualPx(30.0f),
+                                             main->WorkPos.y + editor::detail::EditorVisualPx(50.0f)}, ImGuiCond_FirstUseEver);
+                    ImGui::SetNextWindowSize({editor::detail::EditorVisualPx(440.0f), editor::detail::EditorVisualPx(340.0f)},
+                                             ImGuiCond_FirstUseEver);
+                }
             }
             else
             {
@@ -1918,8 +2096,33 @@ namespace
                     ImGui::SetNextWindowDockID(dock, ImGuiCond_FirstUseEver);
             }
 
+            if (!panel.allowDocking)
+            {
+                // A saved dock ID survives an initial-placement change. Clear it every frame, so
+                // old layouts cannot redock this independent review window on a later reopen.
+                ImGui::SetNextWindowDockID(0, ImGuiCond_Always);
+                // An undocked ImGui window can still merge into the primary Editor viewport.
+                // Non-dockable panels own a native viewport even while overlapping the Editor.
+                ImGuiWindowClass standaloneWindowClass;
+                standaloneWindowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
+                ImGui::SetNextWindowClass(&standaloneWindowClass);
+
+                // A clean, opaque panel surface and restrained one-pixel frame. Avoid
+                // drawing shadows beyond the native viewport: they appear as translucent
+                // fringes over the Editor and make the window edge look broken.
+                ImGui::SetNextWindowBgAlpha(1.0f);
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, editor::detail::EditorVisualColor(0x303030u));
+                ImGui::PushStyleColor(ImGuiCol_Border, editor::detail::EditorVisualColor(0x484848u));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, editor::detail::EditorVisualPx(1.0f));
+            }
             bool open = true;
-            const bool authorContents = ImGui::Begin(windowName, &open);
+            const bool authorContents = ImGui::Begin(windowName, &open,
+                                                      panel.allowDocking ? ImGuiWindowFlags_None : ImGuiWindowFlags_NoDocking);
+            if (!panel.allowDocking)
+            {
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(2);
+            }
             editor::EditorHostWindowHandle authoredHost;
             static_cast<void>(service.m_platform.GetCurrentViewportHost(authoredHost));
             if (panel.handle == service.m_panelFocus.panel && authoredHost.IsValid())
@@ -1946,6 +2149,10 @@ namespace
                     service.m_currentAuthoringFrame = service.m_frame;
                     panel.draw(context, panel.state, panel.factoryData);
                     service.ClearCurrentAuthoringStamp();
+
+                    if (open && service.m_contextMenuRequestedPanel == panel.handle)
+                        service.m_contextMenuRequestedFocus =
+                            {service.m_frame, panel.handle, panel.type, panel.id, authoredHost};
 
                     void* liveReceiver = nullptr;
                     if (open && service.m_panels.ResolveFocusReceiver(panel.handle, liveReceiver))
@@ -2040,6 +2247,13 @@ namespace
         {
             editor::EditorPanelFocusSnapshot focus = m_candidatePanelFocus;
             void* receiverData = m_candidatePanelReceiver;
+            if (m_contextMenuRequestedFocus.HasFocus() && m_contextMenuRequestedFocus.frame == m_frame)
+            {
+                // Right-click on a panel item establishes focus even when the
+                // underlying ImGui child window has not yet acquired it.
+                focus = m_contextMenuRequestedFocus;
+                receiverData = nullptr;
+            }
             if (!focus.HasFocus() && m_surfaceInteractionActive && m_panelFocus.HasFocus() &&
                 m_previousFocusedPanelAuthored && m_previousFocusedPanelHost == m_panelFocus.host &&
                 FindHost(m_panelFocus.host) != nullptr)
@@ -2086,6 +2300,8 @@ namespace
             m_surfaces.CommitContextMenuRequests(focus);
             m_candidatePanelFocus = {};
             m_candidatePanelReceiver = nullptr;
+            m_contextMenuRequestedPanel = {};
+            m_contextMenuRequestedFocus = {};
             m_previousFocusedPanelAuthored = false;
             m_previousFocusedPanelHost = {};
             m_surfaceInteractionActive = false;
@@ -2100,6 +2316,11 @@ namespace
             if (service == nullptr)
                 return true;
             service->CancelContextMenuRequestsForPanel(panel);
+            if (service->m_contextMenuRequestedPanel == panel)
+            {
+                service->m_contextMenuRequestedPanel = {};
+                service->m_contextMenuRequestedFocus = {};
+            }
             if (service->m_candidatePanelFocus.panel == panel)
             {
                 service->m_candidatePanelFocus = {};
@@ -2214,6 +2435,8 @@ namespace
         editor::EditorPanelFocusSnapshot m_panelFocus;
         editor::EditorPanelFocusSnapshot m_candidatePanelFocus;
         void* m_candidatePanelReceiver = nullptr;
+        editor::EditorPanelHandle m_contextMenuRequestedPanel;
+        editor::EditorPanelFocusSnapshot m_contextMenuRequestedFocus;
         editor::EditorPanelHandle m_currentAuthoringPanel;
         editor::EditorExtensionOwner m_currentAuthoringOwner;
         editor::EditorHostWindowHandle m_currentAuthoringHost;
@@ -2244,7 +2467,10 @@ namespace
         vanguard::engine::WindowService* m_windows = nullptr;
         vanguard::engine::InputService* m_input = nullptr;
         editor::EditorResourceService* m_resources = nullptr;
+        editor::ProjectWorkspaceService* m_workspace = nullptr;
         vanguard::u64 m_frame = 0;
+        double m_startupReadinessBeginSeconds = -1.0;
+        bool m_startupReadinessComplete = false;
         ImGuiID m_dockRoot = 0;
         ImGuiID m_dockCenter = 0;
         ImGuiID m_dockLeft = 0;

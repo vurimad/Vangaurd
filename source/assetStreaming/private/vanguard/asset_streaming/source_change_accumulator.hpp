@@ -63,13 +63,30 @@ namespace vanguard::asset_streaming
         // freshness validation. Hints are not freshness authority; a changed
         // generation or overflow only forces a conservative stale rejection.
         [[nodiscard]] SourceChangeSnapshot GetChangeSnapshot() const noexcept;
-        // Executes only the short descriptor-visibility commit while holding the
-        // same mutex used by Publish(). This closes the tracked-callback gap
-        // between a final generation/overflow check and descriptor installation.
-        // Expensive resolve/prepare/materialization work must be completed before
-        // entering this seam. Lock ordering is accumulator -> downstream owner.
+        // Executes only the final already-prepared commit while holding the same
+        // mutex used by Publish(). This closes the tracked-callback gap between a
+        // final generation/overflow check and visibility/source-transaction
+        // linearization. Expensive resolve/planning/staging/prepare work must be
+        // completed before entering this seam. Lock ordering is accumulator ->
+        // downstream owner.
         [[nodiscard]] bool CommitIfUnchanged(SourceChangeSnapshot expected, StableSourceChangeCommitFunction commit,
                                              void* userData) const noexcept;
+        // Variant for a source transaction that has already applied its owned
+        // authored paths before the short durable publication step. Directory
+        // observation can report those exact paths as changed by the transaction
+        // itself. Such hints may cross this fence, but every newer non-owned path,
+        // missing hint provenance, or overflow remains a stale rejection.
+        //
+        // On success, accepted receives the exact observation generation covered
+        // by the publication. A subsequent authoritative Rescan() may acknowledge
+        // through that generation without hiding newer callbacks.
+        [[nodiscard]] bool CommitIfUnchangedOrOwnedChanges(
+            SourceChangeSnapshot expected, containers::ArraySpan<const filesystem::AbsolutePath> ownedPaths,
+            StableSourceChangeCommitFunction commit, void* userData, SourceChangeSnapshot& accepted) const noexcept;
+        // Called only after a full authoritative source rescan. Pending/ready
+        // hints through generation are then represented by that rescan; newer
+        // hints remain active.
+        void AcknowledgeAuthoritativeRescan(u64 generation) noexcept;
         [[nodiscard]] ProjectAssetObservationStatus GetStatus() const noexcept;
 
     private:

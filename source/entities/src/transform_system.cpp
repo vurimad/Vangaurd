@@ -83,20 +83,36 @@ namespace vanguard::entities
             return nullptr;
         }
 
+        void MarkDirtyPath(IPlacedComponent& component, IPlacedComponent& root) const noexcept
+        {
+            IPlacedComponent* cursor = &component;
+            for (u32 depth = 0; depth < config.maximumHierarchyDepth; ++depth)
+            {
+                cursor->m_subtreeTransformDirty = true;
+                if (cursor == &root)
+                    break;
+                cursor = &cursor->m_parentTransform->GetSource();
+            }
+        }
+
         [[nodiscard]] bool Schedule(IPlacedComponent& component) noexcept
         {
             if (processing.GetValue() != 0 || !component.m_registered)
                 return false;
+            // Preserve one job owner per cascaded root, preventing parent/child
+            // races when attachments change while work is queued. A dirty-path
+            // hint lets that one root skip unaffected child branches during dispatch.
             IPlacedComponent* const root = GetRoot(component);
             if (root == nullptr)
                 return false;
+            if (!root->m_scheduled && scheduledRoots.Size() == config.maximumScheduledRoots)
+                return false;
+            MarkDirtyPath(component, *root);
             if (root->m_scheduled)
             {
                 static_cast<void>(redundantSchedules.Increment());
                 return true;
             }
-            if (scheduledRoots.Size() == config.maximumScheduledRoots)
-                return false;
             root->m_scheduled = true;
             scheduledRoots.PushBack(root);
             scheduledRootCount.SetValue(scheduledRoots.Size());
@@ -365,6 +381,15 @@ namespace vanguard::entities
     bool TransformSystem::ScheduleTransformUpdate(IPlacedComponent& component) noexcept
     {
         return m_impl != nullptr && m_impl->Schedule(component);
+    }
+
+    void TransformSystem::MarkTransformBranchDirty(IPlacedComponent& component) noexcept
+    {
+        if (m_impl == nullptr || m_impl->processing.GetValue() != 0 || !component.m_registered)
+            return;
+        IPlacedComponent* const root = m_impl->GetRoot(component);
+        if (root != nullptr)
+            m_impl->MarkDirtyPath(component, *root);
     }
 
     void TransformSystem::CancelTransformUpdate(IPlacedComponent& component) noexcept

@@ -1,0 +1,25 @@
+vproject 1.0
+
+project.id = "3c50d9df-febd-4dd0-a171-024655bc426a"
+project.name = "RED Asset Test"
+project.technicalName = "red-asset-test"
+
+engine.minimum = "0.1.0"
+engine.maximum = "0.1.x"
+
+paths.assets = "Assets"
+paths.derivedData = "DerivedData"
+paths.intermediate = "Intermediate"
+paths.saved = "Saved"
+paths.builds = "Builds"
+paths.config = "Config"
+paths.plugins = "Plugins"
+
+target = "windows-x64"
+
+policy.cooking = "default"
+policy.packaging = "default"
+
+startup.editorWorld = ""
+startup.runtimeWorld = ""
+startup.input = ""

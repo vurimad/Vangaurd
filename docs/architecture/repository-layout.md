@@ -23,6 +23,11 @@ historical depot layout.
 |-- external/
 |   |-- manifests/
 |   `-- patches/
+|-- imported/                   Retained upstream/source images; not Vanguard-owned modules
+|   |-- common/
+|   |-- external/
+|   |-- generated/
+|   `-- internal/
 |-- schemas/
 |   |-- reflection/
 |   |-- resources/
@@ -37,8 +42,6 @@ historical depot layout.
 |   |-- editor/
 |   `-- tests/
 |-- source/
-|   |-- imported/
-|   |   `-- common/            Shared quarantined RED source images
 |   |-- system/
 |   |-- diagnostics/
 |   |-- memory/
@@ -91,6 +94,12 @@ historical depot layout.
 
 `source/system` is the only universal dependency. It owns compile-time platform
 facts and emergency failure handling, not general engine services.
+
+`imported/` is outside `source/` deliberately. It retains auditable upstream
+source/dependency images that Vanguard-owned modules may compile or adapt, but it
+is not itself part of Vanguard's module namespace. Compatibility projects keep
+the retained image identifiable as imported code while Vanguard-owned adapters,
+contracts and tests stay under `source/`.
 
 `source/diagnostics` owns logging and diagnostic sinks. Its bootstrap logger is
 independent of Vanguard memory, while later telemetry, tracing, crash evidence,

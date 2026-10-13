@@ -43,6 +43,35 @@ namespace vanguard::entities
     {
         VANGUARD_USE_MEMORY_POOL(memory::pools::World);
 
+        struct StableKey
+        {
+            ecs::EntityId entity = ecs::InvalidEntityId;
+            u64 stableId = InvalidComponentStableId;
+
+            [[nodiscard]] bool operator==(const StableKey& other) const noexcept
+            {
+                return entity == other.entity && stableId == other.stableId;
+            }
+        };
+
+        struct StableKeyHash
+        {
+            [[nodiscard]] static u32 GetHash(const StableKey& key) noexcept
+            {
+                // Mix both 64-bit identities; neither the entity nor the component
+                // stable ID alone is globally unique across the directory.
+                u64 value = key.entity ^ (key.stableId + 0x9e3779b97f4a7c15ull + (key.entity << 6u) + (key.entity >> 2u));
+                value ^= value >> 30u;
+                value *= 0xbf58476d1ce4e5b9ull;
+                value ^= value >> 27u;
+                value *= 0x94d049bb133111ebull;
+                value ^= value >> 31u;
+                return static_cast<u32>(value ^ (value >> 32u));
+            }
+        };
+
+        using StableIndex = containers::HashMap<StableKey, u32, containers::HashPolicyDefaultEqual<StableKeyHash, StableKey>>;
+
         struct Slot
         {
             Component* component = nullptr;
@@ -62,7 +91,7 @@ namespace vanguard::entities
 
         explicit Impl(const ComponentDirectoryConfig& value) noexcept
             : config(value), slots(memory::pools::World::GetInstance()), entityHeads(memory::pools::World::GetInstance()),
-              entityCounts(memory::pools::World::GetInstance())
+              entityCounts(memory::pools::World::GetInstance()), stableIndex(memory::pools::World::GetInstance())
         {
             slots.Reserve(value.maximumComponents < 4096u ? value.maximumComponents : 4096u);
         }
@@ -82,16 +111,8 @@ namespace vanguard::entities
 
         [[nodiscard]] u32 Find(const ecs::EntityId entity, const u64 stableId) const noexcept
         {
-            const u32* const head = entityHeads.FindPtr(entity);
-            u32 index = head != nullptr ? *head : InvalidIndex;
-            while (index != InvalidIndex)
-            {
-                const Slot& slot = slots[index];
-                if (slot.active && slot.stableId == stableId)
-                    return index;
-                index = slot.nextEntity;
-            }
-            return InvalidIndex;
+            const u32* const index = stableIndex.FindPtr(StableKey{entity, stableId});
+            return index != nullptr ? *index : InvalidIndex;
         }
 
         [[nodiscard]] bool Allocate(u32& index, Slot*& slot) noexcept
@@ -139,6 +160,9 @@ namespace vanguard::entities
         [[nodiscard]] bool LinkEntity(const u32 index) noexcept
         {
             Slot& slot = slots[index];
+            const StableKey stableKey{slot.entity, slot.stableId};
+            if (!stableIndex.Insert(stableKey, index).IsSuccessful())
+                return false;
             u32* const head = entityHeads.FindPtr(slot.entity);
             slot.nextEntity = head != nullptr ? *head : InvalidIndex;
             if (head != nullptr)
@@ -146,10 +170,14 @@ namespace vanguard::entities
             else
             {
                 if (!entityHeads.Insert(slot.entity, index).IsSuccessful())
+                {
+                    static_cast<void>(stableIndex.Remove(stableKey));
                     return false;
+                }
                 if (!entityCounts.Insert(slot.entity, 0u).IsSuccessful())
                 {
                     static_cast<void>(entityHeads.Remove(slot.entity));
+                    static_cast<void>(stableIndex.Remove(stableKey));
                     return false;
                 }
                 ++stats.entities;
@@ -163,6 +191,7 @@ namespace vanguard::entities
         void UnlinkEntity(const u32 index) noexcept
         {
             Slot& slot = slots[index];
+            static_cast<void>(stableIndex.Remove(StableKey{slot.entity, slot.stableId}));
             if (slot.previousEntity != InvalidIndex)
                 slots[slot.previousEntity].nextEntity = slot.nextEntity;
             else if (u32* const head = entityHeads.FindPtr(slot.entity))
@@ -211,6 +240,7 @@ namespace vanguard::entities
         containers::DynamicArray<Slot> slots;
         containers::HashMap<ecs::EntityId, u32> entityHeads;
         containers::HashMap<ecs::EntityId, u32> entityCounts;
+        StableIndex stableIndex;
         u32 freeHead = InvalidIndex;
         u32 activeHead = InvalidIndex;
         u32 activeTail = InvalidIndex;

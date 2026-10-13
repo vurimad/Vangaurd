@@ -56,6 +56,7 @@ int main()
     const filesystem::AbsolutePath safePath = testDirectory.AddFilePath("safe.bin");
     const filesystem::AbsolutePath replacementTarget = testDirectory.AddFilePath("replacement.bin");
     const filesystem::AbsolutePath replacementStaged = testDirectory.AddFilePath("replacement.bin.tmp");
+    const filesystem::AbsolutePath replacementBackup = testDirectory.AddFilePath("replacement.bin.bak");
     const filesystem::AbsolutePath exclusivePath = testDirectory.AddFilePath("exclusive.bin");
     const filesystem::AbsolutePath missingPath = testDirectory.AddFilePath("missing.bin");
 
@@ -79,6 +80,7 @@ int main()
     static_cast<void>(manager.DeleteFile(safePath));
     static_cast<void>(manager.DeleteFile(replacementTarget));
     static_cast<void>(manager.DeleteFile(replacementStaged));
+    static_cast<void>(manager.DeleteFile(replacementBackup));
     static_cast<void>(manager.DeleteFile(exclusivePath));
     static_cast<void>(manager.DeleteFile(missingPath));
     static_cast<void>(manager.DeletePath(nestedDirectory));
@@ -178,6 +180,24 @@ int main()
     Check(filesystem::ReplaceFile(replacementStaged, replacementTarget) && !manager.FileExist(replacementStaged) &&
               manager.GetFileSize(replacementTarget) == newReplacement.size(),
           "same-directory replacement publishes staged file");
+    {
+        auto oldWriter = manager.CreateFileWriter(replacementTarget, filesystem::FOF_Buffered);
+        auto stagedWriter = manager.CreateFileWriter(replacementStaged, filesystem::FOF_Buffered);
+        Check(oldWriter && stagedWriter, "replacement-with-backup fixture writers");
+        if (oldWriter && stagedWriter)
+        {
+            oldWriter->Serialize(const_cast<vanguard::u8*>(oldReplacement.data()), oldReplacement.size());
+            stagedWriter->Serialize(const_cast<vanguard::u8*>(newReplacement.data()), newReplacement.size());
+            oldWriter->Flush();
+            stagedWriter->Flush();
+        }
+    }
+    Check(filesystem::ReplaceFileWithBackup(replacementStaged, replacementTarget, replacementBackup) &&
+              !manager.FileExist(replacementStaged) && manager.FileExist(replacementTarget) && manager.FileExist(replacementBackup) &&
+              manager.GetFileSize(replacementTarget) == newReplacement.size() &&
+              manager.GetFileSize(replacementBackup) == oldReplacement.size(),
+          "atomic replacement preserves exact previous target as backup");
+    static_cast<void>(manager.DeleteFile(replacementBackup));
     {
         auto stagedWriter = manager.CreateFileWriter(replacementStaged, filesystem::FOF_Buffered);
         Check(static_cast<bool>(stagedWriter), "cross-directory rejection fixture");

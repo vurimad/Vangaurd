@@ -2,24 +2,38 @@
 
 #include <vanguard/crypto/crypto.hpp>
 #include <vanguard/memory/memory.hpp>
+#include <vanguard/system/platform.hpp>
 
 #include <algorithm>
 #include <cstring>
+
+#if VG_PLATFORM_WINDOWS
+#include <Windows.h>
+#include <bcrypt.h>
+#endif
 
 namespace vanguard::assets
 {
     namespace
     {
         constexpr u32 JournalMagic = 0x4e585456u; // VTXN
-        constexpr u32 JournalVersion = 3u;
+        constexpr u32 JournalVersion = 5u;
+        constexpr u32 AssertionJournalVersion = 4u;
+        constexpr u32 DigestConditionalJournalVersion = 3u;
         constexpr u32 ConditionalWriteJournalVersion = 2u;
         constexpr u32 LegacyJournalVersion = 1u;
         constexpr u32 JournalHeaderBytes = 48u;
+        constexpr u32 PrepareWriteChunkBytes = 256u * 1024u;
+        constexpr u32 PrepareVerifyChunkBytes = 64u * 1024u;
 
-        enum class MutationKind : u8 { Write, Move, Delete };
+        enum class MutationKind : u8 { Write, Move, Delete, AssertDigest };
         enum class WriteCondition : u8 { Any, MustNotExist, ExpectedBytes, ExpectedDigest };
         enum class FileMatchResult : u8 { Match, Mismatch, IoFailure };
-        enum class JournalState : u32 { Staging = 1u, Prepared = 2u, Committed = 3u };
+        enum class JournalState : u32 { Staging = 1u, Prepared = 2u, Committed = 3u, Applying = 4u };
+
+        constexpr u8 JournalEvidencePreTarget = 1u << 0u;
+        constexpr u8 JournalEvidencePreSource = 1u << 1u;
+        constexpr u8 JournalEvidencePostTarget = 1u << 2u;
 
         struct Mutation
         {
@@ -37,10 +51,14 @@ namespace vanguard::assets
             filesystem::AbsolutePath backup;
             containers::DynamicArray<u8> bytes;
             containers::DynamicArray<u8> expectedBytes;
+            crypto::Digest256 preTargetDigest;
+            crypto::Digest256 preSourceDigest;
             crypto::Digest256 postDigest;
             crypto::Digest256 expectedDigest;
             bool targetExisted = false;
             WriteCondition writeCondition = WriteCondition::Any;
+            bool preTargetDigestValid = false;
+            bool preSourceDigestValid = false;
             bool postDigestValid = false;
             bool touched = false;
             bool backupMatchesExpected = false;
@@ -70,6 +88,14 @@ namespace vanguard::assets
             return true;
         }
 
+        [[nodiscard]] bool AppendDigest(containers::DynamicArray<u8>& bytes, const crypto::Digest256& digest) noexcept
+        {
+            for (u32 index = 0; index < crypto::Digest256::ByteCount; ++index)
+                if (!AppendByte(bytes, digest.bytes[index]))
+                    return false;
+            return true;
+        }
+
         [[nodiscard]] bool AppendPath(containers::DynamicArray<u8>& bytes, const filesystem::AbsolutePath& path) noexcept
         {
             const containers::StringView view = path.AsStringView();
@@ -88,6 +114,15 @@ namespace vanguard::assets
             value = static_cast<u32>(bytes[cursor]) | (static_cast<u32>(bytes[cursor + 1u]) << 8u) |
                     (static_cast<u32>(bytes[cursor + 2u]) << 16u) | (static_cast<u32>(bytes[cursor + 3u]) << 24u);
             cursor += 4u;
+            return true;
+        }
+
+        [[nodiscard]] bool ReadDigest(const containers::ArraySpan<const u8> bytes, u32& cursor, crypto::Digest256& digest) noexcept
+        {
+            if (cursor > bytes.Count() || crypto::Digest256::ByteCount > bytes.Count() - cursor)
+                return false;
+            std::memcpy(digest.bytes, bytes.Data() + cursor, crypto::Digest256::ByteCount);
+            cursor += crypto::Digest256::ByteCount;
             return true;
         }
 
@@ -155,31 +190,89 @@ namespace vanguard::assets
 
         [[nodiscard]] bool DigestBytes(const containers::ArraySpan<const u8> bytes, crypto::Digest256& digest) noexcept
         {
-            crypto::Sha256Builder hash;
-            return (bytes.Empty() || hash.Update(bytes.Data(), bytes.Count())) && hash.Finalize(digest);
+            if (!bytes.Empty() && bytes.Data() == nullptr)
+                return false;
+            digest = crypto::Sha256(bytes.Data(), bytes.Count());
+            return true;
         }
 
-        [[nodiscard]] FileMatchResult MatchFileDigest(filesystem::Manager& files, const filesystem::AbsolutePath& path,
-                                                      const crypto::Digest256& expected) noexcept
+#if VG_PLATFORM_WINDOWS
+        // A separate streaming CNG path is deliberately local to file evidence.
+        // The portable Sha256Builder remains allocation-free and is used when
+        // the OS provider is unavailable or the file is small. Incremental file
+        // verification never needs to retain a second giant source buffer.
+        struct WindowsFileSha256 final
+        {
+            explicit WindowsFileSha256(const bool enable) noexcept
+            {
+                if (enable && ::BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0u) >= 0)
+                    if (::BCryptCreateHash(algorithm, &hash, nullptr, 0u, nullptr, 0u, 0u) < 0)
+                        hash = nullptr;
+            }
+            ~WindowsFileSha256()
+            {
+                if (hash != nullptr)
+                    ::BCryptDestroyHash(hash);
+                if (algorithm != nullptr)
+                    ::BCryptCloseAlgorithmProvider(algorithm, 0u);
+            }
+            WindowsFileSha256(const WindowsFileSha256&) = delete;
+            WindowsFileSha256& operator=(const WindowsFileSha256&) = delete;
+            [[nodiscard]] bool IsReady() const noexcept { return hash != nullptr; }
+            [[nodiscard]] bool Update(const u8* const bytes, const u32 count) noexcept
+            {
+                return hash != nullptr && ::BCryptHashData(hash, const_cast<PUCHAR>(bytes), count, 0u) >= 0;
+            }
+            [[nodiscard]] bool Finalize(crypto::Digest256& digest) noexcept
+            {
+                return hash != nullptr &&
+                       ::BCryptFinishHash(hash, digest.bytes, crypto::Digest256::ByteCount, 0u) >= 0;
+            }
+            BCRYPT_ALG_HANDLE algorithm = nullptr;
+            BCRYPT_HASH_HANDLE hash = nullptr;
+        };
+#endif
+
+        [[nodiscard]] FileMatchResult DigestFile(filesystem::Manager& files, const filesystem::AbsolutePath& path,
+                                                crypto::Digest256& digest) noexcept
         {
             auto reader = files.CreateFileReader(path, filesystem::FOF_Buffered);
             if (!reader)
                 return files.FileExist(path) ? FileMatchResult::IoFailure : FileMatchResult::Mismatch;
             crypto::Sha256Builder hash;
-            u8 buffer[4096];
+            u8 buffer[64u * 1024u];
             u64 remaining = reader->GetSize();
+#if VG_PLATFORM_WINDOWS
+            WindowsFileSha256 accelerated(remaining >= (1u << 20u));
+            const bool useAccelerated = accelerated.IsReady();
+#endif
             while (remaining != 0u)
             {
                 const u32 count = static_cast<u32>(std::min<u64>(sizeof(buffer), remaining));
                 reader->Serialize(buffer, count);
-                if (reader->HasErrors() || !hash.Update(buffer, count))
+#if VG_PLATFORM_WINDOWS
+                const bool updated = useAccelerated ? accelerated.Update(buffer, count) : hash.Update(buffer, count);
+#else
+                const bool updated = hash.Update(buffer, count);
+#endif
+                if (reader->HasErrors() || !updated)
                     return FileMatchResult::IoFailure;
                 remaining -= count;
             }
+#if VG_PLATFORM_WINDOWS
+            const bool finalized = useAccelerated ? accelerated.Finalize(digest) : hash.Finalize(digest);
+#else
+            const bool finalized = hash.Finalize(digest);
+#endif
+            return !reader->HasErrors() && finalized ? FileMatchResult::Match : FileMatchResult::IoFailure;
+        }
+
+        [[nodiscard]] FileMatchResult MatchFileDigest(filesystem::Manager& files, const filesystem::AbsolutePath& path,
+                                                      const crypto::Digest256& expected) noexcept
+        {
             crypto::Digest256 actual;
-            return !reader->HasErrors() && hash.Finalize(actual)
-                       ? (actual == expected ? FileMatchResult::Match : FileMatchResult::Mismatch)
-                       : FileMatchResult::IoFailure;
+            const FileMatchResult result = DigestFile(files, path, actual);
+            return result == FileMatchResult::Match ? (actual == expected ? FileMatchResult::Match : FileMatchResult::Mismatch) : result;
         }
 
         [[nodiscard]] bool WriteAndVerify(filesystem::Manager& files, const filesystem::AbsolutePath& path,
@@ -198,6 +291,94 @@ namespace vanguard::assets
                     return false;
             }
             return MatchFile(files, path, bytes) == FileMatchResult::Match;
+        }
+
+        enum class PrepareStageResult : u8
+        {
+            Success,
+            Cancelled,
+            IoFailure
+        };
+
+        [[nodiscard]] bool IsPrepareCancellationRequested(const AssetFileTransactionPrepareObserver& observer) noexcept
+        {
+            return observer.isCancellationRequested != nullptr && observer.isCancellationRequested(observer.userData);
+        }
+
+        void ReportPrepareProgress(const AssetFileTransactionPrepareObserver& observer,
+                                   const AssetFileTransactionPreparePhase phase, const u64 completedBytes,
+                                   const u64 totalBytes) noexcept
+        {
+            if (observer.reportProgress != nullptr)
+                observer.reportProgress({phase, completedBytes, totalBytes}, observer.userData);
+        }
+
+        [[nodiscard]] u64 AddProgressBytes(const u64 current, const u64 increment) noexcept
+        {
+            return increment > ~u64{0} - current ? ~u64{0} : current + increment;
+        }
+
+        [[nodiscard]] PrepareStageResult WriteAndVerifyPreparedStage(
+            filesystem::Manager& files, const filesystem::AbsolutePath& path, const containers::ArraySpan<const u8> bytes,
+            const AssetFileTransactionPrepareObserver& observer, u64& completedBytes, const u64 totalBytes) noexcept
+        {
+            if (IsPrepareCancellationRequested(observer))
+                return PrepareStageResult::Cancelled;
+
+            {
+                // Keep the writer scoped so cancellation/failure closes the file
+                // before transaction-owned cleanup attempts to remove the stage.
+                auto writer = files.CreateFileWriter(path);
+                if (!writer)
+                    return PrepareStageResult::IoFailure;
+                u32 offset = 0u;
+                while (offset < bytes.Count())
+                {
+                    if (IsPrepareCancellationRequested(observer))
+                        return PrepareStageResult::Cancelled;
+                    const u32 count = std::min<u32>(PrepareWriteChunkBytes, bytes.Count() - offset);
+                    writer->Serialize(const_cast<u8*>(bytes.Data() + offset), count);
+                    if (writer->HasErrors())
+                        return PrepareStageResult::IoFailure;
+                    offset += count;
+                    completedBytes = AddProgressBytes(completedBytes, count);
+                    ReportPrepareProgress(observer, AssetFileTransactionPreparePhase::Writing, completedBytes, totalBytes);
+                }
+                if (IsPrepareCancellationRequested(observer))
+                    return PrepareStageResult::Cancelled;
+                // RawFileWriter::Flush reaches NativeFileHandle::Flush. This call
+                // may block in the OS, so cancellation is checked again once it
+                // returns; the bounded write chunks keep the cooperative portions
+                // of Prepare responsive without weakening durability.
+                writer->Flush();
+                if (writer->HasErrors())
+                    return PrepareStageResult::IoFailure;
+            }
+
+            if (IsPrepareCancellationRequested(observer))
+                return PrepareStageResult::Cancelled;
+            auto reader = files.CreateFileReader(path, filesystem::FOF_Buffered);
+            if (!reader)
+                return PrepareStageResult::IoFailure;
+            if (reader->GetSize() != bytes.Count())
+                return PrepareStageResult::IoFailure;
+            u8 buffer[PrepareVerifyChunkBytes];
+            u32 offset = 0u;
+            while (offset < bytes.Count())
+            {
+                if (IsPrepareCancellationRequested(observer))
+                    return PrepareStageResult::Cancelled;
+                const u32 count = std::min<u32>(PrepareVerifyChunkBytes, bytes.Count() - offset);
+                reader->Serialize(buffer, count);
+                if (reader->HasErrors() || std::memcmp(buffer, bytes.Data() + offset, count) != 0)
+                    return PrepareStageResult::IoFailure;
+                offset += count;
+                completedBytes = AddProgressBytes(completedBytes, count);
+                ReportPrepareProgress(observer, AssetFileTransactionPreparePhase::Verifying, completedBytes, totalBytes);
+            }
+            if (reader->HasErrors())
+                return PrepareStageResult::IoFailure;
+            return IsPrepareCancellationRequested(observer) ? PrepareStageResult::Cancelled : PrepareStageResult::Success;
         }
 
         [[nodiscard]] bool PathInRoots(const containers::ArraySpan<const filesystem::AbsolutePath> roots,
@@ -229,14 +410,18 @@ namespace vanguard::assets
     {
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
 
-        Impl() noexcept : roots(memory::pools::Assets::GetInstance()), mutations(memory::pools::Assets::GetInstance()) {}
+        Impl() noexcept
+            : roots(memory::pools::Assets::GetInstance()), assertionRoots(memory::pools::Assets::GetInstance()),
+              mutations(memory::pools::Assets::GetInstance()) {}
 
         filesystem::Manager* files = nullptr;
         filesystem::AbsolutePath journal;
         filesystem::AbsolutePath journalStage;
         containers::DynamicArray<filesystem::AbsolutePath> roots;
+        containers::DynamicArray<filesystem::AbsolutePath> assertionRoots;
         containers::DynamicArray<Mutation> mutations;
         AssetFileTransactionState state = AssetFileTransactionState::Closed;
+        bool appliedPrepared = false;
         u32 maximumEntries = 0;
         u64 maximumFileBytes = 0;
         u64 maximumStagedBytes = 0;
@@ -251,10 +436,19 @@ namespace vanguard::assets
             return {impl.roots.TypedData(), impl.roots.Size()};
         }
 
+        [[nodiscard]] containers::ArraySpan<const filesystem::AbsolutePath> AssertionRoots(const AssetFileTransaction::Impl& impl) noexcept
+        {
+            return {impl.assertionRoots.TypedData(), impl.assertionRoots.Size()};
+        }
+
         [[nodiscard]] bool ValidateMutationPaths(const AssetFileTransaction::Impl& impl, const Mutation& mutation) noexcept
         {
-            return PathInRoots(Roots(impl), mutation.target) && PathInRoots(Roots(impl), mutation.staged) &&
-                   PathInRoots(Roots(impl), mutation.backup) &&
+            if (mutation.kind == MutationKind::AssertDigest)
+                return PathInRoots(AssertionRoots(impl), mutation.target) && mutation.source.Empty() && mutation.staged.Empty() &&
+                       mutation.backup.Empty();
+            if (!PathInRoots(Roots(impl), mutation.target))
+                return false;
+            return PathInRoots(Roots(impl), mutation.staged) && PathInRoots(Roots(impl), mutation.backup) &&
                    (mutation.kind != MutationKind::Move || PathInRoots(Roots(impl), mutation.source));
         }
 
@@ -364,6 +558,26 @@ namespace vanguard::assets
                                                      : AssetFileTransactionResult::LimitExceeded;
         }
 
+        [[nodiscard]] AssetFileTransactionResult StageAssertDigestInternal(
+            AssetFileTransaction::Impl& impl, const filesystem::AbsolutePath& target,
+            const crypto::Digest256& expectedDigest) noexcept
+        {
+            if (!target.IsFilePath() || expectedDigest.IsEmpty() || !PathInRoots(AssertionRoots(impl), target) ||
+                HasPathConflict(impl, {}, target))
+                return AssetFileTransactionResult::InvalidArgument;
+            if (impl.mutations.Size() == impl.maximumEntries)
+                return AssetFileTransactionResult::LimitExceeded;
+            Mutation mutation;
+            mutation.kind = MutationKind::AssertDigest;
+            mutation.target = target;
+            mutation.writeCondition = WriteCondition::ExpectedDigest;
+            mutation.expectedDigest = expectedDigest;
+            const u32 old = impl.mutations.Size();
+            impl.mutations.PushBack(static_cast<Mutation&&>(mutation));
+            return impl.mutations.Size() == old + 1u ? AssetFileTransactionResult::Success
+                                                     : AssetFileTransactionResult::LimitExceeded;
+        }
+
         [[nodiscard]] bool EncodeJournal(const AssetFileTransaction::Impl& impl, const JournalState state,
                                          containers::DynamicArray<u8>& bytes) noexcept
         {
@@ -379,6 +593,17 @@ namespace vanguard::assets
                     !AppendByte(bytes, static_cast<u8>(mutation.writeCondition)) || !AppendByte(bytes, 0u) ||
                     !AppendPath(bytes, mutation.source) || !AppendPath(bytes, mutation.target) ||
                     bytes.Size() > impl.maximumJournalBytes)
+                    return false;
+                u8 evidence = 0u;
+                if (mutation.preTargetDigestValid)
+                    evidence |= JournalEvidencePreTarget;
+                if (mutation.preSourceDigestValid)
+                    evidence |= JournalEvidencePreSource;
+                if (mutation.postDigestValid)
+                    evidence |= JournalEvidencePostTarget;
+                if (!AppendByte(bytes, evidence) || !AppendByte(bytes, 0u) || !AppendByte(bytes, 0u) || !AppendByte(bytes, 0u) ||
+                    !AppendDigest(bytes, mutation.preTargetDigest) || !AppendDigest(bytes, mutation.preSourceDigest) ||
+                    !AppendDigest(bytes, mutation.postDigest) || bytes.Size() > impl.maximumJournalBytes)
                     return false;
             }
             crypto::Sha256Builder hash;
@@ -402,11 +627,246 @@ namespace vanguard::assets
             return filesystem::ReplaceFile(*impl.files, impl.journalStage, impl.journal);
         }
 
+        [[nodiscard]] bool CleanupOwnedFiles(AssetFileTransaction::Impl& impl) noexcept;
+
+        [[nodiscard]] AssetFileTransactionResult CaptureApplyingEvidence(AssetFileTransaction::Impl& impl) noexcept
+        {
+            for (Mutation& mutation : impl.mutations)
+            {
+                mutation.preTargetDigest = {};
+                mutation.preSourceDigest = {};
+                mutation.preTargetDigestValid = false;
+                mutation.preSourceDigestValid = false;
+
+                if (mutation.kind == MutationKind::AssertDigest)
+                {
+                    if (!impl.files->FileExist(mutation.target))
+                        return AssetFileTransactionResult::Conflict;
+                    const FileMatchResult match = MatchFileDigest(*impl.files, mutation.target, mutation.expectedDigest);
+                    if (match != FileMatchResult::Match)
+                        return match == FileMatchResult::Mismatch ? AssetFileTransactionResult::Conflict
+                                                                 : AssetFileTransactionResult::IoFailure;
+                    continue;
+                }
+
+                if (impl.files->FileExist(mutation.backup) ||
+                    (mutation.kind != MutationKind::Write && impl.files->FileExist(mutation.staged)))
+                    return AssetFileTransactionResult::RecoveryRequired;
+
+                const bool targetExists = impl.files->FileExist(mutation.target);
+                if ((mutation.writeCondition == WriteCondition::MustNotExist && targetExists) ||
+                    ((mutation.writeCondition == WriteCondition::ExpectedBytes ||
+                      mutation.writeCondition == WriteCondition::ExpectedDigest) &&
+                     !targetExists))
+                    return AssetFileTransactionResult::Conflict;
+                if (targetExists != mutation.targetExisted)
+                    return AssetFileTransactionResult::IoFailure;
+
+                if (mutation.kind == MutationKind::Write)
+                {
+                    if (!mutation.postDigestValid || !impl.files->FileExist(mutation.staged))
+                        return AssetFileTransactionResult::IoFailure;
+                    const FileMatchResult stagedMatch = MatchFileDigest(*impl.files, mutation.staged, mutation.postDigest);
+                    if (stagedMatch != FileMatchResult::Match)
+                        return AssetFileTransactionResult::IoFailure;
+                }
+
+                if (mutation.targetExisted)
+                {
+                    if (mutation.writeCondition == WriteCondition::ExpectedBytes)
+                    {
+                        const FileMatchResult match =
+                            MatchFile(*impl.files, mutation.target, {mutation.expectedBytes.TypedData(), mutation.expectedBytes.Size()});
+                        if (match != FileMatchResult::Match)
+                            return match == FileMatchResult::Mismatch ? AssetFileTransactionResult::Conflict
+                                                                     : AssetFileTransactionResult::IoFailure;
+                        if (!DigestBytes({mutation.expectedBytes.TypedData(), mutation.expectedBytes.Size()}, mutation.preTargetDigest))
+                            return AssetFileTransactionResult::IoFailure;
+                    }
+                    else if (mutation.writeCondition == WriteCondition::ExpectedDigest)
+                    {
+                        const FileMatchResult match = MatchFileDigest(*impl.files, mutation.target, mutation.expectedDigest);
+                        if (match != FileMatchResult::Match)
+                            return match == FileMatchResult::Mismatch ? AssetFileTransactionResult::Conflict
+                                                                     : AssetFileTransactionResult::IoFailure;
+                        mutation.preTargetDigest = mutation.expectedDigest;
+                    }
+                    else if (DigestFile(*impl.files, mutation.target, mutation.preTargetDigest) != FileMatchResult::Match)
+                        return AssetFileTransactionResult::IoFailure;
+                    mutation.preTargetDigestValid = true;
+                }
+
+                if (mutation.kind == MutationKind::Move)
+                {
+                    if (!impl.files->FileExist(mutation.source) ||
+                        DigestFile(*impl.files, mutation.source, mutation.preSourceDigest) != FileMatchResult::Match)
+                        return AssetFileTransactionResult::IoFailure;
+                    mutation.preSourceDigestValid = true;
+                }
+            }
+            return AssetFileTransactionResult::Success;
+        }
+
+        [[nodiscard]] bool CanRecoverApplyingMutation(AssetFileTransaction::Impl& impl, const Mutation& mutation) noexcept
+        {
+            if (!ValidateMutationPaths(impl, mutation))
+                return false;
+            if (mutation.kind == MutationKind::AssertDigest)
+                return !mutation.preTargetDigestValid && !mutation.preSourceDigestValid && !mutation.postDigestValid;
+            if (mutation.kind != MutationKind::Write && impl.files->FileExist(mutation.staged))
+                return false;
+
+            const bool targetExists = impl.files->FileExist(mutation.target);
+            const bool backupExists = impl.files->FileExist(mutation.backup);
+            if (mutation.kind == MutationKind::Write)
+            {
+                if (!mutation.postDigestValid || mutation.preSourceDigestValid)
+                    return false;
+                const bool stageExists = impl.files->FileExist(mutation.staged);
+                if (mutation.targetExisted)
+                {
+                    if (!mutation.preTargetDigestValid)
+                        return false;
+                    if (backupExists)
+                    {
+                        if (MatchFileDigest(*impl.files, mutation.backup, mutation.preTargetDigest) != FileMatchResult::Match)
+                            return false;
+                        if (targetExists)
+                            return !stageExists &&
+                                   MatchFileDigest(*impl.files, mutation.target, mutation.postDigest) == FileMatchResult::Match;
+                        return stageExists;
+                    }
+                    return targetExists &&
+                           MatchFileDigest(*impl.files, mutation.target, mutation.preTargetDigest) == FileMatchResult::Match;
+                }
+                if (mutation.preTargetDigestValid || backupExists)
+                    return false;
+                if (stageExists || !targetExists)
+                    return true;
+                return MatchFileDigest(*impl.files, mutation.target, mutation.postDigest) == FileMatchResult::Match;
+            }
+
+            if (mutation.kind == MutationKind::Delete)
+            {
+                if (!mutation.targetExisted || !mutation.preTargetDigestValid || mutation.preSourceDigestValid ||
+                    mutation.postDigestValid)
+                    return false;
+                if (backupExists)
+                    return !targetExists &&
+                           MatchFileDigest(*impl.files, mutation.backup, mutation.preTargetDigest) == FileMatchResult::Match;
+                return targetExists &&
+                       MatchFileDigest(*impl.files, mutation.target, mutation.preTargetDigest) == FileMatchResult::Match;
+            }
+
+            if (mutation.kind != MutationKind::Move || !mutation.preSourceDigestValid || mutation.postDigestValid)
+                return false;
+            const bool sourceExists = impl.files->FileExist(mutation.source);
+            if (mutation.targetExisted != mutation.preTargetDigestValid)
+                return false;
+            if (sourceExists)
+            {
+                if (MatchFileDigest(*impl.files, mutation.source, mutation.preSourceDigest) != FileMatchResult::Match)
+                    return false;
+                if (!mutation.targetExisted)
+                    return !backupExists && !targetExists;
+                if (backupExists)
+                {
+                    if (MatchFileDigest(*impl.files, mutation.backup, mutation.preTargetDigest) != FileMatchResult::Match)
+                        return false;
+                    return !targetExists ||
+                           MatchFileDigest(*impl.files, mutation.target, mutation.preTargetDigest) == FileMatchResult::Match;
+                }
+                return targetExists &&
+                       MatchFileDigest(*impl.files, mutation.target, mutation.preTargetDigest) == FileMatchResult::Match;
+            }
+
+            if (!targetExists || MatchFileDigest(*impl.files, mutation.target, mutation.preSourceDigest) != FileMatchResult::Match)
+                return false;
+            if (mutation.targetExisted)
+                return backupExists &&
+                       MatchFileDigest(*impl.files, mutation.backup, mutation.preTargetDigest) == FileMatchResult::Match;
+            return !backupExists;
+        }
+
+        [[nodiscard]] bool RecoverApplyingMutation(AssetFileTransaction::Impl& impl, Mutation& mutation) noexcept
+        {
+            if (!CanRecoverApplyingMutation(impl, mutation))
+                return false;
+            if (mutation.kind == MutationKind::AssertDigest)
+                return true;
+
+            const bool targetExists = impl.files->FileExist(mutation.target);
+            const bool backupExists = impl.files->FileExist(mutation.backup);
+            if (mutation.kind == MutationKind::Write)
+            {
+                const bool stageExists = impl.files->FileExist(mutation.staged);
+                if (mutation.targetExisted)
+                {
+                    if (!backupExists)
+                        return true;
+                    // Restore in one filesystem operation. Delete-then-restore
+                    // would create a crash tuple (backup present, target absent,
+                    // stage consumed) that is ambiguous on the next restart.
+                    return filesystem::ReplaceFile(*impl.files, mutation.backup, mutation.target);
+                }
+                if (stageExists || !targetExists)
+                    return true;
+                return impl.files->DeleteFile(mutation.target);
+            }
+
+            if (mutation.kind == MutationKind::Delete)
+                return !backupExists || filesystem::ReplaceFile(*impl.files, mutation.backup, mutation.target);
+
+            const bool sourceExists = impl.files->FileExist(mutation.source);
+            if (sourceExists)
+            {
+                if (mutation.targetExisted && backupExists && !targetExists)
+                    return filesystem::ReplaceFile(*impl.files, mutation.backup, mutation.target);
+                return true;
+            }
+            if (!filesystem::SystemIO::MoveFile(mutation.target.AsChar(), mutation.source.AsChar()))
+                return false;
+            return !mutation.targetExisted || filesystem::ReplaceFile(*impl.files, mutation.backup, mutation.target);
+        }
+
+        [[nodiscard]] bool RollbackApplying(AssetFileTransaction::Impl& impl) noexcept
+        {
+            for (const Mutation& mutation : impl.mutations)
+                if (!CanRecoverApplyingMutation(impl, mutation))
+                    return false;
+            for (u32 ordinal = impl.mutations.Size(); ordinal > 0u; --ordinal)
+                if (!RecoverApplyingMutation(impl, impl.mutations[ordinal - 1u]))
+                    return false;
+            return CleanupOwnedFiles(impl);
+        }
+
+        [[nodiscard]] bool CleanupUnappliedPrepared(AssetFileTransaction::Impl& impl) noexcept
+        {
+            for (const Mutation& mutation : impl.mutations)
+            {
+                if (!ValidateMutationPaths(impl, mutation))
+                    return false;
+                if (mutation.kind == MutationKind::AssertDigest)
+                    continue;
+                // v5 Prepared proves no authored mutation has begun. A backup
+                // therefore means either a newer Applying transaction or
+                // external interference; preserve it rather than guessing.
+                if (impl.files->FileExist(mutation.backup) ||
+                    (mutation.kind != MutationKind::Write && impl.files->FileExist(mutation.staged)))
+                    return false;
+            }
+            // Never restore or delete authored targets/sources here. Any changes
+            // to those paths happened outside this v5 transaction.
+            return CleanupOwnedFiles(impl);
+        }
+
         [[nodiscard]] bool CleanupOwnedFiles(AssetFileTransaction::Impl& impl) noexcept
         {
             bool success = true;
             for (Mutation& mutation : impl.mutations)
             {
+                if (mutation.kind == MutationKind::AssertDigest)
+                    continue;
                 if (impl.files->FileExist(mutation.staged) && !impl.files->DeleteFile(mutation.staged))
                     success = false;
                 if (impl.files->FileExist(mutation.backup) && !impl.files->DeleteFile(mutation.backup))
@@ -438,6 +898,8 @@ namespace vanguard::assets
             for (u32 ordinal = impl.mutations.Size(); ordinal > 0u; --ordinal)
             {
                 Mutation& mutation = impl.mutations[ordinal - 1u];
+                if (mutation.kind == MutationKind::AssertDigest)
+                    continue;
                 if (mutation.kind == MutationKind::Move && !impl.files->FileExist(mutation.source))
                 {
                     // A completed move into an originally occupied target must
@@ -526,6 +988,8 @@ namespace vanguard::assets
         {
             for (const Mutation& mutation : impl.mutations)
             {
+                if (mutation.kind == MutationKind::AssertDigest)
+                    continue;
                 if (mutation.kind == MutationKind::Delete)
                 {
                     if (impl.files->FileExist(mutation.target))
@@ -576,17 +1040,18 @@ namespace vanguard::assets
         }
 
         [[nodiscard]] bool DecodeJournal(AssetFileTransaction::Impl& impl, const containers::ArraySpan<const u8> bytes,
-                                         JournalState& state) noexcept
+                                         JournalState& state, u32& decodedVersion) noexcept
         {
             if (bytes.Count() < JournalHeaderBytes)
                 return false;
             u32 cursor = 0;
             u32 magic = 0, version = 0, encodedState = 0, count = 0;
             if (!ReadU32(bytes, cursor, magic) || !ReadU32(bytes, cursor, version) || !ReadU32(bytes, cursor, encodedState) ||
-                !ReadU32(bytes, cursor, count) || magic != JournalMagic ||
-                (version != LegacyJournalVersion && version != ConditionalWriteJournalVersion && version != JournalVersion) || count == 0u ||
-                count > impl.maximumEntries ||
-                encodedState < static_cast<u32>(JournalState::Staging) || encodedState > static_cast<u32>(JournalState::Committed))
+                !ReadU32(bytes, cursor, count) || magic != JournalMagic || version < LegacyJournalVersion || version > JournalVersion ||
+                count == 0u || count > impl.maximumEntries || encodedState < static_cast<u32>(JournalState::Staging) ||
+                encodedState > (version >= JournalVersion ? static_cast<u32>(JournalState::Applying)
+                                                          : static_cast<u32>(JournalState::Committed)) ||
+                (version < JournalVersion && encodedState == static_cast<u32>(JournalState::Applying)))
                 return false;
             crypto::Digest256 expected;
             std::memcpy(expected.bytes, bytes.Data() + 16u, crypto::Digest256::ByteCount);
@@ -608,23 +1073,72 @@ namespace vanguard::assets
                 mutation.targetExisted = targetExisted != 0u;
                 mutation.writeCondition = version == LegacyJournalVersion ? WriteCondition::Any
                                                                           : static_cast<WriteCondition>(encodedWriteCondition);
-                const u8 maximumCondition = version == JournalVersion ? static_cast<u8>(WriteCondition::ExpectedDigest)
-                                                                       : static_cast<u8>(WriteCondition::ExpectedBytes);
+                const u8 maximumCondition = version >= DigestConditionalJournalVersion ? static_cast<u8>(WriteCondition::ExpectedDigest)
+                                                                                        : static_cast<u8>(WriteCondition::ExpectedBytes);
                 const bool validConditionForKind =
                     mutation.kind == MutationKind::Write ||
                     (mutation.kind == MutationKind::Delete &&
                      (mutation.writeCondition == WriteCondition::Any || mutation.writeCondition == WriteCondition::ExpectedDigest)) ||
-                    (mutation.kind == MutationKind::Move && mutation.writeCondition == WriteCondition::Any);
-                if (mutation.kind > MutationKind::Delete || !ReadPath(bytes, cursor, mutation.source, mutation.kind != MutationKind::Move) ||
+                    (mutation.kind == MutationKind::Move && mutation.writeCondition == WriteCondition::Any) ||
+                    (version >= AssertionJournalVersion && mutation.kind == MutationKind::AssertDigest &&
+                     mutation.writeCondition == WriteCondition::ExpectedDigest);
+                if (mutation.kind > (version >= AssertionJournalVersion ? MutationKind::AssertDigest : MutationKind::Delete) ||
+                    !ReadPath(bytes, cursor, mutation.source, mutation.kind != MutationKind::Move) ||
                     !ReadPath(bytes, cursor, mutation.target) ||
                     targetExisted > 1u || (version == LegacyJournalVersion && encodedWriteCondition != 0u) ||
                     (version != LegacyJournalVersion && encodedWriteCondition > maximumCondition) ||
                     reserved1 != 0u || !validConditionForKind ||
-                    !DeriveOwnedPaths(mutation) || HasOwnedPathConflict(impl, mutation) ||
+                    (mutation.kind != MutationKind::AssertDigest &&
+                     (!DeriveOwnedPaths(mutation) || HasOwnedPathConflict(impl, mutation))) ||
                     !ValidateMutationPaths(impl, mutation) ||
                     (mutation.kind == MutationKind::Move && RootIndex(Roots(impl), mutation.source) != RootIndex(Roots(impl), mutation.target)) ||
                     (mutation.kind != MutationKind::Move && !mutation.source.Empty()) || HasPathConflict(impl, mutation.source, mutation.target))
                     return false;
+                if (version >= JournalVersion)
+                {
+                    if (cursor > bytes.Count() || bytes.Count() - cursor < 4u)
+                        return false;
+                    const u8 evidence = bytes[cursor++];
+                    const u8 reserved2 = bytes[cursor++];
+                    const u8 reserved3 = bytes[cursor++];
+                    const u8 reserved4 = bytes[cursor++];
+                    if ((evidence & ~(JournalEvidencePreTarget | JournalEvidencePreSource | JournalEvidencePostTarget)) != 0u ||
+                        reserved2 != 0u || reserved3 != 0u || reserved4 != 0u ||
+                        !ReadDigest(bytes, cursor, mutation.preTargetDigest) ||
+                        !ReadDigest(bytes, cursor, mutation.preSourceDigest) || !ReadDigest(bytes, cursor, mutation.postDigest))
+                        return false;
+                    mutation.preTargetDigestValid = (evidence & JournalEvidencePreTarget) != 0u;
+                    mutation.preSourceDigestValid = (evidence & JournalEvidencePreSource) != 0u;
+                    mutation.postDigestValid = (evidence & JournalEvidencePostTarget) != 0u;
+
+                    const bool applyingOrCommitted =
+                        encodedState == static_cast<u32>(JournalState::Applying) ||
+                        encodedState == static_cast<u32>(JournalState::Committed);
+                    if (mutation.kind == MutationKind::Write)
+                    {
+                        if (!mutation.postDigestValid || mutation.preSourceDigestValid ||
+                            (applyingOrCommitted && mutation.preTargetDigestValid != mutation.targetExisted) ||
+                            (!applyingOrCommitted && mutation.preTargetDigestValid))
+                            return false;
+                    }
+                    else if (mutation.kind == MutationKind::Move)
+                    {
+                        if (mutation.postDigestValid ||
+                            (applyingOrCommitted &&
+                             (!mutation.preSourceDigestValid || mutation.preTargetDigestValid != mutation.targetExisted)) ||
+                            (!applyingOrCommitted && (mutation.preTargetDigestValid || mutation.preSourceDigestValid)))
+                            return false;
+                    }
+                    else if (mutation.kind == MutationKind::Delete)
+                    {
+                        if (mutation.postDigestValid || mutation.preSourceDigestValid ||
+                            (applyingOrCommitted && (!mutation.targetExisted || !mutation.preTargetDigestValid)) ||
+                            (!applyingOrCommitted && mutation.preTargetDigestValid))
+                            return false;
+                    }
+                    else if (mutation.preTargetDigestValid || mutation.preSourceDigestValid || mutation.postDigestValid)
+                        return false;
+                }
                 impl.mutations.PushBack(static_cast<Mutation&&>(mutation));
                 if (impl.mutations.Size() != index + 1u)
                     return false;
@@ -632,6 +1146,7 @@ namespace vanguard::assets
             if (cursor != bytes.Count())
                 return false;
             state = static_cast<JournalState>(encodedState);
+            decodedVersion = version;
             return true;
         }
 
@@ -639,13 +1154,15 @@ namespace vanguard::assets
         {
             impl.mutations.Clear();
             impl.stagedBytes = 0u;
+            impl.appliedPrepared = false;
             impl.state = AssetFileTransactionState::Ready;
         }
     }
 
     bool AssetFileTransactionConfig::IsValid() const noexcept
     {
-        return journalPath.IsFilePath() && !writableRoots.Empty() && writableRoots.Data() != nullptr && maximumEntries != 0u &&
+        return journalPath.IsFilePath() && !writableRoots.Empty() && writableRoots.Data() != nullptr &&
+               !assertionRoots.Empty() && assertionRoots.Data() != nullptr && maximumEntries != 0u &&
                maximumFileBytes != 0u && maximumStagedBytes >= maximumFileBytes && maximumJournalBytes >= JournalHeaderBytes;
     }
 
@@ -699,7 +1216,32 @@ namespace vanguard::assets
                 return AssetFileTransactionResult::LimitExceeded;
             }
         }
-        if (impl->roots.Size() != config.writableRoots.Count() || !impl->journalStage.IsFilePath() ||
+        for (const filesystem::AbsolutePath& root : config.assertionRoots)
+        {
+            const filesystem::AbsolutePath probe = root.AddFilePath("vtxn-assert-root-check");
+            if (!root.IsDirectoryPath() || root.IsOnlyRootPath() || !probe.IsFilePath() ||
+                filesystem::ValidateMutationPath(root, probe) != filesystem::MutationPathResult::Success)
+            {
+                VANGUARD_DELETE(impl);
+                return AssetFileTransactionResult::InvalidArgument;
+            }
+            for (const filesystem::AbsolutePath& previous : impl->assertionRoots)
+                if (root.AsStringView().StartsWithIgnoreCase(previous.AsStringView()) ||
+                    previous.AsStringView().StartsWithIgnoreCase(root.AsStringView()))
+                {
+                    VANGUARD_DELETE(impl);
+                    return AssetFileTransactionResult::InvalidArgument;
+                }
+            const u32 oldRootCount = impl->assertionRoots.Size();
+            impl->assertionRoots.PushBack(root);
+            if (impl->assertionRoots.Size() != oldRootCount + 1u || impl->assertionRoots[oldRootCount] != root)
+            {
+                VANGUARD_DELETE(impl);
+                return AssetFileTransactionResult::LimitExceeded;
+            }
+        }
+        if (impl->roots.Size() != config.writableRoots.Count() || impl->assertionRoots.Size() != config.assertionRoots.Count() ||
+            !impl->journalStage.IsFilePath() ||
             filesystem::paths::ParentAbsolutePath(impl->journalStage) != filesystem::paths::ParentAbsolutePath(impl->journal) ||
             filesystem::ValidateMutationPath(filesystem::paths::ParentAbsolutePath(impl->journal), impl->journal) !=
                 filesystem::MutationPathResult::Success ||
@@ -725,8 +1267,9 @@ namespace vanguard::assets
             recovery->journalFound = true;
         containers::DynamicArray<u8> journalBytes(memory::pools::Assets::GetInstance());
         JournalState journalState = JournalState::Staging;
+        u32 journalVersion = 0u;
         if (!ReadFile(files, impl->journal, impl->maximumJournalBytes, journalBytes) ||
-            !DecodeJournal(*impl, {journalBytes.TypedData(), journalBytes.Size()}, journalState))
+            !DecodeJournal(*impl, {journalBytes.TypedData(), journalBytes.Size()}, journalState, journalVersion))
         {
             impl->state = AssetFileTransactionState::RecoveryRequired;
             return AssetFileTransactionResult::InvalidJournal;
@@ -743,7 +1286,13 @@ namespace vanguard::assets
         }
         else if (journalState == JournalState::Prepared)
         {
-            recovered = RollbackPrepared(*impl);
+            recovered = journalVersion >= JournalVersion ? CleanupUnappliedPrepared(*impl) : RollbackPrepared(*impl);
+            if (recovery != nullptr)
+                recovery->rolledBack = recovered;
+        }
+        else if (journalState == JournalState::Applying)
+        {
+            recovered = RollbackApplying(*impl);
             if (recovery != nullptr)
                 recovery->rolledBack = recovered;
         }
@@ -766,7 +1315,8 @@ namespace vanguard::assets
     {
         if (m_impl == nullptr)
             return AssetFileTransactionResult::Success;
-        if (m_impl->state == AssetFileTransactionState::Prepared || m_impl->state == AssetFileTransactionState::RecoveryRequired)
+        if (m_impl->state == AssetFileTransactionState::Prepared || m_impl->state == AssetFileTransactionState::Committed ||
+            m_impl->state == AssetFileTransactionState::RecoveryRequired)
             return AssetFileTransactionResult::InvalidState;
         VANGUARD_DELETE(m_impl);
         m_impl = nullptr;
@@ -822,6 +1372,14 @@ namespace vanguard::assets
         return StageWriteInternal(*m_impl, target, replacementBytes, WriteCondition::ExpectedDigest, {}, &expectedDigest);
     }
 
+    AssetFileTransactionResult AssetFileTransaction::StageAssertDigestMatches(
+        const filesystem::AbsolutePath& target, const crypto::Digest256& expectedDigest) noexcept
+    {
+        if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Collecting)
+            return AssetFileTransactionResult::InvalidState;
+        return StageAssertDigestInternal(*m_impl, target, expectedDigest);
+    }
+
     AssetFileTransactionResult AssetFileTransaction::StageMove(const filesystem::AbsolutePath& source,
                                                                const filesystem::AbsolutePath& target) noexcept
     {
@@ -862,12 +1420,20 @@ namespace vanguard::assets
 
     AssetFileTransactionResult AssetFileTransaction::Prepare() noexcept
     {
+        return Prepare({});
+    }
+
+    AssetFileTransactionResult AssetFileTransaction::Prepare(const AssetFileTransactionPrepareObserver& observer) noexcept
+    {
         if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Collecting || m_impl->mutations.Empty())
             return AssetFileTransactionResult::InvalidState;
+        if (IsPrepareCancellationRequested(observer))
+            return AssetFileTransactionResult::Cancelled;
         for (Mutation& mutation : m_impl->mutations)
         {
-            if (!ValidateMutationPaths(*m_impl, mutation) || m_impl->files->FileExist(mutation.staged) ||
-                m_impl->files->FileExist(mutation.backup))
+            if (!ValidateMutationPaths(*m_impl, mutation) ||
+                (mutation.kind != MutationKind::AssertDigest &&
+                 (m_impl->files->FileExist(mutation.staged) || m_impl->files->FileExist(mutation.backup))))
                 return AssetFileTransactionResult::Conflict;
             mutation.targetExisted = m_impl->files->FileExist(mutation.target);
             if ((mutation.writeCondition == WriteCondition::MustNotExist && mutation.targetExisted) ||
@@ -877,10 +1443,13 @@ namespace vanguard::assets
             if ((mutation.kind == MutationKind::Move && !m_impl->files->FileExist(mutation.source)) ||
                 (mutation.kind == MutationKind::Delete && !mutation.targetExisted))
                 return AssetFileTransactionResult::Conflict;
-            if ((mutation.targetExisted && m_impl->files->GetFileSize(mutation.target) > m_impl->maximumFileBytes) ||
+            if ((mutation.kind != MutationKind::AssertDigest && mutation.targetExisted &&
+                 m_impl->files->GetFileSize(mutation.target) > m_impl->maximumFileBytes) ||
                 (mutation.kind == MutationKind::Move && m_impl->files->GetFileSize(mutation.source) > m_impl->maximumFileBytes))
                 return AssetFileTransactionResult::LimitExceeded;
         }
+        if (IsPrepareCancellationRequested(observer))
+            return AssetFileTransactionResult::Cancelled;
         if (!PublishJournal(*m_impl, JournalState::Staging))
         {
             if (!CleanupOwnedFiles(*m_impl) || (m_impl->files->FileExist(m_impl->journal) && !m_impl->files->DeleteFile(m_impl->journal)))
@@ -890,17 +1459,42 @@ namespace vanguard::assets
             }
             return AssetFileTransactionResult::IoFailure;
         }
-        for (Mutation& mutation : m_impl->mutations)
-            if (mutation.kind == MutationKind::Write &&
-                !WriteAndVerify(*m_impl->files, mutation.staged, {mutation.bytes.TypedData(), mutation.bytes.Size()}))
+        u64 totalProgressBytes = 0u;
+        for (const Mutation& mutation : m_impl->mutations)
+            if (mutation.kind == MutationKind::Write)
             {
+                totalProgressBytes = AddProgressBytes(totalProgressBytes, mutation.bytes.Size());
+                totalProgressBytes = AddProgressBytes(totalProgressBytes, mutation.bytes.Size());
+            }
+        u64 completedProgressBytes = 0u;
+        for (Mutation& mutation : m_impl->mutations)
+            if (mutation.kind == MutationKind::Write)
+            {
+                const PrepareStageResult staged = WriteAndVerifyPreparedStage(
+                    *m_impl->files, mutation.staged, {mutation.bytes.TypedData(), mutation.bytes.Size()}, observer,
+                    completedProgressBytes, totalProgressBytes);
+                if (staged == PrepareStageResult::Success)
+                    continue;
                 if (!CleanupOwnedFiles(*m_impl) || !m_impl->files->DeleteFile(m_impl->journal))
                 {
                     m_impl->state = AssetFileTransactionState::RecoveryRequired;
                     return AssetFileTransactionResult::RecoveryRequired;
                 }
-                return AssetFileTransactionResult::IoFailure;
+                return staged == PrepareStageResult::Cancelled ? AssetFileTransactionResult::Cancelled
+                                                               : AssetFileTransactionResult::IoFailure;
             }
+        // Prepared is the cut after which restart treats every stage as a complete
+        // unapplied transaction. Honor cancellation immediately before that
+        // durable record; once publication starts, its result owns the outcome.
+        if (IsPrepareCancellationRequested(observer))
+        {
+            if (!CleanupOwnedFiles(*m_impl) || !m_impl->files->DeleteFile(m_impl->journal))
+            {
+                m_impl->state = AssetFileTransactionState::RecoveryRequired;
+                return AssetFileTransactionResult::RecoveryRequired;
+            }
+            return AssetFileTransactionResult::Cancelled;
+        }
         if (!PublishJournal(*m_impl, JournalState::Prepared))
         {
             if (!CleanupOwnedFiles(*m_impl) || !m_impl->files->DeleteFile(m_impl->journal))
@@ -913,6 +1507,7 @@ namespace vanguard::assets
         for (Mutation& mutation : m_impl->mutations)
             if (mutation.writeCondition == WriteCondition::Any || mutation.writeCondition == WriteCondition::ExpectedDigest)
                 mutation.bytes.Clear();
+        m_impl->appliedPrepared = false;
         m_impl->state = AssetFileTransactionState::Prepared;
         return AssetFileTransactionResult::Success;
     }
@@ -921,25 +1516,92 @@ namespace vanguard::assets
         const containers::ArraySpan<const filesystem::AbsolutePath> trackedPaths,
         const containers::ArraySpan<AssetFileTransactionPostCondition> postConditions) noexcept
     {
-        if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Prepared || trackedPaths.Count() != postConditions.Count())
+        if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Prepared ||
+            trackedPaths.Count() != postConditions.Count())
             return AssetFileTransactionResult::InvalidState;
-        for (u32 index = 0; index < postConditions.Count(); ++index)
-            postConditions[index] = {};
+        AssetFileTransactionResult result = ApplyPrepared();
+        if (result != AssetFileTransactionResult::Success)
+            return result;
+        result = PublishCommit();
+        if (result != AssetFileTransactionResult::Success)
+        {
+            const AssetFileTransactionResult rollback = Rollback();
+            return rollback == AssetFileTransactionResult::Success ? result : rollback;
+        }
+        return CompleteCommit(trackedPaths, postConditions);
+    }
+
+    AssetFileTransactionResult AssetFileTransaction::ApplyPrepared() noexcept
+    {
+        if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Prepared || m_impl->appliedPrepared)
+            return AssetFileTransactionResult::InvalidState;
         for (const Mutation& mutation : m_impl->mutations)
             if (!ValidateMutationPaths(*m_impl, mutation))
             {
                 m_impl->state = AssetFileTransactionState::RecoveryRequired;
                 return AssetFileTransactionResult::RecoveryRequired;
             }
+
+        const AssetFileTransactionResult evidence = CaptureApplyingEvidence(*m_impl);
+        if (evidence != AssetFileTransactionResult::Success)
+        {
+            if (evidence == AssetFileTransactionResult::RecoveryRequired)
+            {
+                m_impl->state = AssetFileTransactionState::RecoveryRequired;
+                return evidence;
+            }
+            // No authored mutation has begun. Only transaction-owned staging
+            // files may be removed; a target/source that changed after Prepare
+            // belongs to the concurrent writer and must be left untouched.
+            if (CleanupOwnedFiles(*m_impl) && m_impl->files->DeleteFile(m_impl->journal))
+            {
+                ClearTransaction(*m_impl);
+                return evidence;
+            }
+            m_impl->state = AssetFileTransactionState::RecoveryRequired;
+            return AssetFileTransactionResult::RecoveryRequired;
+        }
+        // Applying is a write-ahead recovery boundary. Every before/after digest
+        // needed to undo an interrupted application is durable before the first
+        // authored path is moved.
+        if (!PublishJournal(*m_impl, JournalState::Applying))
+        {
+            if (CleanupOwnedFiles(*m_impl) && m_impl->files->DeleteFile(m_impl->journal))
+            {
+                ClearTransaction(*m_impl);
+                return AssetFileTransactionResult::IoFailure;
+            }
+            m_impl->state = AssetFileTransactionState::RecoveryRequired;
+            return AssetFileTransactionResult::RecoveryRequired;
+        }
+
         bool applied = true;
         bool conflict = false;
         for (Mutation& mutation : m_impl->mutations)
         {
-            if (m_impl->files->FileExist(mutation.backup))
+            if (mutation.kind == MutationKind::AssertDigest)
             {
-                // Prepare proved this transaction-owned sibling absent. If it
-                // appears before commit, ownership is ambiguous; never let the
-                // replacing move overwrite it or cleanup guess which bytes win.
+                if (!m_impl->files->FileExist(mutation.target))
+                {
+                    conflict = true;
+                    applied = false;
+                    break;
+                }
+                const FileMatchResult match = MatchFileDigest(*m_impl->files, mutation.target, mutation.expectedDigest);
+                if (match != FileMatchResult::Match)
+                {
+                    conflict = match == FileMatchResult::Mismatch;
+                    applied = false;
+                    break;
+                }
+                continue;
+            }
+            if (m_impl->files->FileExist(mutation.backup) ||
+                (mutation.kind != MutationKind::Write && m_impl->files->FileExist(mutation.staged)))
+            {
+                // Applying was published with these transaction-owned siblings
+                // absent. A new unexpected sibling is external interference;
+                // preserve it and the journal rather than guessing ownership.
                 m_impl->state = AssetFileTransactionState::RecoveryRequired;
                 return AssetFileTransactionResult::RecoveryRequired;
             }
@@ -951,38 +1613,92 @@ namespace vanguard::assets
                 applied = false;
                 break;
             }
-            if (targetExists != mutation.targetExisted ||
-                (mutation.kind == MutationKind::Write && !m_impl->files->FileExist(mutation.staged)) ||
-                (mutation.kind == MutationKind::Move && !m_impl->files->FileExist(mutation.source)))
-            {
-                applied = false;
-                break;
-            }
-            if (mutation.targetExisted && !filesystem::SystemIO::MoveFile(mutation.target.AsChar(), mutation.backup.AsChar()))
+            if (targetExists != mutation.targetExisted)
             {
                 applied = false;
                 break;
             }
             if (mutation.targetExisted)
-                mutation.touched = true;
-            if ((mutation.writeCondition == WriteCondition::ExpectedBytes || mutation.writeCondition == WriteCondition::ExpectedDigest) &&
-                mutation.targetExisted)
             {
-                const FileMatchResult movedMatch = mutation.writeCondition == WriteCondition::ExpectedDigest
-                                                       ? MatchFileDigest(*m_impl->files, mutation.backup, mutation.expectedDigest)
-                                                       : MatchFile(*m_impl->files, mutation.backup,
-                                                                   {mutation.expectedBytes.TypedData(), mutation.expectedBytes.Size()});
-                mutation.backupMatchesExpected = movedMatch == FileMatchResult::Match;
-                if (!mutation.backupMatchesExpected)
+                const FileMatchResult currentMatch =
+                    mutation.writeCondition == WriteCondition::ExpectedDigest
+                        ? MatchFileDigest(*m_impl->files, mutation.target, mutation.expectedDigest)
+                        : (mutation.writeCondition == WriteCondition::ExpectedBytes
+                               ? MatchFile(*m_impl->files, mutation.target,
+                                           {mutation.expectedBytes.TypedData(), mutation.expectedBytes.Size()})
+                               : MatchFileDigest(*m_impl->files, mutation.target, mutation.preTargetDigest));
+                if (currentMatch != FileMatchResult::Match)
                 {
-                    conflict = movedMatch == FileMatchResult::Mismatch;
+                    conflict = (mutation.writeCondition == WriteCondition::ExpectedBytes ||
+                                mutation.writeCondition == WriteCondition::ExpectedDigest) &&
+                               currentMatch == FileMatchResult::Mismatch;
+                    applied = false;
+                    break;
+                }
+            }
+
+            if (mutation.kind == MutationKind::Write)
+            {
+                if (!m_impl->files->FileExist(mutation.staged) ||
+                    MatchFileDigest(*m_impl->files, mutation.staged, mutation.postDigest) != FileMatchResult::Match)
+                {
+                    applied = false;
+                    break;
+                }
+            }
+            else if (mutation.kind == MutationKind::Move)
+            {
+                if (!m_impl->files->FileExist(mutation.source) ||
+                    MatchFileDigest(*m_impl->files, mutation.source, mutation.preSourceDigest) != FileMatchResult::Match)
+                {
+                    applied = false;
+                    break;
+                }
+            }
+
+            const bool atomicExistingWrite = mutation.targetExisted && mutation.kind == MutationKind::Write &&
+                                             mutation.writeCondition == WriteCondition::Any;
+            if (mutation.targetExisted && !atomicExistingWrite &&
+                !filesystem::SystemIO::MoveFile(mutation.target.AsChar(), mutation.backup.AsChar()))
+            {
+                applied = false;
+                break;
+            }
+            if (mutation.targetExisted && !atomicExistingWrite)
+            {
+                mutation.touched = true;
+                const FileMatchResult movedMatch =
+                    mutation.writeCondition == WriteCondition::ExpectedDigest
+                        ? MatchFileDigest(*m_impl->files, mutation.backup, mutation.expectedDigest)
+                        : (mutation.writeCondition == WriteCondition::ExpectedBytes
+                               ? MatchFile(*m_impl->files, mutation.backup,
+                                           {mutation.expectedBytes.TypedData(), mutation.expectedBytes.Size()})
+                               : MatchFileDigest(*m_impl->files, mutation.backup, mutation.preTargetDigest));
+                mutation.backupMatchesExpected =
+                    (mutation.writeCondition == WriteCondition::ExpectedBytes ||
+                     mutation.writeCondition == WriteCondition::ExpectedDigest) &&
+                    movedMatch == FileMatchResult::Match;
+                if (movedMatch != FileMatchResult::Match)
+                {
+                    conflict = (mutation.writeCondition == WriteCondition::ExpectedBytes ||
+                                mutation.writeCondition == WriteCondition::ExpectedDigest) &&
+                               movedMatch == FileMatchResult::Mismatch;
                     applied = false;
                     break;
                 }
             }
             if (mutation.kind == MutationKind::Write)
             {
-                if (mutation.writeCondition == WriteCondition::Any)
+                if (atomicExistingWrite)
+                {
+                    applied = filesystem::ReplaceFileWithBackup(*m_impl->files, mutation.staged, mutation.target, mutation.backup);
+                    if (applied)
+                    {
+                        mutation.touched = true;
+                        applied = MatchFileDigest(*m_impl->files, mutation.backup, mutation.preTargetDigest) == FileMatchResult::Match;
+                    }
+                }
+                else if (mutation.writeCondition == WriteCondition::Any)
                     applied = filesystem::ReplaceFile(*m_impl->files, mutation.staged, mutation.target);
                 else
                 {
@@ -1004,20 +1720,52 @@ namespace vanguard::assets
                         applied = false;
                 }
                 if (applied)
+                {
                     mutation.touched = true;
+                    applied = MatchFileDigest(*m_impl->files, mutation.target, mutation.postDigest) == FileMatchResult::Match;
+                }
             }
             else if (mutation.kind == MutationKind::Move)
             {
                 applied = filesystem::SystemIO::MoveFile(mutation.source.AsChar(), mutation.target.AsChar());
                 if (applied)
+                {
                     mutation.touched = true;
+                    applied = MatchFileDigest(*m_impl->files, mutation.target, mutation.preSourceDigest) == FileMatchResult::Match;
+                }
             }
             if (!applied)
                 break;
         }
-        if (!applied || !PublishJournal(*m_impl, JournalState::Committed))
+        // Assertions are checked before mutation for the common stale case and
+        // again after every authored mutation has been applied. The latter is
+        // the asserted-file snapshot boundary: if a dependency/source changed
+        // while the composite write was in flight, roll every touched authored
+        // file back instead of committing metadata for a stale plan.
+        if (applied)
         {
-            if (RollbackTouched(*m_impl) && m_impl->files->DeleteFile(m_impl->journal))
+            for (const Mutation& mutation : m_impl->mutations)
+            {
+                if (mutation.kind != MutationKind::AssertDigest)
+                    continue;
+                if (!m_impl->files->FileExist(mutation.target))
+                {
+                    conflict = true;
+                    applied = false;
+                    break;
+                }
+                const FileMatchResult match = MatchFileDigest(*m_impl->files, mutation.target, mutation.expectedDigest);
+                if (match != FileMatchResult::Match)
+                {
+                    conflict = match == FileMatchResult::Mismatch;
+                    applied = false;
+                    break;
+                }
+            }
+        }
+        if (!applied)
+        {
+            if (RollbackApplying(*m_impl) && m_impl->files->DeleteFile(m_impl->journal))
             {
                 ClearTransaction(*m_impl);
                 return conflict ? AssetFileTransactionResult::Conflict : AssetFileTransactionResult::IoFailure;
@@ -1025,6 +1773,32 @@ namespace vanguard::assets
             m_impl->state = AssetFileTransactionState::RecoveryRequired;
             return AssetFileTransactionResult::RecoveryRequired;
         }
+        m_impl->appliedPrepared = true;
+        return AssetFileTransactionResult::Success;
+    }
+
+    AssetFileTransactionResult AssetFileTransaction::PublishCommit() noexcept
+    {
+        if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Prepared || !m_impl->appliedPrepared)
+            return AssetFileTransactionResult::InvalidState;
+        if (!PublishJournal(*m_impl, JournalState::Committed))
+            // Keep the already-applied Prepared transaction rollback-capable.
+            // The caller performs Rollback() after leaving any higher-level
+            // admission mutex; publication itself stays a short journal-only
+            // linearization step.
+            return AssetFileTransactionResult::IoFailure;
+        m_impl->state = AssetFileTransactionState::Committed;
+        return AssetFileTransactionResult::Success;
+    }
+
+    AssetFileTransactionResult AssetFileTransaction::CompleteCommit(
+        const containers::ArraySpan<const filesystem::AbsolutePath> trackedPaths,
+        const containers::ArraySpan<AssetFileTransactionPostCondition> postConditions) noexcept
+    {
+        if (m_impl == nullptr || m_impl->state != AssetFileTransactionState::Committed || trackedPaths.Count() != postConditions.Count())
+            return AssetFileTransactionResult::InvalidState;
+        for (u32 index = 0; index < postConditions.Count(); ++index)
+            postConditions[index] = {};
         FillPostConditions(*m_impl, trackedPaths, postConditions);
         if (!CleanupOwnedFiles(*m_impl) || !m_impl->files->DeleteFile(m_impl->journal))
         {
@@ -1046,7 +1820,12 @@ namespace vanguard::assets
         }
         if (m_impl->state != AssetFileTransactionState::Prepared)
             return AssetFileTransactionResult::InvalidState;
-        if (!RollbackPrepared(*m_impl) || !m_impl->files->DeleteFile(m_impl->journal))
+        // A current-process Prepared transaction that has not entered Applying
+        // has not authored any target/source path. Use the same cleanup-only
+        // semantics as v5 restart recovery; legacy RollbackPrepared is retained
+        // only for decoding v1-v4 journals from older binaries.
+        const bool rolledBack = m_impl->appliedPrepared ? RollbackApplying(*m_impl) : CleanupUnappliedPrepared(*m_impl);
+        if (!rolledBack || !m_impl->files->DeleteFile(m_impl->journal))
         {
             m_impl->state = AssetFileTransactionState::RecoveryRequired;
             return AssetFileTransactionResult::RecoveryRequired;

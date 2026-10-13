@@ -29,6 +29,7 @@ namespace vanguard::editor
                 AppendRequired(GetEditorActivityPresentationExtensions());
                 AppendRequired(GetEditorProjectAssetActivityExtensions());
                 AppendRequired(GetEditorAssetBrowserExtensions());
+                AppendRequired(GetEditorModelImportExtensions());
                 AppendRequired(GetEditorDemonstrationExtensions());
             }
         };

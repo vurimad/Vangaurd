@@ -22,6 +22,8 @@ $request = [ordered]@{
     warmupSeconds = 2
     windowWidth = 1280
     windowHeight = 720
+    schedulerProbe = $false
+    probeResources = 0
 }
 
 if (Test-Path -LiteralPath $requestPath)
@@ -32,6 +34,8 @@ if (Test-Path -LiteralPath $requestPath)
     if ($loaded.warmupSeconds -ne $null) { $request.warmupSeconds = [int]$loaded.warmupSeconds }
     if ($loaded.windowWidth) { $request.windowWidth = [int]$loaded.windowWidth }
     if ($loaded.windowHeight) { $request.windowHeight = [int]$loaded.windowHeight }
+    if ($loaded.schedulerProbe -ne $null) { $request.schedulerProbe = [bool]$loaded.schedulerProbe }
+    if ($loaded.probeResources -ne $null) { $request.probeResources = [int]$loaded.probeResources }
 }
 
 if ($request.captureSeconds -lt 3 -or $request.captureSeconds -gt 300)
@@ -45,6 +49,14 @@ if ($request.warmupSeconds -lt 0 -or $request.warmupSeconds -gt 60)
 if ($request.windowWidth -lt 1 -or $request.windowWidth -gt 16384 -or $request.windowHeight -lt 1 -or $request.windowHeight -gt 16384)
 {
     throw 'windowWidth and windowHeight must be between 1 and 16384.'
+}
+if ($request.probeResources -ne 0 -and $request.probeResources -ne 64 -and $request.probeResources -ne 320)
+{
+    throw 'probeResources must be 0, 64, or 320.'
+}
+if ($request.probeResources -ne 0 -and -not $request.schedulerProbe)
+{
+    throw 'probeResources requires schedulerProbe=true.'
 }
 
 $safeRunId = ($request.runId -replace '[^A-Za-z0-9_.-]', '_')
@@ -157,9 +169,51 @@ public static class VanguardBenchmarkNative
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindowAsync(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BringWindowToTop(IntPtr window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetActiveWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern void SwitchToThisWindow(IntPtr window, bool altTab);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetClientRect(IntPtr window, out RECT rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr window, out RECT rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
 
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
@@ -208,6 +262,62 @@ function Get-ClientPixelExtent([IntPtr] $window)
     finally
     {
         [void][VanguardBenchmarkNative]::SetThreadDpiAwarenessContext($previousContext)
+    }
+}
+
+function Request-ForegroundWindow([IntPtr] $window)
+{
+    if ($window -eq [IntPtr]::Zero) { return }
+    $windowRect = New-Object VanguardBenchmarkNative+RECT
+    if ([VanguardBenchmarkNative]::GetWindowRect($window, [ref]$windowRect))
+    {
+        $clickX = [int](($windowRect.Left + $windowRect.Right) / 2)
+        $clickY = [int]($windowRect.Top + 10)
+        if ([VanguardBenchmarkNative]::SetCursorPos($clickX, $clickY))
+        {
+            [VanguardBenchmarkNative]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+            [VanguardBenchmarkNative]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+        }
+    }
+    $foreground = [VanguardBenchmarkNative]::GetForegroundWindow()
+    [uint32]$foregroundProcessId = 0
+    [uint32]$foregroundThread = if ($foreground -ne [IntPtr]::Zero) {
+        [VanguardBenchmarkNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundProcessId)
+    } else { 0 }
+    [uint32]$targetProcessId = 0
+    [uint32]$targetThread = [VanguardBenchmarkNative]::GetWindowThreadProcessId($window, [ref]$targetProcessId)
+    [uint32]$currentThread = [VanguardBenchmarkNative]::GetCurrentThreadId()
+    $attachedForeground = $false
+    $attachedTarget = $false
+    try
+    {
+        if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread)
+        {
+            $attachedForeground = [VanguardBenchmarkNative]::AttachThreadInput($currentThread, $foregroundThread, $true)
+        }
+        if ($targetThread -ne 0 -and $targetThread -ne $currentThread)
+        {
+            $attachedTarget = [VanguardBenchmarkNative]::AttachThreadInput($currentThread, $targetThread, $true)
+        }
+        [void][VanguardBenchmarkNative]::ShowWindowAsync($window, 9)
+        [VanguardBenchmarkNative]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+        [VanguardBenchmarkNative]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+        [VanguardBenchmarkNative]::SwitchToThisWindow($window, $true)
+        [void][VanguardBenchmarkNative]::BringWindowToTop($window)
+        [void][VanguardBenchmarkNative]::SetActiveWindow($window)
+        [void][VanguardBenchmarkNative]::SetFocus($window)
+        [void][VanguardBenchmarkNative]::SetForegroundWindow($window)
+    }
+    finally
+    {
+        if ($attachedTarget)
+        {
+            [void][VanguardBenchmarkNative]::AttachThreadInput($currentThread, $targetThread, $false)
+        }
+        if ($attachedForeground)
+        {
+            [void][VanguardBenchmarkNative]::AttachThreadInput($currentThread, $foregroundThread, $false)
+        }
     }
 }
 
@@ -261,8 +371,23 @@ try
         throw ('Refusing to start benchmark while Vanguard.exe is already running. Existing PID(s): ' + (($existing | Select-Object -ExpandProperty Id) -join ', '))
     }
 
-    Remove-Item Env:VANGUARD_RENDER_GRAPH_SCHEDULER_PROBE -ErrorAction SilentlyContinue
-    Remove-Item Env:VANGUARD_RF_PROBE_RESOURCES -ErrorAction SilentlyContinue
+    if ($request.schedulerProbe)
+    {
+        $env:VANGUARD_RENDER_GRAPH_SCHEDULER_PROBE = '1'
+        if ($request.probeResources -eq 64)
+        {
+            $env:VANGUARD_RF_PROBE_RESOURCES = '64'
+        }
+        else
+        {
+            Remove-Item Env:VANGUARD_RF_PROBE_RESOURCES -ErrorAction SilentlyContinue
+        }
+    }
+    else
+    {
+        Remove-Item Env:VANGUARD_RENDER_GRAPH_SCHEDULER_PROBE -ErrorAction SilentlyContinue
+        Remove-Item Env:VANGUARD_RF_PROBE_RESOURCES -ErrorAction SilentlyContinue
+    }
 
     $runtimeArguments = ('"' + $projectFile + '" --window-width ' + [string]$request.windowWidth + ' --window-height ' + [string]$request.windowHeight)
     $runtime = Start-Process `
@@ -284,6 +409,9 @@ try
     {
         try
         {
+            $runtime.Refresh()
+            Write-RunnerLog ('Foreground attempt: target HWND=' + $runtime.MainWindowHandle + ', current foreground PID=' + (Get-ForegroundProcessId) + '.')
+            Request-ForegroundWindow $runtime.MainWindowHandle
             [Microsoft.VisualBasic.Interaction]::AppActivate($runtime.Id)
         }
         catch

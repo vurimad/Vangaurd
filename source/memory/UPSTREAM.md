@@ -9,7 +9,7 @@
 - SHA-256 of the sorted `relative-path<TAB>file-SHA-256` manifest:
   `CDB0CF4CDC890E893467C3E494C5AA40CF986F6191D2D4EFDD2AFCC3FDB1EFF8`
 
-The complete image is retained under `source/imported/common/redMemory`. Windows x64 builds
+The complete image is retained under `imported/common/redMemory`. Windows x64 builds
 exclude other platform implementations but do not remove them from the source
 snapshot.
 

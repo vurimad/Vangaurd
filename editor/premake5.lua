@@ -1,9 +1,18 @@
 local editor_resource_root = path.getabsolute("resources")
+local model_import_shader_root = path.getabsolute("../source/rendering/shaders")
+
+function deployVanguardEditorModelImportShaders()
+    postbuildcommands {
+        '{MKDIR} "%{cfg.targetdir}/shaders"',
+        '{COPYFILE} "' .. path.join(model_import_shader_root, "static_surface_prefix.vsl") .. '" "%{cfg.targetdir}/shaders/static_surface_prefix.vsl"',
+        '{COPYFILE} "' .. path.join(model_import_shader_root, "static_surface_suffix.vsl") .. '" "%{cfg.targetdir}/shaders/static_surface_suffix.vsl"',
+        '{COPYFILE} "' .. path.join(model_import_shader_root, "gpu_scene_types.hlsli") .. '" "%{cfg.targetdir}/shaders/gpu_scene_types.hlsli"'
+    }
+end
 
 function deployVanguardEditorResources()
-    postbuildcommands {
-        '{COPYDIR} "' .. editor_resource_root .. '" "%{cfg.targetdir}/Editor"'
-    }
+    postbuildcommands { '{COPYDIR} "' .. editor_resource_root .. '" "%{cfg.targetdir}/Editor"' }
+    deployVanguardEditorModelImportShaders()
 end
 
 group "Applications/Editor"
@@ -27,6 +36,7 @@ project "editor"
         "framework/include", "private", "../source/application/include", "../source/engine/include", "../source/rendering/include",
         "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/projects/include", "../source/jobs/include",
         "../source/shaderTools/include", "../source/shaders/include", "../source/assets/include", "../source/textureTools/include",
+        "../source/meshTools/include", "../source/materialTools/include", "../source/modelTools/include",
         "../source/assetStreaming/include",
         "../source/input/include", "../source/gameInput/include",
         "../source/pipelines/include", "../source/pipelineCache/include", "../source/textures/include", "../source/materials/include",
@@ -37,11 +47,11 @@ project "editor"
         "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include",
         "../source/meshes/include", "../source/prefabs/include", "../source/packages/include",
         "../source/serialization/include", "../source/schemas/include", "../source/reflection/include",
-        "../source/crypto/include", "../source/math/include", "../source/imported/common/redMath/include", path.join(flecs_root, "distr"), imgui_root, nanosvg_root
+        "../source/crypto/include", "../source/math/include", "../imported/common/redMath/include", path.join(flecs_root, "distr"), imgui_root, nanosvg_root
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "shaderTools", "shaders", "textureTools", "assetStreaming", "assets", "crypto", "serializationCompat", "slang-compiler",
+        "shaderTools", "shaders", "textureTools", "meshTools", "materialTools", "assimp", "meshoptimizer", "assetStreaming", "assets", "crypto", "serializationCompat", "slang-compiler",
         "platformWindows", "engine", "rendering", "rhiNvrhi", "rhi", "projects", "entities", "gameWorld", "ecs", "flecs", "imgui", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "application", "jobs", "jobsCompat", "concurrency", "concurrencyCompat", "diagnostics", "diagnosticsCompat",
         "containers", "containersCompat", "memory", "redSystemCompat", "system", "d3d12", "dxgi", "Advapi32", "Dbghelp", "Psapi",
         "Shell32", "Shlwapi", "User32", "Version", "ws2_32"
@@ -69,10 +79,10 @@ project "editor"
 
 group "Tests/Editor"
 
-local sceneOutputFixtureFileSyncRoot = path.getabsolute("../source/imported/internal/FileSync")
-local sceneOutputFixtureUdtRoot = path.getabsolute("../source/imported/external/udt")
-local sceneOutputFixtureOodleRoot = path.getabsolute("../source/imported/external/oodle")
-local sceneOutputFixtureNvToolsRoot = path.getabsolute("../source/imported/external/nvToolsExt")
+local sceneOutputFixtureFileSyncRoot = path.getabsolute("../imported/internal/FileSync")
+local sceneOutputFixtureUdtRoot = path.getabsolute("../imported/external/udt")
+local sceneOutputFixtureOodleRoot = path.getabsolute("../imported/external/oodle")
+local sceneOutputFixtureNvToolsRoot = path.getabsolute("../imported/external/nvToolsExt")
 
 project "editorSceneOutputPackageFixture"
     kind "ConsoleApp"
@@ -93,11 +103,11 @@ project "editorSceneOutputPackageFixture"
         "../source/world/include", "../source/meshes/include", "../source/packages/include", "../source/rendering/include"
     }
     includedirs {
-        "../source/imported/common/redFileSystem/include", "../source/imported/common/redFileSystem/src",
-        "../source/imported/common/redCompression/include", "../source/imported/common/redCompression/src",
-        "../source/imported/common/redSystem/include", "../source/imported/common/redMemory/include", "../source/imported/common/redMemory/src",
-        "../source/imported/common/redMath/include", "../source/imported/common/redContainers/include",
-        "../source/imported/common/redIO/include", "../source/imported/common/redCore/include"
+        "../imported/common/redFileSystem/include", "../imported/common/redFileSystem/src",
+        "../imported/common/redCompression/include", "../imported/common/redCompression/src",
+        "../imported/common/redSystem/include", "../imported/common/redMemory/include", "../imported/common/redMemory/src",
+        "../imported/common/redMath/include", "../imported/common/redContainers/include",
+        "../imported/common/redIO/include", "../imported/common/redCore/include"
     }
     libdirs { path.join(sceneOutputFixtureNvToolsRoot, "lib/x64.Release") }
     links {
@@ -159,6 +169,7 @@ project "editorApplicationLifecycleIntegrationTest"
         "framework/include", "private", "tests/support", "../source/application/include", "../source/engine/include", "../source/rendering/include",
         "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/projects/include", "../source/jobs/include",
         "../source/shaderTools/include", "../source/shaders/include", "../source/assets/include", "../source/textureTools/include",
+        "../source/meshTools/include", "../source/materialTools/include", "../source/modelTools/include",
         "../source/assetStreaming/include",
         "../source/input/include", "../source/gameInput/include",
         "../source/pipelines/include", "../source/pipelineCache/include", "../source/textures/include", "../source/materials/include",
@@ -169,11 +180,11 @@ project "editorApplicationLifecycleIntegrationTest"
         "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include",
         "../source/meshes/include", "../source/prefabs/include", "../source/packages/include",
         "../source/serialization/include", "../source/schemas/include", "../source/reflection/include",
-        "../source/crypto/include", "../source/math/include", "../source/imported/common/redMath/include", path.join(flecs_root, "distr"), imgui_root, nanosvg_root
+        "../source/crypto/include", "../source/math/include", "../imported/common/redMath/include", path.join(flecs_root, "distr"), imgui_root, nanosvg_root
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "shaderTools", "shaders", "textureTools", "assetStreaming", "assets", "crypto", "serializationCompat", "slang-compiler",
+        "shaderTools", "shaders", "textureTools", "meshTools", "materialTools", "assimp", "meshoptimizer", "assetStreaming", "assets", "crypto", "serializationCompat", "slang-compiler",
         "platformWindows", "engine", "rendering", "rhiNvrhi", "rhi", "projects", "entities", "gameWorld", "ecs", "flecs", "imgui", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "application", "jobs", "jobsCompat", "concurrency", "concurrencyCompat", "diagnostics", "diagnosticsCompat",
         "containers", "containersCompat", "memory", "redSystemCompat", "system", "d3d12", "dxgi", "Advapi32", "Dbghelp", "Psapi",
         "Shell32", "Shlwapi", "User32", "Version", "ws2_32"
@@ -241,6 +252,7 @@ project "editorNativeUiIntegrationTest"
         "framework/include", "private", "tests/support", "../source/application/include", "../source/engine/include", "../source/rendering/include",
         "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/projects/include", "../source/jobs/include",
         "../source/shaderTools/include", "../source/shaders/include", "../source/assets/include", "../source/textureTools/include",
+        "../source/meshTools/include", "../source/materialTools/include", "../source/modelTools/include",
         "../source/assetStreaming/include",
         "../source/input/include", "../source/gameInput/include",
         "../source/pipelines/include", "../source/pipelineCache/include", "../source/textures/include", "../source/materials/include",
@@ -251,11 +263,11 @@ project "editorNativeUiIntegrationTest"
         "../source/entities/include", "../source/gameWorld/include", "../source/ecs/include",
         "../source/meshes/include", "../source/prefabs/include", "../source/packages/include",
         "../source/serialization/include", "../source/schemas/include", "../source/reflection/include",
-        "../source/crypto/include", "../source/math/include", "../source/imported/common/redMath/include", path.join(flecs_root, "distr"), imgui_root, nanosvg_root
+        "../source/crypto/include", "../source/math/include", "../imported/common/redMath/include", path.join(flecs_root, "distr"), imgui_root, nanosvg_root
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
-        "shaderTools", "shaders", "textureTools", "assetStreaming", "assets", "crypto", "serializationCompat", "slang-compiler",
+        "shaderTools", "shaders", "textureTools", "meshTools", "materialTools", "assimp", "meshoptimizer", "assetStreaming", "assets", "crypto", "serializationCompat", "slang-compiler",
         "platformWindows", "engine", "rendering", "rhiNvrhi", "rhi", "projects", "entities", "gameWorld", "ecs", "flecs", "imgui", "world", "streaming", "resources", "packages", "schemas", "reflection", "serialization", "filesystem", "io", "application", "jobs", "jobsCompat", "concurrency", "concurrencyCompat", "diagnostics", "diagnosticsCompat",
         "containers", "containersCompat", "memory", "redSystemCompat", "system", "d3d12", "dxgi", "Advapi32", "Dbghelp", "Psapi",
         "Shell32", "Shlwapi", "User32", "Version", "ws2_32"
@@ -305,6 +317,16 @@ project "editorPanelTests"
         "../source/rendering/include", "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/window/include",
         "../source/resources/include", "../source/math/include", "../source/jobs/include", "../source/input/include",
         "../source/concurrency/include", "../source/containers/include", "../source/memory/include",
+        "../source/filesystem/include", "../source/projects/include", "../source/assets/include",
+        "../source/assetStreaming/include", "../source/textures/include",
+        "../source/io/include", "../source/crypto/include", "../source/serialization/include",
+        "../source/reflection/include", "../source/schemas/include", "../source/streaming/include",
+        "../source/packages/include", "../source/pipelines/include", "../source/materials/include",
+        "../source/pipelineCache/include", "../source/textureTools/include", "../source/meshTools/include",
+        "../source/materialTools/include", "../source/modelTools/include", "../source/shaderTools/include",
+        "../source/shaders/include", "../source/prefabs/include", "../source/meshes/include",
+        "../source/entities/include", "../source/world/include", "../source/gameWorld/include",
+        "../source/ecs/include", "../source/gameInput/include", "../imported/common/redMath/include",
         "../source/diagnostics/include", "../source/system/include"
     }
     links {
@@ -383,7 +405,9 @@ project "editorCommandTests"
     includedirs {
         "framework/include", "private", "tests/support", "../source/application/include", "../source/engine/include", "../source/rendering/include",
         "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/input/include",
-        "../source/resources/include", "../source/math/include",
+        "../source/resources/include", "../source/math/include", "../source/projects/include", "../source/assets/include",
+        "../source/assetStreaming/include", "../source/streaming/include", "../source/textures/include",
+        "../source/filesystem/include", "../source/io/include", "../source/crypto/include",
         "../source/jobs/include", "../source/window/include", "../source/concurrency/include", "../source/diagnostics/include",
         "../source/containers/include", "../source/memory/include", "../source/system/include"
     }
@@ -583,9 +607,12 @@ project "editorAssetRetirementTests"
     targetdir(output_root)
     objdir(object_root)
     enableVanguardD3D12Agility()
+    deployVanguardEditorModelImportShaders()
     files {
         "tests/editor_asset_retirement_tests.cpp",
         "src/editor_project_service.cpp",
+        "extensions/editor_model_import_session.cpp",
+        "private/vanguard/editor/editor_model_import_session.hpp",
         "private/vanguard/editor/editor_project_service.hpp",
         "framework/include/vanguard/editor/editor_service_ids.hpp"
     }
@@ -593,6 +620,7 @@ project "editorAssetRetirementTests"
         "framework/include", "private", "../source/application/include", "../source/engine/include", "../source/rendering/include",
         "../source/rhi/include", "../source/rhi/nvrhi/include", "../source/projects/include", "../source/assets/include",
         "../source/textureTools/include", "../source/shaderTools/include", "../source/shaders/include", "../source/assetStreaming/include",
+        "../source/meshTools/include", "../source/materialTools/include", "../source/modelTools/include",
         "../source/textures/include", "../source/pipelines/include", "../source/pipelineCache/include", "../source/resources/include",
         "../source/streaming/include", "../source/packages/include", "../source/schemas/include", "../source/reflection/include",
         "../source/serialization/include", "../source/crypto/include", "../source/filesystem/include", "../source/io/include",
@@ -600,19 +628,21 @@ project "editorAssetRetirementTests"
         "../source/memory/include", "../source/system/include", "../source/math/include", "../source/input/include",
         "../source/gameInput/include", "../source/window/include", "../source/platform/windows/include", "../source/entities/include",
         "../source/world/include", "../source/meshes/include", "../source/materials/include", "../source/prefabs/include",
-        "../source/gameWorld/include", "../source/ecs/include", "../source/imported/common/redMath/include", path.join(flecs_root, "distr")
+        "../source/gameWorld/include", "../source/ecs/include", "../imported/common/redMath/include", path.join(flecs_root, "distr")
     }
     links {
-        "textureTools", "shaderTools", "shaders", "assetStreaming", "assets", "crypto", "serializationCompat", "engine", "rendering",
+        "textureTools", "meshTools", "materialTools", "assimp", "meshoptimizer", "shaderTools", "shaders", "slang-compiler", "assetStreaming", "assets", "crypto", "serializationCompat", "engine", "rendering",
         "rhiNvrhi", "rhi", "projects", "entities", "gameWorld", "ecs", "flecs", "world", "streaming", "resources", "textures",
         "meshes", "materials", "prefabs", "pipelines", "pipelineCache", "window", "input", "gameInput", "packages", "schemas",
         "reflection", "serialization", "filesystem", "io", "application", "jobs", "jobsCompat", "concurrency", "concurrencyCompat",
         "diagnostics", "diagnosticsCompat", "containers", "containersCompat", "memory", "redSystemCompat", "system",
         "d3d12", "dxgi", "Advapi32", "Dbghelp", "Psapi", "Shlwapi", "Version", "ws2_32"
     }
+    libdirs { path.join(slang_root, "lib") }
     vpaths {
         ["Tests/*"] = { "tests/editor_asset_retirement_tests.cpp" },
-        ["Production/*"] = { "src/editor_project_service.cpp", "private/vanguard/editor/editor_project_service.hpp",
+        ["Production/*"] = { "src/editor_project_service.cpp", "extensions/editor_model_import_session.cpp",
+                             "private/vanguard/editor/editor_model_import_session.hpp", "private/vanguard/editor/editor_project_service.hpp",
                              "framework/include/vanguard/editor/editor_service_ids.hpp" }
     }
 
@@ -646,7 +676,7 @@ project "editorSceneOutputTests"
         "../source/memory/include", "../source/system/include", "../source/math/include", "../source/input/include",
         "../source/gameInput/include", "../source/window/include", "../source/platform/windows/include", "../source/entities/include",
         "../source/world/include", "../source/meshes/include", "../source/materials/include", "../source/prefabs/include",
-        "../source/gameWorld/include", "../source/ecs/include", "../source/imported/common/redMath/include", path.join(flecs_root, "distr")
+        "../source/gameWorld/include", "../source/ecs/include", "../imported/common/redMath/include", path.join(flecs_root, "distr")
     }
     defines { "FLECS_CUSTOM_BUILD", "FLECS_CPP", "FLECS_MODULE", "FLECS_SYSTEM", "FLECS_PIPELINE", "FLECS_TIMER" }
     links {
@@ -663,3 +693,28 @@ project "editorSceneOutputTests"
         ["Production/UI Handoff/*"] = { "framework/src/editor_ui_render_data.cpp", "private/vanguard/editor/editor_ui_render_data.hpp",
                                          "framework/include/vanguard/editor/editor_ui.hpp", "framework/include/vanguard/editor/editor_service_ids.hpp" }
     }
+
+-- Focused source-routing regression: intentionally no Editor application or
+-- second project pipeline. Covers upper/mixed-case GLB/glTF OS-drop handoff.
+project "editorModelImportFrontendTests"
+    enforceEngineCodePolicy()
+    kind "ConsoleApp"
+    language "C++"
+    cppdialect "C++20"
+    exceptionhandling "Off"
+    fatalwarnings "All"
+    disablewarnings { "4127", "4324" }
+    targetdir(output_root)
+    objdir(object_root)
+    files {
+        "tests/editor_model_import_frontend_tests.cpp",
+        "private/vanguard/editor/editor_model_import_frontend.hpp"
+    }
+    includedirs {
+        "private", "../source/assets/include", "../source/containers/include",
+        "../source/filesystem/include", "../source/resources/include", "../source/crypto/include",
+        "../source/io/include", "../source/memory/include", "../source/system/include",
+        "../source/diagnostics/include", "../source/concurrency/include", "../source/math/include",
+        "../imported/common/redMath/include"
+    }
+    links { "filesystem", "containers", "containersCompat", "memory", "redSystemCompat", "system" }

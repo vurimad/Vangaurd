@@ -947,6 +947,37 @@ namespace vanguard::rhi::backend
         return true;
     }
 
+    bool ResourceLifetimeManager::RecordOwnedUse(const ResourceRef resource, const QueueType queue, const u64 submissionFence) noexcept
+    {
+        // A submitter-owned resource reference pins the slot already; there is
+        // no need to incur an additional atomic AddRef/Release pair for each
+        // fence publication. Preserve a generation check, and NEVER use this
+        // variant for a reference whose lifetime is not owned by the caller.
+        if (!IsInitialized() || !resource.IsValid() || submissionFence == 0 ||
+            (queue != QueueType::Graphics && queue != QueueType::Compute && queue != QueueType::Copy))
+        {
+            if (m_impl != nullptr)
+                static_cast<void>(m_impl->staleReferenceOperations.Increment());
+            return false;
+        }
+        ResourceTable* const table = m_impl->GetTable(resource.GetKind());
+        ResourceSlot* const slot = table != nullptr ? table->Find(resource) : nullptr;
+        if (slot == nullptr)
+        {
+            static_cast<void>(m_impl->staleReferenceOperations.Increment());
+            return false;
+        }
+        const u64 identity = slot->identity.GetValue();
+        if (IdentityGeneration(identity) != resource.GetGeneration() ||
+            IdentityReferences(identity) == 0 || IdentityReferences(identity) >= DestroyingReferenceCount)
+        {
+            static_cast<void>(m_impl->staleReferenceOperations.Increment());
+            return false;
+        }
+        UpdateMaximum(slot->lastUse[QueueIndex(queue)], submissionFence);
+        return true;
+    }
+
     FenceSet ResourceLifetimeManager::GetLastUse(const ResourceRef resource) const noexcept
     {
         if (!IsInitialized() || !resource.IsValid())

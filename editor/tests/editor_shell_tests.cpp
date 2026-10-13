@@ -2581,10 +2581,22 @@ namespace
                       editor::detail::IsAssetBrowserMutationSelectionCurrent(true, 77u, true, 77u),
                   "adopted mutation policy disables on stale source/accepted generations and re-enables only when both are current");
             Check(editor::detail::CanRunAssetBrowserAdoptedOperation(true, true, false, true) &&
-                      !editor::detail::CanRunAssetBrowserAdoptedOperation(true, true, true, true) &&
-                      editor::detail::CanRunAssetBrowserAdoptedOperation(true, false, true, true) &&
-                      !editor::detail::CanRunAssetBrowserAdoptedOperation(false, false, false, true),
+                  !editor::detail::CanRunAssetBrowserAdoptedOperation(true, true, true, true) &&
+                  editor::detail::CanRunAssetBrowserAdoptedOperation(true, false, true, true) &&
+                  !editor::detail::CanRunAssetBrowserAdoptedOperation(false, false, false, true),
                   "read-only adopted sources allow Reimport/reveal while source-mutating commands stay disabled");
+            Check(editor::detail::ShouldRebindAssetBrowserAcceptedSelection(true, true, true, 0u, 91u) &&
+                  editor::detail::ShouldRebindAssetBrowserAcceptedSelection(true, true, true, 90u, 91u) &&
+                  !editor::detail::ShouldRebindAssetBrowserAcceptedSelection(true, true, true, 91u, 91u) &&
+                  !editor::detail::ShouldRebindAssetBrowserAcceptedSelection(true, false, true, 90u, 91u) &&
+                  !editor::detail::ShouldRebindAssetBrowserAcceptedSelection(true, true, false, 90u, 91u) &&
+                  !editor::detail::ShouldRebindAssetBrowserAcceptedSelection(false, true, true, 90u, 91u),
+                  "accepted-state publication refreshes an unchanged catalog selection without stale witnesses");
+            Check(editor::detail::ShouldClearAssetBrowserSelectionOnBackgroundClick(true, true, false) &&
+                  !editor::detail::ShouldClearAssetBrowserSelectionOnBackgroundClick(false, true, false) &&
+                  !editor::detail::ShouldClearAssetBrowserSelectionOnBackgroundClick(true, false, false) &&
+                  !editor::detail::ShouldClearAssetBrowserSelectionOnBackgroundClick(true, true, true),
+                  "left-clicking empty browser content clears selection, not clicks on assets or other windows");
 
             Check(editor::detail::BeginAssetBrowserBrowseQuery(secondary, catalog) ==
                           assetStreaming::ProjectAssetCatalogResult::Success &&

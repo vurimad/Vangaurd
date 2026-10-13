@@ -6,6 +6,7 @@
 #include <vanguard/jobs/jobs.hpp>
 
 
+
 namespace
 {
     using namespace vanguard;
@@ -19,11 +20,13 @@ namespace
         resources::ResourceReference leftSource;
         resources::ResourceReference rootSource;
         resources::ResourceReference softSource;
+        resources::ResourceReference retirementSource;
         resources::ResourceReference materializeSource;
         resources::ResourceReference sharedOutput;
         resources::ResourceReference leftOutput;
         resources::ResourceReference rootOutput;
         resources::ResourceReference softOutput;
+        resources::ResourceReference retirementOutput;
         resources::ResourceReference materializeOutput;
         resources::ResourceReference missingOutput;
         assets::DependencyRequirement softRequirement = assets::DependencyRequirement::Soft;
@@ -72,7 +75,7 @@ namespace
             return collector.Add({fixture.missingOutput, {}, assets::DependencyRole::Generated, fixture.missingRequirement}) ==
                    assets::Result::Success;
         }
-        return request.source.identity == fixture.sharedSource;
+        return request.source.identity == fixture.sharedSource || request.source.identity == fixture.retirementSource;
     }
 
     [[nodiscard]] bool Compile(const assets::CompileContext& context, assets::ArtifactWriter& writer, void*) noexcept
@@ -184,11 +187,13 @@ int main()
     fixture.leftSource = Reference("source/index/left.asset", SourceType);
     fixture.rootSource = Reference("source/index/root.asset", SourceType);
     fixture.softSource = Reference("source/index/soft.asset", SourceType);
+    fixture.retirementSource = Reference("source/index/retirement.asset", SourceType);
     fixture.materializeSource = Reference("source/index/materialize.asset", SourceType);
     fixture.sharedOutput = Reference("cooked/index/shared.asset", OutputType);
     fixture.leftOutput = Reference("cooked/index/left.asset", OutputType);
     fixture.rootOutput = Reference("cooked/index/root.asset", OutputType);
     fixture.softOutput = Reference("cooked/index/soft.asset", OutputType);
+    fixture.retirementOutput = Reference("cooked/index/retirement.asset", OutputType);
     fixture.materializeOutput = Reference("cooked/index/materialize.asset", OutputType);
     fixture.missingOutput = Reference("cooked/index/missing.asset", OutputType);
 
@@ -196,11 +201,13 @@ int main()
     const u8 leftBytes[] = {2};
     const u8 rootBytes[] = {3};
     const u8 softBytes[] = {4};
+    const u8 retirementBytes[] = {6};
     const u8 materializeBytes[] = {5};
     const assets::BuildRequest sharedRequest = Request(fixture.sharedSource, fixture.sharedOutput, sharedBytes);
     const assets::BuildRequest leftRequest = Request(fixture.leftSource, fixture.leftOutput, leftBytes);
     const assets::BuildRequest rootRequest = Request(fixture.rootSource, fixture.rootOutput, rootBytes);
     const assets::BuildRequest softRequest = Request(fixture.softSource, fixture.softOutput, softBytes);
+    const assets::BuildRequest retirementRequest = Request(fixture.retirementSource, fixture.retirementOutput, retirementBytes);
     const assets::BuildRequest materializeRequest = Request(fixture.materializeSource, fixture.materializeOutput, materializeBytes);
 
     assets::BuildSystem buildSystem;
@@ -367,12 +374,57 @@ int main()
               index.Evaluate(leftRequest, changedCompilerPlan) == assets::DirtyReason::CompilerChanged,
           "compiler version change is classified");
 
+    // P5 retirement/LKG: one retired output and its exact successor generation
+    // commit durably as one index transaction. The retired row leaves current
+    // build authority but remains a VDDC protection witness across restart.
+    Check(BuildAndPublish(buildSystem, index, retirementRequest) && index.Save() == assets::IndexResult::Success,
+          "P5 publish dedicated retirement baseline");
+    assets::DependencyRecord retirementBaseline;
+    Check(index.Find(fixture.retirementOutput, retirementBaseline) == assets::IndexResult::Success,
+          "P5 capture exact retirement baseline row");
+    Check(index.BeginTransaction() == assets::IndexResult::Success &&
+              BuildAndPublish(buildSystem, index, sharedRequest) &&
+              index.StageRemoval(fixture.retirementOutput) == assets::IndexResult::Success,
+          "P5 stage successor replacement and retirement together");
+    const resources::ResourceReference retirementSuccessors[]{fixture.sharedOutput};
+    Check(index.StageRetirementSuccessors({retirementSuccessors, 1u}) == assets::IndexResult::Success &&
+              index.CommitTransaction() == assets::IndexResult::Success,
+          "P5 durably commits retirement with exact successor witness");
+    assets::DependencyRecord retiredCurrentProbe;
+    containers::DynamicArray<assets::DependencyRecord> retiredProtection(memory::pools::Assets::GetInstance());
+    const assets::IndexResult retiredFind = index.Find(fixture.retirementOutput, retiredCurrentProbe);
+    const assets::IndexResult retiredCapture =
+        index.CaptureRetiredProtectionRecords(retiredProtection, 4u, 256u * 1024u);
+    const assets::DependencyRecord* retiredRemoved = nullptr;
+    const assets::DependencyRecord* retiredReplaced = nullptr;
+    for (const assets::DependencyRecord& record : retiredProtection)
+    {
+        if (record.output == fixture.retirementOutput)
+            retiredRemoved = &record;
+        if (record.output == fixture.sharedOutput)
+            retiredReplaced = &record;
+    }
+    Check(retiredFind == assets::IndexResult::NotFound,
+          "P5 retired row leaves current build authority");
+    Check(retiredCapture == assets::IndexResult::Success && retiredProtection.Size() == 2u &&
+              retiredRemoved != nullptr && retiredReplaced != nullptr &&
+              retiredRemoved->buildFingerprint == retirementBaseline.buildFingerprint &&
+              retiredRemoved->contentFingerprint == retirementBaseline.contentFingerprint &&
+              retiredReplaced->buildFingerprint == sharedRecord.buildFingerprint &&
+              retiredReplaced->contentFingerprint == sharedRecord.contentFingerprint,
+          "P5 removed and superseded rows remain exact whole-generation LKG evidence");
+    const assets::IndexResult retiredKeys =
+        index.CaptureProtectionKeys(protectionKeys, 6u, 6u * sizeof(assets::ArtifactSetKey));
+    Check(retiredKeys == assets::IndexResult::Success && protectionKeys.Size() == 6u,
+          "P5 VDDC protection snapshot includes durable retired LKG key");
+
+    Check(BuildAndPublish(buildSystem, index, softRequest), "restore unsaved-change fixture after P5 durable transaction");
     Check(!index.Shutdown(), "shutdown refuses unsaved changes");
     Check(index.Save() == assets::IndexResult::Success && !index.HasChanges(), "atomic index save");
     Check(index.BeginTransaction() == assets::IndexResult::Success && BuildAndPublish(buildSystem, index, sharedRequest),
           "stage replacement for VADI protection snapshot");
-    Check(index.CaptureProtectionKeys(protectionKeys, 5, 5u * sizeof(assets::ArtifactSetKey)) == assets::IndexResult::Success &&
-              protectionKeys.Size() == 5,
+    Check(index.CaptureProtectionKeys(protectionKeys, 7, 7u * sizeof(assets::ArtifactSetKey)) == assets::IndexResult::Success &&
+              protectionKeys.Size() == 7,
           "VADI protection snapshot includes committed and staged exact keys");
     Check(index.RollbackTransaction() == assets::IndexResult::Success, "rollback staged protection fixture");
     Check(index.Shutdown(), "saved index shutdown");
@@ -388,6 +440,27 @@ int main()
               persistedSoft.dependencies[0].identity == fixture.sharedOutput &&
               persistedSoft.dependencies[0].requirement == assets::DependencyRequirement::Soft && persistedSoft.dependencies[0].content.IsEmpty(),
           "soft dependency kind and empty content survive restart");
+    retiredProtection.Clear();
+    assets::DependencyRecord persistedSuccessor;
+    Check(restarted.CaptureRetiredProtectionRecords(retiredProtection, 4u, 256u * 1024u) == assets::IndexResult::Success &&
+              retiredProtection.Size() == 2u &&
+              restarted.Find(fixture.sharedOutput, persistedSuccessor) == assets::IndexResult::Success,
+          "P5 restart restores whole retired LKG cohort and current successor");
+    assets::DependencyPublicationWitness wrongVisible{fixture.sharedOutput, persistedSuccessor.buildFingerprint,
+                                                      persistedSuccessor.contentFingerprint};
+    wrongVisible.contentFingerprint.bytes[0] ^= 0xffu;
+    Check(restarted.ReleaseSatisfiedRetirementProtections({&wrongVisible, 1u}) == assets::IndexResult::Success &&
+              restarted.CaptureRetiredProtectionRecords(retiredProtection, 4u, 256u * 1024u) == assets::IndexResult::Success &&
+              retiredProtection.Size() == 2u,
+          "P5 wrong successor witness cannot release restart LKG protection");
+    const assets::DependencyPublicationWitness exactVisible{fixture.sharedOutput, persistedSuccessor.buildFingerprint,
+                                                            persistedSuccessor.contentFingerprint};
+    Check(restarted.ReleaseSatisfiedRetirementProtections({&exactVisible, 1u}) == assets::IndexResult::Success,
+          "P5 exact visible successor releases durable retirement protection");
+    retiredProtection.Clear();
+    Check(restarted.CaptureRetiredProtectionRecords(retiredProtection, 4u, 256u * 1024u) == assets::IndexResult::Success &&
+              retiredProtection.Empty(),
+          "P5 released retirement protection remains absent after durable cleanup");
 
     assets::BuildGraph graph;
     Check(graph.Initialize(buildSystem, nullptr, nullptr, {}, &restarted), "indexed build-graph initialization");
@@ -460,11 +533,41 @@ int main()
             }
         }
     }
+    assets::DependencyIndexConfig protectedCorruptConfig = indexConfig;
+    protectedCorruptConfig.allowDestructiveRecovery = false;
+    assets::DependencyIndex protectedCorrupt;
+    Check(protectedCorrupt.Initialize(protectedCorruptConfig) == assets::IndexResult::Corrupt && manager.FileExist(indexPath),
+          "protected corruption fails closed without deleting the committed index");
+    assets::DependencyIndex protectedCorruptRetry;
+    Check(protectedCorruptRetry.Initialize(protectedCorruptConfig) == assets::IndexResult::Corrupt && manager.FileExist(indexPath),
+          "protected corruption remains fail-closed across repeated initialization");
     assets::DependencyIndex recovered;
     Check(recovered.Initialize(indexConfig) == assets::IndexResult::Recovered && recovered.GetStats().corruptions == 1 &&
               recovered.GetStats().recoveries == 1 && recovered.GetStats().records == 0,
           "integrity corruption explicitly recovers");
     Check(recovered.Shutdown(), "recovered index shutdown");
+
+    const filesystem::AbsolutePath temporaryPath = root.AddFilePath("asset-dependencies.vadi.tmp");
+    constexpr u8 TempOnlyEvidence[] = {0x56u, 0x41u, 0x44u, 0x49u};
+    {
+        auto writer = manager.CreateFileWriter(temporaryPath, filesystem::FOF_Buffered);
+        Check(static_cast<bool>(writer), "create temp-only index recovery evidence");
+        if (writer)
+        {
+            writer->Serialize(const_cast<u8*>(TempOnlyEvidence), sizeof(TempOnlyEvidence));
+            writer->Flush();
+            writer.Reset();
+        }
+    }
+    assets::DependencyIndex protectedTemporary;
+    Check(protectedTemporary.Initialize(protectedCorruptConfig) == assets::IndexResult::InvalidState &&
+              manager.FileExist(temporaryPath) && !manager.FileExist(indexPath),
+          "protected temp-only persistence fails closed without discarding recovery evidence");
+    assets::DependencyIndex protectedTemporaryRetry;
+    Check(protectedTemporaryRetry.Initialize(protectedCorruptConfig) == assets::IndexResult::InvalidState &&
+              manager.FileExist(temporaryPath),
+          "protected temp-only persistence remains fail-closed across repeated initialization");
+    Check(manager.DeleteFile(temporaryPath), "remove protected temp-only recovery evidence");
 
     Check(buildSystem.UnregisterCompiler(compiler.id) == assets::Result::Success, "compiler unregistration");
     Check(buildSystem.Shutdown(), "build-system shutdown");

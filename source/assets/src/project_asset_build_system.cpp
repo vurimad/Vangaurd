@@ -57,10 +57,12 @@ namespace vanguard::assets
         VANGUARD_USE_MEMORY_POOL(memory::pools::Assets);
 
         Impl(filesystem::Manager& sourceFiles, const SourceDatabase& sourceDatabase, const TargetPlatform buildTarget,
-             const ProjectSourceDataLimits& dataLimits) noexcept
+             const ProjectSourceDataLimits& dataLimits, const ResolveGeneratedDependencyFunction generatedFallback,
+             void* const generatedFallbackUserData) noexcept
             : files(&sourceFiles), sources(&sourceDatabase), target(buildTarget), sourceDataLimits(dataLimits),
               importers(memory::pools::Assets::GetInstance()),
-              importerIndices(memory::pools::Assets::GetInstance())
+              importerIndices(memory::pools::Assets::GetInstance()), resolveGeneratedFallback(generatedFallback),
+              resolveGeneratedFallbackUserData(generatedFallbackUserData)
         {
         }
 
@@ -73,6 +75,8 @@ namespace vanguard::assets
         BuildGraph buildGraph;
         containers::DynamicArray<SourceImporterDescriptor> importers;
         containers::HashMap<SourceImporterId, u32> importerIndices;
+        ResolveGeneratedDependencyFunction resolveGeneratedFallback = nullptr;
+        void* resolveGeneratedFallbackUserData = nullptr;
         IndexResult indexInitializationResult = IndexResult::InvalidState;
 
         [[nodiscard]] const SourceImporterDescriptor* FindImporter(const SourceImporterId id) const noexcept
@@ -107,8 +111,28 @@ namespace vanguard::assets
             if (userData == nullptr)
                 return false;
             const Impl& implementation = *static_cast<const Impl*>(userData);
-            return implementation.sources != nullptr &&
-                   implementation.ResolveRequest(*implementation.sources, dependency.identity, request) == ProjectAssetBuildResult::Success;
+            if (implementation.sources == nullptr)
+                return false;
+            const ProjectAssetBuildResult projectResult = implementation.ResolveRequest(*implementation.sources, dependency.identity, request);
+            if (projectResult == ProjectAssetBuildResult::Success)
+                return true;
+            // Never allow a generated provider to shadow or mask a real project
+            // output that failed for another reason. It is a namespace extension
+            // for compiler-owned intermediates, not an alternate project resolver.
+            if (projectResult != ProjectAssetBuildResult::SourceNotFound ||
+                implementation.sources->ContainsOutputPath(dependency.identity.GetPath()) ||
+                implementation.resolveGeneratedFallback == nullptr)
+                return false;
+            request.Reset();
+            if (!implementation.resolveGeneratedFallback(dependency, request, implementation.resolveGeneratedFallbackUserData))
+                return false;
+            const BuildRequest view = request.View();
+            if (!view.IsValid() || view.output != dependency.identity || view.target != implementation.target)
+            {
+                request.Reset();
+                return false;
+            }
+            return true;
         }
     };
 
@@ -164,7 +188,8 @@ namespace vanguard::assets
             }
         }
 
-        Impl* const implementation = VANGUARD_NEW(Impl)(files, sources, config.target, config.sourceData);
+        Impl* const implementation = VANGUARD_NEW(Impl)(files, sources, config.target, config.sourceData,
+                                                        config.resolveGeneratedFallback, config.resolveGeneratedFallbackUserData);
         if (implementation == nullptr)
             return ProjectAssetBuildResult::BuildSystemInitializationFailed;
         for (u32 index = 0; index < importers.Count(); ++index)
@@ -246,6 +271,187 @@ namespace vanguard::assets
         if (m_impl == nullptr || !output.IsValid() || !output.IsTyped())
             return ProjectAssetBuildResult::InvalidArgument;
         return m_impl->ResolveRequest(sources, output, request);
+    }
+
+    ProjectAssetBuildResult ProjectAssetBuildSystem::ResolveCohort(
+        const SourceDatabase& sources, const containers::ArraySpan<const resources::ResourceReference> outputs,
+        containers::DynamicArray<OwnedBuildRequest>& requests, u32& failedIndex) const noexcept
+    {
+        requests.Clear();
+        failedIndex = ~u32{0};
+        if (m_impl == nullptr || outputs.Empty() || outputs.Data() == nullptr)
+            return ProjectAssetBuildResult::InvalidArgument;
+
+        const SourceRecord* firstSource = nullptr;
+        bool singleSource = true;
+        for (u32 index = 0; index < outputs.Count(); ++index)
+        {
+            const resources::ResourceReference output = outputs[index];
+            if (!output.IsValid() || !output.IsTyped())
+            {
+                failedIndex = index;
+                return ProjectAssetBuildResult::InvalidArgument;
+            }
+            const SourceRecord* const source = sources.LookupOutput(output);
+            if (source == nullptr)
+            {
+                failedIndex = index;
+                return ProjectAssetBuildResult::SourceNotFound;
+            }
+            if (firstSource == nullptr)
+                firstSource = source;
+            else if (source != firstSource)
+                singleSource = false;
+        }
+
+        containers::DynamicArray<OwnedBuildRequest> staged(memory::pools::Assets::GetInstance());
+        staged.Reserve(outputs.Count());
+        if (staged.Capacity() < outputs.Count())
+        {
+            failedIndex = 0u;
+            return ProjectAssetBuildResult::BuildRequestCreationFailed;
+        }
+
+        if (!singleSource)
+        {
+            for (u32 index = 0; index < outputs.Count(); ++index)
+            {
+                OwnedBuildRequest request;
+                const ProjectAssetBuildResult resolved = m_impl->ResolveRequest(sources, outputs[index], request);
+                if (resolved != ProjectAssetBuildResult::Success)
+                {
+                    failedIndex = index;
+                    return resolved;
+                }
+                const u32 previous = staged.Size();
+                staged.PushBack(static_cast<OwnedBuildRequest&&>(request));
+                if (staged.Size() != previous + 1u)
+                {
+                    failedIndex = index;
+                    return ProjectAssetBuildResult::BuildRequestCreationFailed;
+                }
+            }
+            requests.Swap(staged);
+            return ProjectAssetBuildResult::Success;
+        }
+
+        const SourceImporterDescriptor* const importer = m_impl->FindImporter(firstSource->metadata.importer);
+        if (importer == nullptr || importer->version != firstSource->metadata.importerVersion)
+        {
+            failedIndex = 0u;
+            return ProjectAssetBuildResult::ImporterUnavailable;
+        }
+
+        ProjectSourceData data;
+        if (LoadProjectSourceData(*m_impl->files, *firstSource, data, m_impl->sourceDataLimits) != ProjectSourceDataResult::Success)
+        {
+            failedIndex = 0u;
+            return ProjectAssetBuildResult::SourceDataUnavailable;
+        }
+        const ProjectSourceDataView view = data.View(m_impl->target);
+
+        // An importer may use the authored source bytes for some outputs and
+        // independently composed build inputs for others. In particular, a
+        // model's meshes use the GLB, but its material/texture outputs need
+        // not have the same source identity or content as the first output.
+        // Only the immutable ProjectSourceData view has stable pointer
+        // provenance across importer calls (composed views can be scratch).
+        u32 originalContentOwner = ~u32{0};
+        for (u32 index = 0; index < outputs.Count(); ++index)
+        {
+            BuildRequest borrowed;
+            if (!CreateSourceBuildRequest(*importer, *firstSource, view, outputs[index], borrowed))
+            {
+                failedIndex = index;
+                return ProjectAssetBuildResult::BuildRequestCreationFailed;
+            }
+
+            const bool usesOriginalContent = !view.content.Empty() &&
+                borrowed.source.content.Data() == view.content.Data() &&
+                borrowed.source.content.Count() == view.content.Count();
+            OwnedBuildRequest request;
+            bool captured = false;
+            if (usesOriginalContent && originalContentOwner != ~u32{0} &&
+                staged[originalContentOwner].sourceReference == borrowed.source.identity)
+            {
+                // The first owner copied precisely this immutable source view.
+                // Clone its proven backing instead of comparing/copying the
+                // same 60MB for every mesh, then copy only output-local bytes.
+                captured = request.CopyFromSharingSource(staged[originalContentOwner]);
+                if (captured)
+                {
+                    request.metadata.Resize(borrowed.source.metadata.Count());
+                    request.settings.Resize(borrowed.settings.Count());
+                    captured = request.metadata.Size() == borrowed.source.metadata.Count() &&
+                               request.settings.Size() == borrowed.settings.Count();
+                }
+                if (captured)
+                {
+                    request.outputReference = borrowed.output;
+                    request.target = borrowed.target;
+                    for (u32 byte = 0; byte < request.metadata.Size(); ++byte)
+                        request.metadata[byte] = borrowed.source.metadata[byte];
+                    for (u32 byte = 0; byte < request.settings.Size(); ++byte)
+                        request.settings[byte] = borrowed.settings[byte];
+                }
+            }
+            else
+            {
+                // Composed requests may share only after exact identity and
+                // byte equality, never merely because they have one SourceRecord.
+                for (const OwnedBuildRequest& prior : staged)
+                    if (prior.sourceReference == borrowed.source.identity &&
+                        prior.SourceContentEquals(borrowed))
+                    {
+                        captured = request.CopyFromSharingSource(borrowed, prior);
+                        break;
+                    }
+                if (!captured)
+                    captured = request.CopyFrom(borrowed) && request.MakeSourceShared();
+            }
+            if (!captured)
+            {
+                failedIndex = index;
+                return ProjectAssetBuildResult::BuildRequestCreationFailed;
+            }
+
+            const u32 previous = staged.Size();
+            staged.PushBack(static_cast<OwnedBuildRequest&&>(request));
+            if (staged.Size() != previous + 1u)
+            {
+                failedIndex = index;
+                return ProjectAssetBuildResult::BuildRequestCreationFailed;
+            }
+            if (usesOriginalContent && originalContentOwner == ~u32{0})
+                originalContentOwner = index;
+        }
+
+        requests.Swap(staged);
+        return ProjectAssetBuildResult::Success;
+    }
+
+    ProjectAssetBuildResult ProjectAssetBuildSystem::ResolveForValidation(
+        const SourceDatabase& sources, const resources::ResourceReference output,
+        OwnedBuildRequest& request) const noexcept
+    {
+        request.Reset();
+        if (m_impl == nullptr || !output.IsValid() || !output.IsTyped())
+            return ProjectAssetBuildResult::InvalidArgument;
+        const ProjectAssetBuildResult resolved = m_impl->ResolveRequest(sources, output, request);
+        if (resolved != ProjectAssetBuildResult::SourceNotFound)
+            return resolved;
+        // Only the live catalog's canonical generated provider may fill this
+        // namespace. A real authored path that fails to resolve is NEVER
+        // shadowed by a generated intermediate.
+        if (&sources != m_impl->sources || sources.ContainsOutputPath(output.GetPath()) ||
+            m_impl->resolveGeneratedFallback == nullptr)
+            return resolved;
+        BuildDependency generated;
+        generated.identity = output;
+        generated.role = DependencyRole::Generated;
+        generated.requirement = DependencyRequirement::Required;
+        return Impl::ResolveGenerated(generated, request, m_impl)
+                   ? ProjectAssetBuildResult::Success : ProjectAssetBuildResult::SourceNotFound;
     }
 
     GraphRequest ProjectAssetBuildSystem::Request(const resources::ResourceReference output, const BuildPriority priority,

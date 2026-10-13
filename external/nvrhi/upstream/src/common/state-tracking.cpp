@@ -21,9 +21,11 @@
 */
 
 #include "state-tracking.h"
+#include "../../../../../source/profiling/include/vanguard/profiling/profiling.hpp"
 
 #include <nvrhi/utils.h>
 
+#include <cstdint>
 #include <sstream>
 
 namespace nvrhi
@@ -46,6 +48,110 @@ namespace nvrhi
     static uint32_t calcSubresource(MipLevel mipLevel, ArraySlice arraySlice, const TextureDesc& desc)
     {
         return mipLevel + arraySlice * desc.mipLevels;
+    }
+
+    static size_t hashStateExtensionPointer(const void* pointer)
+    {
+        size_t hash = static_cast<size_t>(reinterpret_cast<std::uintptr_t>(pointer) >> 4u);
+        hash ^= hash >> 16u;
+        hash *= size_t(0x9e3779b1u);
+        hash ^= hash >> 13u;
+        return hash;
+    }
+
+    void CommandListResourceStateTracker::resetTextureState(TextureState& tracking)
+    {
+        if (tracking.subresourceStates.capacity() > RetainedSubresourceStateCapacity)
+            std::vector<ResourceStates>().swap(tracking.subresourceStates);
+        else
+            tracking.subresourceStates.clear();
+        tracking.state = ResourceStates::Unknown;
+        tracking.enableUavBarriers = true;
+        tracking.firstUavBarrierPlaced = false;
+        tracking.permanentTransition = false;
+        tracking.oversizedRetention = false;
+    }
+
+    void CommandListResourceStateTracker::resetBufferState(BufferState& tracking)
+    {
+        tracking.state = ResourceStates::Unknown;
+        tracking.enableUavBarriers = true;
+        tracking.firstUavBarrierPlaced = false;
+        tracking.permanentTransition = false;
+    }
+
+    void CommandListResourceStateTracker::advanceRecordingEpoch()
+    {
+        ++m_RecordingEpoch;
+        if (m_RecordingEpoch != 0)
+            return;
+
+        // A wrapped epoch is practically unreachable, but stale slots must never
+        // alias a future recording if it does happen.
+        for (RetainedTextureStateSlot& slot : m_RetainedTextureStates)
+            slot.epoch = 0;
+        for (RetainedBufferStateSlot& slot : m_RetainedBufferStates)
+            slot.epoch = 0;
+        m_RecordingEpoch = 1;
+    }
+
+    void CommandListResourceStateTracker::releaseOversizedTextureStateStorage()
+    {
+        for (TextureState* tracking : m_OversizedTextureStates)
+        {
+            if (tracking == nullptr || !tracking->oversizedRetention)
+                continue;
+            std::vector<ResourceStates>().swap(tracking->subresourceStates);
+            tracking->oversizedRetention = false;
+        }
+        m_OversizedTextureStates.clear();
+        if (m_OversizedTextureStates.capacity() > RetainedStateSlotCapacity)
+            std::vector<TextureState*>().swap(m_OversizedTextureStates);
+    }
+
+    void CommandListResourceStateTracker::trimTransientOverflowStorage()
+    {
+        constexpr size_t retainedBucketLimit = RetainedStateSlotCapacity * 2u;
+        if (m_OverflowTextureStates.bucket_count() > retainedBucketLimit)
+            decltype(m_OverflowTextureStates)().swap(m_OverflowTextureStates);
+        if (m_OverflowBufferStates.bucket_count() > retainedBucketLimit)
+            decltype(m_OverflowBufferStates)().swap(m_OverflowBufferStates);
+        if (m_InitialTextureStates.capacity() > RetainedStateSlotCapacity)
+            std::vector<TextureStateExtension*>().swap(m_InitialTextureStates);
+        if (m_PermanentTextureStates.capacity() > RetainedStateSlotCapacity)
+            decltype(m_PermanentTextureStates)().swap(m_PermanentTextureStates);
+        if (m_PermanentBufferStates.capacity() > RetainedStateSlotCapacity)
+            decltype(m_PermanentBufferStates)().swap(m_PermanentBufferStates);
+    }
+
+    void CommandListResourceStateTracker::noteTextureStateStorage(TextureState* tracking)
+    {
+        if (tracking == nullptr || tracking->oversizedRetention ||
+            tracking->subresourceStates.capacity() <= RetainedSubresourceStateCapacity)
+            return;
+        tracking->oversizedRetention = true;
+        m_OversizedTextureStates.push_back(tracking);
+    }
+
+    void CommandListResourceStateTracker::abandonRecordingState()
+    {
+        releaseOversizedTextureStateStorage();
+        m_OverflowTextureStates.clear();
+        m_OverflowBufferStates.clear();
+        m_ActiveTextureStateSlots.clear();
+        m_ActiveBufferStateSlots.clear();
+        m_PermanentTextureStates.clear();
+        m_PermanentBufferStates.clear();
+        m_InitialTextureStates.clear();
+        m_TextureBarriers.clear();
+        m_BufferBarriers.clear();
+        trimTransientOverflowStorage();
+        advanceRecordingEpoch();
+    }
+
+    void CommandListResourceStateTracker::beginRecording()
+    {
+        abandonRecordingState();
     }
 
     void CommandListResourceStateTracker::setEnableUavBarriersForTexture(TextureStateExtension* texture, bool enableBarriers)
@@ -80,6 +186,7 @@ namespace nvrhi
         else
         {
             tracking->subresourceStates.resize(desc.mipLevels * desc.arraySize, tracking->state);
+            noteTextureStateStorage(tracking);
             tracking->state = ResourceStates::Unknown;
 
             for (MipLevel mipLevel = subresources.baseMipLevel; mipLevel < subresources.baseMipLevel + subresources.numMipLevels; mipLevel++)
@@ -215,6 +322,7 @@ namespace nvrhi
             if (tracking->subresourceStates.empty())
             {
                 tracking->subresourceStates.resize(texture->descRef.mipLevels * texture->descRef.arraySize, tracking->state);
+                noteTextureStateStorage(tracking);
                 tracking->state = ResourceStates::Unknown;
                 stateExpanded = true;
             }
@@ -335,9 +443,24 @@ namespace nvrhi
 
     void CommandListResourceStateTracker::keepBufferInitialStates()
     {
-        for (auto& [buffer, tracking] : m_BufferStates)
+        for (uint32_t slotIndex : m_ActiveBufferStateSlots)
         {
+            RetainedBufferStateSlot& slot = m_RetainedBufferStates[slotIndex];
+            if (slot.epoch != m_RecordingEpoch)
+                continue;
+            BufferStateExtension* const buffer = slot.buffer;
+            BufferState* const tracking = &slot.tracking;
             if (buffer->descRef.keepInitialState && 
+                !buffer->permanentState &&
+                !buffer->descRef.isVolatile &&
+                !tracking->permanentTransition)
+            {
+                requireBufferState(buffer, buffer->descRef.initialState);
+            }
+        }
+        for (auto& [buffer, tracking] : m_OverflowBufferStates)
+        {
+            if (buffer->descRef.keepInitialState &&
                 !buffer->permanentState &&
                 !buffer->descRef.isVolatile &&
                 !tracking->permanentTransition)
@@ -349,10 +472,24 @@ namespace nvrhi
 
     void CommandListResourceStateTracker::keepTextureInitialStates()
     {
-        for (auto& [texture, tracking] : m_TextureStates)
+        for (uint32_t slotIndex : m_ActiveTextureStateSlots)
         {
+            RetainedTextureStateSlot& slot = m_RetainedTextureStates[slotIndex];
+            if (slot.epoch != m_RecordingEpoch)
+                continue;
+            TextureStateExtension* const texture = slot.texture;
+            TextureState* const tracking = &slot.tracking;
             if (texture->descRef.keepInitialState && 
                 !texture->permanentState && 
+                !tracking->permanentTransition)
+            {
+                requireTextureState(texture, AllSubresources, texture->descRef.initialState);
+            }
+        }
+        for (auto& [texture, tracking] : m_OverflowTextureStates)
+        {
+            if (texture->descRef.keepInitialState &&
+                !texture->permanentState &&
                 !tracking->permanentTransition)
             {
                 requireTextureState(texture, AllSubresources, texture->descRef.initialState);
@@ -362,6 +499,9 @@ namespace nvrhi
 
     void CommandListResourceStateTracker::commandListSubmitted()
     {
+        VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/TrackerSubmit");
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/PermanentPublication");
         for (auto [texture, state] : m_PermanentTextureStates)
         {
             if (texture->permanentState != 0 && texture->permanentState != state)
@@ -391,64 +531,141 @@ namespace nvrhi
             buffer->permanentState = state;
         }
         m_PermanentBufferStates.clear();
+        }
 
-        for (const auto& [texture, stateTracking] : m_TextureStates)
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/InitialStatePublication");
+        for (TextureStateExtension* texture : m_InitialTextureStates)
         {
             if (texture->descRef.keepInitialState && !texture->stateInitialized)
                 texture->stateInitialized = true;
         }
-
-        m_TextureStates.clear();
-        m_BufferStates.clear();
+        m_InitialTextureStates.clear();
+        }
+        {
+            VG_PROFILE_ZONE_NAMED("RFCPU/NVRHI/TrackerMapDestruction");
+            releaseOversizedTextureStateStorage();
+            m_OverflowTextureStates.clear();
+            m_OverflowBufferStates.clear();
+            m_ActiveTextureStateSlots.clear();
+            m_ActiveBufferStateSlots.clear();
+            m_TextureBarriers.clear();
+            m_BufferBarriers.clear();
+            trimTransientOverflowStorage();
+            advanceRecordingEpoch();
+        }
     }
 
     TextureState* CommandListResourceStateTracker::getTextureStateTracking(TextureStateExtension* texture, bool allowCreate)
     {
-        auto it = m_TextureStates.find(texture);
-
-        if (it != m_TextureStates.end())
+        if (!m_RetainedTextureStates.empty())
         {
-            return it->second.get();
+            const size_t first = hashStateExtensionPointer(texture) & (RetainedStateSlotCapacity - 1u);
+            for (uint32_t probe = 0; probe < RetainedStateSlotCapacity; ++probe)
+            {
+                const uint32_t slotIndex = uint32_t((first + probe) & (RetainedStateSlotCapacity - 1u));
+                RetainedTextureStateSlot& slot = m_RetainedTextureStates[slotIndex];
+                if (slot.epoch != m_RecordingEpoch)
+                {
+                    if (!allowCreate)
+                        break;
+
+                    slot.texture = texture;
+                    resetTextureState(slot.tracking);
+                    slot.epoch = m_RecordingEpoch;
+                    m_ActiveTextureStateSlots.push_back(slotIndex);
+                    if (texture->descRef.keepInitialState)
+                    {
+                        slot.tracking.state = texture->stateInitialized ? texture->descRef.initialState : ResourceStates::Common;
+                        if (!texture->stateInitialized)
+                            m_InitialTextureStates.push_back(texture);
+                    }
+                    return &slot.tracking;
+                }
+
+                // Never compare a pointer carried by a stale epoch: a resource may
+                // have been destroyed and a later resource may reuse its address.
+                if (slot.texture == texture)
+                    return &slot.tracking;
+            }
         }
+
+        auto overflow = m_OverflowTextureStates.find(texture);
+        if (overflow != m_OverflowTextureStates.end())
+            return overflow->second.get();
 
         if (!allowCreate)
             return nullptr;
-        
-        std::unique_ptr<TextureState> trackingRef = std::make_unique<TextureState>();
 
-        TextureState* tracking = trackingRef.get();
-        m_TextureStates.insert(std::make_pair(texture, std::move(trackingRef)));
-        
+        if (m_RetainedTextureStates.empty())
+        {
+            m_RetainedTextureStates.resize(RetainedStateSlotCapacity);
+            m_ActiveTextureStateSlots.reserve(RetainedStateSlotCapacity);
+            m_InitialTextureStates.reserve(RetainedStateSlotCapacity);
+            return getTextureStateTracking(texture, true);
+        }
+
+        std::unique_ptr<TextureState> trackingRef = std::make_unique<TextureState>();
+        TextureState* const tracking = trackingRef.get();
         if (texture->descRef.keepInitialState)
         {
             tracking->state = texture->stateInitialized ? texture->descRef.initialState : ResourceStates::Common;
+            if (!texture->stateInitialized)
+                m_InitialTextureStates.push_back(texture);
         }
-
+        m_OverflowTextureStates.insert(std::make_pair(texture, std::move(trackingRef)));
         return tracking;
     }
 
     BufferState* CommandListResourceStateTracker::getBufferStateTracking(BufferStateExtension* buffer, bool allowCreate)
     {
-        auto it = m_BufferStates.find(buffer);
-
-        if (it != m_BufferStates.end())
+        if (!m_RetainedBufferStates.empty())
         {
-            return it->second.get();
+            const size_t first = hashStateExtensionPointer(buffer) & (RetainedStateSlotCapacity - 1u);
+            for (uint32_t probe = 0; probe < RetainedStateSlotCapacity; ++probe)
+            {
+                const uint32_t slotIndex = uint32_t((first + probe) & (RetainedStateSlotCapacity - 1u));
+                RetainedBufferStateSlot& slot = m_RetainedBufferStates[slotIndex];
+                if (slot.epoch != m_RecordingEpoch)
+                {
+                    if (!allowCreate)
+                        break;
+
+                    slot.buffer = buffer;
+                    resetBufferState(slot.tracking);
+                    slot.epoch = m_RecordingEpoch;
+                    m_ActiveBufferStateSlots.push_back(slotIndex);
+                    if (buffer->descRef.keepInitialState)
+                        slot.tracking.state = buffer->descRef.initialState;
+                    return &slot.tracking;
+                }
+
+                if (slot.buffer == buffer)
+                    return &slot.tracking;
+            }
         }
+
+        auto overflow = m_OverflowBufferStates.find(buffer);
+        if (overflow != m_OverflowBufferStates.end())
+            return overflow->second.get();
 
         if (!allowCreate)
             return nullptr;
 
-        std::unique_ptr<BufferState> trackingRef = std::make_unique<BufferState>();
+        if (m_RetainedBufferStates.empty())
+        {
+            m_RetainedBufferStates.resize(RetainedStateSlotCapacity);
+            m_ActiveBufferStateSlots.reserve(RetainedStateSlotCapacity);
+            return getBufferStateTracking(buffer, true);
+        }
 
-        BufferState* tracking = trackingRef.get();
-        m_BufferStates.insert(std::make_pair(buffer, std::move(trackingRef)));
-                                                   
+        std::unique_ptr<BufferState> trackingRef = std::make_unique<BufferState>();
+        BufferState* const tracking = trackingRef.get();
         if (buffer->descRef.keepInitialState)
         {
             tracking->state = buffer->descRef.initialState;
         }
-
+        m_OverflowBufferStates.insert(std::make_pair(buffer, std::move(trackingRef)));
         return tracking;
     }
 

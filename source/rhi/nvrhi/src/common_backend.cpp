@@ -5,6 +5,7 @@
 #include <vanguard/system/assert.hpp>
 #include <vanguard/system/time.hpp>
 #include <vanguard/concurrency/thread.hpp>
+#include "../../../profiling/include/vanguard/profiling/profiling.hpp"
 
 #include <new>
 
@@ -248,6 +249,131 @@ namespace vanguard::rhi::backend
             if (HasFlag(state, ResourceState::ShadingRate))
                 include(nvrhi::ResourceStates::ShadingRateSurface);
             return static_cast<nvrhi::ResourceStates>(result);
+        }
+
+        [[nodiscard]] constexpr u32 StateBits(const ResourceState state) noexcept
+        {
+            return static_cast<u32>(state);
+        }
+
+        [[nodiscard]] constexpr bool HasSingleStateBit(const u32 bits) noexcept
+        {
+            return bits != 0 && (bits & (bits - 1u)) == 0;
+        }
+
+        [[nodiscard]] constexpr bool CanonicalTextureState(const ResourceState state) noexcept
+        {
+            constexpr u32 Known = (1u << 19u) - 1u;
+            const u32 bits = StateBits(state);
+            if (bits == 0 || (bits & ~Known) != 0)
+                return false;
+            constexpr u32 Common = StateBits(ResourceState::Common);
+            if ((bits & Common) != 0)
+                return bits == Common;
+            constexpr u32 Standalone = StateBits(ResourceState::CopySource) | StateBits(ResourceState::CopyDestination) | StateBits(ResourceState::UnorderedAccess) |
+                                       StateBits(ResourceState::RenderTarget) | StateBits(ResourceState::DepthWrite) | StateBits(ResourceState::DepthRead) | StateBits(ResourceState::Present) |
+                                       StateBits(ResourceState::ResolveSource) | StateBits(ResourceState::ResolveDestination) | StateBits(ResourceState::ShadingRate);
+            if ((bits & Standalone) != 0)
+                return HasSingleStateBit(bits);
+            constexpr u32 CompatibleReads = StateBits(ResourceState::ShaderResourceGraphics) | StateBits(ResourceState::ShaderResourceCompute);
+            return (bits & CompatibleReads) != 0 && (bits & ~CompatibleReads) == 0;
+        }
+
+        [[nodiscard]] constexpr bool CanonicalBufferState(const ResourceState state) noexcept
+        {
+            constexpr u32 Known = (1u << 19u) - 1u;
+            const u32 bits = StateBits(state);
+            if (bits == 0 || (bits & ~Known) != 0)
+                return false;
+            constexpr u32 Common = StateBits(ResourceState::Common);
+            if ((bits & Common) != 0)
+                return bits == Common;
+            constexpr u32 Standalone = StateBits(ResourceState::CopyDestination) | StateBits(ResourceState::UnorderedAccess) |
+                                       StateBits(ResourceState::AccelerationStructureRead) | StateBits(ResourceState::AccelerationStructureWrite);
+            if ((bits & Standalone) != 0)
+                return HasSingleStateBit(bits);
+            constexpr u32 CompatibleReads = StateBits(ResourceState::CopySource) | StateBits(ResourceState::ShaderResourceGraphics) | StateBits(ResourceState::ShaderResourceCompute) |
+                                            StateBits(ResourceState::VertexBuffer) | StateBits(ResourceState::IndexBuffer) | StateBits(ResourceState::ConstantBuffer) |
+                                            StateBits(ResourceState::IndirectArgument);
+            return (bits & CompatibleReads) != 0 && (bits & ~CompatibleReads) == 0;
+        }
+
+        [[nodiscard]] bool TextureStateCompatible(const TextureDesc& desc, const ResourceState state) noexcept
+        {
+            if (!CanonicalTextureState(state))
+                return false;
+            const u32 bits = StateBits(state);
+            if ((bits & (StateBits(ResourceState::VertexBuffer) | StateBits(ResourceState::IndexBuffer) | StateBits(ResourceState::ConstantBuffer) |
+                         StateBits(ResourceState::IndirectArgument) | StateBits(ResourceState::AccelerationStructureRead) | StateBits(ResourceState::AccelerationStructureWrite))) != 0)
+                return false;
+            if ((bits & StateBits(ResourceState::CopySource)) != 0 && !HasFlag(desc.usage, TextureUsage::CopySource))
+                return false;
+            if ((bits & StateBits(ResourceState::CopyDestination)) != 0 && !HasFlag(desc.usage, TextureUsage::CopyDestination))
+                return false;
+            if ((bits & (StateBits(ResourceState::ShaderResourceGraphics) | StateBits(ResourceState::ShaderResourceCompute))) != 0 && !HasFlag(desc.usage, TextureUsage::ShaderResource))
+                return false;
+            if ((bits & StateBits(ResourceState::UnorderedAccess)) != 0 && !HasFlag(desc.usage, TextureUsage::UnorderedAccess))
+                return false;
+            if ((bits & StateBits(ResourceState::RenderTarget)) != 0 && !HasFlag(desc.usage, TextureUsage::RenderTarget))
+                return false;
+            if ((bits & (StateBits(ResourceState::DepthWrite) | StateBits(ResourceState::DepthRead))) != 0 && !HasFlag(desc.usage, TextureUsage::DepthStencil))
+                return false;
+            if ((bits & StateBits(ResourceState::Present)) != 0 && !HasFlag(desc.usage, TextureUsage::Present))
+                return false;
+            if ((bits & StateBits(ResourceState::ResolveSource)) != 0 && !HasFlag(desc.usage, TextureUsage::ResolveSource))
+                return false;
+            if ((bits & StateBits(ResourceState::ResolveDestination)) != 0 && !HasFlag(desc.usage, TextureUsage::ResolveDestination))
+                return false;
+            return (bits & StateBits(ResourceState::ShadingRate)) == 0 || HasFlag(desc.usage, TextureUsage::ShadingRate);
+        }
+
+        [[nodiscard]] bool BufferStateCompatible(const BufferDesc& desc, const ResourceState state) noexcept
+        {
+            if (!CanonicalBufferState(state))
+                return false;
+            const u32 bits = StateBits(state);
+            if ((bits & (StateBits(ResourceState::RenderTarget) | StateBits(ResourceState::DepthWrite) | StateBits(ResourceState::DepthRead) |
+                         StateBits(ResourceState::Present) | StateBits(ResourceState::ResolveSource) | StateBits(ResourceState::ResolveDestination) |
+                         StateBits(ResourceState::ShadingRate))) != 0)
+                return false;
+            if ((bits & StateBits(ResourceState::CopySource)) != 0 && !HasFlag(desc.usage, BufferUsage::CopySource))
+                return false;
+            if ((bits & StateBits(ResourceState::CopyDestination)) != 0 && !HasFlag(desc.usage, BufferUsage::CopyDestination))
+                return false;
+            if ((bits & (StateBits(ResourceState::ShaderResourceGraphics) | StateBits(ResourceState::ShaderResourceCompute))) != 0 && !HasFlag(desc.usage, BufferUsage::ShaderResource))
+                return false;
+            if ((bits & StateBits(ResourceState::UnorderedAccess)) != 0 && !HasFlag(desc.usage, BufferUsage::UnorderedAccess))
+                return false;
+            if ((bits & StateBits(ResourceState::VertexBuffer)) != 0 && !HasFlag(desc.usage, BufferUsage::Vertex))
+                return false;
+            if ((bits & StateBits(ResourceState::IndexBuffer)) != 0 && !HasFlag(desc.usage, BufferUsage::Index))
+                return false;
+            if ((bits & StateBits(ResourceState::ConstantBuffer)) != 0 && !HasFlag(desc.usage, BufferUsage::Constant))
+                return false;
+            if ((bits & StateBits(ResourceState::IndirectArgument)) != 0 && !HasFlag(desc.usage, BufferUsage::IndirectArguments))
+                return false;
+            return (bits & (StateBits(ResourceState::AccelerationStructureRead) | StateBits(ResourceState::AccelerationStructureWrite))) == 0 ||
+                   HasFlag(desc.usage, BufferUsage::AccelerationStructure);
+        }
+
+        [[nodiscard]] constexpr bool QueueSupportsCompiledState(const CommandListType queue, const ResourceKind kind, const ResourceState state) noexcept
+        {
+            const u32 bits = StateBits(state);
+            if (queue == CommandListType::Default)
+                return true;
+            if (queue == CommandListType::CopyAsync)
+                return bits == StateBits(ResourceState::Common) || bits == StateBits(ResourceState::CopySource) || bits == StateBits(ResourceState::CopyDestination);
+            if (queue != CommandListType::Compute)
+                return false;
+            if (kind == ResourceKind::Texture)
+            {
+                constexpr u32 Unsupported = StateBits(ResourceState::ShaderResourceGraphics) | StateBits(ResourceState::RenderTarget) | StateBits(ResourceState::DepthWrite) |
+                                            StateBits(ResourceState::DepthRead) | StateBits(ResourceState::Present) | StateBits(ResourceState::ResolveSource) |
+                                            StateBits(ResourceState::ResolveDestination) | StateBits(ResourceState::ShadingRate);
+                return (bits & Unsupported) == 0;
+            }
+            constexpr u32 Unsupported = StateBits(ResourceState::ShaderResourceGraphics) | StateBits(ResourceState::VertexBuffer) | StateBits(ResourceState::IndexBuffer);
+            return (bits & Unsupported) == 0;
         }
 
         [[nodiscard]] nvrhi::TextureDesc ToNativeTextureDesc(const TextureDesc& desc, const bool requirementsProbe = false) noexcept
@@ -937,7 +1063,7 @@ namespace vanguard::rhi::backend
             };
 
             CommandListPayload() noexcept
-                : resources(memory::pools::Rendering::GetInstance()), residencyResources(memory::pools::Rendering::GetInstance()),
+                : resources(memory::pools::Rendering::GetInstance()), residencyResources(memory::pools::Rendering::GetInstance()), admittedResources(memory::pools::Rendering::GetInstance()),
                   submissionCallbacks(memory::pools::Rendering::GetInstance())
             {
             }
@@ -946,7 +1072,7 @@ namespace vanguard::rhi::backend
                                 const CommandListRetentionPolicy commandListRetentionPolicy, const CommandListReuseClass commandListReuseClass,
                                 const u64 commandListReuseRole, const GpuFence priorCompletion) noexcept
             {
-                VG_ASSERT_MSG(!native && resources.Size() == 0 && residencyResources.Size() == 0 && submissionCallbacks.Size() == 0,
+                VG_ASSERT_MSG(!native && resources.Size() == 0 && residencyResources.Size() == 0 && admittedResources.Size() == 0 && submissionCallbacks.Size() == 0,
                               "command-list arena slot was reused before its prior recording was drained");
                 VG_ASSERT_MSG(commandListType > CommandListType::None && commandListType <= CommandListType::Compute,
                               "command-list arena received an invalid native queue type");
@@ -957,7 +1083,7 @@ namespace vanguard::rhi::backend
                                   ? commandListReuseRole == 0
                                   : (commandListRetentionPolicy == CommandListRetentionPolicy::BoundedUploadReuse && commandListRole != 0 &&
                                      commandListReuseRole == commandListRole),
-                              "command-list native reuse provenance is incompatible with the new recording lease");
+                              "command-list native reuse provenance is incompatible with the next recording lease");
                 native = static_cast<nvrhi::CommandListHandle&&>(commandList);
                 framebuffer = nullptr;
                 pipeline = {};
@@ -988,6 +1114,10 @@ namespace vanguard::rhi::backend
                     bound = false;
                 open = true;
                 entryStatesSeeded = false;
+                resourceAdmissionActive = false;
+                resourceRecordingStarted = false;
+                residencyResourcesSorted = true;
+                compiledBarrierEpoch = 0;
                 ResetPendingBarrierTracking();
                 for (u64& wait : incomingWaits)
                     wait = 0;
@@ -1003,6 +1133,7 @@ namespace vanguard::rhi::backend
                 native = nullptr;
                 resources.Clear();
                 residencyResources.Clear();
+                admittedResources.Clear();
                 submissionCallbacks.Clear();
                 framebuffer = nullptr;
                 pipeline = {};
@@ -1012,6 +1143,11 @@ namespace vanguard::rhi::backend
                 retentionPolicy = CommandListRetentionPolicy::Default;
                 reuseClass = CommandListReuseClass::Clean;
                 open = false;
+                entryStatesSeeded = false;
+                resourceAdmissionActive = false;
+                resourceRecordingStarted = false;
+                residencyResourcesSorted = true;
+                compiledBarrierEpoch = 0;
                 ResetPendingBarrierTracking();
                 recycleNative = false;
                 usedPersistentWorkingSet = false;
@@ -1020,6 +1156,9 @@ namespace vanguard::rhi::backend
             nvrhi::CommandListHandle native;
             containers::DynamicArray<ResourceRef> resources;
             containers::DynamicArray<ResourceRef> residencyResources;
+            // Sorted immutable packet table. Payload pointers remain stable while
+            // the corresponding ResourceRefs are retained in resources.
+            containers::DynamicArray<AdmittedCommandResource> admittedResources;
             containers::DynamicArray<SubmissionCallback> submissionCallbacks;
             nvrhi::FramebufferHandle framebuffer;
             PipelineRef pipeline;
@@ -1047,6 +1186,10 @@ namespace vanguard::rhi::backend
             bool vertexBufferSet[MaximumVertexBindings]{};
             bool open = true;
             bool entryStatesSeeded = false;
+            bool resourceAdmissionActive = false;
+            bool resourceRecordingStarted = false;
+            bool residencyResourcesSorted = true;
+            u32 compiledBarrierEpoch = 0;
             PendingBufferBarrierSlot pendingBufferBarrierTable[PendingBufferBarrierTableCapacity]{};
             PendingTextureBarrierRequest pendingTextureBarriers[MaximumPendingExplicitBarrierRequests]{};
             u32 pendingBufferBarrierCount = 0;
@@ -1167,8 +1310,44 @@ namespace vanguard::rhi::backend
             DestroyPayload<PipelinePayload>(nullptr, {}, pipeline);
         }
 
+        [[nodiscard]] const AdmittedCommandResource* FindAdmittedCommandResource(const CommandListPayload& command,
+                                                                                  const ResourceRef resource) noexcept
+        {
+            u32 first = 0;
+            u32 count = command.admittedResources.Size();
+            while (count != 0)
+            {
+                const u32 step = count / 2u;
+                const u32 index = first + step;
+                const u64 candidate = command.admittedResources[index].resource.value;
+                if (candidate < resource.value)
+                {
+                    first = index + 1u;
+                    count -= step + 1u;
+                }
+                else
+                    count = step;
+            }
+            return first < command.admittedResources.Size() && command.admittedResources[first].resource == resource
+                       ? &command.admittedResources[first]
+                       : nullptr;
+        }
+
+        [[nodiscard]] void* ResolveCommandResourcePayload(CommonBackend& common, CommandListPayload& command, const ResourceRef resource,
+                                                          bool* const admittedResult = nullptr) noexcept
+        {
+            const AdmittedCommandResource* const admitted = FindAdmittedCommandResource(command, resource);
+            command.resourceRecordingStarted = true;
+            if (admittedResult != nullptr)
+                *admittedResult = admitted != nullptr;
+            return admitted != nullptr ? admitted->payload : common.GetResourcePayload(resource);
+        }
+
         [[nodiscard]] bool TrackCommandResource(CommonBackend& common, CommandListPayload& command, const ResourceRef resource) noexcept
         {
+            command.resourceRecordingStarted = true;
+            if (FindAdmittedCommandResource(command, resource) != nullptr)
+                return true;
             bool retained = false;
             for (const ResourceRef tracked : command.resources)
                 if (tracked == resource)
@@ -1215,6 +1394,8 @@ namespace vanguard::rhi::backend
             for (const ResourceRef tracked : command.residencyResources)
                 if (tracked == allocation)
                     return true;
+            if (!command.residencyResources.Empty() && command.residencyResources.Back().value > allocation.value)
+                command.residencyResourcesSorted = false;
             const u32 expected = command.residencyResources.Size() + 1u;
             command.residencyResources.PushBack(allocation);
             return command.residencyResources.Size() == expected;
@@ -1414,8 +1595,8 @@ namespace vanguard::rhi::backend
         }
 
         constexpr u32 CommandListArenaCapacity = ResourceLifetimeConfig{}.commandListCapacity;
-        // RED's DX12 backend retires command-list contexts after 30 maintenance
-        // flushes of inactivity. Use the same proven starting window here; Gate 4
+        // Command-list contexts retire after a bounded maintenance window of
+        // inactivity. Keep the proven 30-epoch starting window here; Gate 4
         // profiling can tune it without changing correctness.
         constexpr u64 CommandListColdMaintenanceEpochs = 30u;
         // Outer destruction can be materially more expensive than pool removal.
@@ -2063,13 +2244,14 @@ namespace vanguard::rhi::backend
     }
 
     bool CommonBackend::Initialize(nvrhi::DeviceHandle&& device, const FenceCompleteCallback fenceComplete, const SignalFenceCallback signalFence,
-                                   const WaitFenceCallback waitFence, const QueueWaitCallback queueWait, const AliasingBarrierCallback aliasingBarrier,
+                                   const WaitFenceCallback waitFence, const QueueWaitCallback queueWait, const CompiledBarrierBatchCallback compiledBarrierBatch,
+                                   const AliasingBarrierCallback aliasingBarrier,
                                    const RectColorClearCallback rectColorClear, const RectDepthStencilClearCallback rectDepthStencilClear,
                                    const DiscardTextureCallback discardTexture, const PrepareResidencyCallback prepareResidency,
                                    const CommitResidencyCallback commitResidency, const ReleaseResidencyCallback releaseResidency,
                                    void* const fenceContext) noexcept
     {
-        if (IsInitialized() || !device || fenceComplete == nullptr || signalFence == nullptr || waitFence == nullptr || queueWait == nullptr || aliasingBarrier == nullptr ||
+        if (IsInitialized() || !device || fenceComplete == nullptr || signalFence == nullptr || waitFence == nullptr || queueWait == nullptr || compiledBarrierBatch == nullptr || aliasingBarrier == nullptr ||
             rectColorClear == nullptr || rectDepthStencilClear == nullptr || discardTexture == nullptr || prepareResidency == nullptr ||
             commitResidency == nullptr || releaseResidency == nullptr)
             return false;
@@ -2099,6 +2281,7 @@ namespace vanguard::rhi::backend
         m_signalFence = signalFence;
         m_waitFence = waitFence;
         m_queueWait = queueWait;
+        m_compiledBarrierBatch = compiledBarrierBatch;
         m_aliasingBarrier = aliasingBarrier;
         m_rectColorClear = rectColorClear;
         m_rectDepthStencilClear = rectDepthStencilClear;
@@ -2148,6 +2331,7 @@ namespace vanguard::rhi::backend
         m_signalFence = nullptr;
         m_waitFence = nullptr;
         m_queueWait = nullptr;
+        m_compiledBarrierBatch = nullptr;
         m_aliasingBarrier = nullptr;
         m_rectColorClear = nullptr;
         m_rectDepthStencilClear = nullptr;
@@ -2185,6 +2369,7 @@ namespace vanguard::rhi::backend
         m_signalFence = nullptr;
         m_waitFence = nullptr;
         m_queueWait = nullptr;
+        m_compiledBarrierBatch = nullptr;
         m_aliasingBarrier = nullptr;
         m_rectColorClear = nullptr;
         m_rectDepthStencilClear = nullptr;
@@ -3716,6 +3901,7 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::SubmitCommandLists(const char*, const containers::ArraySpan<const CommandListRef> commandLists,
                                                      const CommandListSyncType sync, SubmissionReceipt& receipt) noexcept
     {
+        VG_PROFILE_ZONE_NAMED("RFCPU/RHI/SubmitTotal");
         concurrency::ScopedLock submissionGuard(m_submissionLock);
         receipt = {};
         nvrhi::ICommandList* nativeLists[3][MaximumCommandListsPerSubmission]{};
@@ -3723,6 +3909,8 @@ namespace vanguard::rhi::backend
         u32 queueCounts[3]{};
         u64 incomingWaits[3][3]{};
 
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/RHI/ValidateLists");
         for (u32 index = 0; index < commandLists.Size(); ++index)
         {
             auto* const payload = static_cast<CommandListPayload*>(GetCommandListPayload(commandLists[index]));
@@ -3751,25 +3939,165 @@ namespace vanguard::rhi::backend
                 return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
                                               "a submission spanning multiple queues requires an explicit fork or join synchronization mode");
         }
+        }
 
+        // Resource admission publishes sorted-unique canonical physical
+        // allocations. Legacy command recording also deduplicates allocations,
+        // but preserves first-use order; normalize only payloads that observed
+        // an out-of-order physical allocation before the submit-wide merge.
         for (u32 index = 0; index < commandLists.Size(); ++index)
         {
-            CommandListPayload* const payload = payloads[index];
-            if (payload == nullptr)
-                return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "submission lost a validated command list");
-            const containers::DynamicArray<ResourceRef>& workingSet = payload->residencyResources;
-            for (u32 first = 0; first < workingSet.Size(); first += MaximumResidencyBatchSize)
+            CommandListPayload& payload = *payloads[index];
+            containers::DynamicArray<ResourceRef>& workingSet = payload.residencyResources;
+            if (!payload.residencyResourcesSorted)
             {
-                const u32 count = workingSet.Size() - first < MaximumResidencyBatchSize ? workingSet.Size() - first : MaximumResidencyBatchSize;
-                const BackendStatus status = m_prepareResidency(m_fenceContext, {workingSet.TypedData() + first, count});
-                if (!status)
-                    return status;
+                std::sort(workingSet.Begin(), workingSet.End(), [](const ResourceRef left, const ResourceRef right) noexcept
+                          { return left.value < right.value; });
+                payload.residencyResourcesSorted = true;
             }
+        }
+
+        struct ResidencyMergeCursor
+        {
+            u32 payload = 0;
+            u32 resource = 0;
+        };
+        const auto streamSubmissionResidency = [&](const auto& consume) noexcept -> BackendStatus
+        {
+            ResidencyMergeCursor heap[MaximumCommandListsPerSubmission]{};
+            ResourceRef resources[MaximumResidencyBatchSize]{};
+            u8 queueMasks[MaximumResidencyBatchSize]{};
+            u32 heapCount = 0;
+            u32 resourceCount = 0;
+
+            const auto less = [&](const ResidencyMergeCursor left, const ResidencyMergeCursor right) noexcept
+            {
+                const ResourceRef leftResource = payloads[left.payload]->residencyResources[left.resource];
+                const ResourceRef rightResource = payloads[right.payload]->residencyResources[right.resource];
+                return leftResource.value < rightResource.value;
+            };
+            const auto push = [&](ResidencyMergeCursor cursor) noexcept
+            {
+                u32 child = heapCount++;
+                heap[child] = cursor;
+                while (child != 0)
+                {
+                    const u32 parent = (child - 1u) / 2u;
+                    if (!less(heap[child], heap[parent]))
+                        break;
+                    const ResidencyMergeCursor temporary = heap[parent];
+                    heap[parent] = heap[child];
+                    heap[child] = temporary;
+                    child = parent;
+                }
+            };
+            const auto pop = [&]() noexcept
+            {
+                const ResidencyMergeCursor result = heap[0];
+                --heapCount;
+                if (heapCount != 0)
+                {
+                    heap[0] = heap[heapCount];
+                    u32 parent = 0;
+                    for (;;)
+                    {
+                        const u32 left = parent * 2u + 1u;
+                        if (left >= heapCount)
+                            break;
+                        const u32 right = left + 1u;
+                        u32 best = left;
+                        if (right < heapCount && less(heap[right], heap[left]))
+                            best = right;
+                        if (!less(heap[best], heap[parent]))
+                            break;
+                        const ResidencyMergeCursor temporary = heap[parent];
+                        heap[parent] = heap[best];
+                        heap[best] = temporary;
+                        parent = best;
+                    }
+                }
+                return result;
+            };
+            const auto advance = [&](ResidencyMergeCursor cursor) noexcept
+            {
+                ++cursor.resource;
+                if (cursor.resource < payloads[cursor.payload]->residencyResources.Size())
+                    push(cursor);
+            };
+            for (u32 payload = 0; payload < commandLists.Size(); ++payload)
+                if (!payloads[payload]->residencyResources.Empty())
+                    push({payload, 0});
+
+            while (heapCount != 0)
+            {
+                ResidencyMergeCursor cursor = pop();
+                const ResourceRef physical = payloads[cursor.payload]->residencyResources[cursor.resource];
+                u8 queueMask = static_cast<u8>(1u << QueueIndex(GetQueueType(payloads[cursor.payload]->type)));
+                advance(cursor);
+                while (heapCount != 0)
+                {
+                    const ResidencyMergeCursor next = heap[0];
+                    if (payloads[next.payload]->residencyResources[next.resource] != physical)
+                        break;
+                    cursor = pop();
+                    queueMask |= static_cast<u8>(1u << QueueIndex(GetQueueType(payloads[cursor.payload]->type)));
+                    advance(cursor);
+                }
+
+                resources[resourceCount] = physical;
+                queueMasks[resourceCount] = queueMask;
+                ++resourceCount;
+                if (resourceCount == MaximumResidencyBatchSize)
+                {
+                    const BackendStatus status = consume(resources, queueMasks, resourceCount);
+                    if (!status)
+                        return status;
+                    resourceCount = 0;
+                }
+            }
+            if (resourceCount != 0)
+                return consume(resources, queueMasks, resourceCount);
+            return BackendStatus::Success();
+        };
+
+        // Most frames fit in one physical working-set batch. Save that bounded
+        // union for fence publication rather than running the full k-way merge
+        // a second time on the serial submission thread. Oversized submissions
+        // still stream without an unbounded allocation and replay after submit.
+        ResourceRef preparedAllocations[MaximumResidencyBatchSize]{};
+        u8 preparedQueueMasks[MaximumResidencyBatchSize]{};
+        u32 preparedAllocationCount = 0;
+        bool preparedUnionOverflow = false;
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/RHI/PrepareResidency");
+        const BackendStatus residencyStatus = streamSubmissionResidency(
+            [&](const ResourceRef* const resources, const u8* const queueMasks, const u32 count) noexcept
+            {
+                if (!preparedUnionOverflow)
+                {
+                    if (count <= MaximumResidencyBatchSize - preparedAllocationCount)
+                    {
+                        for (u32 index = 0; index < count; ++index)
+                        {
+                            preparedAllocations[preparedAllocationCount + index] = resources[index];
+                            preparedQueueMasks[preparedAllocationCount + index] = queueMasks[index];
+                        }
+                        preparedAllocationCount += count;
+                    }
+                    else
+                        preparedUnionOverflow = true;
+                }
+                return m_prepareResidency(m_fenceContext, {resources, count});
+            });
+        if (!residencyStatus)
+            return residencyStatus;
         }
 
         // Use the existing native submission lock. Per-list recording has no
         // shared wait state; at most one wait per consumer/producer queue pair
         // is issued here. Same-queue dependencies follow submission order.
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/RHI/QueueWaits");
         for (u32 consumer = 0; consumer < 3; ++consumer)
         {
             for (u32 producer = 0; producer < 3; ++producer)
@@ -3782,14 +4110,18 @@ namespace vanguard::rhi::backend
                     return BackendStatus::Failure(FailureCode::DeviceLost, 0, "failed to enqueue an incoming GPU queue wait");
             }
         }
+        }
 
         const auto executeQueue = [&](const QueueType queue) noexcept
         {
             const u32 index = QueueIndex(queue);
             if (queueCounts[index] == 0)
                 return;
+            VG_PROFILE_ZONE_NAMED("RFCPU/RHI/NativeExecuteLists");
             m_submittedInstances[index] = m_device->executeCommandLists(nativeLists[index], queueCounts[index], static_cast<nvrhi::CommandQueue>(index));
         };
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/RHI/NativeSubmitAndSync");
         if (sync == CommandListSyncType::ForkAsyncCompute)
         {
             executeQueue(QueueType::Graphics);
@@ -3812,11 +4144,35 @@ namespace vanguard::rhi::backend
             executeQueue(QueueType::Compute);
             executeQueue(QueueType::Copy);
         }
+        }
 
         GpuFence queueFences[3]{};
         receipt.workSubmitted = true;
         const auto finalizeSubmittedPayloads = [&](const bool healthySubmission) noexcept
         {
+            VG_PROFILE_ZONE_NAMED("RFCPU/RHI/FinalizePayloads");
+            ResourceRef queueResources[MaximumResidencyBatchSize]{};
+            const auto commitResidency = [&](const ResourceRef* const resources, const u8* const queueMasks, const u32 count) noexcept -> BackendStatus
+                {
+                    for (u32 queueIndex = 0; queueIndex < 3; ++queueIndex)
+                    {
+                        const GpuFence fence = queueFences[queueIndex];
+                        if (!fence.IsValid())
+                            continue;
+                        u32 queueResourceCount = 0;
+                        const u8 queueBit = static_cast<u8>(1u << queueIndex);
+                        for (u32 resource = 0; resource < count; ++resource)
+                            if ((queueMasks[resource] & queueBit) != 0)
+                                queueResources[queueResourceCount++] = resources[resource];
+                        if (queueResourceCount != 0)
+                            m_commitResidency(m_fenceContext, {queueResources, queueResourceCount}, fence);
+                    }
+                    return BackendStatus::Success();
+                };
+            const BackendStatus commitStatus = preparedUnionOverflow
+                ? streamSubmissionResidency(commitResidency)
+                : commitResidency(preparedAllocations, preparedQueueMasks, preparedAllocationCount);
+            VG_ASSERT_MSG(commitStatus, "submission residency replay cannot fail after native execution");
             for (u32 index = 0; index < commandLists.Size(); ++index)
             {
                 CommandListPayload* const submittedPayload = payloads[index];
@@ -3826,8 +4182,6 @@ namespace vanguard::rhi::backend
                 CommandListPayload& payload = *submittedPayload;
                 const QueueType queue = GetQueueType(payload.type);
                 const GpuFence fence = queueFences[QueueIndex(queue)];
-                if (fence.IsValid())
-                    m_commitResidency(m_fenceContext, {payload.residencyResources.TypedData(), payload.residencyResources.Size()}, fence);
                 for (const CommandListPayload::SubmissionCallback& notification : payload.submissionCallbacks)
                     notification.callback(notification.context, fence, notification.value);
                 payload.submissionCallbacks.Clear();
@@ -3840,7 +4194,7 @@ namespace vanguard::rhi::backend
                 for (const ResourceRef resource : payload.resources)
                 {
                     if (fence.IsValid())
-                        static_cast<void>(m_lifetime.RecordUse(resource, queue, fence.value));
+                        static_cast<void>(m_lifetime.RecordOwnedUse(resource, queue, fence.value));
                     static_cast<void>(m_lifetime.Release(resource));
                 }
                 payload.resources.Clear();
@@ -3848,6 +4202,8 @@ namespace vanguard::rhi::backend
                 RetireCommandListLease(commandLists[index], fence, healthySubmission && fence.IsValid(), !healthySubmission && !fence.IsValid());
             }
         };
+        {
+        VG_PROFILE_ZONE_NAMED("RFCPU/RHI/SignalFences");
         for (u32 queueIndex = 0; queueIndex < 3; ++queueIndex)
         {
             bool signalQueue = queueCounts[queueIndex] != 0;
@@ -3871,6 +4227,7 @@ namespace vanguard::rhi::backend
             queueFences[queueIndex] = {queue, value};
             m_signaledFences[queueIndex] = value;
             receipt.residency.Include(queueFences[queueIndex]);
+        }
         }
 
         finalizeSubmittedPayloads(true);
@@ -4073,9 +4430,10 @@ namespace vanguard::rhi::backend
                                                   const SubresourceRange& requested, const Rect* const rectangle) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(target)));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "color clears require an open graphics command list");
+        bool admitted = false;
+        const auto* const texture = static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(target), &admitted));
         if (texture == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "color clear references a stale texture");
         if (!HasFlag(texture->desc.usage, TextureUsage::RenderTarget) || IsDepthFormat(texture->desc.format))
@@ -4083,7 +4441,7 @@ namespace vanguard::rhi::backend
         SubresourceRange range;
         if (!ResolveSubresources(texture->desc, requested, range) || (rectangle != nullptr && !ValidateClearRectangle(texture->desc, range, *rectangle)))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid color-clear subresource range or rectangle");
-        if (!TrackCommandResource(*this, *command, ResourceRef(target)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(target)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a color-clear target");
         const nvrhi::TextureSubresourceSet nativeRange(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
         if (rectangle == nullptr)
@@ -4109,9 +4467,10 @@ namespace vanguard::rhi::backend
                                                          const Rect* const rectangle) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(target)));
         if (command == nullptr || !command->open || command->type != CommandListType::Default)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "depth-stencil clears require an open graphics command list");
+        bool admitted = false;
+        const auto* const texture = static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(target), &admitted));
         if (texture == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "depth-stencil clear references a stale texture");
         if (!clearDepth && !clearStencil)
@@ -4122,7 +4481,7 @@ namespace vanguard::rhi::backend
         SubresourceRange range;
         if (!ResolveSubresources(texture->desc, requested, range) || (rectangle != nullptr && !ValidateClearRectangle(texture->desc, range, *rectangle)))
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid depth-stencil-clear subresource range or rectangle");
-        if (!TrackCommandResource(*this, *command, ResourceRef(target)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(target)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a depth-stencil-clear target");
         const nvrhi::TextureSubresourceSet nativeRange(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount);
         if (rectangle == nullptr)
@@ -4147,9 +4506,10 @@ namespace vanguard::rhi::backend
                                                  const SubresourceRange& requested) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV clears require an open graphics or compute command list");
+        bool admitted = false;
+        const auto* const texture = static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(textureRef), &admitted));
         if (texture == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture UAV clear references a stale texture");
         if (!HasFlag(texture->desc.usage, TextureUsage::UnorderedAccess) || IsDepthFormat(texture->desc.format) ||
@@ -4158,7 +4518,7 @@ namespace vanguard::rhi::backend
         SubresourceRange range;
         if (!ResolveSubresources(texture->desc, requested, range) || range.firstSlice != 0 || range.sliceCount != texture->desc.arraySize)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture UAV clear range");
-        if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(textureRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV clear target");
         CommitPendingBarriers(*command);
         for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
@@ -4171,9 +4531,10 @@ namespace vanguard::rhi::backend
                                                  const SubresourceRange& requested) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(textureRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV clears require an open graphics or compute command list");
+        bool admitted = false;
+        const auto* const texture = static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(textureRef), &admitted));
         if (texture == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture UAV clear references a stale texture");
         if (!HasFlag(texture->desc.usage, TextureUsage::UnorderedAccess) || !IsUnsignedIntegerFormat(texture->desc.format))
@@ -4181,7 +4542,7 @@ namespace vanguard::rhi::backend
         SubresourceRange range;
         if (!ResolveSubresources(texture->desc, requested, range) || range.firstSlice != 0 || range.sliceCount != texture->desc.arraySize)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "invalid texture UAV clear range");
-        if (!TrackCommandResource(*this, *command, ResourceRef(textureRef)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(textureRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV clear target");
         CommitPendingBarriers(*command);
         for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
@@ -4192,12 +4553,13 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::ClearBufferUav(const CommandListRef commandList, const BufferRef bufferRef, const u32 value) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(bufferRef)));
         if (command == nullptr || !command->open || (command->type != CommandListType::Default && command->type != CommandListType::Compute))
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer UAV clears require an open graphics or compute command list");
+        bool admitted = false;
+        const auto* const buffer = static_cast<const BufferPayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(bufferRef), &admitted));
         if (buffer == nullptr || !HasFlag(buffer->desc.usage, BufferUsage::UnorderedAccess))
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "buffer does not support unordered access");
-        if (!TrackCommandResource(*this, *command, ResourceRef(bufferRef)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(bufferRef)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer UAV clear target");
         CommitPendingBarriers(*command);
         command->native->clearBufferUInt(buffer->native, value);
@@ -4816,11 +5178,124 @@ namespace vanguard::rhi::backend
         return BackendStatus::Success();
     }
 
+    BackendStatus CommonBackend::AdmitCommandListResources(const CommandListRef commandList, const containers::ArraySpan<const ResourceRef> resources) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
+        if (command == nullptr || !command->open || command->entryStatesSeeded || command->resourceAdmissionActive || command->resourceRecordingStarted ||
+            !command->resources.Empty() || !command->residencyResources.Empty() || !command->admittedResources.Empty())
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0,
+                                          "command-list resource admission requires a fresh open command list before entry-state seeding or recording");
+        command->resourceAdmissionActive = true;
+        const auto rollback = [&](const BackendStatus status) noexcept
+        {
+            for (const ResourceRef retained : command->resources)
+                static_cast<void>(Release(retained));
+            command->resources.Clear();
+            command->residencyResources.Clear();
+            command->admittedResources.Clear();
+            command->resourceAdmissionActive = false;
+            command->residencyResourcesSorted = true;
+            return status;
+        };
+        if (resources.Empty())
+            return BackendStatus::Success();
+
+        command->admittedResources.Reserve(resources.Size());
+        command->residencyResources.Reserve(resources.Size());
+        ResourceRef previous;
+        for (const ResourceRef resource : resources)
+        {
+            if (!resource.IsValid() || (resource.GetKind() != ResourceKind::Texture && resource.GetKind() != ResourceKind::Buffer) ||
+                (previous.IsValid() && previous.value >= resource.value))
+                return rollback(BackendStatus::Failure(FailureCode::InvalidArgument, 0, "command-list admitted resources must be sorted unique textures/buffers"));
+
+            void* payload = nullptr;
+            ResourceRef residency;
+            nvrhi::IResource* native = nullptr;
+            u16 textureMipCount = 0;
+            u16 textureArraySize = 0;
+            u8 texturePlaneCount = 0;
+            if (resource.GetKind() == ResourceKind::Texture)
+            {
+                auto* const texture = static_cast<TexturePayload*>(m_lifetime.GetPayload(resource));
+                if (texture == nullptr)
+                    return rollback(BackendStatus::Failure(FailureCode::InvalidReference, 0, "command-list resource admission references a stale texture"));
+                payload = texture;
+                residency = texture->placement.IsValid() ? ResourceRef(texture->placement.heap) : resource;
+                native = texture->native.Get();
+                textureMipCount = texture->desc.mipCount;
+                textureArraySize = texture->desc.arraySize;
+                texturePlaneCount = HasStencilPlane(texture->desc.format) ? 2u : 1u;
+            }
+            else
+            {
+                auto* const buffer = static_cast<BufferPayload*>(m_lifetime.GetPayload(resource));
+                if (buffer == nullptr)
+                    return rollback(BackendStatus::Failure(FailureCode::InvalidReference, 0, "command-list resource admission references a stale buffer"));
+                payload = buffer;
+                residency = buffer->placement.IsValid() ? ResourceRef(buffer->placement.heap) : resource;
+                native = buffer->native.Get();
+            }
+            if (!residency.IsValid() || native == nullptr)
+                return rollback(BackendStatus::Failure(FailureCode::InvalidReference, 0, "command-list resource admission lost its residency allocation"));
+
+            const u32 expectedAdmitted = command->admittedResources.Size() + 1u;
+            command->admittedResources.PushBack({resource, residency, payload, native, textureMipCount, textureArraySize, texturePlaneCount, 0});
+            if (command->admittedResources.Size() != expectedAdmitted)
+                return rollback(BackendStatus::Failure(FailureCode::OutOfMemory, 0, "command-list admitted resource table allocation failed"));
+            const u32 expectedResidency = command->residencyResources.Size() + 1u;
+            command->residencyResources.PushBack(residency);
+            if (command->residencyResources.Size() != expectedResidency)
+                return rollback(BackendStatus::Failure(FailureCode::OutOfMemory, 0, "command-list admitted residency table allocation failed"));
+            previous = resource;
+        }
+
+        if (command->residencyResources.Size() > 1)
+        {
+            std::sort(command->residencyResources.Begin(), command->residencyResources.End(), [](const ResourceRef left, const ResourceRef right) noexcept
+                      { return left.value < right.value; });
+            const auto uniqueEnd = std::unique(command->residencyResources.Begin(), command->residencyResources.End());
+            command->residencyResources.Resize(static_cast<u32>(uniqueEnd - command->residencyResources.Begin()));
+        }
+        command->residencyResourcesSorted = true;
+
+        command->resources.Reserve(command->admittedResources.Size() + command->residencyResources.Size());
+        for (const AdmittedCommandResource& admitted : command->admittedResources)
+        {
+            AddRef(admitted.resource);
+            const u32 expected = command->resources.Size() + 1u;
+            command->resources.PushBack(admitted.resource);
+            if (command->resources.Size() != expected)
+            {
+                static_cast<void>(Release(admitted.resource));
+                return rollback(BackendStatus::Failure(FailureCode::OutOfMemory, 0, "command-list admitted resource retention allocation failed"));
+            }
+        }
+        for (const ResourceRef residency : command->residencyResources)
+        {
+            if (FindAdmittedCommandResource(*command, residency) != nullptr)
+                continue;
+            if (!IsResourceReferenceValid(residency))
+                return rollback(BackendStatus::Failure(FailureCode::InvalidReference, 0, "command-list admitted residency allocation became stale"));
+            AddRef(residency);
+            const u32 expected = command->resources.Size() + 1u;
+            command->resources.PushBack(residency);
+            if (command->resources.Size() != expected)
+            {
+                static_cast<void>(Release(residency));
+                return rollback(BackendStatus::Failure(FailureCode::OutOfMemory, 0, "command-list admitted residency retention allocation failed"));
+            }
+        }
+        return BackendStatus::Success();
+    }
+
     BackendStatus CommonBackend::SeedCommandListStates(const CommandListRef commandList, const containers::ArraySpan<const CommandListEntryState> entries) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        if (command == nullptr || !command->open || command->entryStatesSeeded || command->resources.Size() != 0)
-            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "entry-state seeding requires an unseeded command list with no recorded resources");
+        if (command == nullptr || !command->open || command->entryStatesSeeded || command->resourceRecordingStarted ||
+            (!command->resourceAdmissionActive && command->resources.Size() != 0))
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0,
+                                          "entry-state seeding requires an unseeded command list before ordinary resource recording");
 
         // Validate the entire immutable table before retaining resources or changing native tracking. Full, sorted texture cells make missing/duplicate state detectable in linear time.
         for (u32 first = 0; first < entries.Size();)
@@ -4834,7 +5309,8 @@ namespace vanguard::rhi::backend
             bool keepInitialState = true;
             if (reference.GetKind() == ResourceKind::Texture)
             {
-                const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(reference));
+                const AdmittedCommandResource* const admitted = FindAdmittedCommandResource(*command, reference);
+                const auto* const texture = static_cast<const TexturePayload*>(admitted != nullptr ? admitted->payload : m_lifetime.GetPayload(reference));
                 if (texture == nullptr)
                     return BackendStatus::Failure(FailureCode::InvalidReference, 0, "entry state references a stale texture");
                 mipCount = texture->desc.mipCount;
@@ -4846,7 +5322,8 @@ namespace vanguard::rhi::backend
             }
             else if (reference.GetKind() == ResourceKind::Buffer)
             {
-                const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(reference));
+                const AdmittedCommandResource* const admitted = FindAdmittedCommandResource(*command, reference);
+                const auto* const buffer = static_cast<const BufferPayload*>(admitted != nullptr ? admitted->payload : m_lifetime.GetPayload(reference));
                 if (buffer == nullptr)
                     return BackendStatus::Failure(FailureCode::InvalidReference, 0, "entry state references a stale buffer");
                 initialState = buffer->desc.initialState;
@@ -4876,7 +5353,12 @@ namespace vanguard::rhi::backend
         for (const CommandListEntryState& entry : entries)
             if (entry.resource != retained)
             {
-                if (!TrackCommandResource(*this, *command, entry.resource))
+                if (command->resourceAdmissionActive)
+                {
+                    if (FindAdmittedCommandResource(*command, entry.resource) == nullptr)
+                        return BackendStatus::Failure(FailureCode::InvalidReference, 0, "entry state references a resource outside the admitted packet table");
+                }
+                else if (!TrackCommandResource(*this, *command, entry.resource))
                     return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain entry-state resources; discard the command list");
                 retained = entry.resource;
             }
@@ -4885,16 +5367,183 @@ namespace vanguard::rhi::backend
         {
             if (entry.resource.GetKind() == ResourceKind::Texture)
             {
-                const auto* const texture = static_cast<const TexturePayload*>(m_lifetime.GetPayload(entry.resource));
+                const AdmittedCommandResource* const admitted = FindAdmittedCommandResource(*command, entry.resource);
+                const auto* const texture = static_cast<const TexturePayload*>(admitted != nullptr ? admitted->payload : m_lifetime.GetPayload(entry.resource));
                 command->native->beginTrackingTextureState(texture->native, nvrhi::TextureSubresourceSet(entry.subresource.mipLevel, 1, entry.subresource.arraySlice, 1), ToNativeState(entry.state));
             }
             else
             {
-                const auto* const buffer = static_cast<const BufferPayload*>(m_lifetime.GetPayload(entry.resource));
+                const AdmittedCommandResource* const admitted = FindAdmittedCommandResource(*command, entry.resource);
+                const auto* const buffer = static_cast<const BufferPayload*>(admitted != nullptr ? admitted->payload : m_lifetime.GetPayload(entry.resource));
                 // Upload/readback heaps have a fixed native state. Their immutable descriptor state was validated above,
                 // so retain them in this scope without attempting to override NVRHI's fixed-heap tracking.
                 if (buffer->desc.memoryType == MemoryType::DeviceLocal)
                     command->native->beginTrackingBufferState(buffer->native, ToNativeState(entry.state));
+            }
+        }
+        command->resourceRecordingStarted = true;
+        return BackendStatus::Success();
+    }
+
+    BackendStatus CommonBackend::ExecuteCompiledBarriers(const CommandListRef commandList, const containers::ArraySpan<const CompiledBarrier> barriers) noexcept
+    {
+        auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
+        if (command == nullptr || !command->open || !command->resourceAdmissionActive || !command->entryStatesSeeded)
+            return BackendStatus::Failure(FailureCode::InvalidCommandList, 0,
+                                          "compiled barriers require an open admitted command list with seeded entry-state tracking");
+        if (barriers.Empty())
+            return BackendStatus::Success();
+
+        // Preserve ordering against any ordinary tracked work that preceded this
+        // compiler-owned run. The compiled run itself is independent by contract:
+        // at most one barrier per admitted resource. RF17 splits dependent chains.
+        CommitPendingBarriers(*command);
+
+        ++command->compiledBarrierEpoch;
+        if (command->compiledBarrierEpoch == 0)
+        {
+            for (AdmittedCommandResource& admitted : command->admittedResources)
+                admitted.compiledBarrierEpoch = 0;
+            command->compiledBarrierEpoch = 1;
+        }
+        const u32 batchEpoch = command->compiledBarrierEpoch;
+        constexpr u32 KnownStateMask = (1u << 19u) - 1u;
+        for (const CompiledBarrier& barrier : barriers)
+        {
+            if (barrier.resourceBinding >= command->admittedResources.Size())
+                return BackendStatus::Failure(FailureCode::InvalidReference, 0, "compiled barrier resource binding is outside the admitted packet table");
+            AdmittedCommandResource& admitted = command->admittedResources[barrier.resourceBinding];
+            if (admitted.compiledBarrierEpoch == batchEpoch)
+                return BackendStatus::Failure(FailureCode::InvalidArgument, 0,
+                                              "dependent compiled barriers for one resource must be split into separate native batches");
+            admitted.compiledBarrierEpoch = batchEpoch;
+            const bool texture = admitted.resource.GetKind() == ResourceKind::Texture;
+            const bool transition = barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::BufferTransition;
+            const bool kindMatches = texture ? (barrier.kind == CompiledBarrierKind::TextureTransition || barrier.kind == CompiledBarrierKind::TextureUav)
+                                             : (barrier.kind == CompiledBarrierKind::BufferTransition || barrier.kind == CompiledBarrierKind::BufferUav);
+            if (!kindMatches || admitted.native == nullptr)
+                return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "compiled barrier kind disagrees with its admitted resource");
+            if (transition)
+            {
+                const u32 before = static_cast<u32>(barrier.before);
+                const u32 after = static_cast<u32>(barrier.after);
+                if (before == 0 || after == 0 || before == after || (before & ~KnownStateMask) != 0 || (after & ~KnownStateMask) != 0)
+                    return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "compiled transition requires distinct explicit representable states");
+                if (texture)
+                {
+                    const SubresourceRange& range = barrier.textureSubresources;
+                    const auto* const payload = static_cast<const TexturePayload*>(admitted.payload);
+                    if (HasFlag(barrier.before, ResourceState::Present) || HasFlag(barrier.after, ResourceState::Present))
+                        return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                                      "compiled texture transitions cannot replace acquisition-aware swap-chain presentation");
+                    if (payload == nullptr || !TextureStateCompatible(payload->desc, barrier.before) || !TextureStateCompatible(payload->desc, barrier.after) ||
+                        !QueueSupportsCompiledState(command->type, ResourceKind::Texture, barrier.before) ||
+                        !QueueSupportsCompiledState(command->type, ResourceKind::Texture, barrier.after))
+                        return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                                      "compiled texture transition states are incompatible with the resource or command queue");
+                    if (range.mipCount == 0 || range.sliceCount == 0 || range.mipCount == 0xffffu || range.sliceCount == 0xffffu ||
+                        range.firstMip >= admitted.textureMipCount || range.firstSlice >= admitted.textureArraySize ||
+                        range.mipCount > static_cast<u32>(admitted.textureMipCount - range.firstMip) ||
+                        range.sliceCount > static_cast<u32>(admitted.textureArraySize - range.firstSlice))
+                        return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "compiled texture transition has an invalid resolved subresource range");
+
+                    const nvrhi::ResourceStates expected = ToNativeState(barrier.before);
+                    for (u32 slice = range.firstSlice; slice < static_cast<u32>(range.firstSlice) + range.sliceCount; ++slice)
+                        for (u32 mip = range.firstMip; mip < static_cast<u32>(range.firstMip) + range.mipCount; ++mip)
+                        {
+                            nvrhi::ResourceStates tracked = command->native->getTextureSubresourceState(payload->native, slice, mip);
+                            if (tracked == nvrhi::ResourceStates::Unknown && payload->desc.keepInitialState)
+                                tracked = ToNativeState(payload->desc.initialState);
+                            if (tracked != expected)
+                                return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                                              "compiled texture transition before-state does not match command-list tracking");
+                        }
+                }
+                else
+                {
+                    const auto* const payload = static_cast<const BufferPayload*>(admitted.payload);
+                    if (payload == nullptr || payload->desc.memoryType != MemoryType::DeviceLocal || !BufferStateCompatible(payload->desc, barrier.before) ||
+                        !BufferStateCompatible(payload->desc, barrier.after) || !QueueSupportsCompiledState(command->type, ResourceKind::Buffer, barrier.before) ||
+                        !QueueSupportsCompiledState(command->type, ResourceKind::Buffer, barrier.after))
+                        return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0,
+                                                      "compiled buffer transition states are incompatible with the resource or command queue");
+                    nvrhi::ResourceStates tracked = command->native->getBufferState(payload->native);
+                    if (tracked == nvrhi::ResourceStates::Unknown && payload->desc.keepInitialState)
+                        tracked = ToNativeState(payload->desc.initialState);
+                    if (tracked != ToNativeState(barrier.before))
+                        return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                                      "compiled buffer transition before-state does not match command-list tracking");
+                }
+            }
+            else
+            {
+                if (barrier.before != ResourceState::Unknown || barrier.after != ResourceState::Unknown)
+                    return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "compiled UAV barrier carries transition state");
+                if (texture)
+                {
+                    const auto* const payload = static_cast<const TexturePayload*>(admitted.payload);
+                    if (payload == nullptr || !HasFlag(payload->desc.usage, TextureUsage::UnorderedAccess) ||
+                        !QueueSupportsCompiledState(command->type, ResourceKind::Texture, ResourceState::UnorderedAccess))
+                        return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "compiled texture UAV barrier targets a texture without unordered access");
+                    for (u32 slice = 0; slice < payload->desc.arraySize; ++slice)
+                        for (u32 mip = 0; mip < payload->desc.mipCount; ++mip)
+                        {
+                            nvrhi::ResourceStates tracked = command->native->getTextureSubresourceState(payload->native, slice, mip);
+                            if (tracked == nvrhi::ResourceStates::Unknown && payload->desc.keepInitialState)
+                                tracked = ToNativeState(payload->desc.initialState);
+                            if (tracked != nvrhi::ResourceStates::UnorderedAccess)
+                                return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                                              "compiled texture UAV barrier requires whole-resource unordered-access tracking");
+                        }
+                }
+                else
+                {
+                    const auto* const payload = static_cast<const BufferPayload*>(admitted.payload);
+                    if (payload == nullptr || !HasFlag(payload->desc.usage, BufferUsage::UnorderedAccess) ||
+                        !QueueSupportsCompiledState(command->type, ResourceKind::Buffer, ResourceState::UnorderedAccess))
+                        return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "compiled buffer UAV barrier targets a buffer without unordered access");
+                    nvrhi::ResourceStates tracked = command->native->getBufferState(payload->native);
+                    if (tracked == nvrhi::ResourceStates::Unknown && payload->desc.keepInitialState)
+                        tracked = ToNativeState(payload->desc.initialState);
+                    if (tracked != nvrhi::ResourceStates::UnorderedAccess)
+                        return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
+                                                      "compiled buffer UAV barrier requires unordered-access tracking");
+                }
+            }
+        }
+
+        const BackendStatus nativeStatus = m_compiledBarrierBatch(m_fenceContext, command->native, barriers,
+                                                                  {command->admittedResources.TypedData(), command->admittedResources.Size()});
+        if (!nativeStatus)
+            return nativeStatus;
+
+        // Advance NVRHI tracking without asking it to lower another barrier. This
+        // keeps its later validation and keepInitialState close restoration exact.
+        for (const CompiledBarrier& barrier : barriers)
+        {
+            const AdmittedCommandResource& admitted = command->admittedResources[barrier.resourceBinding];
+            if (barrier.kind == CompiledBarrierKind::TextureTransition)
+            {
+                const auto* const payload = static_cast<const TexturePayload*>(admitted.payload);
+                const SubresourceRange& range = barrier.textureSubresources;
+                command->native->beginTrackingTextureState(payload->native,
+                                                            nvrhi::TextureSubresourceSet(range.firstMip, range.mipCount, range.firstSlice, range.sliceCount),
+                                                            ToNativeState(barrier.after));
+            }
+            else if (barrier.kind == CompiledBarrierKind::BufferTransition)
+            {
+                const auto* const payload = static_cast<const BufferPayload*>(admitted.payload);
+                command->native->beginTrackingBufferState(payload->native, ToNativeState(barrier.after));
+            }
+            else if (barrier.kind == CompiledBarrierKind::TextureUav)
+            {
+                const auto* const payload = static_cast<const TexturePayload*>(admitted.payload);
+                command->native->beginTrackingTextureState(payload->native, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+            }
+            else
+            {
+                const auto* const payload = static_cast<const BufferPayload*>(admitted.payload);
+                command->native->beginTrackingBufferState(payload->native, nvrhi::ResourceStates::UnorderedAccess);
             }
         }
         return BackendStatus::Success();
@@ -4904,9 +5553,10 @@ namespace vanguard::rhi::backend
                                                    const ResourceState after, const SubresourceRange& range) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        auto* const resource = static_cast<TexturePayload*>(m_lifetime.GetPayload(ResourceRef(texture)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture transition requires an open command list");
+        bool admitted = false;
+        auto* const resource = static_cast<TexturePayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(texture), &admitted));
         if (resource == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "texture transition references a stale texture");
         SubresourceRange resolved;
@@ -4918,13 +5568,15 @@ namespace vanguard::rhi::backend
             for (u32 slice = resolved.firstSlice; slice < static_cast<u32>(resolved.firstSlice) + resolved.sliceCount; ++slice)
                 for (u32 mip = resolved.firstMip; mip < static_cast<u32>(resolved.firstMip) + resolved.mipCount; ++mip)
                 {
-                    const nvrhi::ResourceStates tracked = command->native->getTextureSubresourceState(resource->native, slice, mip);
+                    nvrhi::ResourceStates tracked = command->native->getTextureSubresourceState(resource->native, slice, mip);
+                    if (tracked == nvrhi::ResourceStates::Unknown && resource->desc.keepInitialState)
+                        tracked = ToNativeState(resource->desc.initialState);
                     if (tracked == nvrhi::ResourceStates::Unknown || (before != ResourceState::Unknown && tracked != expected))
                         return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0,
                                                       "texture transition before-state does not match command-list tracking");
                 }
         }
-        if (!TrackCommandResource(*this, *command, ResourceRef(texture)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(texture)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture transition resource");
         PrepareExplicitTextureBarrier(*command, ResourceRef(texture), resolved);
         const nvrhi::TextureSubresourceSet subresources(resolved.firstMip, resolved.mipCount, resolved.firstSlice, resolved.sliceCount);
@@ -4935,9 +5587,10 @@ namespace vanguard::rhi::backend
                                                   const ResourceState after) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        auto* const resource = static_cast<BufferPayload*>(m_lifetime.GetPayload(ResourceRef(buffer)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer transition requires an open command list");
+        bool admitted = false;
+        auto* const resource = static_cast<BufferPayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(buffer), &admitted));
         if (resource == nullptr)
             return BackendStatus::Failure(FailureCode::InvalidReference, 0, "buffer transition references a stale buffer");
         if (before != ResourceState::Unknown || !resource->desc.keepInitialState)
@@ -4948,7 +5601,7 @@ namespace vanguard::rhi::backend
             if (tracked == nvrhi::ResourceStates::Unknown || (before != ResourceState::Unknown && tracked != ToNativeState(before)))
                 return BackendStatus::Failure(FailureCode::ResourceStateMismatch, 0, "buffer transition before-state does not match command-list tracking");
         }
-        if (!TrackCommandResource(*this, *command, ResourceRef(buffer)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(buffer)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer transition resource");
         PrepareExplicitBufferBarrier(*command, ResourceRef(buffer));
         command->native->setBufferState(resource->native, ToNativeState(after));
@@ -4957,12 +5610,13 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::BarrierTextureUav(const CommandListRef commandList, const TextureRef texture) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const resource = static_cast<const TexturePayload*>(m_lifetime.GetPayload(ResourceRef(texture)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "texture UAV barrier requires an open command list");
+        bool admitted = false;
+        const auto* const resource = static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(texture), &admitted));
         if (resource == nullptr || !HasFlag(resource->desc.usage, TextureUsage::UnorderedAccess))
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "texture does not support unordered access");
-        if (!TrackCommandResource(*this, *command, ResourceRef(texture)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(texture)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a texture UAV barrier resource");
         SubresourceRange wholeResource;
         if (!ResolveSubresources(resource->desc, {}, wholeResource))
@@ -4974,12 +5628,13 @@ namespace vanguard::rhi::backend
     BackendStatus CommonBackend::BarrierBufferUav(const CommandListRef commandList, const BufferRef buffer) noexcept
     {
         auto* const command = static_cast<CommandListPayload*>(GetCommandListPayload(commandList));
-        const auto* const resource = static_cast<const BufferPayload*>(m_lifetime.GetPayload(ResourceRef(buffer)));
         if (command == nullptr || !command->open)
             return BackendStatus::Failure(FailureCode::InvalidCommandList, 0, "buffer UAV barrier requires an open command list");
+        bool admitted = false;
+        const auto* const resource = static_cast<const BufferPayload*>(ResolveCommandResourcePayload(*this, *command, ResourceRef(buffer), &admitted));
         if (resource == nullptr || !HasFlag(resource->desc.usage, BufferUsage::UnorderedAccess))
             return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "buffer does not support unordered access");
-        if (!TrackCommandResource(*this, *command, ResourceRef(buffer)))
+        if (!admitted && !TrackCommandResource(*this, *command, ResourceRef(buffer)))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain a buffer UAV barrier resource");
         PrepareExplicitBufferBarrier(*command, ResourceRef(buffer));
         command->native->setBufferState(resource->native, nvrhi::ResourceStates::UnorderedAccess);
@@ -4994,13 +5649,13 @@ namespace vanguard::rhi::backend
         if ((destination.GetKind() != ResourceKind::Texture && destination.GetKind() != ResourceKind::Buffer) || predecessors.Size() == 0)
             return BackendStatus::Failure(FailureCode::InvalidArgument, 0, "alias activation requires a placed destination and predecessor set");
 
-        auto resolvePlacedResource = [this](const ResourceRef resource, PlacementRecord& placement,
-                                            nvrhi::IResource** const native) noexcept -> BackendStatus {
+        auto resolvePlacedResource = [this, command](const ResourceRef resource, PlacementRecord& placement,
+                                                     nvrhi::IResource** const native) noexcept -> BackendStatus {
             placement = {};
             nvrhi::IResource* resolvedNative = nullptr;
             if (resource.GetKind() == ResourceKind::Texture)
             {
-                const auto* const payload = static_cast<const TexturePayload*>(m_lifetime.GetPayload(resource));
+                const auto* const payload = static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, resource));
                 if (payload == nullptr)
                     return BackendStatus::Failure(FailureCode::InvalidReference, 0, "alias activation references a stale texture");
                 placement = payload->placement;
@@ -5008,7 +5663,7 @@ namespace vanguard::rhi::backend
             }
             else if (resource.GetKind() == ResourceKind::Buffer)
             {
-                const auto* const payload = static_cast<const BufferPayload*>(m_lifetime.GetPayload(resource));
+                const auto* const payload = static_cast<const BufferPayload*>(ResolveCommandResourcePayload(*this, *command, resource));
                 if (payload == nullptr)
                     return BackendStatus::Failure(FailureCode::InvalidReference, 0, "alias activation references a stale buffer");
                 placement = payload->placement;
@@ -5067,7 +5722,7 @@ namespace vanguard::rhi::backend
                 return BackendStatus::Failure(FailureCode::IncompatibleBinding, 0, "alias predecessor fragments do not exactly cover the destination");
 
             const TexturePayload* destinationTexture =
-                destination.GetKind() == ResourceKind::Texture ? static_cast<const TexturePayload*>(m_lifetime.GetPayload(destination)) : nullptr;
+                destination.GetKind() == ResourceKind::Texture ? static_cast<const TexturePayload*>(ResolveCommandResourcePayload(*this, *command, destination)) : nullptr;
             requiresExplicitDiscard =
                 destinationTexture != nullptr &&
                 (HasFlag(destinationTexture->desc.usage, TextureUsage::RenderTarget) || HasFlag(destinationTexture->desc.usage, TextureUsage::DepthStencil));
@@ -5077,10 +5732,10 @@ namespace vanguard::rhi::backend
                                               "texture alias activation has no discard-compatible usage on the compute queue");
         }
 
-        if (!TrackCommandResource(*this, *command, destination))
+        if (FindAdmittedCommandResource(*command, destination) == nullptr && !TrackCommandResource(*this, *command, destination))
             return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain alias destination");
         for (const ResourceRef predecessor : predecessors)
-            if (!TrackCommandResource(*this, *command, predecessor))
+            if (FindAdmittedCommandResource(*command, predecessor) == nullptr && !TrackCommandResource(*this, *command, predecessor))
                 return BackendStatus::Failure(FailureCode::OutOfMemory, 0, "failed to retain alias predecessor");
         CommitPendingBarriers(*command);
         if (!m_aliasingBarrier(m_fenceContext, command->native, destinationNative))

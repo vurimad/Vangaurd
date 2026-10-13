@@ -54,6 +54,17 @@ namespace vanguard::rendering
             return context.EndResourceQueue();
         }
 
+        [[nodiscard]] bool PatchResourceContract(const RenderNodeImplContext& context, RenderFlowResourceFailure* const failure) const noexcept override
+        {
+            for (const RenderNodeImpl* const subnode : m_subnodes)
+            {
+                subnode->Process(context, nullptr);
+                if (failure != nullptr && failure->code != RenderFlowResourceFailureCode::None)
+                    return false;
+            }
+            return true;
+        }
+
         void Execute(const RenderNodeImplContext& context, jobs::Builder* const builder) const override
         {
             if (m_subnodes.Empty())
@@ -124,9 +135,16 @@ namespace vanguard::rendering
 
     rhi::CommandListRef RenderNodeCommandListGroup::CreateCommandList() const
     {
-        rhi::CommandListRef commandList = rhi::CreateCommandList(m_commandListType, m_commandListRole, nullptr, m_retentionPolicy);
+        rhi::CommandListRef commandList;
+        {
+            VG_PROFILE_ZONE_NAMED("RenderGraph/CommandList/CreateOpen");
+            commandList = rhi::CreateCommandList(m_commandListType, m_commandListRole, nullptr, m_retentionPolicy);
+        }
         if (commandList.IsValid())
+        {
+            VG_PROFILE_ZONE_NAMED("RenderGraph/CommandList/SetDebugName");
             rhi::SetResourceDebugName(commandList, m_name.AsChar());
+        }
         return commandList;
     }
 

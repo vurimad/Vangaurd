@@ -1,6 +1,6 @@
 group "Engine/Rendering"
 
-local nvToolsRoot = path.getabsolute("../imported/external/nvToolsExt")
+local nvToolsRoot = path.getabsolute("../../imported/external/nvToolsExt")
 
 project "rendering"
     enforceEngineCodePolicy()

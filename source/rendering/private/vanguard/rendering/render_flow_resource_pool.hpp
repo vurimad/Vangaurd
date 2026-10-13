@@ -51,7 +51,8 @@ namespace vanguard::rendering::detail
     enum class CanonicalDescriptorOwnerClass : u8
     {
         Dedicated,
-        Placed
+        Placed,
+        RetainedImport
     };
 
     struct CanonicalDescriptorEvictionCandidate
@@ -102,7 +103,8 @@ namespace vanguard::rendering::detail
         void Release(u32 slots) noexcept;
         void MarkReusable(u32 slots) noexcept;
         void MarkNotReusable(u32 slots) noexcept;
-        void RecordPublicationHit() noexcept;
+        [[nodiscard]] bool TryMarkNotReusable(u32 slots) noexcept;
+        void RecordPublicationHit(u64 count = 1) noexcept;
         void RecordPublicationMiss() noexcept;
         void RecordPressureEviction() noexcept;
         void RecordMaintenanceEviction() noexcept;
@@ -363,6 +365,5 @@ namespace vanguard::rendering::detail
         static void Set(RenderFlowResourceAllocator& allocator, const RenderFlowResourceShutdownFailureInjection& injection) noexcept;
         static void Clear(RenderFlowResourceAllocator& allocator) noexcept;
         static void AbandonPublishedExecution(RenderFlowResourceAllocator& allocator) noexcept;
-        [[nodiscard]] static bool HasStructuralPlan(const RenderFlowResourceAllocator& allocator) noexcept;
     };
 } // namespace vanguard::rendering::detail

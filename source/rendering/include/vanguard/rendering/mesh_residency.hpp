@@ -81,12 +81,14 @@ namespace vanguard::rendering
         GeometryPlacement placement;
         u32 sourceSubmesh = meshes::InvalidRecordIndex;
         RenderPhaseId phase;
+        f32 sortCenter[3]{};
 
     private:
         MaterialTechniqueId m_normal;
         MaterialTechniqueId m_mirrored;
         RenderPhaseId m_phase;
         u32 m_sourceSubmesh = meshes::InvalidRecordIndex;
+        f32 m_sortCenter[3]{};
         friend class MeshResidencyManager;
     };
 
@@ -114,6 +116,8 @@ namespace vanguard::rendering
         u32 placementRevision = 0;
         u32 anchorLod = InvalidGpuSceneIndex;
         u32 placementCount = 0;
+        u32 firstGpuPrimitive = InvalidGpuSceneIndex;
+        u32 gpuPrimitiveCount = 0;
         // Actual residency upload receipt. Cross-queue consumers must establish
         // a GPU dependency; a CPU preparation/acceptance callback is not a wait.
         rhi::GpuFence readyAfter;

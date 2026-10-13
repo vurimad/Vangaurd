@@ -102,93 +102,6 @@ namespace vanguard::rendering::detail
             return false;
         }
 
-        [[nodiscard]] bool EnsureRetainedImportCanonicalDescriptors(RenderFlowResourceAllocator::Impl& allocator,
-                                                                    PhysicalBindingRecord& binding,
-                                                                    const FrameResourceDesc& desc,
-                                                                    CanonicalDescriptorPressure* const pressure,
-                                                                    RenderFlowResourceFailure* const failure) noexcept
-        {
-            if (pressure != nullptr)
-                *pressure = {};
-            if (!allocator.resourceDescriptors.IsValid())
-                return true;
-            const bool buffer = binding.buffer.IsValid();
-            if (buffer == binding.texture.IsValid())
-                return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, RenderFlowResourceSessionState::Resolving,
-                            "retained import canonical descriptor source kind is invalid");
-
-            const bool needShaderResource = buffer ? HasAny(desc.buffer.active.usage, rhi::BufferUsage::ShaderResource)
-                                                   : HasAny(desc.texture.active.usage, rhi::TextureUsage::ShaderResource);
-            const bool needUnorderedAccess = buffer ? HasAny(desc.buffer.active.usage, rhi::BufferUsage::UnorderedAccess)
-                                                    : HasAny(desc.texture.active.usage, rhi::TextureUsage::UnorderedAccess);
-            const u32 missing = static_cast<u32>(needShaderResource && !binding.shaderResource.IsValid()) +
-                                static_cast<u32>(needUnorderedAccess && !binding.unorderedAccess.IsValid());
-            if (missing == 0)
-                return true;
-            if (!allocator.descriptorLedger.TryReserve(missing))
-            {
-                if (pressure != nullptr)
-                    *pressure = {CanonicalDescriptorPressureKind::LocalLimit, missing};
-                return false;
-            }
-
-            rhi::DescriptorHandle createdShaderResource;
-            rhi::DescriptorHandle createdUnorderedAccess;
-            rhi::Failure rhiFailure;
-            bool allocationCapacityFailure = false;
-            const auto create = [&](const bool writable, rhi::DescriptorHandle& created) noexcept
-            {
-                created = rhi::AllocateDescriptor(allocator.resourceDescriptors.GetRef(), &rhiFailure);
-                if (!created.IsValid())
-                {
-                    allocationCapacityFailure = rhiFailure.code == rhi::FailureCode::CapacityExceeded;
-                    return false;
-                }
-                if (buffer)
-                {
-                    const rhi::BufferUsage usage = desc.buffer.active.usage;
-                    const rhi::BindingType type = HasAny(usage, rhi::BufferUsage::Structured)
-                                                      ? (writable ? rhi::BindingType::StructuredBufferUnorderedAccess : rhi::BindingType::StructuredBufferShaderResource)
-                                                  : HasAny(usage, rhi::BufferUsage::Raw)
-                                                      ? (writable ? rhi::BindingType::ByteAddressBufferUnorderedAccess : rhi::BindingType::ByteAddressBufferShaderResource)
-                                                      : (writable ? rhi::BindingType::TypedBufferUnorderedAccess : rhi::BindingType::TypedBufferShaderResource);
-                    return rhi::WriteDescriptor(allocator.resourceDescriptors.GetRef(), created, binding.buffer, type, {}, &rhiFailure);
-                }
-                return rhi::WriteDescriptor(allocator.resourceDescriptors.GetRef(), created, binding.texture,
-                                            writable ? rhi::BindingType::TextureUnorderedAccess : rhi::BindingType::TextureShaderResource,
-                                            {}, &rhiFailure);
-            };
-
-            bool published = true;
-            if (needShaderResource && !binding.shaderResource.IsValid())
-                published = create(false, createdShaderResource);
-            if (published && needUnorderedAccess && !binding.unorderedAccess.IsValid())
-                published = create(true, createdUnorderedAccess);
-            if (published)
-            {
-                if (createdShaderResource.IsValid())
-                    binding.shaderResource = createdShaderResource;
-                if (createdUnorderedAccess.IsValid())
-                    binding.unorderedAccess = createdUnorderedAccess;
-                return true;
-            }
-
-            if (createdShaderResource.IsValid())
-                static_cast<void>(rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), createdShaderResource, {}));
-            if (createdUnorderedAccess.IsValid())
-                static_cast<void>(rhi::RetireDescriptor(allocator.resourceDescriptors.GetRef(), createdUnorderedAccess, {}));
-            allocator.descriptorLedger.Release(missing);
-            if (allocationCapacityFailure && pressure != nullptr)
-            {
-                *pressure = {CanonicalDescriptorPressureKind::SharedDomain, missing};
-                return false;
-            }
-            return Fail(failure, allocationCapacityFailure ? RenderFlowResourceFailureCode::CapacityExceeded
-                                                           : MapRhiFailure(rhiFailure, RhiFailureContext::BackendContract),
-                        RenderFlowResourceSessionState::Resolving,
-                        rhiFailure.message[0] != '\0' ? rhiFailure.message : "retained import canonical descriptor publication failed");
-        }
-
         [[nodiscard]] bool ExtentEqual(const rhi::Extent3D& left, const rhi::Extent3D& right) noexcept
         {
             return left.width == right.width && left.height == right.height && left.depth == right.depth;
@@ -710,88 +623,99 @@ namespace vanguard::rendering::detail
             return true;
         }
 
-        [[nodiscard]] constexpr u64 StructuralHashMix(const u64 hash, const u64 value) noexcept
+        void ReleaseDedicatedPlanStorage(RenderFlowResourceAllocator::Impl& allocator, PersistentDedicatedPhysicalPlan& plan,
+                                         const bool releaseLeases) noexcept
         {
-            return (hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u))) * 0x100000001b3ull;
+            if (releaseLeases)
+                for (PersistentDedicatedPlanLaneRuntime& runtime : plan.laneRuntime)
+                    for (const DedicatedResourceLease& lease : runtime.leases)
+                        allocator.dedicatedPool.ReleaseLease(lease);
+            plan.Clear();
         }
 
-        [[nodiscard]] u64 ComputeStructuralSignature(const RenderFlowResourceAllocator::Impl& allocator) noexcept
+        void RemovePersistentDedicatedProgram(RenderFlowResourceAllocator::Impl& allocator, const u32 index,
+                                              const bool releaseLeases) noexcept
         {
-            u64 hash = 0xcbf29ce484222325ull;
-            hash = StructuralHashMix(hash, allocator.activePolicy.enablePlacedResources ? 1u : 0u);
-            hash = StructuralHashMix(hash, allocator.activePolicy.processEviction ? 1u : 0u);
-            hash = StructuralHashMix(hash, allocator.sealedWriters.Size());
-            hash = StructuralHashMix(hash, allocator.sealedQueueGroups.Size());
-            for (const SealedWriterRecord& sealed : allocator.sealedWriters)
+            auto& programs = allocator.persistentDedicatedPrograms;
+            if (index >= programs.Size())
+                return;
+            ReleaseDedicatedPlanStorage(allocator, programs[index].plan, releaseLeases);
+            programs[index].Clear();
+            if (index + 1u != programs.Size())
+                programs[index] = static_cast<PersistentDedicatedPhysicalProgram&&>(programs.Back());
+            programs.PopBack();
+        }
+
+        [[nodiscard]] PersistentDedicatedPhysicalProgram* FindPersistentDedicatedProgram(RenderFlowResourceAllocator::Impl& allocator,
+                                                                                          const ResourceContractStorage& contract) noexcept
+        {
+            for (PersistentDedicatedPhysicalProgram& program : allocator.persistentDedicatedPrograms)
             {
-                if (sealed.groupIndex >= allocator.writerReservations.Size())
-                    return 0;
-                const CandidateWriterBatch& batch = allocator.writerReservations[sealed.groupIndex].batch;
-                hash = StructuralHashMix(hash, sealed.groupIndex);
-                hash = StructuralHashMix(hash, batch.node.value);
-                hash = StructuralHashMix(hash, batch.flowGroup.value);
-                hash = StructuralHashMix(hash, batch.commandScope.value);
-                hash = StructuralHashMix(hash, batch.resourceCount);
-                hash = StructuralHashMix(hash, batch.textureViews.Size());
-                hash = StructuralHashMix(hash, batch.bufferViews.Size());
-                hash = StructuralHashMix(hash, batch.uses.Size());
-                hash = StructuralHashMix(hash, batch.useEndOrder.Size());
-                hash = StructuralHashMix(hash, batch.operations.Size());
-                hash = StructuralHashMix(hash, batch.declarationCount);
-                hash = StructuralHashMix(hash, batch.semanticSequenceCount);
-                hash = StructuralHashMix(hash, batch.stepCount);
-                hash = StructuralHashMix(hash, batch.explicitScopeOpenCount);
-                hash = StructuralHashMix(hash, batch.decisionCount);
-                hash = StructuralHashMix(hash, batch.exportCount);
+                if (!program.Matches(contract.contractIdentity, contract.publicationSerial,
+                                     allocator.rhiDeviceIncarnation, allocator.descriptorDomainIdentity))
+                    continue;
+                program.lastUsedFrame = allocator.frameSerial;
+                return &program;
             }
-            for (const u32 groupIndex : allocator.sealedQueueGroups)
+            return nullptr;
+        }
+
+        void RemovePersistentDedicatedProgramsForContract(RenderFlowResourceAllocator::Impl& allocator, const u64 contractIdentity) noexcept
+        {
+            if (contractIdentity == 0)
+                return;
+            for (u32 index = 0; index < allocator.persistentDedicatedPrograms.Size();)
             {
-                if (groupIndex >= allocator.queueRequestGroups.Size())
-                    return 0;
-                const QueueRequestGroup& group = allocator.queueRequestGroups[groupIndex];
-                hash = StructuralHashMix(hash, groupIndex);
-                hash = StructuralHashMix(hash, group.count);
-                for (u32 requestIndex = 0; requestIndex < group.count && requestIndex < 2u; ++requestIndex)
+                if (allocator.persistentDedicatedPrograms[index].contractIdentity != contractIdentity)
                 {
-                    const QueueRequestRecord& request = group.requests[requestIndex];
-                    hash = StructuralHashMix(hash, request.flowGroup.value);
-                    hash = StructuralHashMix(hash, static_cast<u64>(request.queue));
-                    hash = StructuralHashMix(hash, static_cast<u64>(request.sync));
-                    hash = StructuralHashMix(hash, static_cast<u64>(request.kind));
+                    ++index;
+                    continue;
+                }
+                RemovePersistentDedicatedProgram(allocator, index, true);
+            }
+        }
+
+        void InstallPersistentDedicatedProgram(RenderFlowResourceAllocator::Impl& allocator, PersistentDedicatedPhysicalPlan&& plan,
+                                               const ResourceContractStorage& contract) noexcept
+        {
+            VG_ASSERT(plan.valid && contract.contractIdentity != 0 && contract.publicationSerial != 0);
+            auto& programs = allocator.persistentDedicatedPrograms;
+            u32 slot = InvalidRenderFlowResourceIndex;
+            for (u32 index = 0; index < programs.Size(); ++index)
+            {
+                if (programs[index].contractIdentity == contract.contractIdentity)
+                {
+                    slot = index;
+                    break;
                 }
             }
-            return hash != 0 ? hash : 1u;
-        }
-
-        [[nodiscard]] bool TextureUseEqual(const TextureUseDesc& left, const TextureUseDesc& right) noexcept
-        {
-            return left.requiredState == right.requiredState && SubresourcesEqual(left.subresources, right.subresources) && left.access == right.access &&
-                   left.content == right.content && TextureClearValueEqual(left.clearValue, right.clearValue);
-        }
-
-        [[nodiscard]] bool BufferUseEqual(const BufferUseDesc& left, const BufferUseDesc& right) noexcept
-        {
-            return left.requiredState == right.requiredState && left.access == right.access && left.content == right.content &&
-                   BufferClearValueEqual(left.clearValue, right.clearValue);
-        }
-
-        [[nodiscard]] bool CandidateUseEqual(const CandidateUse& left, const CandidateUse& right) noexcept
-        {
-            if (left.kind != right.kind || left.resource != right.resource || left.view != right.view || left.beginSequence != right.beginSequence ||
-                left.endSequence != right.endSequence)
-                return false;
-            return left.kind == CandidateUseKind::Texture ? TextureUseEqual(left.payload.texture, right.payload.texture)
-                                                         : BufferUseEqual(left.payload.buffer, right.payload.buffer);
-        }
-
-        [[nodiscard]] bool ExportDescEqual(const TerminalResourceExportDesc& left, const TerminalResourceExportDesc& right) noexcept
-        {
-            return left.terminalState == right.terminalState && left.terminalQueue == right.terminalQueue && left.readiness == right.readiness;
+            if (slot == InvalidRenderFlowResourceIndex && programs.Size() < MaximumPersistentDedicatedPhysicalPrograms)
+            {
+                slot = programs.Size();
+                programs.EmplaceBack();
+            }
+            if (slot == InvalidRenderFlowResourceIndex)
+            {
+                slot = 0;
+                for (u32 index = 1; index < programs.Size(); ++index)
+                    if (programs[index].lastUsedFrame < programs[slot].lastUsedFrame)
+                        slot = index;
+            }
+            if (programs[slot].plan.valid)
+                ReleaseDedicatedPlanStorage(allocator, programs[slot].plan, true);
+            PersistentDedicatedPhysicalProgram& program = programs[slot];
+            program.plan = static_cast<PersistentDedicatedPhysicalPlan&&>(plan);
+            program.contractIdentity = contract.contractIdentity;
+            program.contractPublicationSerial = contract.publicationSerial;
+            program.rhiDeviceIncarnation = allocator.rhiDeviceIncarnation;
+            program.descriptorDomainIdentity = allocator.descriptorDomainIdentity;
+            program.lastUsedFrame = allocator.frameSerial;
         }
 
         [[nodiscard]] StructuralImportContract MakeStructuralImportContract(const RetainedImportRecord& imported) noexcept
         {
             StructuralImportContract contract;
+            contract.contractPatch = imported.contractPatch;
             contract.desc = imported.desc;
             contract.initialState = imported.initialState;
             contract.terminalState = imported.terminalState;
@@ -805,15 +729,11 @@ namespace vanguard::rendering::detail
 
         [[nodiscard]] bool StructuralImportContractEqual(const StructuralImportContract& left, const StructuralImportContract& right) noexcept
         {
-            return ResourceDescEqual(left.desc, right.desc) && left.initialState == right.initialState && left.terminalState == right.terminalState &&
+            return left.contractPatch == right.contractPatch && ResourceDescEqual(left.desc, right.desc) &&
+                   left.initialState == right.initialState && left.terminalState == right.terminalState &&
                    left.initialQueue == right.initialQueue && left.terminalQueue == right.terminalQueue && left.readiness == right.readiness &&
                    (left.readiness != ImportReadinessKind::ExplicitFenceWait || left.incomingWaitQueue == right.incomingWaitQueue) &&
                    left.presentation == right.presentation;
-        }
-
-        [[nodiscard]] bool QueueRequestEqual(const QueueRequestRecord& left, const QueueRequestRecord& right) noexcept
-        {
-            return left.flowGroup == right.flowGroup && left.queue == right.queue && left.sync == right.sync && left.kind == right.kind;
         }
 
         void ResetStructuralNormalization(ResolveScratch& scratch) noexcept
@@ -911,17 +831,6 @@ namespace vanguard::rendering::detail
             return true;
         }
 
-        [[nodiscard]] bool StructuralOperationEqual(const CandidateOperation& left, const CandidateOperation& right) noexcept
-        {
-            if (left.kind != right.kind || left.sequence != right.sequence || left.a != right.a || left.b != right.b)
-                return false;
-            if (left.kind == CandidateOperationKind::ScopeOpen || left.kind == CandidateOperationKind::ScopeClose)
-                return left.payload.scope == right.payload.scope;
-            if (left.kind == CandidateOperationKind::Export)
-                return ExportDescEqual(left.payload.exportDesc, right.payload.exportDesc);
-            return true;
-        }
-
         [[nodiscard]] bool StructuralScopesClosed(const ResolveScratch& scratch) noexcept
         {
             for (const u8 closed : scratch.structuralScopeClosed)
@@ -930,100 +839,57 @@ namespace vanguard::rendering::detail
             return true;
         }
 
-        [[nodiscard]] bool StructuralPlanMatchesCurrent(const PersistentStructuralPlan& plan, const RenderFlowResourceAllocator::Impl& allocator,
-                                                       ResolveScratch& scratch) noexcept
+        [[nodiscard]] bool PrepareBoundStructuralPatches(const PersistentStructuralPlan& plan,
+                                                         RenderFlowResourceAllocator::Impl& allocator, ResolveScratch& scratch) noexcept
         {
-            if (!plan.valid || plan.policy.enablePlacedResources != allocator.activePolicy.enablePlacedResources ||
-                plan.policy.processEviction != allocator.activePolicy.processEviction ||
-                plan.batches.Size() != allocator.sealedWriters.Size() || plan.queueGroups.Size() != allocator.sealedQueueGroups.Size())
-                return false;
             ResetStructuralNormalization(scratch);
-            u32 declarationOrdinal = 0;
-            u32 expectedImportOrdinal = 0;
-            for (u32 batchIndex = 0; batchIndex < allocator.sealedWriters.Size(); ++batchIndex)
+
+            scratch.retainedImportContractPatches.Reset();
+            scratch.retainedImportContractPatches.Reserve(allocator.retainedImports.Size());
+            for (u32 importIndex = 0; importIndex < allocator.retainedImports.Size(); ++importIndex)
             {
-                const SealedWriterRecord& sealed = allocator.sealedWriters[batchIndex];
-                if (sealed.groupIndex >= allocator.writerReservations.Size())
+                const RetainedImportRecord& imported = allocator.retainedImports[importIndex];
+                if (!imported.contractPatch.IsValid() || !scratch.retainedImportContractPatches.Insert(imported.contractPatch.value, importIndex))
                     return false;
-                const CandidateWriterBatch& batch = allocator.writerReservations[sealed.groupIndex].batch;
-                const StructuralBatchKey& key = plan.batches[batchIndex];
-                if (key.groupIndex != sealed.groupIndex || key.node != batch.node || key.flowGroup != batch.flowGroup || key.commandScope != batch.commandScope ||
-                    key.declarationCount != batch.declarationCount || key.semanticSequenceCount != batch.semanticSequenceCount || key.stepCount != batch.stepCount ||
-                    key.explicitScopeOpenCount != batch.explicitScopeOpenCount || key.decisionCount != batch.decisionCount || key.exportCount != batch.exportCount ||
-                    key.resources.Size() != batch.resourceCount || key.textureViews.Size() != batch.textureViews.Size() ||
-                    key.bufferViews.Size() != batch.bufferViews.Size() || key.uses.Size() != batch.uses.Size() ||
-                    key.useEndOrder.Size() != batch.useEndOrder.Size() || key.operations.Size() != batch.operations.Size())
-                    return false;
-                for (u32 resourceIndex = 0; resourceIndex < batch.resourceCount; ++resourceIndex)
-                {
-                    const CandidateResource& current = batch.resources[resourceIndex];
-                    const StructuralResourceKey& expected = key.resources[resourceIndex];
-                    if (current.identity != expected.identity)
-                        return false;
-                    if (current.identity == CandidateIdentityKind::Named &&
-                        (current.flowSpace != expected.flowSpace || containers::StringView(current.name) != containers::StringView(expected.name)))
-                        return false;
-                }
-                for (u32 viewIndex = 0; viewIndex < batch.textureViews.Size(); ++viewIndex)
-                {
-                    const CandidateTextureView& current = batch.textureViews[viewIndex];
-                    const CandidateTextureView& expected = key.textureViews[viewIndex];
-                    if (current.resource.flowGroup != batch.flowGroup || current.resource.generation != batch.sessionGeneration ||
-                        current.resource.index != expected.resource.index || expected.resource.flowGroup != batch.flowGroup ||
-                        !TextureViewDescEqual(current.desc, expected.desc))
-                        return false;
-                }
-                for (u32 viewIndex = 0; viewIndex < batch.bufferViews.Size(); ++viewIndex)
-                {
-                    const CandidateBufferView& current = batch.bufferViews[viewIndex];
-                    const CandidateBufferView& expected = key.bufferViews[viewIndex];
-                    if (current.resource.flowGroup != batch.flowGroup || current.resource.generation != batch.sessionGeneration ||
-                        current.resource.index != expected.resource.index || expected.resource.flowGroup != batch.flowGroup ||
-                        !BufferViewDescEqual(current.desc, expected.desc))
-                        return false;
-                }
-                for (u32 useIndex = 0; useIndex < batch.uses.Size(); ++useIndex)
-                    if (!CandidateUseEqual(batch.uses[useIndex], key.uses[useIndex]))
-                        return false;
-                for (u32 endIndex = 0; endIndex < batch.useEndOrder.Size(); ++endIndex)
-                    if (batch.useEndOrder[endIndex] != key.useEndOrder[endIndex])
-                        return false;
-                for (u32 operationIndex = 0; operationIndex < batch.operations.Size(); ++operationIndex)
-                {
-                    CandidateOperation normalized;
-                    StructuralOperationExtras extras;
-                    if (!NormalizeStructuralOperation(batch, batch.operations[operationIndex], allocator, scratch, declarationOrdinal, normalized, extras) ||
-                        !StructuralOperationEqual(normalized, key.operations[operationIndex]))
-                        return false;
-                    if (extras.hasDeclaration)
-                    {
-                        if (normalized.b >= plan.declarationDescs.Size() || !ResourceDescEqual(extras.declarationDesc, plan.declarationDescs[normalized.b]))
-                            return false;
-                    }
-                    if (extras.hasImport)
-                    {
-                        if (normalized.b != expectedImportOrdinal++ || normalized.b >= plan.importContracts.Size() ||
-                            !StructuralImportContractEqual(extras.importContract, plan.importContracts[normalized.b]))
-                            return false;
-                    }
-                }
             }
-            if (!StructuralScopesClosed(scratch) || declarationOrdinal != plan.declarationDescs.Size() ||
-                expectedImportOrdinal != plan.importContracts.Size() || scratch.structuralExportSlots.Size() != plan.pendingExports.Size())
+            scratch.structuralImportIndices.Reserve(plan.importContracts.Size());
+            for (const StructuralImportContract& expected : plan.importContracts)
+            {
+                u32 importIndex = InvalidRenderFlowResourceIndex;
+                if (!expected.contractPatch.IsValid() ||
+                    !scratch.retainedImportContractPatches.Find(expected.contractPatch.value, importIndex) ||
+                    importIndex >= allocator.retainedImports.Size() ||
+                    !StructuralImportContractEqual(expected, MakeStructuralImportContract(allocator.retainedImports[importIndex])))
+                    return false;
+                scratch.structuralImportIndices.PushBack(importIndex);
+            }
+
+            if (plan.exportPatches.Size() != plan.pendingExports.Size())
                 return false;
-            for (u32 queueIndex = 0; queueIndex < allocator.sealedQueueGroups.Size(); ++queueIndex)
+            scratch.structuralExportSlots.Reserve(plan.exportPatches.Size());
+            for (const ResourceContractPatchId patch : plan.exportPatches)
             {
-                const u32 groupIndex = allocator.sealedQueueGroups[queueIndex];
-                if (groupIndex >= allocator.queueRequestGroups.Size())
+                u32 slot = InvalidRenderFlowResourceIndex;
+                if (!patch.IsValid() || !allocator.reservedExportContractPatchIndices.Find(patch.value, slot) || slot >= allocator.reservedExportSlots)
                     return false;
-                const QueueRequestGroup& current = allocator.queueRequestGroups[groupIndex];
-                const StructuralQueueGroupKey& expected = plan.queueGroups[queueIndex];
-                if (expected.groupIndex != groupIndex || expected.count != current.count || current.count > 2u)
-                    return false;
-                for (u32 requestIndex = 0; requestIndex < current.count; ++requestIndex)
-                    if (!QueueRequestEqual(current.requests[requestIndex], expected.requests[requestIndex]))
-                        return false;
+                scratch.structuralExportSlots.PushBack(slot);
             }
+
+            u32 expectedDecisionCount = 0;
+            for (const StructuralPacketTemplate& packet : plan.packets)
+                expectedDecisionCount += packet.decisionCount;
+            if (allocator.contractDecisionPatches.Size() != expectedDecisionCount)
+                return false;
+            scratch.structuralDecisionValues.Reserve(expectedDecisionCount);
+            for (const StructuralPacketTemplate& packet : plan.packets)
+                for (u32 ordinal = 0; ordinal < packet.decisionCount; ++ordinal)
+                {
+                    const u64 key = (static_cast<u64>(packet.flowGroup.value) << 32u) | ordinal;
+                    u32 value = 0;
+                    if (!allocator.contractDecisionPatches.Find(key, value) || value > 1u)
+                        return false;
+                    scratch.structuralDecisionValues.PushBack(value != 0 ? u8{1} : u8{0});
+                }
             return true;
         }
 
@@ -1043,19 +909,17 @@ namespace vanguard::rendering::detail
             return InvalidRenderFlowResourceIndex;
         }
 
-        [[nodiscard]] bool BuildStructuralPlanCandidate(const u64 signature, const RenderFlowResourceAllocator::Impl& allocator,
+        [[nodiscard]] bool BuildStructuralPlanCandidate(const RenderFlowResourceAllocator::Impl& allocator,
                                                         const ExecutionGenerationRef::Impl& generation, ResolveScratch& scratch,
                                                         const u32 physicalAssignmentFirst) noexcept
         {
             PersistentStructuralPlan& candidate = scratch.candidateStructuralPlan;
             candidate.Clear();
-            if (allocator.config.allowLogicalOnlyValidation || allocator.activePolicy.enablePlacedResources)
+            if (allocator.config.allowLogicalOnlyValidation)
                 return false;
 
             ResetStructuralNormalization(scratch);
             u32 declarationOrdinal = 0;
-            candidate.signature = signature;
-            candidate.policy = allocator.activePolicy;
             candidate.batches.Reserve(allocator.sealedWriters.Size());
             for (u32 batchIndex = 0; batchIndex < allocator.sealedWriters.Size(); ++batchIndex)
             {
@@ -1103,9 +967,9 @@ namespace vanguard::rendering::detail
                 key.uses.Reserve(batch.uses.Size());
                 for (const CandidateUse& use : batch.uses)
                     key.uses.PushBack(use);
-                key.useEndOrder.Reserve(batch.useEndOrder.Size());
-                for (const u32 end : batch.useEndOrder)
-                    key.useEndOrder.PushBack(end);
+                key.semanticEvents.Reserve(batch.semanticEvents.Size());
+                for (const CandidateSemanticEvent event : batch.semanticEvents)
+                    key.semanticEvents.PushBack(event);
                 key.operations.Reserve(batch.operations.Size());
                 for (const CandidateOperation& operation : batch.operations)
                 {
@@ -1176,9 +1040,29 @@ namespace vanguard::rendering::detail
                 packet.queue = current.queue;
                 packet.decisionCount = current.decisions.Size();
                 packet.useSlotCount = current.runtime.liveness != nullptr ? current.runtime.liveness->useActive.Size() : 0u;
+                packet.beginStepByUseOrdinal.Reserve(current.beginStepByUseOrdinal.Size());
+                for (const u32 stepIndex : current.beginStepByUseOrdinal)
+                    packet.beginStepByUseOrdinal.PushBack(stepIndex);
+                packet.endStepByUseOrdinal.Reserve(current.endStepByUseOrdinal.Size());
+                for (const u32 stepIndex : current.endStepByUseOrdinal)
+                    packet.endStepByUseOrdinal.PushBack(stepIndex);
                 packet.steps.Reserve(current.steps.Size());
                 for (const CompiledStep& currentStep : current.steps)
                 {
+                    if (currentStep.logicalAllocation >= generation.allocations.Size())
+                    {
+                        candidate.Clear();
+                        return false;
+                    }
+                    if (generation.allocations[currentStep.logicalAllocation].imported)
+                    {
+                        StructuralPacketTemplate::ImportEvent event;
+                        event.logicalAllocation = currentStep.logicalAllocation;
+                        event.beginsUse = currentStep.kind == CompiledResourceStepKind::TextureUseBegin ||
+                                          currentStep.kind == CompiledResourceStepKind::BufferUseBegin;
+                        event.terminalPresent = currentStep.terminalPresent;
+                        packet.importEvents.PushBack(event);
+                    }
                     CompiledStep step = currentStep;
                     step.use.generation = 0;
                     step.physical = {};
@@ -1188,7 +1072,10 @@ namespace vanguard::rendering::detail
                     step.afterActionCount = 0;
                     step.aliasPredecessorOffset = 0;
                     step.aliasPredecessorCount = 0;
+                    step.actionTapeOffset = 0;
+                    step.actionTapeCount = 0;
                     step.finalizeForAlias = false;
+                    step.localStateRequired = false;
                     packet.steps.PushBack(step);
                 }
             }
@@ -1210,6 +1097,7 @@ namespace vanguard::rendering::detail
             for (u32 order = physicalAssignmentFirst; order < scratch.physicalAssignmentOrder.Size(); ++order)
                 candidate.firstTouchAllocationOrder.PushBack(scratch.physicalAssignmentOrder[order]);
             candidate.pendingExports.Reserve(generation.pendingExports.Size());
+            candidate.exportPatches.Reserve(generation.pendingExports.Size());
             for (const PendingExportRecord& current : generation.pendingExports)
             {
                 PendingExportRecord exported = current;
@@ -1224,29 +1112,43 @@ namespace vanguard::rendering::detail
                 exported.textureDesc = {};
                 exported.bufferDesc = {};
                 candidate.pendingExports.PushBack(exported);
+                if (current.slot.index >= allocator.reservedExportContractPatches.Size())
+                {
+                    candidate.Clear();
+                    return false;
+                }
+                candidate.exportPatches.PushBack(allocator.reservedExportContractPatches[current.slot.index]);
             }
             if (candidate.importContracts.Size() != scratch.structuralImportIndices.Size() ||
-                candidate.pendingExports.Size() != scratch.structuralExportSlots.Size())
+                candidate.pendingExports.Size() != scratch.structuralExportSlots.Size() ||
+                candidate.exportPatches.Size() != candidate.pendingExports.Size())
             {
                 candidate.Clear();
                 return false;
             }
+            candidate.semanticEventCount = allocator.sealedPlanning.semanticEventCount;
             candidate.valid = true;
             return true;
         }
 
         [[nodiscard]] bool InstantiateStructuralPlan(const PersistentStructuralPlan& plan, RenderFlowResourceAllocator::Impl& allocator,
                                                      ExecutionGenerationRef::Impl& generation, ResolveScratch& scratch,
-                                                     RenderFlowResourceFailure* const failure) noexcept
+                                                     RenderFlowResourceFailure* const failure, const bool deferSteps) noexcept
         {
-            if (!plan.valid || allocator.config.allowLogicalOnlyValidation || allocator.activePolicy.enablePlacedResources ||
+            VG_PROFILE_ZONE_NAMED("RenderFlow/Resolve/InstantiateStructuralPlan");
+            if (!plan.valid || allocator.config.allowLogicalOnlyValidation ||
                 scratch.structuralImportIndices.Size() != plan.importContracts.Size() ||
                 scratch.structuralExportSlots.Size() != plan.pendingExports.Size())
                 return false;
-            generation.allocations.Reserve(plan.allocations.Size());
-            for (const LogicalAllocationRecord& current : plan.allocations)
+            // A certified structural contract owns immutable descriptors and
+            // lifetime topology. Clone that dense table in one typed bulk
+            // operation and patch only this frame's retained-import ordinal
+            // and physical binding fields; no operation stream replay.
+            generation.allocations = plan.allocations;
+            if (generation.allocations.Size() != plan.allocations.Size())
+                return false;
+            for (LogicalAllocationRecord& allocation : generation.allocations)
             {
-                LogicalAllocationRecord allocation = current;
                 allocation.physical = {};
                 if (allocation.imported)
                 {
@@ -1256,7 +1158,6 @@ namespace vanguard::rendering::detail
                     if (allocation.importedResource >= allocator.retainedImports.Size())
                         return false;
                 }
-                generation.allocations.PushBack(allocation);
             }
 
             generation.packets.Reserve(plan.packets.Size());
@@ -1272,39 +1173,25 @@ namespace vanguard::rendering::detail
                 packet.flowGroup = source.flowGroup;
                 packet.commandScope = source.commandScope;
                 packet.queue = source.queue;
-                packet.steps.Reserve(source.steps.Size());
-                packet.beginStepByUseOrdinal.Reserve(source.useSlotCount);
-                packet.endStepByUseOrdinal.Resize(source.useSlotCount, InvalidRenderFlowResourceIndex);
-                u32 endUseCount = 0;
-                for (const CompiledStep& current : source.steps)
-                {
-                    CompiledStep step = current;
-                    step.use.generation = allocator.sessionGeneration;
-                    step.physical = {};
-                    const u32 stepIndex = packet.steps.Size();
-                    if (step.kind == CompiledResourceStepKind::TextureUseBegin || step.kind == CompiledResourceStepKind::BufferUseBegin)
-                    {
-                        if (!step.use.IsValid() || step.use.flowGroup != packet.flowGroup || step.use.ordinal != packet.beginStepByUseOrdinal.Size() ||
-                            step.use.ordinal >= source.useSlotCount)
-                            return false;
-                        packet.beginStepByUseOrdinal.PushBack(stepIndex);
-                    }
-                    else if (step.kind == CompiledResourceStepKind::UseEnd)
-                    {
-                        if (!step.use.IsValid() || step.use.flowGroup != packet.flowGroup || step.use.ordinal >= packet.endStepByUseOrdinal.Size() ||
-                            packet.endStepByUseOrdinal[step.use.ordinal] != InvalidRenderFlowResourceIndex)
-                            return false;
-                        packet.endStepByUseOrdinal[step.use.ordinal] = stepIndex;
-                        ++endUseCount;
-                    }
-                    else
-                    {
-                        return false;
-                    }
-                    packet.steps.PushBack(step);
-                }
-                if (packet.beginStepByUseOrdinal.Size() != source.useSlotCount || endUseCount != source.useSlotCount)
+                packet.structuralStepCount = source.steps.Size();
+                if (source.beginStepByUseOrdinal.Size() != source.useSlotCount || source.endStepByUseOrdinal.Size() != source.useSlotCount)
                     return false;
+                packet.beginStepByUseOrdinal = source.beginStepByUseOrdinal;
+                packet.endStepByUseOrdinal = source.endStepByUseOrdinal;
+                if (packet.beginStepByUseOrdinal.Size() != source.useSlotCount ||
+                    packet.endStepByUseOrdinal.Size() != source.useSlotCount)
+                    return false;
+                if (!deferSteps)
+                {
+                    packet.steps.Reserve(source.steps.Size());
+                    for (const CompiledStep& current : source.steps)
+                    {
+                        CompiledStep step = current;
+                        step.use.generation = allocator.sessionGeneration;
+                        step.physical = {};
+                        packet.steps.PushBack(step);
+                    }
+                }
                 packet.decisions.Reserve(source.decisionCount);
                 for (u32 localDecision = 0; localDecision < source.decisionCount; ++localDecision)
                 {
@@ -1322,16 +1209,13 @@ namespace vanguard::rendering::detail
             }
             if (decisionOrdinal != scratch.structuralDecisionValues.Size())
                 return false;
-            generation.commandScopes.Reserve(plan.commandScopes.Size());
-            for (const CompiledCommandScope& scope : plan.commandScopes)
-                generation.commandScopes.PushBack(scope);
-            generation.queueDependencies.Reserve(plan.queueDependencies.Size());
-            for (const CompiledQueueDependency& dependency : plan.queueDependencies)
-                generation.queueDependencies.PushBack(dependency);
-            scratch.crossQueueProducerScopes.Clear();
-            scratch.crossQueueProducerScopes.Reserve(plan.crossQueueProducerScopes.Size());
-            for (const u32 producer : plan.crossQueueProducerScopes)
-                scratch.crossQueueProducerScopes.PushBack(producer);
+            generation.commandScopes = plan.commandScopes;
+            generation.queueDependencies = plan.queueDependencies;
+            scratch.crossQueueProducerScopes = plan.crossQueueProducerScopes;
+            if (generation.commandScopes.Size() != plan.commandScopes.Size() ||
+                generation.queueDependencies.Size() != plan.queueDependencies.Size() ||
+                scratch.crossQueueProducerScopes.Size() != plan.crossQueueProducerScopes.Size())
+                return false;
 
             generation.pendingExports.Reserve(plan.pendingExports.Size());
             for (const PendingExportRecord& current : plan.pendingExports)
@@ -1364,20 +1248,21 @@ namespace vanguard::rendering::detail
 
             generation.presentationAcquisition = {};
             generation.presentationCommandScope = {};
-            for (CompiledPacket& packet : generation.packets)
+            for (u32 packetIndex = 0; packetIndex < generation.packets.Size(); ++packetIndex)
             {
-                for (const CompiledStep& step : packet.steps)
+                CompiledPacket& packet = generation.packets[packetIndex];
+                const StructuralPacketTemplate& source = plan.packets[packetIndex];
+                for (const StructuralPacketTemplate::ImportEvent& event : source.importEvents)
                 {
-                    if (step.logicalAllocation >= generation.allocations.Size())
+                    if (event.logicalAllocation >= generation.allocations.Size())
                         return false;
-                    const LogicalAllocationRecord& allocation = generation.allocations[step.logicalAllocation];
+                    const LogicalAllocationRecord& allocation = generation.allocations[event.logicalAllocation];
                     if (!allocation.imported)
-                        continue;
+                        return false;
                     if (allocation.importedResource >= allocator.retainedImports.Size())
                         return false;
                     const RetainedImportRecord& imported = allocator.retainedImports[allocation.importedResource];
-                    if ((step.kind == CompiledResourceStepKind::TextureUseBegin || step.kind == CompiledResourceStepKind::BufferUseBegin) &&
-                        imported.readiness == ImportReadinessKind::ExplicitFenceWait)
+                    if (event.beginsUse && imported.readiness == ImportReadinessKind::ExplicitFenceWait)
                     {
                         const u32 queue = static_cast<u32>(imported.incomingWait.queue);
                         if (queue >= 3u)
@@ -1385,7 +1270,7 @@ namespace vanguard::rendering::detail
                         if (imported.incomingWait.value > packet.incomingWaits[queue])
                             packet.incomingWaits[queue] = imported.incomingWait.value;
                     }
-                    if (step.terminalPresent)
+                    if (event.terminalPresent)
                     {
                         if (!imported.presentationAcquisition.IsValid() || generation.presentationAcquisition.IsValid())
                             return false;
@@ -1395,6 +1280,30 @@ namespace vanguard::rendering::detail
                 }
             }
             generation.hasNativeResourceBindings = true;
+            return true;
+        }
+
+        [[nodiscard]] bool MaterializeDeferredStructuralSteps(const PersistentStructuralPlan& plan,
+                                                              const RenderFlowResourceAllocator::Impl& allocator,
+                                                              ExecutionGenerationRef::Impl& generation) noexcept
+        {
+            if (plan.packets.Size() != generation.packets.Size())
+                return false;
+            for (u32 index = 0; index < plan.packets.Size(); ++index)
+            {
+                const StructuralPacketTemplate& saved = plan.packets[index];
+                CompiledPacket& packet = generation.packets[index];
+                if (!packet.steps.Empty() || packet.structuralStepCount != saved.steps.Size())
+                    return false;
+                packet.steps.Reserve(saved.steps.Size());
+                for (const CompiledStep& current : saved.steps)
+                {
+                    CompiledStep step = current;
+                    step.use.generation = allocator.sessionGeneration;
+                    step.physical = {};
+                    packet.steps.PushBack(step);
+                }
+            }
             return true;
         }
 
@@ -1443,6 +1352,9 @@ namespace vanguard::rendering::detail
                     return false;
                 }
                 const DedicatedResourceRequest request = BuildDedicatedResourceRequest(generation.allocations[allocation].desc);
+                candidate.allocations[allocation].dedicatedRequest = request;
+                candidate.allocations[allocation].dedicatedRequest.requiresCanonicalDescriptors =
+                    generation.allocations[allocation].requiresCanonicalDescriptors;
                 PersistentDedicatedPlanLane& lane = candidate.lanes[laneIndex];
                 if (lane.compatibility.kind == FrameResourceKind::Invalid)
                 {
@@ -1510,12 +1422,13 @@ namespace vanguard::rendering::detail
             return admittedProducerScopeIndex != InvalidRenderFlowResourceIndex && producerScopeIndex <= admittedProducerScopeIndex;
         }
 
-        void TouchLifetime(LogicalAllocationRecord& allocation, const u32 allocationIndex, const PlanPosition position, const u32 commandScopeIndex, const CompiledPacket& packet,
-                           containers::DynamicArray<u32>& physicalAssignmentOrder) noexcept
+        void TouchLifetime(LogicalAllocationRecord& allocation, const u32 allocationIndex, const PlanPosition position, const u32 semanticOrdinal,
+                           const u32 commandScopeIndex, const CompiledPacket& packet, containers::DynamicArray<u32>& physicalAssignmentOrder) noexcept
         {
             if (!allocation.firstUsePosition.IsValid())
             {
                 allocation.firstUsePosition = position;
+                allocation.firstUseSemanticOrdinal = semanticOrdinal;
                 allocation.firstUseCommandScopeIndex = commandScopeIndex;
                 // CompileOperations already visits resource operations in strict
                 // PlanPosition order. Record the allocation exactly once at the
@@ -1524,6 +1437,7 @@ namespace vanguard::rendering::detail
                 physicalAssignmentOrder.PushBack(allocationIndex);
             }
             allocation.lastUsePosition = position;
+            allocation.lastUseSemanticOrdinal = semanticOrdinal;
             allocation.lastUseCommandScopeIndex = commandScopeIndex;
             allocation.queueMask |= QueueMask(packet.queue);
         }
@@ -1538,9 +1452,9 @@ namespace vanguard::rendering::detail
             if (scratch != nullptr)
             {
                 RenderFlowResourceFailure descriptorCleanupFailure;
-                if (!RetireRetainedImportDescriptors(allocator, *scratch, {}, deviceLost, &descriptorCleanupFailure) && !deviceLost)
+                if (!ReleaseRetainedImportDescriptorBorrows(allocator, *scratch, {}, deviceLost, &descriptorCleanupFailure) && !deviceLost)
                     VG_FATAL(descriptorCleanupFailure.message != nullptr ? descriptorCleanupFailure.message
-                                                                       : "retained import descriptor rollback failed");
+                                                                       : "retained import descriptor-borrow rollback failed");
                 if (!deviceLost && scratch->hasNativeResourceBindings)
                 {
                     allocator.placedPool.Rollback(scratch->placedBatch);
@@ -1565,10 +1479,15 @@ namespace vanguard::rendering::detail
             // namedSlots borrows candidate-name bytes. Invalidate those entries
             // in O(1) before cancellation makes candidate storage writable.
             allocator.resolveScratch.namedSlots.Reset();
+            if (allocator.contractCompileTarget != nullptr)
+            {
+                allocator.contractCompileTarget->candidateNodes.Clear();
+                allocator.contractCompileTarget->candidateNodesReady = false;
+            }
             if (deviceLost)
             {
-                allocator.structuralPlan.Clear();
                 ReleasePersistentDedicatedPlan(allocator, false);
+                RetainedImportDescriptorCacheDeviceLost(allocator);
                 allocator.dedicatedPool.DeviceLost();
                 allocator.placedPool.DeviceLost();
                 allocator.stats.rejectedOperations += allocator.pendingRejectedOperations.Exchange(0);
@@ -1577,6 +1496,11 @@ namespace vanguard::rendering::detail
                 allocator.publishedExports.Clear();
                 allocator.publishedExportIndices.Reset();
                 allocator.reservedExportSlots = 0;
+                allocator.reservedExportContractPatches.Clear();
+                allocator.reservedExportContractPatchIndices.Reset();
+                allocator.contractDecisionPatches.Reset();
+                allocator.contractCompileTarget = nullptr;
+                allocator.boundContract = nullptr;
                 allocator.activePolicy = {};
                 allocator.state = RenderFlowResourceSessionState::DeviceUnavailable;
                 allocator.stats.state = allocator.state;
@@ -1587,17 +1511,19 @@ namespace vanguard::rendering::detail
             return result;
         }
 
-        // RF8: native state lowering owns one dense physical-state history for
-        // the whole generation. Semantic compilation records intent on steps;
-        // this pass binds that intent to the selected physical objects exactly
-        // once, emits final actions directly, and carries only explicit-state
-        // objects across command-list boundaries.
+        // RF11: native state lowering keeps a global image only for semantics
+        // which actually cross a command-list/resource boundary. Ordinary
+        // same-queue state progression stays on the compiled step and is applied
+        // through the command-list-local RHI tracker at execution time. Explicit
+        // state, import/export terminals, UAV hazards, aliasing and presentation
+        // retain the stronger whole-frame witness where required.
         [[nodiscard]] bool LowerPhysicalStates(RenderFlowResourceAllocator::Impl& allocator, ExecutionGenerationRef::Impl& generation, ResolveScratch& resolveScratch,
                                               u64& totalActions, RenderFlowResourceFailure* const failure) noexcept
         {
             VG_PROFILE_ZONE_NAMED("RenderFlow/Resolve/LowerPhysicalStates");
             containers::DynamicArray<PhysicalScopeState>& history = resolveScratch.physicalHistory;
             containers::DynamicArray<rhi::ResourceState>& cells = resolveScratch.physicalStateCells;
+            containers::DynamicArray<u8>& globalState = resolveScratch.physicalGlobalState;
             containers::DynamicArray<u8>& accessCells = resolveScratch.physicalAccessCells;
             containers::DynamicArray<u32>& packetPhysicals = resolveScratch.packetPhysicalIndices;
             const u32 historyCount = resolveScratch.physicalHistoryCount;
@@ -1629,13 +1555,62 @@ namespace vanguard::rendering::detail
                 return binding.texture.IsValid() ? FrameResourceKind::Texture : FrameResourceKind::Buffer;
             };
 
+            // Classify the exceptional physicals once. Ordinary dedicated/placed
+            // resources never enter the whole-frame state image: their use-state
+            // progression is owned by the command-list-local RHI tracker. Global
+            // cells remain only where RenderFlow must prove something across a
+            // command-list/resource boundary.
+            globalState.Resize(historyCount, u8{0});
+            for (u32 physicalIndex = 0; physicalIndex < generation.physicalBindings.Size(); ++physicalIndex)
+            {
+                const PhysicalBindingRecord& binding = generation.physicalBindings[physicalIndex];
+                if (binding.explicitState || binding.kind == PhysicalBindingKind::RetainedImport)
+                    globalState[physicalIndex] = 1;
+            }
+            for (const PendingExportRecord& exported : generation.pendingExports)
+                if (exported.physical.IsValid() && exported.physical.index < historyCount)
+                    globalState[exported.physical.index] = 1;
+            for (const CompiledPacket& packet : generation.packets)
+            {
+                for (const u32 predecessor : packet.aliasPredecessorPhysicalIndices)
+                    if (predecessor < historyCount)
+                        globalState[predecessor] = 1;
+                for (const CompiledStep& step : packet.steps)
+                {
+                    if (step.logicalAllocation >= generation.allocations.Size())
+                        continue;
+                    const PhysicalResourceId physical = generation.allocations[step.logicalAllocation].physical;
+                    if (!physical.IsValid() || physical.index >= historyCount)
+                        continue;
+                    if ((step.kind == CompiledResourceStepKind::TextureUseBegin && step.texture.requiredState == rhi::ResourceState::UnorderedAccess) ||
+                        (step.kind == CompiledResourceStepKind::BufferUseBegin && step.buffer.requiredState == rhi::ResourceState::UnorderedAccess) ||
+                        step.aliasPredecessorCount != 0 || step.finalizeForAlias || step.terminalState != rhi::ResourceState::Unknown || step.terminalPresent)
+                        globalState[physical.index] = 1;
+                }
+            }
+
             for (u32 packetIndex = 0; packetIndex < generation.packets.Size(); ++packetIndex)
             {
                 CompiledPacket& packet = generation.packets[packetIndex];
                 packetPhysicals.Clear();
                 if (!packet.actions.Empty() || !packet.entryStates.Empty() || !packet.statePredecessorPackets.Empty())
                     return reject(RenderFlowResourceFailureCode::BackendContractViolation,
-                                  "native semantic compilation leaked provisional state output into RF8 lowering", &packet);
+                                  "native semantic compilation leaked provisional state output into RF11 lowering", &packet);
+                packet.actionTape.Clear();
+                packet.exitActionTapeOffset = 0;
+                packet.exitActionTapeCount = 0;
+                const auto appendStepTape = [&](CompiledStep& step, const CompiledActionTapePhase phase, const u32 stepIndex,
+                                                const u32 actionOffset, const u32 actionCount) noexcept -> bool
+                {
+                    step.actionTapeOffset = packet.actionTape.Size();
+                    step.actionTapeCount = 0;
+                    const u32 expected = packet.actionTape.Size() + 1u;
+                    packet.actionTape.PushBack({phase, stepIndex, actionOffset, actionCount});
+                    if (packet.actionTape.Size() != expected)
+                        return false;
+                    step.actionTapeCount = 1;
+                    return true;
+                };
 
                 const auto ensurePhysical = [&](const PhysicalResourceId physical) noexcept -> bool
                 {
@@ -1673,6 +1648,12 @@ namespace vanguard::rendering::detail
                     if (!reference.IsValid() || initial == rhi::ResourceState::Unknown || cellCount == 0)
                         return reject(RenderFlowResourceFailureCode::BackendContractViolation, "physical state has no explicit native initial state", &packet);
 
+                    if (globalState[physical.index] == 0)
+                    {
+                        tracked.trackedPacket = packetIndex;
+                        return true;
+                    }
+
                     if (tracked.cellCount == 0)
                     {
                         tracked.cellOffset = cells.Size();
@@ -1691,7 +1672,7 @@ namespace vanguard::rendering::detail
                         for (u32 cell = 0; cell < cellCount; ++cell)
                             cells[tracked.cellOffset + cell] = initial;
                     }
-                    else if (tracked.lastPacket != InvalidRenderFlowResourceIndex)
+                    else if (binding.explicitState && tracked.lastPacket != InvalidRenderFlowResourceIndex)
                     {
                         if (tracked.lastPacket >= generation.packets.Size())
                             return reject(RenderFlowResourceFailureCode::BackendContractViolation, "explicit physical state predecessor is stale", &packet);
@@ -1744,33 +1725,39 @@ namespace vanguard::rendering::detail
                         packet.statePredecessorPackets.PushBack(tracked.lastPacket);
                     }
 
-                    if (cellCount > allocator.config.maximumCommandScopeEntryStates - totalEntries)
-                        return reject(RenderFlowResourceFailureCode::CapacityExceeded, "command-scope entry states exceed the aggregate metadata capacity", &packet);
-                    totalEntries += cellCount;
-                    for (u32 cell = 0; cell < cellCount; ++cell)
+                    if (binding.explicitState)
                     {
-                        rhi::CommandListEntryState entry;
-                        entry.resource = reference;
-                        entry.state = cells[tracked.cellOffset + cell];
-                        if (texture)
-                            entry.subresource = {static_cast<u16>(cell % binding.textureMipCount), static_cast<u16>(cell / binding.textureMipCount)};
-                        if (!QueueStateAllowed(packet.queue, bindingKind(binding), entry.state))
-                            return reject(RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "native entry state is illegal on the packet queue", &packet);
-                        packet.entryStates.PushBack(entry);
+                        if (cellCount > allocator.config.maximumCommandScopeEntryStates - totalEntries)
+                            return reject(RenderFlowResourceFailureCode::CapacityExceeded, "command-scope entry states exceed the aggregate metadata capacity", &packet);
+                        totalEntries += cellCount;
+                        for (u32 cell = 0; cell < cellCount; ++cell)
+                        {
+                            rhi::CommandListEntryState entry;
+                            entry.resource = reference;
+                            entry.state = cells[tracked.cellOffset + cell];
+                            if (texture)
+                                entry.subresource = {static_cast<u16>(cell % binding.textureMipCount), static_cast<u16>(cell / binding.textureMipCount)};
+                            if (!QueueStateAllowed(packet.queue, bindingKind(binding), entry.state))
+                                return reject(RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch, "native entry state is illegal on the packet queue", &packet);
+                            packet.entryStates.PushBack(entry);
+                        }
+                        packetPhysicals.PushBack(physical.index);
                     }
                     tracked.trackedPacket = packetIndex;
-                    packetPhysicals.PushBack(physical.index);
                     return true;
                 };
 
-                const auto transitionTexture = [&](const CompiledStep& step, const PhysicalResourceId physical, const rhi::SubresourceRange range,
-                                                   const rhi::ResourceState after, const u32 blockStart) noexcept -> bool
+                const auto requireTextureState = [&](CompiledStep& step, const PhysicalResourceId physical, const rhi::SubresourceRange range,
+                                                     const rhi::ResourceState after) noexcept -> bool
                 {
                     if (!ensurePhysical(physical))
                         return false;
                     const PhysicalBindingRecord& binding = generation.physicalBindings[physical.index];
                     if (!binding.texture.IsValid() || binding.buffer.IsValid() || after == rhi::ResourceState::Unknown)
                         return reject(RenderFlowResourceFailureCode::BackendContractViolation, "texture state intent targets a non-texture physical binding", &packet, step.use);
+                    if (!binding.explicitState && !QueueStateAllowed(packet.queue, FrameResourceKind::Texture, binding.initialState))
+                        return reject(RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch,
+                                      "automatic texture close-time state is illegal on the packet queue", &packet, step.use);
                     const u32 firstMip = range.firstMip;
                     const u32 firstSlice = range.firstSlice;
                     const u32 mipCount = range.mipCount == 0xffffu ? binding.textureMipCount - firstMip : range.mipCount;
@@ -1778,46 +1765,28 @@ namespace vanguard::rendering::detail
                     if (firstMip >= binding.textureMipCount || firstSlice >= binding.textureArraySize || mipCount == 0 || sliceCount == 0 ||
                         mipCount > binding.textureMipCount - firstMip || sliceCount > binding.textureArraySize - firstSlice)
                         return reject(RenderFlowResourceFailureCode::BackendContractViolation, "texture state intent has an invalid physical subresource range", &packet, step.use);
+                    step.localStateRequired = true;
                     PhysicalScopeState& tracked = history[physical.index];
-                    for (u32 slice = firstSlice; slice < firstSlice + sliceCount; ++slice)
-                        for (u32 mip = firstMip; mip < firstMip + mipCount; ++mip)
-                        {
-                            rhi::ResourceState& state = cells[tracked.cellOffset + slice * binding.textureMipCount + mip];
-                            if (state == after)
-                                continue;
-                            CompiledResourceAction action;
-                            action.kind = CompiledResourceActionKind::TextureTransition;
-                            action.logicalAllocation = step.logicalAllocation;
-                            action.physical = physical;
-                            action.before = state;
-                            action.after = after;
-                            action.textureSubresources = {static_cast<u16>(mip), 1, static_cast<u16>(slice), 1};
-                            if (!AppendOrMergeTextureTransition(packet.actions, blockStart, action, false))
-                                return reject(RenderFlowResourceFailureCode::CapacityExceeded, "texture transition storage allocation failed", &packet, step.use);
-                            state = after;
-                        }
+                    if (tracked.cellCount != 0)
+                        for (u32 slice = firstSlice; slice < firstSlice + sliceCount; ++slice)
+                            for (u32 mip = firstMip; mip < firstMip + mipCount; ++mip)
+                                cells[tracked.cellOffset + slice * binding.textureMipCount + mip] = after;
                     return true;
                 };
-                const auto transitionBuffer = [&](const CompiledStep& step, const PhysicalResourceId physical, const rhi::ResourceState after) noexcept -> bool
+                const auto requireBufferState = [&](CompiledStep& step, const PhysicalResourceId physical, const rhi::ResourceState after) noexcept -> bool
                 {
                     if (!ensurePhysical(physical))
                         return false;
                     const PhysicalBindingRecord& binding = generation.physicalBindings[physical.index];
                     if (!binding.buffer.IsValid() || binding.texture.IsValid() || after == rhi::ResourceState::Unknown)
                         return reject(RenderFlowResourceFailureCode::BackendContractViolation, "buffer state intent targets a non-buffer physical binding", &packet, step.use);
-                    rhi::ResourceState& state = cells[history[physical.index].cellOffset];
-                    if (state == after)
-                        return true;
-                    if (!chargeActions(1))
-                        return reject(RenderFlowResourceFailureCode::CapacityExceeded, "buffer transitions exceed the action capacity", &packet, step.use);
-                    CompiledResourceAction action;
-                    action.kind = CompiledResourceActionKind::BufferTransition;
-                    action.logicalAllocation = step.logicalAllocation;
-                    action.physical = physical;
-                    action.before = state;
-                    action.after = after;
-                    packet.actions.PushBack(action);
-                    state = after;
+                    if (!binding.explicitState && !QueueStateAllowed(packet.queue, FrameResourceKind::Buffer, binding.initialState))
+                        return reject(RenderFlowResourceFailureCode::QueueOrCommandScopeMismatch,
+                                      "automatic buffer close-time state is illegal on the packet queue", &packet, step.use);
+                    step.localStateRequired = true;
+                    PhysicalScopeState& tracked = history[physical.index];
+                    if (tracked.cellCount != 0)
+                        cells[tracked.cellOffset] = after;
                     return true;
                 };
 
@@ -1833,8 +1802,11 @@ namespace vanguard::rendering::detail
                                           "aliased predecessor close-time restoration must remain Common before activation", &packet);
                 }
 
-                for (CompiledStep& step : packet.steps)
+                for (u32 stepIndex = 0; stepIndex < packet.steps.Size(); ++stepIndex)
                 {
+                    CompiledStep& step = packet.steps[stepIndex];
+                    step.actionTapeOffset = packet.actionTape.Size();
+                    step.actionTapeCount = 0;
                     if (step.logicalAllocation >= generation.allocations.Size())
                         return reject(RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "compiled step lost its logical allocation", &packet, step.use);
                     const PhysicalResourceId physical = generation.allocations[step.logicalAllocation].physical;
@@ -1858,7 +1830,6 @@ namespace vanguard::rendering::detail
                         }
 
                         step.beforeActionOffset = packet.actions.Size();
-                        const u32 transitionStart = packet.actions.Size();
                         bool requiresUavBarrier = false;
                         if (step.kind == CompiledResourceStepKind::TextureUseBegin)
                         {
@@ -1880,21 +1851,17 @@ namespace vanguard::rendering::detail
                                             ((prior & physicalAccessWrite) != 0 || currentWrites))
                                             requiresUavBarrier = true;
                                     }
-                            if (!transitionTexture(step, physical, step.texture.subresources, step.texture.requiredState, transitionStart))
+                            if (!requireTextureState(step, physical, step.texture.subresources, step.texture.requiredState))
                                 return false;
-                            if (!FinalizeTextureTransitionBlock(packet.actions, transitionStart, resolveScratch.textureTransitionRuns))
-                                return reject(RenderFlowResourceFailureCode::BackendContractViolation, "texture transition block is not self-contained", &packet, step.use);
-                            if (!chargeActions(packet.actions.Size() - transitionStart))
-                                return reject(RenderFlowResourceFailureCode::CapacityExceeded, "texture transitions exceed the action capacity", &packet, step.use);
                         }
                         else if (step.kind == CompiledResourceStepKind::BufferUseBegin)
                         {
-                            const u8 prior = accessCells[tracked.cellOffset];
+                            const u8 prior = tracked.cellCount != 0 ? accessCells[tracked.cellOffset] : u8{0};
                             const bool currentWrites = AccessWrites(step.buffer.access) || step.nativeHasClear;
-                            requiresUavBarrier = step.buffer.requiredState == rhi::ResourceState::UnorderedAccess &&
+                            requiresUavBarrier = tracked.cellCount != 0 && step.buffer.requiredState == rhi::ResourceState::UnorderedAccess &&
                                                  cells[tracked.cellOffset] == rhi::ResourceState::UnorderedAccess && (prior & physicalAccessSeen) != 0 &&
                                                  (prior & physicalAccessUav) != 0 && ((prior & physicalAccessWrite) != 0 || currentWrites);
-                            if (!transitionBuffer(step, physical, step.buffer.requiredState))
+                            if (!requireBufferState(step, physical, step.buffer.requiredState))
                                 return false;
                         }
                         else
@@ -1904,23 +1871,75 @@ namespace vanguard::rendering::detail
 
                         if (requiresUavBarrier)
                         {
-                            if (!chargeActions(1))
-                                return reject(RenderFlowResourceFailureCode::CapacityExceeded, "UAV barriers exceed the action capacity", &packet, step.use);
                             if (step.kind == CompiledResourceStepKind::TextureUseBegin)
                             {
+                                // The backend's texture UAV primitive is resource-wide and
+                                // temporarily authors UAV tracking for every subresource. Preserve
+                                // unrelated subresource states by normalizing only for the barrier
+                                // window, then restoring them immediately afterward.
+                                const u32 normalizationStart = packet.actions.Size();
                                 for (u32 cell = 0; cell < tracked.cellCount; ++cell)
-                                    if (cells[tracked.cellOffset + cell] != rhi::ResourceState::UnorderedAccess)
-                                        return reject(RenderFlowResourceFailureCode::UnsupportedCapability,
-                                                      "whole-resource texture UAV barrier requires every physical subresource in UAV state", &packet, step.use);
+                                {
+                                    const rhi::ResourceState state = cells[tracked.cellOffset + cell];
+                                    if (state == rhi::ResourceState::UnorderedAccess)
+                                        continue;
+                                    CompiledResourceAction normalize;
+                                    normalize.kind = CompiledResourceActionKind::TextureTransition;
+                                    normalize.logicalAllocation = step.logicalAllocation;
+                                    normalize.physical = physical;
+                                    normalize.before = binding.explicitState ? state : rhi::ResourceState::Unknown;
+                                    normalize.after = rhi::ResourceState::UnorderedAccess;
+                                    normalize.textureSubresources = {static_cast<u16>(cell % binding.textureMipCount), 1,
+                                                                     static_cast<u16>(cell / binding.textureMipCount), 1};
+                                    if (!AppendOrMergeTextureTransition(packet.actions, normalizationStart, normalize, false))
+                                        return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                                      "texture UAV normalization transition storage allocation failed", &packet, step.use);
+                                }
+                                if (!FinalizeTextureTransitionBlock(packet.actions, normalizationStart, resolveScratch.textureTransitionRuns))
+                                    return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                                  "texture UAV normalization transition block is not self-contained", &packet, step.use);
+                                CompiledResourceAction barrier;
+                                barrier.kind = CompiledResourceActionKind::TextureUavBarrier;
+                                barrier.logicalAllocation = step.logicalAllocation;
+                                barrier.physical = physical;
+                                packet.actions.PushBack(barrier);
+                                const u32 restoreStart = packet.actions.Size();
+                                for (u32 cell = 0; cell < tracked.cellCount; ++cell)
+                                {
+                                    const rhi::ResourceState state = cells[tracked.cellOffset + cell];
+                                    if (state == rhi::ResourceState::UnorderedAccess)
+                                        continue;
+                                    CompiledResourceAction restore;
+                                    restore.kind = CompiledResourceActionKind::TextureTransition;
+                                    restore.logicalAllocation = step.logicalAllocation;
+                                    restore.physical = physical;
+                                    restore.before = rhi::ResourceState::UnorderedAccess;
+                                    restore.after = state;
+                                    restore.textureSubresources = {static_cast<u16>(cell % binding.textureMipCount), 1,
+                                                                   static_cast<u16>(cell / binding.textureMipCount), 1};
+                                    if (!AppendOrMergeTextureTransition(packet.actions, restoreStart, restore, false))
+                                        return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                                      "texture UAV restoration transition storage allocation failed", &packet, step.use);
+                                }
+                                if (!FinalizeTextureTransitionBlock(packet.actions, restoreStart, resolveScratch.textureTransitionRuns))
+                                    return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                                  "texture UAV restoration transition block is not self-contained", &packet, step.use);
+                                if (!chargeActions(packet.actions.Size() - normalizationStart))
+                                    return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                                  "texture UAV barrier normalization exceeds the action capacity", &packet, step.use);
                             }
-                            CompiledResourceAction action;
-                            action.kind = step.kind == CompiledResourceStepKind::TextureUseBegin ? CompiledResourceActionKind::TextureUavBarrier
-                                                                                                : CompiledResourceActionKind::BufferUavBarrier;
-                            action.logicalAllocation = step.logicalAllocation;
-                            action.physical = physical;
-                            packet.actions.PushBack(action);
+                            else
+                            {
+                                if (!chargeActions(1))
+                                    return reject(RenderFlowResourceFailureCode::CapacityExceeded, "buffer UAV barrier exceeds the action capacity", &packet, step.use);
+                                CompiledResourceAction barrier;
+                                barrier.kind = CompiledResourceActionKind::BufferUavBarrier;
+                                barrier.logicalAllocation = step.logicalAllocation;
+                                barrier.physical = physical;
+                                packet.actions.PushBack(barrier);
+                            }
                         }
-                        if (step.kind == CompiledResourceStepKind::TextureUseBegin)
+                        if (tracked.cellCount != 0 && step.kind == CompiledResourceStepKind::TextureUseBegin)
                         {
                             const u32 firstMip = step.texture.subresources.firstMip;
                             const u32 firstSlice = step.texture.subresources.firstSlice;
@@ -1932,7 +1951,7 @@ namespace vanguard::rendering::detail
                                 for (u32 mip = firstMip; mip < firstMip + mipCount; ++mip)
                                     accessCells[tracked.cellOffset + slice * binding.textureMipCount + mip] = current;
                         }
-                        else
+                        else if (tracked.cellCount != 0)
                         {
                             accessCells[tracked.cellOffset] = physicalAccessSeen | (step.buffer.requiredState == rhi::ResourceState::UnorderedAccess ? physicalAccessUav : u8{0}) |
                                                               ((AccessWrites(step.buffer.access) || step.nativeHasClear) ? physicalAccessWrite : u8{0});
@@ -1959,6 +1978,9 @@ namespace vanguard::rendering::detail
                         step.beforeActionCount = packet.actions.Size() - step.beforeActionOffset;
                         step.afterActionOffset = packet.actions.Size();
                         step.afterActionCount = 0;
+                        if ((step.aliasPredecessorCount != 0 || step.beforeActionCount != 0) &&
+                            !appendStepTape(step, CompiledActionTapePhase::Begin, stepIndex, step.beforeActionOffset, step.beforeActionCount))
+                            return reject(RenderFlowResourceFailureCode::CapacityExceeded, "compiled begin action tape allocation failed", &packet, step.use);
                         continue;
                     }
 
@@ -1987,18 +2009,59 @@ namespace vanguard::rendering::detail
                         }
                         else if (generation.physicalBindings[physical.index].texture.IsValid())
                         {
-                            const PhysicalBindingRecord& binding = generation.physicalBindings[physical.index];
-                            const u32 transitionStart = packet.actions.Size();
-                            if (!transitionTexture(step, physical, {0, binding.textureMipCount, 0, binding.textureArraySize}, step.terminalState, transitionStart))
+                            if (!ensurePhysical(physical))
                                 return false;
+                            const PhysicalBindingRecord& binding = generation.physicalBindings[physical.index];
+                            PhysicalScopeState& tracked = history[physical.index];
+                            if (tracked.cellCount != static_cast<u32>(binding.textureMipCount) * binding.textureArraySize)
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "terminal texture transition lost its global state witness", &packet, step.use);
+                            const u32 transitionStart = packet.actions.Size();
+                            for (u32 cell = 0; cell < tracked.cellCount; ++cell)
+                            {
+                                rhi::ResourceState& state = cells[tracked.cellOffset + cell];
+                                if (state == step.terminalState)
+                                    continue;
+                                CompiledResourceAction action;
+                                action.kind = CompiledResourceActionKind::TextureTransition;
+                                action.logicalAllocation = step.logicalAllocation;
+                                action.physical = physical;
+                                action.before = state;
+                                action.after = step.terminalState;
+                                action.textureSubresources = {static_cast<u16>(cell % binding.textureMipCount), 1,
+                                                              static_cast<u16>(cell / binding.textureMipCount), 1};
+                                if (!AppendOrMergeTextureTransition(packet.actions, transitionStart, action, false))
+                                    return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                                  "terminal texture transition storage allocation failed", &packet, step.use);
+                                state = step.terminalState;
+                            }
                             if (!FinalizeTextureTransitionBlock(packet.actions, transitionStart, resolveScratch.textureTransitionRuns))
                                 return reject(RenderFlowResourceFailureCode::BackendContractViolation, "terminal texture transition block is not self-contained", &packet, step.use);
                             if (!chargeActions(packet.actions.Size() - transitionStart))
                                 return reject(RenderFlowResourceFailureCode::CapacityExceeded, "terminal texture transitions exceed the action capacity", &packet, step.use);
                         }
-                        else if (!transitionBuffer(step, physical, step.terminalState))
+                        else
                         {
-                            return false;
+                            if (!ensurePhysical(physical))
+                                return false;
+                            PhysicalScopeState& tracked = history[physical.index];
+                            if (tracked.cellCount != 1)
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "terminal buffer transition lost its global state witness", &packet, step.use);
+                            rhi::ResourceState& state = cells[tracked.cellOffset];
+                            if (state != step.terminalState)
+                            {
+                                if (!chargeActions(1))
+                                    return reject(RenderFlowResourceFailureCode::CapacityExceeded, "terminal buffer transition exceeds the action capacity", &packet, step.use);
+                                CompiledResourceAction action;
+                                action.kind = CompiledResourceActionKind::BufferTransition;
+                                action.logicalAllocation = step.logicalAllocation;
+                                action.physical = physical;
+                                action.before = state;
+                                action.after = step.terminalState;
+                                packet.actions.PushBack(action);
+                                state = step.terminalState;
+                            }
                         }
                     }
                     if (step.finalizeForAlias)
@@ -2010,6 +2073,9 @@ namespace vanguard::rendering::detail
                             cells[tracked.cellOffset + cell] = rhi::ResourceState::Common;
                     }
                     step.afterActionCount = packet.actions.Size() - step.afterActionOffset;
+                    if ((step.afterActionCount != 0 || step.finalizeForAlias) &&
+                        !appendStepTape(step, CompiledActionTapePhase::End, stepIndex, step.afterActionOffset, step.afterActionCount))
+                        return reject(RenderFlowResourceFailureCode::CapacityExceeded, "compiled end action tape allocation failed", &packet, step.use);
                 }
 
                 for (const u32 physicalIndex : packetPhysicals)
@@ -2020,18 +2086,6 @@ namespace vanguard::rendering::detail
                     const PhysicalBindingRecord& binding = generation.physicalBindings[physicalIndex];
                     if (!binding.explicitState)
                         continue;
-                    if (binding.buffer.IsValid() && cells[tracked.cellOffset] != rhi::ResourceState::Common)
-                    {
-                        if (!chargeActions(1))
-                            return reject(RenderFlowResourceFailureCode::CapacityExceeded, "buffer packet-exit transitions exceed the action capacity", &packet);
-                        CompiledResourceAction action;
-                        action.kind = CompiledResourceActionKind::BufferTransition;
-                        action.physical = {physicalIndex, generation.id.generation};
-                        action.before = cells[tracked.cellOffset];
-                        action.after = rhi::ResourceState::Common;
-                        packet.exitActions.PushBack(action);
-                        cells[tracked.cellOffset] = rhi::ResourceState::Common;
-                    }
                     tracked.lastPacket = packetIndex;
                 }
 
@@ -2066,7 +2120,7 @@ namespace vanguard::rendering::detail
                     continue;
                 PhysicalScopeState& tracked = history[physicalIndex];
                 const bool buffer = binding.buffer.IsValid();
-                if (tracked.lastPacket >= generation.packets.Size() || (!buffer && tracked.terminal == rhi::ResourceState::Unknown))
+                if (tracked.lastPacket >= generation.packets.Size() || tracked.terminal == rhi::ResourceState::Unknown)
                     return reject(RenderFlowResourceFailureCode::BackendContractViolation, "explicit physical resource has no terminal packet/state");
                 CompiledPacket& packet = generation.packets[tracked.lastPacket];
                 const u32 exportIndex = physicalIndex < resolveScratch.physicalAssignmentOrder.Size()
@@ -2076,7 +2130,24 @@ namespace vanguard::rendering::detail
                     (exportIndex >= generation.pendingExports.Size() || generation.pendingExports[exportIndex].terminalPacket != tracked.lastPacket))
                     return reject(RenderFlowResourceFailureCode::BackendContractViolation, "explicit export terminal fence does not cover its final physical packet", &packet);
                 if (buffer)
+                {
+                    if (tracked.cellCount != 1)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation, "explicit terminal buffer lost its global state witness", &packet);
+                    rhi::ResourceState& state = cells[tracked.cellOffset];
+                    if (state != tracked.terminal)
+                    {
+                        if (!chargeActions(1))
+                            return reject(RenderFlowResourceFailureCode::CapacityExceeded, "explicit terminal buffer transition exceeds the action capacity", &packet);
+                        CompiledResourceAction action;
+                        action.kind = CompiledResourceActionKind::BufferTransition;
+                        action.physical = {physicalIndex, generation.id.generation};
+                        action.before = state;
+                        action.after = tracked.terminal;
+                        packet.exitActions.PushBack(action);
+                        state = tracked.terminal;
+                    }
                     continue;
+                }
                 const u32 transitionStart = packet.exitActions.Size();
                 for (u32 cell = 0; cell < tracked.cellCount; ++cell)
                 {
@@ -2098,6 +2169,977 @@ namespace vanguard::rendering::detail
                     return reject(RenderFlowResourceFailureCode::BackendContractViolation, "explicit terminal texture transition block is not self-contained", &packet);
                 if (!chargeActions(packet.exitActions.Size() - transitionStart))
                     return reject(RenderFlowResourceFailureCode::CapacityExceeded, "explicit terminal texture transitions exceed the action capacity", &packet);
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool BuildPacketResourceBindings(RenderFlowResourceAllocator::Impl& allocator, ExecutionGenerationRef::Impl& generation,
+                                                       ResolveScratch& resolveScratch, RenderFlowResourceFailure* const failure) noexcept
+        {
+            containers::DynamicArray<u32>& slotByPhysical = resolveScratch.physicalAssignmentOrder;
+            containers::DynamicArray<u32>& packetPhysicals = resolveScratch.packetPhysicalIndices;
+            slotByPhysical.Clear();
+            slotByPhysical.Resize(generation.physicalBindings.Size(), InvalidRenderFlowResourceIndex);
+
+            const auto resourceForPhysicalIndex = [&](const u32 physicalIndex) noexcept -> rhi::ResourceRef
+            {
+                if (physicalIndex >= generation.physicalBindings.Size())
+                    return {};
+                const PhysicalBindingRecord& binding = generation.physicalBindings[physicalIndex];
+                if (binding.texture.IsValid() == binding.buffer.IsValid())
+                    return {};
+                return binding.texture.IsValid() ? rhi::ResourceRef(binding.texture) : rhi::ResourceRef(binding.buffer);
+            };
+
+            for (CompiledPacket& packet : generation.packets)
+            {
+                packet.resourceBindings.Clear();
+                packet.resourceBindingPhysicals.Clear();
+                packet.resourceBindingShaderResources.Clear();
+                packet.resourceBindingUnorderedAccess.Clear();
+                packet.aliasPredecessorBindingSlots.Clear();
+                packetPhysicals.Clear();
+                const auto appendPhysical = [&](const PhysicalResourceId physical) noexcept -> bool
+                {
+                    if (!physical.IsValid() || physical.generation != generation.id.generation || physical.index >= generation.physicalBindings.Size())
+                        return Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                                    "packet resource binding references a stale physical assignment", packet.node);
+                    if (!resourceForPhysicalIndex(physical.index).IsValid())
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "packet resource binding has no unique native resource", packet.node);
+                    if (slotByPhysical[physical.index] != InvalidRenderFlowResourceIndex)
+                        return true;
+                    slotByPhysical[physical.index] = 0;
+                    const u32 expected = packetPhysicals.Size() + 1u;
+                    packetPhysicals.PushBack(physical.index);
+                    return packetPhysicals.Size() == expected ||
+                           Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, allocator.state,
+                                "packet physical resource binding scratch allocation failed", packet.node);
+                };
+
+                for (const CompiledStep& step : packet.steps)
+                    if (!appendPhysical(step.physical))
+                        return false;
+                for (const CompiledResourceAction& action : packet.actions)
+                    if (!appendPhysical(action.physical))
+                        return false;
+                for (const CompiledResourceAction& action : packet.exitActions)
+                    if (!appendPhysical(action.physical))
+                        return false;
+                if (packet.aliasPredecessors.Size() != packet.aliasPredecessorPhysicalIndices.Size())
+                    return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                "packet alias resource and physical metadata diverged", packet.node);
+                for (u32 index = 0; index < packet.aliasPredecessors.Size(); ++index)
+                {
+                    const rhi::ResourceRef predecessor = packet.aliasPredecessors[index];
+                    if (!predecessor.IsValid() || (predecessor.GetKind() != rhi::ResourceKind::Texture && predecessor.GetKind() != rhi::ResourceKind::Buffer))
+                        return Fail(failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, allocator.state,
+                                    "packet alias predecessor has no valid native resource binding", packet.node);
+                    const u32 physicalIndex = packet.aliasPredecessorPhysicalIndices[index];
+                    if (physicalIndex >= generation.physicalBindings.Size() || resourceForPhysicalIndex(physicalIndex) != predecessor ||
+                        !appendPhysical({physicalIndex, generation.id.generation}))
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "packet alias predecessor physical identity disagrees with its native resource", packet.node);
+                }
+
+                if (packetPhysicals.Size() > 1)
+                {
+                    std::sort(packetPhysicals.Begin(), packetPhysicals.End(), [&](const u32 left, const u32 right) noexcept
+                              {
+                                  const u64 leftResource = resourceForPhysicalIndex(left).value;
+                                  const u64 rightResource = resourceForPhysicalIndex(right).value;
+                                  return leftResource != rightResource ? leftResource < rightResource : left < right;
+                              });
+                }
+
+                packet.resourceBindings.Reserve(packetPhysicals.Size());
+                packet.resourceBindingPhysicals.Reserve(packetPhysicals.Size());
+                packet.resourceBindingShaderResources.Reserve(packetPhysicals.Size());
+                packet.resourceBindingUnorderedAccess.Reserve(packetPhysicals.Size());
+                for (u32 slot = 0; slot < packetPhysicals.Size(); ++slot)
+                {
+                    const u32 physicalIndex = packetPhysicals[slot];
+                    const rhi::ResourceRef resource = resourceForPhysicalIndex(physicalIndex);
+                    const PhysicalBindingRecord& binding = generation.physicalBindings[physicalIndex];
+                    if (!resource.IsValid() || (slot != 0 && packet.resourceBindings.Back().value >= resource.value))
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "packet resource binding table aliases one native resource through multiple physical identities", packet.node);
+                    const u32 expected = packet.resourceBindings.Size() + 1u;
+                    packet.resourceBindings.PushBack(resource);
+                    packet.resourceBindingPhysicals.PushBack({physicalIndex, generation.id.generation});
+                    packet.resourceBindingShaderResources.PushBack(binding.shaderResource);
+                    packet.resourceBindingUnorderedAccess.PushBack(binding.unorderedAccess);
+                    if (packet.resourceBindings.Size() != expected || packet.resourceBindingPhysicals.Size() != expected ||
+                        packet.resourceBindingShaderResources.Size() != expected || packet.resourceBindingUnorderedAccess.Size() != expected)
+                        return Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, allocator.state,
+                                    "packet dense resource binding table allocation failed", packet.node);
+                    slotByPhysical[physicalIndex] = slot;
+                }
+
+                const auto bindingSlot = [&](const PhysicalResourceId physical) noexcept -> u32
+                {
+                    return physical.IsValid() && physical.generation == generation.id.generation && physical.index < slotByPhysical.Size()
+                               ? slotByPhysical[physical.index]
+                               : InvalidRenderFlowResourceIndex;
+                };
+                for (CompiledStep& step : packet.steps)
+                {
+                    step.resourceBinding = bindingSlot(step.physical);
+                    if (step.resourceBinding >= packet.resourceBindings.Size())
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "compiled step lost its packet-local resource binding", packet.node, {}, step.use);
+                }
+                for (CompiledResourceAction& action : packet.actions)
+                {
+                    action.resourceBinding = bindingSlot(action.physical);
+                    if (action.resourceBinding >= packet.resourceBindings.Size())
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "compiled resource action lost its packet-local resource binding", packet.node);
+                }
+                for (CompiledResourceAction& action : packet.exitActions)
+                {
+                    action.resourceBinding = bindingSlot(action.physical);
+                    if (action.resourceBinding >= packet.resourceBindings.Size())
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "compiled packet-exit action lost its packet-local resource binding", packet.node);
+                }
+                packet.aliasPredecessorBindingSlots.Reserve(packet.aliasPredecessorPhysicalIndices.Size());
+                for (const u32 physicalIndex : packet.aliasPredecessorPhysicalIndices)
+                {
+                    const u32 slot = physicalIndex < slotByPhysical.Size() ? slotByPhysical[physicalIndex] : InvalidRenderFlowResourceIndex;
+                    if (slot >= packet.resourceBindings.Size())
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "compiled alias predecessor lost its packet-local resource binding", packet.node);
+                    const u32 expected = packet.aliasPredecessorBindingSlots.Size() + 1u;
+                    packet.aliasPredecessorBindingSlots.PushBack(slot);
+                    if (packet.aliasPredecessorBindingSlots.Size() != expected)
+                        return Fail(failure, RenderFlowResourceFailureCode::CapacityExceeded, allocator.state,
+                                    "compiled alias predecessor binding-slot allocation failed", packet.node);
+                }
+
+                for (const rhi::CommandListEntryState& entry : packet.entryStates)
+                {
+                    const auto found = std::lower_bound(packet.resourceBindings.Begin(), packet.resourceBindings.End(), entry.resource,
+                                                        [](const rhi::ResourceRef left, const rhi::ResourceRef right) noexcept { return left.value < right.value; });
+                    if (found == packet.resourceBindings.End() || *found != entry.resource)
+                        return Fail(failure, RenderFlowResourceFailureCode::BackendContractViolation, allocator.state,
+                                    "command-list entry state references a resource outside its packet binding table", packet.node);
+                }
+
+                for (const u32 physicalIndex : packetPhysicals)
+                    slotByPhysical[physicalIndex] = InvalidRenderFlowResourceIndex;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool CompilePacketBarriers(RenderFlowResourceAllocator::Impl& allocator, ExecutionGenerationRef::Impl& generation,
+                                                 ResolveScratch& resolveScratch, u64& totalBarriers,
+                                                 RenderFlowResourceFailure* const failure) noexcept
+        {
+            VG_PROFILE_ZONE_NAMED("RenderFlow/Resolve/CompilePacketBarriers");
+            containers::DynamicArray<rhi::ResourceState>& states = resolveScratch.physicalStateCells;
+            // Reuse post-binding scratch as packet-local binding -> state-cell offset.
+            containers::DynamicArray<u32>& stateOffsets = resolveScratch.packetPhysicalIndices;
+            // BuildPacketResourceBindings has finished with this dense array. RF17
+            // reuses it as binding -> last native-batch epoch, avoiding per-batch clears.
+            containers::DynamicArray<u32>& batchEpochByBinding = resolveScratch.physicalAssignmentOrder;
+            containers::DynamicArray<u8>& entrySeeded = resolveScratch.physicalGlobalState;
+
+            const auto reject = [&](const RenderFlowResourceFailureCode code, const char* const message, const CompiledPacket* const packet = nullptr,
+                                    const ResourceUseId use = {}) noexcept
+            {
+                return Fail(failure, code, allocator.state, message, packet != nullptr ? packet->node : RenderFlowNodeId{}, {}, use);
+            };
+
+            for (CompiledPacket& packet : generation.packets)
+            {
+                packet.compiledBarriers.Clear();
+                packet.compiledBarrierBatches.Clear();
+                for (CompiledStep& step : packet.steps)
+                {
+                    step.compiledBarrierOffset = 0;
+                    step.compiledBarrierCount = 0;
+                }
+                for (CompiledResourceAction& action : packet.actions)
+                {
+                    action.compiledBarrierOffset = 0;
+                    action.compiledBarrierCount = 0;
+                }
+                for (CompiledResourceAction& action : packet.exitActions)
+                {
+                    action.compiledBarrierOffset = 0;
+                    action.compiledBarrierCount = 0;
+                }
+
+                if (packet.resourceBindings.Size() != packet.resourceBindingPhysicals.Size())
+                    return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                  "RF17 packet resource bindings lost their physical identity table", &packet);
+
+                states.Clear();
+                stateOffsets.Clear();
+                stateOffsets.Resize(packet.resourceBindings.Size(), InvalidRenderFlowResourceIndex);
+                entrySeeded.Clear();
+                entrySeeded.Resize(packet.resourceBindings.Size(), u8{0});
+
+                const auto bindingCellCount = [&](const u32 slot, const PhysicalBindingRecord*& binding, u32& count) noexcept -> bool
+                {
+                    if (slot >= packet.resourceBindingPhysicals.Size())
+                        return false;
+                    const PhysicalResourceId physical = packet.resourceBindingPhysicals[slot];
+                    if (!physical.IsValid() || physical.generation != generation.id.generation || physical.index >= generation.physicalBindings.Size())
+                        return false;
+                    binding = &generation.physicalBindings[physical.index];
+                    if (binding->texture.IsValid() == binding->buffer.IsValid() || binding->initialState == rhi::ResourceState::Unknown)
+                        return false;
+                    if (binding->texture.IsValid())
+                    {
+                        if (binding->stateDescriptorKind != FrameResourceKind::Texture || binding->textureMipCount == 0 || binding->textureArraySize == 0)
+                            return false;
+                        const u64 cells = static_cast<u64>(binding->textureMipCount) * binding->textureArraySize;
+                        if (cells == 0 || cells > 0xffffffffu)
+                            return false;
+                        count = static_cast<u32>(cells);
+                    }
+                    else
+                    {
+                        if (binding->stateDescriptorKind != FrameResourceKind::Buffer)
+                            return false;
+                        count = 1;
+                    }
+                    return true;
+                };
+
+                for (u32 slot = 0; slot < packet.resourceBindings.Size(); ++slot)
+                {
+                    const PhysicalBindingRecord* binding = nullptr;
+                    u32 cellCount = 0;
+                    if (!bindingCellCount(slot, binding, cellCount) || !packet.resourceBindings[slot].IsValid())
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 packet binding has no canonical state descriptor", &packet);
+                    if (states.Size() > 0xffffffffu - cellCount)
+                        return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                      "RF17 packet-local state image exceeds addressable storage", &packet);
+                    stateOffsets[slot] = states.Size();
+                    states.Resize(states.Size() + cellCount, binding->initialState);
+                }
+
+                // Explicit resources already carry the exact packet entry proof.
+                // Accept a complete entry group for an automatic resource too; the
+                // backend validates that it equals the immutable initial state.
+                u32 entryIndex = 0;
+                u32 bindingCursor = 0;
+                while (entryIndex < packet.entryStates.Size())
+                {
+                    const rhi::ResourceRef resource = packet.entryStates[entryIndex].resource;
+                    while (bindingCursor < packet.resourceBindings.Size() && packet.resourceBindings[bindingCursor].value < resource.value)
+                        ++bindingCursor;
+                    if (bindingCursor >= packet.resourceBindings.Size() || packet.resourceBindings[bindingCursor] != resource)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 entry-state proof references a resource outside the packet binding table", &packet);
+                    const PhysicalBindingRecord* binding = nullptr;
+                    u32 cellCount = 0;
+                    if (!bindingCellCount(bindingCursor, binding, cellCount) || entryIndex > packet.entryStates.Size() ||
+                        cellCount > packet.entryStates.Size() - entryIndex)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 entry-state proof is incomplete", &packet);
+                    const u32 offset = stateOffsets[bindingCursor];
+                    for (u32 cell = 0; cell < cellCount; ++cell)
+                    {
+                        const rhi::CommandListEntryState& entry = packet.entryStates[entryIndex + cell];
+                        const u16 expectedMip = binding->texture.IsValid() ? static_cast<u16>(cell % binding->textureMipCount) : 0;
+                        const u16 expectedSlice = binding->texture.IsValid() ? static_cast<u16>(cell / binding->textureMipCount) : 0;
+                        if (entry.resource != resource || entry.subresource.mipLevel != expectedMip || entry.subresource.arraySlice != expectedSlice ||
+                            entry.state == rhi::ResourceState::Unknown)
+                            return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                          "RF17 entry-state proof is not complete and ordered by slice/mip", &packet);
+                        states[offset + cell] = entry.state;
+                    }
+                    entrySeeded[bindingCursor] = 1;
+                    entryIndex += cellCount;
+                    ++bindingCursor;
+                }
+                for (u32 slot = 0; slot < packet.resourceBindings.Size(); ++slot)
+                {
+                    const PhysicalBindingRecord* binding = nullptr;
+                    u32 ignored = 0;
+                    if (!bindingCellCount(slot, binding, ignored) || (binding->explicitState && entrySeeded[slot] == 0))
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 explicit resource has no packet entry-state proof", &packet);
+                }
+
+                packet.compiledBarriers.Reserve(packet.actions.Size() + packet.exitActions.Size() + packet.steps.Size());
+                packet.compiledBarrierBatches.Reserve(packet.actions.Size() + packet.exitActions.Size() + packet.steps.Size());
+                batchEpochByBinding.Clear();
+                batchEpochByBinding.Resize(packet.resourceBindings.Size(), 0u);
+                u32 batchEpoch = 1u;
+
+                const auto breakBatch = [&]() noexcept -> bool
+                {
+                    ++batchEpoch;
+                    return batchEpoch != 0u && batchEpoch != InvalidRenderFlowResourceIndex;
+                };
+                const auto validateBinding = [&](const u32 slot, const PhysicalResourceId physical, const bool texture,
+                                                 const PhysicalBindingRecord*& binding, u32& cellOffset, u32& cellCount) noexcept -> bool
+                {
+                    if (slot >= packet.resourceBindings.Size() || slot >= packet.resourceBindingPhysicals.Size() ||
+                        packet.resourceBindingPhysicals[slot] != physical || slot >= stateOffsets.Size() || stateOffsets[slot] == InvalidRenderFlowResourceIndex ||
+                        !bindingCellCount(slot, binding, cellCount) || binding->texture.IsValid() != texture)
+                        return false;
+                    cellOffset = stateOffsets[slot];
+                    return cellOffset <= states.Size() && cellCount <= states.Size() - cellOffset;
+                };
+                const auto appendBarrier = [&](const rhi::CompiledBarrier& barrier, const bool nativeEligible) noexcept -> bool
+                {
+                    if (barrier.resourceBinding >= packet.resourceBindings.Size())
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 compiled barrier escaped its packet binding table", &packet);
+                    if (totalBarriers >= allocator.config.maximumCompiledResourceActions)
+                        return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                      "RF17 compiled barrier program exceeds the configured action capacity", &packet);
+
+                    u32 batch = InvalidRenderFlowResourceIndex;
+                    if (nativeEligible)
+                    {
+                        if (batchEpochByBinding[barrier.resourceBinding] == batchEpoch && !breakBatch())
+                            return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                          "RF17 compiled barrier batch epoch overflowed", &packet);
+                        batchEpochByBinding[barrier.resourceBinding] = batchEpoch;
+                        batch = batchEpoch;
+                    }
+                    else if (!breakBatch())
+                    {
+                        return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                      "RF17 generic barrier fence epoch overflowed", &packet);
+                    }
+
+                    const u32 expected = packet.compiledBarriers.Size() + 1u;
+                    packet.compiledBarriers.PushBack(barrier);
+                    packet.compiledBarrierBatches.PushBack(batch);
+                    if (packet.compiledBarriers.Size() != expected || packet.compiledBarrierBatches.Size() != expected)
+                        return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                      "RF17 compiled barrier storage allocation failed", &packet);
+                    ++totalBarriers;
+                    return true;
+                };
+
+                const auto compileTextureTransition = [&](const u32 slot, const PhysicalResourceId physical, const rhi::SubresourceRange requested,
+                                                          const rhi::ResourceState expectedBefore, const rhi::ResourceState after,
+                                                          const ResourceUseId use = {}) noexcept -> bool
+                {
+                    const PhysicalBindingRecord* binding = nullptr;
+                    u32 offset = 0;
+                    u32 cellCount = 0;
+                    if (!validateBinding(slot, physical, true, binding, offset, cellCount) || after == rhi::ResourceState::Unknown)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 texture transition lost its packet-local state binding", &packet, use);
+                    const u32 firstMip = requested.firstMip;
+                    const u32 firstSlice = requested.firstSlice;
+                    const u32 mipCount = requested.mipCount == 0xffffu ? binding->textureMipCount - firstMip : requested.mipCount;
+                    const u32 sliceCount = requested.sliceCount == 0xffffu ? binding->textureArraySize - firstSlice : requested.sliceCount;
+                    if (firstMip >= binding->textureMipCount || firstSlice >= binding->textureArraySize || mipCount == 0 || sliceCount == 0 ||
+                        mipCount > binding->textureMipCount - firstMip || sliceCount > binding->textureArraySize - firstSlice ||
+                        mipCount >= 0xffffu || sliceCount >= 0xffffu)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 texture transition has an invalid resolved subresource range", &packet, use);
+
+                    const u32 blockStart = packet.compiledBarriers.Size();
+                    resolveScratch.textureTransitionRuns.Reset();
+                    for (u32 slice = firstSlice; slice < firstSlice + sliceCount; ++slice)
+                    {
+                        u32 mip = firstMip;
+                        while (mip < firstMip + mipCount)
+                        {
+                            const u32 cell = offset + slice * binding->textureMipCount + mip;
+                            const rhi::ResourceState before = states[cell];
+                            if (expectedBefore != rhi::ResourceState::Unknown && before != expectedBefore)
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "RF17 texture action before-state disagrees with packet-local state", &packet, use);
+                            if (before == after)
+                            {
+                                ++mip;
+                                continue;
+                            }
+                            const u32 runStart = mip;
+                            ++mip;
+                            while (mip < firstMip + mipCount)
+                            {
+                                const rhi::ResourceState next = states[offset + slice * binding->textureMipCount + mip];
+                                if ((expectedBefore != rhi::ResourceState::Unknown && next != expectedBefore) || next != before || next == after)
+                                    break;
+                                ++mip;
+                            }
+                            const u32 runCount = mip - runStart;
+                            rhi::CompiledBarrier barrier;
+                            barrier.resourceBinding = slot;
+                            barrier.kind = rhi::CompiledBarrierKind::TextureTransition;
+                            barrier.before = before;
+                            barrier.after = after;
+                            barrier.textureSubresources = {static_cast<u16>(runStart), static_cast<u16>(runCount), static_cast<u16>(slice), 1};
+
+                            const TextureTransitionRunKey key{InvalidRenderFlowResourceIndex, physical.index, physical.generation, Bits(before), Bits(after),
+                                                              static_cast<u16>(runStart), static_cast<u16>(runCount)};
+                            u32 prior = InvalidRenderFlowResourceIndex;
+                            bool merged = false;
+                            if (resolveScratch.textureTransitionRuns.Find(key, prior) && prior >= blockStart && prior < packet.compiledBarriers.Size())
+                            {
+                                rhi::CompiledBarrier& previous = packet.compiledBarriers[prior];
+                                const u32 priorSliceEnd = static_cast<u32>(previous.textureSubresources.firstSlice) + previous.textureSubresources.sliceCount;
+                                const u32 mergedSlices = static_cast<u32>(previous.textureSubresources.sliceCount) + 1u;
+                                if (previous.resourceBinding == slot && previous.kind == rhi::CompiledBarrierKind::TextureTransition &&
+                                    previous.before == before && previous.after == after && previous.textureSubresources.firstMip == runStart &&
+                                    previous.textureSubresources.mipCount == runCount && priorSliceEnd == slice && mergedSlices < 0xffffu)
+                                {
+                                    previous.textureSubresources.sliceCount = static_cast<u16>(mergedSlices);
+                                    merged = true;
+                                }
+                            }
+                            if (!merged)
+                            {
+                                const bool nativeEligible = before != rhi::ResourceState::Present && after != rhi::ResourceState::Present;
+                                if (!appendBarrier(barrier, nativeEligible))
+                                    return false;
+                                if (!resolveScratch.textureTransitionRuns.Set(key, packet.compiledBarriers.Size() - 1u))
+                                    return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                                  "RF17 texture transition run index allocation failed", &packet, use);
+                            }
+                            for (u32 writeMip = runStart; writeMip < runStart + runCount; ++writeMip)
+                                states[offset + slice * binding->textureMipCount + writeMip] = after;
+                        }
+                    }
+                    return true;
+                };
+
+                const auto compileBufferTransition = [&](const u32 slot, const PhysicalResourceId physical, const rhi::ResourceState expectedBefore,
+                                                         const rhi::ResourceState after, const ResourceUseId use = {}) noexcept -> bool
+                {
+                    const PhysicalBindingRecord* binding = nullptr;
+                    u32 offset = 0;
+                    u32 cellCount = 0;
+                    if (!validateBinding(slot, physical, false, binding, offset, cellCount) || cellCount != 1 || after == rhi::ResourceState::Unknown)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 buffer transition lost its packet-local state binding", &packet, use);
+                    const rhi::ResourceState before = states[offset];
+                    if (expectedBefore != rhi::ResourceState::Unknown && before != expectedBefore)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 buffer action before-state disagrees with packet-local state", &packet, use);
+                    if (before != after)
+                    {
+                        rhi::CompiledBarrier barrier;
+                        barrier.resourceBinding = slot;
+                        barrier.kind = rhi::CompiledBarrierKind::BufferTransition;
+                        barrier.before = before;
+                        barrier.after = after;
+                        const bool nativeEligible = binding->bufferMemoryType == rhi::MemoryType::DeviceLocal &&
+                                                    before != rhi::ResourceState::Present && after != rhi::ResourceState::Present;
+                        if (!appendBarrier(barrier, nativeEligible))
+                            return false;
+                        states[offset] = after;
+                    }
+                    return true;
+                };
+
+                const auto compileAction = [&](CompiledResourceAction& action, const ResourceUseId use = {}) noexcept -> bool
+                {
+                    action.compiledBarrierOffset = packet.compiledBarriers.Size();
+                    action.compiledBarrierCount = 0;
+                    if (action.resourceBinding >= packet.resourceBindings.Size() || packet.resourceBindingPhysicals[action.resourceBinding] != action.physical)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 resource action lost its packet-local binding", &packet, use);
+
+                    if (action.kind == CompiledResourceActionKind::TextureTransition)
+                    {
+                        if (!compileTextureTransition(action.resourceBinding, action.physical, action.textureSubresources, action.before, action.after, use))
+                            return false;
+                    }
+                    else if (action.kind == CompiledResourceActionKind::BufferTransition)
+                    {
+                        if (!compileBufferTransition(action.resourceBinding, action.physical, action.before, action.after, use))
+                            return false;
+                    }
+                    else if (action.kind == CompiledResourceActionKind::TextureUavBarrier)
+                    {
+                        const PhysicalBindingRecord* binding = nullptr;
+                        u32 offset = 0;
+                        u32 cellCount = 0;
+                        if (!validateBinding(action.resourceBinding, action.physical, true, binding, offset, cellCount))
+                            return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                          "RF17 texture UAV barrier lost its packet-local state binding", &packet, use);
+                        for (u32 cell = 0; cell < cellCount; ++cell)
+                            if (states[offset + cell] != rhi::ResourceState::UnorderedAccess)
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "RF17 texture UAV barrier requires whole-resource UAV state", &packet, use);
+                        rhi::CompiledBarrier barrier;
+                        barrier.resourceBinding = action.resourceBinding;
+                        barrier.kind = rhi::CompiledBarrierKind::TextureUav;
+                        if (!appendBarrier(barrier, true))
+                            return false;
+                    }
+                    else if (action.kind == CompiledResourceActionKind::BufferUavBarrier)
+                    {
+                        const PhysicalBindingRecord* binding = nullptr;
+                        u32 offset = 0;
+                        u32 cellCount = 0;
+                        if (!validateBinding(action.resourceBinding, action.physical, false, binding, offset, cellCount) || cellCount != 1 ||
+                            states[offset] != rhi::ResourceState::UnorderedAccess)
+                            return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                          "RF17 buffer UAV barrier requires UAV packet-local state", &packet, use);
+                        rhi::CompiledBarrier barrier;
+                        barrier.resourceBinding = action.resourceBinding;
+                        barrier.kind = rhi::CompiledBarrierKind::BufferUav;
+                        if (!appendBarrier(barrier, binding->bufferMemoryType == rhi::MemoryType::DeviceLocal))
+                            return false;
+                    }
+                    else
+                    {
+                        // Clears and acquisition-aware Present are native ordering
+                        // fences. They stay on their dedicated RHI paths.
+                        if (!breakBatch())
+                            return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                          "RF17 semantic fence epoch overflowed", &packet, use);
+                        if (action.kind == CompiledResourceActionKind::SwapChainPresentTransition)
+                        {
+                            const PhysicalBindingRecord* binding = nullptr;
+                            u32 offset = 0;
+                            u32 cellCount = 0;
+                            if (!validateBinding(action.resourceBinding, action.physical, true, binding, offset, cellCount) || cellCount != 1 ||
+                                (action.before != rhi::ResourceState::Unknown && states[offset] != action.before) || action.after != rhi::ResourceState::Present)
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "RF17 Present action disagrees with packet-local state", &packet, use);
+                            states[offset] = rhi::ResourceState::Present;
+                        }
+                    }
+                    action.compiledBarrierCount = packet.compiledBarriers.Size() - action.compiledBarrierOffset;
+                    return true;
+                };
+
+                for (CompiledStep& step : packet.steps)
+                {
+                    if (step.resourceBinding >= packet.resourceBindings.Size() || packet.resourceBindingPhysicals[step.resourceBinding] != step.physical)
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 compiled step lost its packet-local resource binding", &packet, step.use);
+
+                    if (step.kind == CompiledResourceStepKind::TextureUseBegin || step.kind == CompiledResourceStepKind::BufferUseBegin)
+                    {
+                        if (step.aliasPredecessorCount != 0)
+                        {
+                            if (!breakBatch())
+                                return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                              "RF17 alias fence epoch overflowed", &packet, step.use);
+                            const PhysicalBindingRecord* binding = nullptr;
+                            u32 offset = 0;
+                            u32 cellCount = 0;
+                            const bool texture = step.kind == CompiledResourceStepKind::TextureUseBegin;
+                            if (!validateBinding(step.resourceBinding, step.physical, texture, binding, offset, cellCount))
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "RF17 alias destination lost its state binding", &packet, step.use);
+                            if (texture && HasAny(binding->textureUsage, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::DepthStencil))
+                            {
+                                const rhi::ResourceState discard = packet.queue == rhi::QueueType::Graphics
+                                                                       ? (HasAny(binding->textureUsage, rhi::TextureUsage::RenderTarget)
+                                                                              ? rhi::ResourceState::RenderTarget
+                                                                              : rhi::ResourceState::DepthWrite)
+                                                                       : rhi::ResourceState::UnorderedAccess;
+                                for (u32 cell = 0; cell < cellCount; ++cell)
+                                    states[offset + cell] = discard;
+                            }
+                        }
+
+                        step.compiledBarrierOffset = packet.compiledBarriers.Size();
+                        if (!step.localStateRequired)
+                            return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                          "RF17 native begin step has no local state intent", &packet, step.use);
+                        const bool localCompiled = step.kind == CompiledResourceStepKind::TextureUseBegin
+                                                       ? compileTextureTransition(step.resourceBinding, step.physical, step.texture.subresources,
+                                                                                  rhi::ResourceState::Unknown, step.texture.requiredState, step.use)
+                                                       : compileBufferTransition(step.resourceBinding, step.physical, rhi::ResourceState::Unknown,
+                                                                                 step.buffer.requiredState, step.use);
+                        if (!localCompiled)
+                            return false;
+                        step.compiledBarrierCount = packet.compiledBarriers.Size() - step.compiledBarrierOffset;
+
+                        if (step.beforeActionOffset > packet.actions.Size() || step.beforeActionCount > packet.actions.Size() - step.beforeActionOffset)
+                            return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                          "RF17 begin action slice is outside the packet action program", &packet, step.use);
+                        for (u32 actionIndex = step.beforeActionOffset; actionIndex < step.beforeActionOffset + step.beforeActionCount; ++actionIndex)
+                            if (!compileAction(packet.actions[actionIndex], step.use))
+                                return false;
+                    }
+                    else if (step.kind == CompiledResourceStepKind::UseEnd)
+                    {
+                        if (step.afterActionOffset > packet.actions.Size() || step.afterActionCount > packet.actions.Size() - step.afterActionOffset)
+                            return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                          "RF17 end action slice is outside the packet action program", &packet, step.use);
+                        for (u32 actionIndex = step.afterActionOffset; actionIndex < step.afterActionOffset + step.afterActionCount; ++actionIndex)
+                            if (!compileAction(packet.actions[actionIndex], step.use))
+                                return false;
+                        if (step.finalizeForAlias)
+                        {
+                            if (!breakBatch())
+                                return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                              "RF17 alias-finalization fence epoch overflowed", &packet, step.use);
+                            const PhysicalBindingRecord* binding = nullptr;
+                            u32 offset = 0;
+                            u32 cellCount = 0;
+                            const bool texture = generation.physicalBindings[step.physical.index].texture.IsValid();
+                            if (!validateBinding(step.resourceBinding, step.physical, texture, binding, offset, cellCount))
+                                return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "RF17 alias predecessor lost its state binding", &packet, step.use);
+                            for (u32 cell = 0; cell < cellCount; ++cell)
+                                states[offset + cell] = rhi::ResourceState::Common;
+                        }
+                    }
+                    else
+                    {
+                        return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                      "RF17 encountered an unknown compiled step kind", &packet, step.use);
+                    }
+                }
+
+                if (!breakBatch())
+                    return reject(RenderFlowResourceFailureCode::CapacityExceeded,
+                                  "RF17 packet-exit fence epoch overflowed", &packet);
+                for (CompiledResourceAction& action : packet.exitActions)
+                    if (!compileAction(action))
+                        return false;
+
+                if (packet.compiledBarriers.Size() != packet.compiledBarrierBatches.Size())
+                    return reject(RenderFlowResourceFailureCode::BackendContractViolation,
+                                  "RF17 compiled barrier and batch programs diverged", &packet);
+            }
+            return true;
+        }
+
+        // The RF17 result is structural only after the dedicated lane topology is
+        // certified. Persist symbolic old physical indices, never generation IDs,
+        // ResourceRefs or descriptor handles. The ordinary compiler remains the
+        // reference and fallback for all other programs (including placed).
+        [[nodiscard]] PersistentStateDescriptorWitness MakeStateWitness(const PhysicalBindingRecord& binding) noexcept
+        {
+            PersistentStateDescriptorWitness witness;
+            witness.kind = binding.kind;
+            witness.resourceKind = binding.stateDescriptorKind;
+            witness.initialState = binding.initialState;
+            witness.usage = binding.stateDescriptorKind == FrameResourceKind::Texture ? static_cast<u32>(binding.textureUsage)
+                                                                                     : static_cast<u32>(binding.bufferUsage);
+            witness.mipCount = binding.textureMipCount;
+            witness.arraySize = binding.textureArraySize;
+            witness.memoryType = binding.bufferMemoryType;
+            witness.explicitState = binding.explicitState;
+            return witness;
+        }
+
+        [[nodiscard]] bool SameStateWitness(const PersistentStateDescriptorWitness& a, const PersistentStateDescriptorWitness& b) noexcept
+        {
+            return a.kind == b.kind && a.resourceKind == b.resourceKind && a.initialState == b.initialState &&
+                   a.usage == b.usage && a.mipCount == b.mipCount && a.arraySize == b.arraySize &&
+                   a.memoryType == b.memoryType && a.explicitState == b.explicitState;
+        }
+
+        template <typename T>
+        [[nodiscard]] bool CopyStateArray(containers::DynamicArray<T>& target, const containers::DynamicArray<T>& source) noexcept
+        {
+            // Typed range copy uses one bulk trivial copy (or the correct
+            // element copy constructor), not one allocation-size
+            // check and PushBack per saved program element. Runtime generation
+            // fields are patched separately after this immutable payload copy.
+            target = source;
+            return target.Size() == source.Size();
+        }
+
+        [[nodiscard]] bool CapturePersistentStateProgram(const ExecutionGenerationRef::Impl& generation,
+                                                         PersistentStateProgram& program,
+                                                         const u32 planAllocationCount) noexcept
+        {
+            program.Clear();
+            if (!generation.hasNativeResourceBindings || generation.physicalBindings.Empty() ||
+                generation.allocations.Size() != planAllocationCount)
+                return false;
+            program.physicalByAllocation.Resize(generation.allocations.Size(), InvalidRenderFlowResourceIndex);
+            program.physicalWitnesses.Reserve(generation.physicalBindings.Size());
+            for (const PhysicalBindingRecord& binding : generation.physicalBindings)
+            {
+                if (binding.kind == PhysicalBindingKind::PlacedPool ||
+                    binding.stateDescriptorKind == FrameResourceKind::Invalid)
+                    return false;
+                program.physicalWitnesses.PushBack(MakeStateWitness(binding));
+            }
+            for (u32 allocation = 0; allocation < generation.allocations.Size(); ++allocation)
+            {
+                const PhysicalResourceId physical = generation.allocations[allocation].physical;
+                if (physical.IsValid())
+                {
+                    if (physical.index >= program.physicalWitnesses.Size())
+                        return false;
+                    program.physicalByAllocation[allocation] = physical.index;
+                }
+            }
+            if (program.physicalByAllocation.Size() != generation.allocations.Size() ||
+                program.physicalWitnesses.Size() != generation.physicalBindings.Size())
+                return false;
+
+            program.packets.Reserve(generation.packets.Size());
+            for (const CompiledPacket& packet : generation.packets)
+            {
+                // A dedicated-only program cannot replay placed alias activation.
+                if (!packet.aliasPredecessors.Empty() || !packet.aliasPredecessorPhysicalIndices.Empty())
+                    return false;
+                PersistentStatePacket& saved = program.packets.EmplaceBack();
+                saved.node = packet.node;
+                saved.flowGroup = packet.flowGroup;
+                saved.commandScope = packet.commandScope;
+                saved.queue = packet.queue;
+                saved.exitTapeOffset = packet.exitActionTapeOffset;
+                saved.exitTapeCount = packet.exitActionTapeCount;
+                for (const CompiledStep& current : packet.steps)
+                {
+                    CompiledStep step = current;
+                    step.use.generation = 0;
+                    step.physical.generation = 0;
+                    saved.steps.PushBack(step);
+                }
+                for (const CompiledResourceAction& current : packet.actions)
+                {
+                    CompiledResourceAction action = current;
+                    action.physical.generation = 0;
+                    saved.actions.PushBack(action);
+                }
+                for (const CompiledResourceAction& current : packet.exitActions)
+                {
+                    CompiledResourceAction action = current;
+                    action.physical.generation = 0;
+                    saved.exitActions.PushBack(action);
+                }
+                for (const CompiledActionTapeEntry& tape : packet.actionTape)
+                    saved.actionTape.PushBack(tape);
+                for (const u32 predecessor : packet.statePredecessorPackets)
+                    saved.statePredecessors.PushBack(predecessor);
+                for (const CapturedDecisionRecord& decision : packet.decisions)
+                    saved.decisions.PushBack(decision.value ? u8{1} : u8{0});
+                saved.bindingPhysicalIndices.Reserve(packet.resourceBindingPhysicals.Size());
+                saved.entryGroups.Reserve(packet.resourceBindings.Size());
+                u32 entry = 0;
+                for (u32 slot = 0; slot < packet.resourceBindings.Size(); ++slot)
+                {
+                    const PhysicalResourceId physical = packet.resourceBindingPhysicals[slot];
+                    if (!physical.IsValid() || physical.index >= generation.physicalBindings.Size())
+                        return false;
+                    saved.bindingPhysicalIndices.PushBack(physical.index);
+                    PersistentStateEntryGroup group;
+                    group.offset = saved.entryCells.Size();
+                    while (entry < packet.entryStates.Size() && packet.entryStates[entry].resource == packet.resourceBindings[slot])
+                    {
+                        const rhi::CommandListEntryState& current = packet.entryStates[entry++];
+                        saved.entryCells.PushBack({current.state, current.subresource});
+                    }
+                    group.count = saved.entryCells.Size() - group.offset;
+                    saved.entryGroups.PushBack(group);
+                }
+                if (entry != packet.entryStates.Size() ||
+                    packet.compiledBarriers.Size() != packet.compiledBarrierBatches.Size() ||
+                    !CopyStateArray(saved.barriers, packet.compiledBarriers) ||
+                    !CopyStateArray(saved.barrierBatches, packet.compiledBarrierBatches) ||
+                    saved.steps.Size() != packet.steps.Size() || saved.actions.Size() != packet.actions.Size() ||
+                    saved.exitActions.Size() != packet.exitActions.Size() || saved.actionTape.Size() != packet.actionTape.Size() ||
+                    saved.statePredecessors.Size() != packet.statePredecessorPackets.Size() ||
+                    saved.decisions.Size() != packet.decisions.Size() ||
+                    saved.entryGroups.Size() != packet.resourceBindings.Size())
+                    return false;
+            }
+            if (program.packets.Size() != generation.packets.Size())
+                return false;
+            program.valid = true;
+            return true;
+        }
+
+        [[nodiscard]] bool ValidatePersistentStateProgram(const PersistentStateProgram& program,
+                                                          const ExecutionGenerationRef::Impl& generation,
+                                                          ResolveScratch& scratch) noexcept
+        {
+            VG_PROFILE_ZONE_NAMED("RenderFlow/Resolve/ValidateCachedStateProgram");
+            if (!program.valid || program.physicalByAllocation.Size() != generation.allocations.Size() ||
+                program.physicalWitnesses.Size() != generation.physicalBindings.Size() ||
+                program.packets.Size() != generation.packets.Size())
+                return false;
+            scratch.cachedOldToCurrentPhysical.Resize(program.physicalWitnesses.Size(), InvalidRenderFlowResourceIndex);
+            scratch.cachedCurrentToOldPhysical.Resize(generation.physicalBindings.Size(), InvalidRenderFlowResourceIndex);
+            for (u32 index = 0; index < generation.allocations.Size(); ++index)
+            {
+                const u32 oldPhysical = program.physicalByAllocation[index];
+                const PhysicalResourceId current = generation.allocations[index].physical;
+                if (oldPhysical == InvalidRenderFlowResourceIndex)
+                {
+                    if (current.IsValid())
+                        return false;
+                    continue;
+                }
+                if (!current.IsValid() || oldPhysical >= scratch.cachedOldToCurrentPhysical.Size() ||
+                    current.index >= scratch.cachedCurrentToOldPhysical.Size())
+                    return false;
+                u32& mapped = scratch.cachedOldToCurrentPhysical[oldPhysical];
+                u32& reverse = scratch.cachedCurrentToOldPhysical[current.index];
+                if ((mapped != InvalidRenderFlowResourceIndex && mapped != current.index) ||
+                    (reverse != InvalidRenderFlowResourceIndex && reverse != oldPhysical))
+                    return false;
+                mapped = current.index;
+                reverse = oldPhysical;
+            }
+            for (u32 oldPhysical = 0; oldPhysical < program.physicalWitnesses.Size(); ++oldPhysical)
+            {
+                const u32 current = scratch.cachedOldToCurrentPhysical[oldPhysical];
+                if (current >= generation.physicalBindings.Size() ||
+                    !SameStateWitness(program.physicalWitnesses[oldPhysical], MakeStateWitness(generation.physicalBindings[current])))
+                    return false;
+            }
+            for (u32 packetIndex = 0; packetIndex < program.packets.Size(); ++packetIndex)
+            {
+                const PersistentStatePacket& saved = program.packets[packetIndex];
+                const CompiledPacket& current = generation.packets[packetIndex];
+                if (saved.node != current.node || saved.flowGroup != current.flowGroup ||
+                    saved.commandScope != current.commandScope || saved.queue != current.queue ||
+                    saved.steps.Size() != (current.steps.Empty() ? current.structuralStepCount : current.steps.Size()) ||
+                    saved.decisions.Size() != current.decisions.Size() ||
+                    saved.barriers.Size() != saved.barrierBatches.Size() ||
+                    saved.bindingPhysicalIndices.Size() != saved.entryGroups.Size())
+                    return false;
+                for (u32 decision = 0; decision < saved.decisions.Size(); ++decision)
+                    if (saved.decisions[decision] != (current.decisions[decision].value ? 1u : 0u))
+                        return false;
+                for (const u32 oldPhysical : saved.bindingPhysicalIndices)
+                    if (oldPhysical >= scratch.cachedOldToCurrentPhysical.Size() ||
+                        scratch.cachedOldToCurrentPhysical[oldPhysical] >= generation.physicalBindings.Size())
+                        return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] bool RestorePersistentStateProgram(const PersistentStateProgram& program,
+                                                         RenderFlowResourceAllocator::Impl& allocator,
+                                                         ExecutionGenerationRef::Impl& generation,
+                                                         ResolveScratch& scratch) noexcept
+        {
+            for (u32 packetIndex = 0; packetIndex < program.packets.Size(); ++packetIndex)
+            {
+                const PersistentStatePacket& saved = program.packets[packetIndex];
+                CompiledPacket& packet = generation.packets[packetIndex];
+                // Compile-time symbolic binding ordinals remain stable. The
+                // backend requires sorted native refs; build that permutation
+                // exactly once and patch all cached indices against it.
+                scratch.cachedBindingSort.Clear();
+                scratch.cachedBindingSort.Reserve(saved.bindingPhysicalIndices.Size());
+                // A certified dedicated program often acquires the same native
+                // ordering even when lease serials change. Prove it from every
+                // CURRENT ref before omitting the comparison sort; never reuse
+                // an old resource ordinal as an unchecked correctness witness.
+                bool bindingsAlreadySorted = true;
+                rhi::ResourceRef previousUnsorted;
+                for (u32 oldSlot = 0; oldSlot < saved.bindingPhysicalIndices.Size(); ++oldSlot)
+                {
+                    const u32 physical = scratch.cachedOldToCurrentPhysical[saved.bindingPhysicalIndices[oldSlot]];
+                    const PhysicalBindingRecord& binding = generation.physicalBindings[physical];
+                    const rhi::ResourceRef ref = binding.texture.IsValid() ? rhi::ResourceRef(binding.texture) : rhi::ResourceRef(binding.buffer);
+                    if (!ref.IsValid())
+                        return false;
+                    if (previousUnsorted.IsValid() && previousUnsorted.value >= ref.value)
+                        bindingsAlreadySorted = false;
+                    previousUnsorted = ref;
+                    scratch.cachedBindingSort.PushBack({ref, oldSlot});
+                }
+                if (!bindingsAlreadySorted)
+                    std::sort(scratch.cachedBindingSort.Begin(), scratch.cachedBindingSort.End(),
+                              [](const PersistentStateBindingSort& a, const PersistentStateBindingSort& b) noexcept
+                              { return a.resource.value < b.resource.value; });
+                scratch.cachedBindingSlotRemap.Resize(saved.bindingPhysicalIndices.Size(), InvalidRenderFlowResourceIndex);
+                packet.resourceBindings.Clear();
+                packet.resourceBindingPhysicals.Clear();
+                packet.resourceBindingShaderResources.Clear();
+                packet.resourceBindingUnorderedAccess.Clear();
+                packet.entryStates.Clear();
+                packet.resourceBindings.Reserve(saved.bindingPhysicalIndices.Size());
+                packet.resourceBindingPhysicals.Reserve(saved.bindingPhysicalIndices.Size());
+                packet.resourceBindingShaderResources.Reserve(saved.bindingPhysicalIndices.Size());
+                packet.resourceBindingUnorderedAccess.Reserve(saved.bindingPhysicalIndices.Size());
+                packet.entryStates.Reserve(saved.entryCells.Size());
+                rhi::ResourceRef previous;
+                for (u32 newSlot = 0; newSlot < scratch.cachedBindingSort.Size(); ++newSlot)
+                {
+                    const PersistentStateBindingSort& sorted = scratch.cachedBindingSort[newSlot];
+                    if (previous.IsValid() && previous.value >= sorted.resource.value)
+                        return false;
+                    previous = sorted.resource;
+                    const u32 physical = scratch.cachedOldToCurrentPhysical[saved.bindingPhysicalIndices[sorted.oldSlot]];
+                    const PhysicalBindingRecord& binding = generation.physicalBindings[physical];
+                    scratch.cachedBindingSlotRemap[sorted.oldSlot] = newSlot;
+                    packet.resourceBindings.PushBack(sorted.resource);
+                    packet.resourceBindingPhysicals.PushBack({physical, generation.id.generation});
+                    packet.resourceBindingShaderResources.PushBack(binding.shaderResource);
+                    packet.resourceBindingUnorderedAccess.PushBack(binding.unorderedAccess);
+                    const PersistentStateEntryGroup group = saved.entryGroups[sorted.oldSlot];
+                    if (group.offset > saved.entryCells.Size() || group.count > saved.entryCells.Size() - group.offset)
+                        return false;
+                    for (u32 cell = group.offset; cell < group.offset + group.count; ++cell)
+                    {
+                        const PersistentStateEntryCell& state = saved.entryCells[cell];
+                        packet.entryStates.PushBack({sorted.resource, state.state, state.subresource});
+                    }
+                }
+                if (packet.resourceBindings.Size() != saved.bindingPhysicalIndices.Size() ||
+                    packet.resourceBindingPhysicals.Size() != saved.bindingPhysicalIndices.Size() ||
+                    packet.resourceBindingShaderResources.Size() != saved.bindingPhysicalIndices.Size() ||
+                    packet.resourceBindingUnorderedAccess.Size() != saved.bindingPhysicalIndices.Size() ||
+                    packet.entryStates.Size() != saved.entryCells.Size())
+                    return false;
+
+                if (!CopyStateArray(packet.steps, saved.steps))
+                    return false;
+                for (CompiledStep& step : packet.steps)
+                {
+                    step.use.generation = allocator.sessionGeneration;
+                    if (step.physical.index >= scratch.cachedOldToCurrentPhysical.Size() ||
+                        step.resourceBinding >= scratch.cachedBindingSlotRemap.Size())
+                        return false;
+                    step.physical = {scratch.cachedOldToCurrentPhysical[step.physical.index], generation.id.generation};
+                    step.resourceBinding = scratch.cachedBindingSlotRemap[step.resourceBinding];
+                }
+                if (!CopyStateArray(packet.actions, saved.actions))
+                    return false;
+                for (CompiledResourceAction& action : packet.actions)
+                {
+                    if (action.physical.index >= scratch.cachedOldToCurrentPhysical.Size() ||
+                        action.resourceBinding >= scratch.cachedBindingSlotRemap.Size())
+                        return false;
+                    action.physical = {scratch.cachedOldToCurrentPhysical[action.physical.index], generation.id.generation};
+                    action.resourceBinding = scratch.cachedBindingSlotRemap[action.resourceBinding];
+                }
+                if (!CopyStateArray(packet.exitActions, saved.exitActions))
+                    return false;
+                for (CompiledResourceAction& action : packet.exitActions)
+                {
+                    if (action.physical.index >= scratch.cachedOldToCurrentPhysical.Size() ||
+                        action.resourceBinding >= scratch.cachedBindingSlotRemap.Size())
+                        return false;
+                    action.physical = {scratch.cachedOldToCurrentPhysical[action.physical.index], generation.id.generation};
+                    action.resourceBinding = scratch.cachedBindingSlotRemap[action.resourceBinding];
+                }
+                if (!CopyStateArray(packet.actionTape, saved.actionTape) ||
+                    !CopyStateArray(packet.statePredecessorPackets, saved.statePredecessors) ||
+                    packet.steps.Size() != saved.steps.Size() || packet.actions.Size() != saved.actions.Size() ||
+                    packet.exitActions.Size() != saved.exitActions.Size())
+                    return false;
+                packet.exitActionTapeOffset = saved.exitTapeOffset;
+                packet.exitActionTapeCount = saved.exitTapeCount;
+
+                if (!CopyStateArray(packet.compiledBarriers, saved.barriers))
+                    return false;
+                for (rhi::CompiledBarrier& barrier : packet.compiledBarriers)
+                {
+                    if (barrier.resourceBinding >= scratch.cachedBindingSlotRemap.Size())
+                        return false;
+                    barrier.resourceBinding = scratch.cachedBindingSlotRemap[barrier.resourceBinding];
+                }
+                if (!CopyStateArray(packet.compiledBarrierBatches, saved.barrierBatches) ||
+                    packet.compiledBarriers.Size() != saved.barriers.Size() ||
+                    scratch.cachedBindingSlotRemap.Size() != saved.bindingPhysicalIndices.Size())
+                    return false;
             }
             return true;
         }
@@ -2133,12 +3175,9 @@ namespace vanguard::rendering::detail
 
     void ReleasePersistentDedicatedPlan(RenderFlowResourceAllocator::Impl& allocator, const bool releaseLeases) noexcept
     {
-        PersistentDedicatedPhysicalPlan& plan = allocator.persistentDedicatedPlan;
-        if (releaseLeases)
-            for (PersistentDedicatedPlanLaneRuntime& runtime : plan.laneRuntime)
-                for (const DedicatedResourceLease& lease : runtime.leases)
-                    allocator.dedicatedPool.ReleaseLease(lease);
-        plan.Clear();
+        ReleaseDedicatedPlanStorage(allocator, allocator.persistentDedicatedPlan, releaseLeases);
+        while (!allocator.persistentDedicatedPrograms.Empty())
+            RemovePersistentDedicatedProgram(allocator, allocator.persistentDedicatedPrograms.Size() - 1u, releaseLeases);
     }
 
     bool TextureViewDescEqual(const rhi::TextureViewDesc& left, const rhi::TextureViewDesc& right) noexcept
@@ -2235,17 +3274,23 @@ namespace vanguard::rendering::detail
         ExecutionGenerationRef::Impl* const scratch = AllocateGeneration();
         if (scratch == nullptr)
             return FailResolve(allocator, nullptr, failure, RenderFlowResourceFailureCode::CapacityExceeded, "execution generation metadata allocation failed");
-        scratch->id = {0, NextGeneration(allocator.executionGeneration)};
-        if (allocator.sealedWriters.Size() > allocator.config.maximumExecutionPackets)
+        scratch->id = {0, NextRenderFlowExecutionGeneration()};
+        const PersistentStructuralPlan* const boundStructuralPlan = allocator.boundContract != nullptr ? &allocator.boundContract->plan : nullptr;
+        const u32 semanticEventCount = boundStructuralPlan != nullptr ? boundStructuralPlan->semanticEventCount : allocator.sealedPlanning.semanticEventCount;
+        const u32 packetCount = boundStructuralPlan != nullptr ? boundStructuralPlan->packets.Size() : allocator.sealedWriters.Size();
+        if (packetCount > allocator.config.maximumExecutionPackets)
             return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::CapacityExceeded, "execution packet count exceeds allocator capacity");
 
         ResolveScratch& resolveScratch = allocator.resolveScratch;
         resolveScratch.ResetFrame();
-        const u32 packetCount = allocator.sealedWriters.Size();
+        if (boundStructuralPlan == nullptr && allocator.sealedPlanning.unterminatedUseCount != 0)
+            return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidUseOrScope,
+                               "a resource use has no end endpoint");
         containers::DynamicArray<u32>& batchResourceSlots = resolveScratch.batchResourceSlots;
         containers::DynamicArray<ResolvedTextureViewRecord>& batchTextureViews = resolveScratch.batchTextureViews;
         containers::DynamicArray<ResolvedBufferViewRecord>& batchBufferViews = resolveScratch.batchBufferViews;
         containers::DynamicArray<LogicalSlot>& slots = resolveScratch.slots;
+        containers::DynamicArray<u8>& slotFastPath = resolveScratch.slotFastPath;
         containers::DynamicArray<ActiveUseRecord>& uses = resolveScratch.uses;
         containers::DynamicArray<OpenScopeRecord>& scopes = resolveScratch.scopes;
         containers::DynamicArray<NamedScopeState>& namedScopes = resolveScratch.namedScopes;
@@ -2269,23 +3314,32 @@ namespace vanguard::rendering::detail
 
         u64 compiledOperationCount = 0;
         u64 compiledResourceActionCount = 0;
-        const bool structuralPlanEligible = !allocator.config.allowLogicalOnlyValidation && !allocator.activePolicy.enablePlacedResources;
-        const u64 structuralSignature = structuralPlanEligible ? ComputeStructuralSignature(allocator) : 0;
+        u64 compiledBarrierCount = 0;
+        const bool structuralPlanEligible = !allocator.config.allowLogicalOnlyValidation && allocator.contractCompileTarget != nullptr;
         bool structuralPlanHit = false;
         bool structuralCandidateReady = false;
-        if (structuralPlanEligible && allocator.structuralPlan.valid && structuralSignature != 0 &&
-            structuralSignature == allocator.structuralPlan.signature &&
-            StructuralPlanMatchesCurrent(allocator.structuralPlan, allocator, resolveScratch))
+        bool deferredStructuralSteps = false;
+        if (boundStructuralPlan != nullptr)
         {
-            if (!InstantiateStructuralPlan(allocator.structuralPlan, allocator, *scratch, resolveScratch, failure))
+            if (!PrepareBoundStructuralPatches(*boundStructuralPlan, allocator, resolveScratch))
+                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                   "current dynamic resource-contract patches do not satisfy the cached semantic contract");
+            if (!allocator.activePolicy.enablePlacedResources && allocator.boundContract != nullptr)
+            {
+                for (const PersistentDedicatedPhysicalProgram& program : allocator.persistentDedicatedPrograms)
+                {
+                    if (program.Matches(allocator.boundContract->contractIdentity, allocator.boundContract->publicationSerial,
+                                        allocator.rhiDeviceIncarnation, allocator.descriptorDomainIdentity) && program.plan.stateProgram.valid)
+                    {
+                        deferredStructuralSteps = true;
+                        break;
+                    }
+                }
+            }
+            if (!InstantiateStructuralPlan(*boundStructuralPlan, allocator, *scratch, resolveScratch, failure, deferredStructuralSteps))
                 return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                   "cached structural resource plan could not instantiate a fresh execution generation");
+                                   "cached resource contract could not instantiate a fresh execution generation");
             structuralPlanHit = true;
-            ++allocator.stats.structuralPlanHits;
-        }
-        else if (structuralPlanEligible)
-        {
-            ++allocator.stats.structuralPlanMisses;
         }
 
         if (!structuralPlanHit)
@@ -2295,8 +3349,10 @@ namespace vanguard::rendering::detail
         batchResourceSlots.Resize(sealedPlanning.resourceSlotCount, InvalidRenderFlowResourceIndex);
         batchTextureViews.Resize(sealedPlanning.textureViewCount);
         batchBufferViews.Resize(sealedPlanning.bufferViewCount);
+        slotFastPath.Reserve(sealedPlanning.resourceSlotCount);
         scratch->allocations.Reserve(sealedPlanning.declarationCount);
-        slots.Reserve(sealedPlanning.declarationCount);
+        slots.Reserve(sealedPlanning.resourceSlotCount);
+        namedSlots.Reserve(sealedPlanning.resourceSlotCount);
         allocationStates.Reserve(sealedPlanning.declarationCount);
         namedScopes.Reserve(sealedPlanning.declarationCount);
         uses.Reserve(sealedPlanning.useBeginCount);
@@ -2312,8 +3368,8 @@ namespace vanguard::rendering::detail
         physicalAssignmentOrder.Reserve(static_cast<u32>(physicalAssignmentCapacity));
         physicalAssignmentOrder.Resize(allocator.reservedExportSlots, InvalidRenderFlowResourceIndex);
 
-        // RED pays once to linearize temporal ordering before lifetime work.
-        // The sealed writer stream is already strictly ordered by flow group, so
+        // Linearize temporal ordering once before lifetime work. The sealed
+        // writer stream is already strictly ordered by flow group, so
         // merge it directly with the queue-request stream. This keeps packet,
         // batch, and dense command-scope indices identical, lowers dependencies
         // as their consumer packet is encountered, and emits the one watermark
@@ -2509,6 +3565,45 @@ namespace vanguard::rendering::detail
             return true;
         };
 
+        // Collapse every writer-local identity into the global logical slot once.
+        // CandidateResource records all mapping/scope facts while planning, so
+        // this O(resources) pass is sufficient to classify the common stable
+        // path without a second O(operations) semantic scan.
+        for (u32 batchIndex = 0; batchIndex < allocator.sealedWriters.Size(); ++batchIndex)
+        {
+            const CandidateWriterBatch& batch = batchAt(batchIndex);
+            for (u32 resourceIndex = 0; resourceIndex < batch.resourceCount; ++resourceIndex)
+            {
+                u32 slotIndex = InvalidRenderFlowResourceIndex;
+                if (!getSlot(batchIndex, {batch.flowGroup, resourceIndex, batch.sessionGeneration}, slotIndex))
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity,
+                                       "sealed resource identity could not bind to a global logical slot", batch.node);
+                if (slotIndex >= slotFastPath.Size())
+                    slotFastPath.Resize(slotIndex + 1u, u8{1});
+                if (!batch.resources[resourceIndex].FastPathEligible())
+                    slotFastPath[slotIndex] = 0;
+            }
+        }
+        if (slotFastPath.Size() != resolveScratch.slotCount)
+            return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                               "sealed logical-slot classification does not cover the global slot image");
+
+        const auto sealedSlot = [&](const u32 batchIndex, const u32 resourceIndex, u32& result) noexcept -> bool
+        {
+            result = InvalidRenderFlowResourceIndex;
+            if (batchIndex >= allocator.sealedWriters.Size())
+                return false;
+            const CandidateWriterBatch& batch = batchAt(batchIndex);
+            if (resourceIndex >= batch.resourceCount)
+                return false;
+            const SealedWriterRecord& sealed = allocator.sealedWriters[batchIndex];
+            const u32 denseIndex = sealed.resourceSlotOffset + resourceIndex;
+            if (denseIndex >= batchResourceSlots.Size())
+                return false;
+            result = batchResourceSlots[denseIndex];
+            return result < resolveScratch.slotCount;
+        };
+
         const auto failOperation = [&](const OperationVisit& mergedOperation, const RenderFlowResourceFailureCode code, const char* const message, const ResourceUseId use = {}) noexcept -> bool
         {
             const CandidateWriterBatch& batch = batchAt(mergedOperation.batch);
@@ -2555,24 +3650,28 @@ namespace vanguard::rendering::detail
         const u64 compileOperationsProbeFrameCycleBegin = __rdtsc();
 #endif
 #endif
+        bool hasExceptionalNamedScopes = false;
         for (u32 batchIndex = 0; batchIndex < allocator.sealedWriters.Size(); ++batchIndex)
         {
             const CandidateWriterBatch& batch = batchAt(batchIndex);
-            const auto localResource = [&](const u32 index) noexcept -> LogicalResourceId
-            {
-                return {batch.flowGroup, index, batch.sessionGeneration};
-            };
             const u32 packetIndex = batchIndex;
             CompiledPacket& packet = scratch->packets[packetIndex];
             const SealedWriterRecord& sealed = allocator.sealedWriters[batchIndex];
+            if (sealed.semanticEventOffset > sealedPlanning.semanticEventCount ||
+                batch.semanticEvents.Size() > sealedPlanning.semanticEventCount - sealed.semanticEventOffset)
+                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                   "sealed semantic-event range exceeds the frame semantic image", batch.node);
             packet.beginStepByUseOrdinal.Reserve(batch.uses.Size());
             packet.endStepByUseOrdinal.Resize(batch.uses.Size(), InvalidRenderFlowResourceIndex);
-            const auto compileUseEnd = [&](const u32 candidateUseIndex, const u32 sequence) noexcept -> bool
+            const auto compileUseEnd = [&](const u32 candidateUseIndex, const u32 sequence, const u32 semanticOrdinal) noexcept -> bool
             {
                 const OperationVisit mergedEnd{batchIndex, candidateUseIndex, {batch.flowGroup, sequence}};
                 const ResourceUseId use{batch.flowGroup, candidateUseIndex, batch.sessionGeneration};
                 if (candidateUseIndex >= batch.uses.Size())
                     return failOperation(mergedEnd, RenderFlowResourceFailureCode::InvalidUseOrScope, "resource use end has an invalid dense identity", use);
+                if (batch.uses[candidateUseIndex].endSequence != sequence)
+                    return failOperation(mergedEnd, RenderFlowResourceFailureCode::BackendContractViolation,
+                                         "sealed resource-use end disagrees with its recorded semantic sequence", use);
                 const u32 useIndex = sealed.useRecordOffset + candidateUseIndex;
                 ActiveUseRecord* const active = useIndex < uses.Size() ? &uses[useIndex] : nullptr;
                 if (active == nullptr || active->id != use || active->ended || active->packet != packetIndex)
@@ -2631,45 +3730,31 @@ namespace vanguard::rendering::detail
                 packet.endStepByUseOrdinal[use.ordinal] = packet.steps.Size();
                 packet.steps.PushBack(step);
                 logicalState.terminalUseRecord = useIndex;
-                TouchLifetime(scratch->allocations[active->allocation], active->allocation, mergedEnd.position, packetIndex, packet, physicalAssignmentOrder);
+                TouchLifetime(scratch->allocations[active->allocation], active->allocation, mergedEnd.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
                 return true;
             };
 
-            u32 operationIndex = 0;
-            u32 useEndIndex = 0;
-            u32 expectedSequence = 0;
-            while (operationIndex < batch.operations.Size() || useEndIndex < batch.useEndOrder.Size())
+            for (u32 sequence = 0; sequence < batch.semanticEvents.Size(); ++sequence)
             {
-                const u32 operationSequence = operationIndex < batch.operations.Size() ? batch.operations[operationIndex].sequence : InvalidRenderFlowResourceIndex;
-                u32 endUseOrdinal = InvalidRenderFlowResourceIndex;
-                u32 endSequence = InvalidRenderFlowResourceIndex;
-                if (useEndIndex < batch.useEndOrder.Size())
-                {
-                    endUseOrdinal = batch.useEndOrder[useEndIndex];
-                    if (endUseOrdinal >= batch.uses.Size())
-                        return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                           "dense resource-use end stream references an invalid use", batch.node, {batch.flowGroup, expectedSequence});
-                    endSequence = batch.uses[endUseOrdinal].endSequence;
-                }
-                const bool visitEnd = endSequence != InvalidRenderFlowResourceIndex &&
-                                      (operationSequence == InvalidRenderFlowResourceIndex || endSequence < operationSequence);
-                const u32 sequence = visitEnd ? endSequence : operationSequence;
-                if (sequence != expectedSequence)
-                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                       "planning semantic sequence is sparse, duplicated, or out of order", batch.node, {batch.flowGroup, sequence});
-                ++expectedSequence;
                 ++compiledOperationCount;
-                if (visitEnd)
+                const CandidateSemanticEvent event = batch.semanticEvents[sequence];
+                const u32 semanticOrdinal = sealed.semanticEventOffset + sequence;
+                if (event.IsUseEnd())
                 {
-                    if (!compileUseEnd(endUseOrdinal, sequence))
+                    if (!compileUseEnd(event.Index(), sequence, semanticOrdinal))
                         return false;
-                    ++useEndIndex;
                     continue;
                 }
+                if (!event.IsOperation() || event.Index() >= batch.operations.Size())
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                       "sealed semantic-event stream references an invalid operation", batch.node, {batch.flowGroup, sequence});
 
+                const u32 operationIndex = event.Index();
                 const CandidateOperation& operation = batch.operations[operationIndex];
-                const OperationVisit mergedOperation{batchIndex, operationIndex, {batch.flowGroup, operation.sequence}};
-                ++operationIndex;
+                if (operation.sequence != sequence)
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                       "sealed operation disagrees with its recorded semantic sequence", batch.node, {batch.flowGroup, sequence});
+                const OperationVisit mergedOperation{batchIndex, operationIndex, {batch.flowGroup, sequence}};
 
                 u32 slotIndex = InvalidRenderFlowResourceIndex;
                 switch (operation.kind)
@@ -2680,7 +3765,7 @@ namespace vanguard::rendering::detail
                 case CandidateOperationKind::ImportTexture:
                 case CandidateOperationKind::ImportBuffer:
                 {
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex))
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex))
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "declaration references an invalid candidate resource");
                     LogicalSlot& slot = slots[slotIndex];
                     if (slot.currentAllocation != InvalidRenderFlowResourceIndex)
@@ -2700,7 +3785,7 @@ namespace vanguard::rendering::detail
                     else if (operation.kind == CandidateOperationKind::DeclareLike)
                     {
                         u32 sourceSlot = InvalidRenderFlowResourceIndex;
-                        if (!getSlot(mergedOperation.batch, localResource(operation.b), sourceSlot) || slots[sourceSlot].currentAllocation == InvalidRenderFlowResourceIndex)
+                        if (!sealedSlot(mergedOperation.batch, operation.b, sourceSlot) || slots[sourceSlot].currentAllocation == InvalidRenderFlowResourceIndex)
                             return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "declare-like source is not mapped at this plan position");
                         inheritedDesc = &scratch->allocations[slots[sourceSlot].currentAllocation].desc;
                     }
@@ -2758,7 +3843,7 @@ namespace vanguard::rendering::detail
                 }
                 case CandidateOperationKind::CreateTextureView:
                 {
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex) || slotIndex >= resolveScratch.slotCount || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "texture view was created before its resource was mapped");
                     const u32 allocation = slots[slotIndex].currentAllocation;
                     if (scratch->allocations[allocation].desc.kind != FrameResourceKind::Texture || operation.b >= batch.textureViews.Size())
@@ -2771,7 +3856,7 @@ namespace vanguard::rendering::detail
                 }
                 case CandidateOperationKind::CreateBufferView:
                 {
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex) || slotIndex >= resolveScratch.slotCount || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "buffer view was created before its resource was mapped");
                     const u32 allocation = slots[slotIndex].currentAllocation;
                     if (scratch->allocations[allocation].desc.kind != FrameResourceKind::Buffer || operation.b >= batch.bufferViews.Size())
@@ -2818,7 +3903,7 @@ namespace vanguard::rendering::detail
                             return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "buffer use references an invalid view", use);
                         slotIndex = batchBufferViews[sealed.bufferViewOffset + candidateUse.view].slot;
                     }
-                    else if (candidateUse.resource == InvalidRenderFlowResourceIndex || !getSlot(mergedOperation.batch, localResource(candidateUse.resource), slotIndex))
+                    else if (candidateUse.resource == InvalidRenderFlowResourceIndex || !sealedSlot(mergedOperation.batch, candidateUse.resource, slotIndex))
                     {
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "resource use references an invalid logical resource", use);
                     }
@@ -2847,6 +3932,7 @@ namespace vanguard::rendering::detail
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope,
                                              "resource use state is incompatible with its kind, creation usage, access intent, or command queue", use);
                     AllocationLogicalState& allocationState = allocationStates[allocation];
+                    allocationState.useQueueMask |= QueueMask(packet.queue);
                     const bool initializationClear = allocationState.initializationPending;
                     if (initializationClear && !AccessWrites(access))
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "declaration-time clear initialization requires a writable first use", use);
@@ -3157,7 +4243,7 @@ namespace vanguard::rendering::detail
                     allocationTimeline.lastUseBeginRecord = useIndex;
                     packet.steps.PushBack(step);
                     scratch->allocations[allocation].used = true;
-                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, packetIndex, packet, physicalAssignmentOrder);
+                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
 #if VG_ENABLE_PROFILING && VG_COMPILE_OPERATIONS_PROBE
                     if (probeSample)
                     {
@@ -3174,7 +4260,7 @@ namespace vanguard::rendering::detail
                 case CandidateOperationKind::ScopeOpen:
                 {
                     const ResourceScopeId scope = operation.payload.scope;
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "resource scope begins before the logical resource is mapped");
                     u32 existingScope = InvalidRenderFlowResourceIndex;
                     if (!scope.IsValid() || openScopeIndices.Find(scope.value, existingScope))
@@ -3184,7 +4270,7 @@ namespace vanguard::rendering::detail
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "resource scope identity became duplicated during Resolve");
                     scopes.PushBack({scope, allocation, InvalidRenderFlowResourceIndex, mergedOperation.position, false, false});
                     scratch->allocations[allocation].used = true;
-                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, packetIndex, packet, physicalAssignmentOrder);
+                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
                     break;
                 }
                 case CandidateOperationKind::ScopeClose:
@@ -3195,14 +4281,21 @@ namespace vanguard::rendering::detail
                     if (found == nullptr || found->closed)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "resource scope end has no matching open endpoint");
                     found->closed = true;
-                    TouchLifetime(scratch->allocations[found->allocation], found->allocation, mergedOperation.position, packetIndex, packet, physicalAssignmentOrder);
+                    TouchLifetime(scratch->allocations[found->allocation], found->allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
                     break;
                 }
                 case CandidateOperationKind::NamedScopeOpen:
                 {
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "named resource scope begins before the logical resource is mapped");
                     const u32 allocation = slots[slotIndex].currentAllocation;
+                    if (slotFastPath[slotIndex] != 0)
+                    {
+                        scratch->allocations[allocation].used = true;
+                        TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
+                        break;
+                    }
+                    hasExceptionalNamedScopes = true;
                     if (allocation >= namedScopes.Size())
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "named resource scope references an invalid allocation");
                     NamedScopeState& scope = namedScopes[allocation];
@@ -3210,25 +4303,31 @@ namespace vanguard::rendering::detail
                         scope.firstOpen = mergedOperation.position;
                     ++scope.depth;
                     scratch->allocations[allocation].used = true;
-                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, packetIndex, packet, physicalAssignmentOrder);
+                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
                     break;
                 }
                 case CandidateOperationKind::NamedScopeClose:
                 {
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex) || slots[slotIndex].currentAllocation == InvalidRenderFlowResourceIndex)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "named resource scope ends before the logical resource is mapped");
                     const u32 allocation = slots[slotIndex].currentAllocation;
+                    if (slotFastPath[slotIndex] != 0)
+                    {
+                        TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
+                        break;
+                    }
+                    hasExceptionalNamedScopes = true;
                     if (allocation >= namedScopes.Size() || namedScopes[allocation].depth == 0)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidUseOrScope, "named resource scope end has no matching open endpoint");
                     --namedScopes[allocation].depth;
-                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, packetIndex, packet, physicalAssignmentOrder);
+                    TouchLifetime(scratch->allocations[allocation], allocation, mergedOperation.position, semanticOrdinal, packetIndex, packet, physicalAssignmentOrder);
                     break;
                 }
                 case CandidateOperationKind::SwapMappings:
                 {
                     u32 leftSlot = InvalidRenderFlowResourceIndex;
                     u32 rightSlot = InvalidRenderFlowResourceIndex;
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), leftSlot) || !getSlot(mergedOperation.batch, localResource(operation.b), rightSlot) || leftSlot == rightSlot ||
+                    if (!sealedSlot(mergedOperation.batch, operation.a, leftSlot) || !sealedSlot(mergedOperation.batch, operation.b, rightSlot) || leftSlot == rightSlot ||
                         slots[leftSlot].currentAllocation == InvalidRenderFlowResourceIndex || slots[rightSlot].currentAllocation == InvalidRenderFlowResourceIndex)
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "logical swap requires two distinct mapped resources");
                     const u32 leftAllocation = slots[leftSlot].currentAllocation;
@@ -3247,7 +4346,7 @@ namespace vanguard::rendering::detail
                 }
                 case CandidateOperationKind::Export:
                 {
-                    if (!getSlot(mergedOperation.batch, localResource(operation.a), slotIndex))
+                    if (!sealedSlot(mergedOperation.batch, operation.a, slotIndex))
                         return failOperation(mergedOperation, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "export references an invalid logical resource");
                     const ExportSlotId exportSlot{operation.b, batch.sessionGeneration};
                     const TerminalResourceExportDesc exportDesc = operation.payload.exportDesc;
@@ -3269,11 +4368,10 @@ namespace vanguard::rendering::detail
                 }
                 }
             }
-            if (expectedSequence != batch.semanticSequenceCount || operationIndex != batch.operations.Size() || useEndIndex != batch.useEndOrder.Size() ||
-                packet.beginStepByUseOrdinal.Size() != batch.uses.Size())
+            if (batch.semanticEvents.Size() != batch.semanticSequenceCount || packet.beginStepByUseOrdinal.Size() != batch.uses.Size())
                 return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
                                    "planning semantic sequence cardinality disagrees with its recorded streams", batch.node,
-                                   {batch.flowGroup, expectedSequence});
+                                   {batch.flowGroup, batch.semanticEvents.Size()});
 #if VG_ENABLE_ASSERTS
             const CompiledPacket& compiledPacket = scratch->packets[batchIndex];
             if (compiledPacket.steps.Size() != batch.stepCount || compiledPacket.decisions.Size() != batch.decisionCount ||
@@ -3333,17 +4431,26 @@ namespace vanguard::rendering::detail
         for (const OpenScopeRecord& scope : scopes)
             if (!scope.closed)
                 return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "a cross-node resource scope has no close endpoint", {}, scope.begin);
-        for (const NamedScopeState& scope : namedScopes)
-            if (scope.depth != 0)
-                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "a named resource scope has no close endpoint", {}, scope.firstOpen);
+        if (hasExceptionalNamedScopes)
+            for (const NamedScopeState& scope : namedScopes)
+                if (scope.depth != 0)
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "a named resource scope has no close endpoint", {}, scope.firstOpen);
 
+#if VG_ENABLE_ASSERTS
         for (const ActiveUseRecord& use : uses)
             if (!use.ended)
-                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidUseOrScope, "a resource use has no end endpoint", scratch->packets[use.packet].node, {}, use.id);
+                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                   "sealed planning admitted an unterminated resource use", scratch->packets[use.packet].node, {}, use.id);
+#endif
 
         for (u32 allocationIndex = 0; allocationIndex < scratch->allocations.Size(); ++allocationIndex)
         {
+            // One-queue allocations are already ordered by their command-list
+            // stream. Only the exceptional multi-queue timeline needs the
+            // allocation-local walk and explicit fork/join proof.
             const AllocationLogicalState& timeline = allocationStates[allocationIndex];
+            if (timeline.useQueueMask == 0 || (timeline.useQueueMask & (timeline.useQueueMask - 1u)) == 0)
+                continue;
             u32 previousUseIndex = InvalidRenderFlowResourceIndex;
             for (u32 useIndex = timeline.firstUseRecord; useIndex != InvalidRenderFlowResourceIndex; useIndex = uses[useIndex].nextAllocationUse)
             {
@@ -3638,8 +4745,8 @@ namespace vanguard::rendering::detail
             exportRecord.terminalPacket = terminalUse->packet;
             exportRecord.kind = allocation.desc.kind;
         }
-        if (structuralPlanEligible && structuralSignature != 0)
-            structuralCandidateReady = BuildStructuralPlanCandidate(structuralSignature, allocator, *scratch, resolveScratch, allocator.reservedExportSlots);
+        if (structuralPlanEligible)
+            structuralCandidateReady = BuildStructuralPlanCandidate(allocator, *scratch, resolveScratch, allocator.reservedExportSlots);
         }
 
 #if VG_ENABLE_PROFILING
@@ -3650,6 +4757,7 @@ namespace vanguard::rendering::detail
         scratch->hasNativeResourceBindings = !allocator.config.allowLogicalOnlyValidation;
         containers::DynamicArray<WholeFrameLane>& wholeFrameLanes = resolveScratch.wholeFrameLanes;
         containers::DynamicArray<WholeFrameReleaseEvent>& wholeFrameReleaseEvents = resolveScratch.wholeFrameReleaseEvents;
+        containers::DynamicArray<u32>& wholeFrameReleaseHeads = resolveScratch.wholeFrameReleaseHeads;
         auto& wholeFrameReuseHeads = resolveScratch.wholeFrameReuseHeads;
         containers::DynamicArray<WholeFrameReuseClass>& wholeFrameReuseClasses = resolveScratch.wholeFrameReuseClasses;
         containers::DynamicArray<u32>& persistentAllocationLanes = resolveScratch.persistentAllocationLanes;
@@ -3665,25 +4773,62 @@ namespace vanguard::rendering::detail
         wholeFrameReuseHeads.Reserve(scratch->allocations.Size());
         containers::DynamicArray<DedicatedResourceLease>& releasedPersistentLeases = resolveScratch.releasedPersistentLeases;
 
-        // Resolve the dedicated-plan contract before *any* physical provider
-        // acquisition. An ineligible old plan must not keep PlanReady bytes
-        // reserved while the current frame tries the placed or generic path.
-        const bool persistentPlanHit = scratch->hasNativeResourceBindings && !allocator.activePolicy.enablePlacedResources &&
-                                       PersistentDedicatedPlanMatches(allocator.persistentDedicatedPlan, *scratch, resolveScratch);
-        if (!persistentPlanHit && allocator.persistentDedicatedPlan.valid)
+        // Resolve the dedicated physical program before *any* provider acquisition.
+        // RF13 contract-backed frames admit a program through the immutable contract
+        // identity/publication plus allocator epochs, avoiding the old O(resources)
+        // plan comparison. The legacy exact comparison remains only for standalone
+        // callers that do not bind a resource contract.
+        PersistentDedicatedPhysicalPlan* activePersistentPlan = nullptr;
+        if (scratch->hasNativeResourceBindings && allocator.activePolicy.enablePlacedResources)
         {
-            if (allocator.activePolicy.enablePlacedResources)
-                for (PersistentDedicatedPlanLaneRuntime& runtime : allocator.persistentDedicatedPlan.laneRuntime)
+            const auto rememberReleased = [&](PersistentDedicatedPhysicalPlan& plan) noexcept
+            {
+                for (PersistentDedicatedPlanLaneRuntime& runtime : plan.laneRuntime)
                     for (const DedicatedResourceLease& lease : runtime.leases)
                         releasedPersistentLeases.PushBack(lease);
+            };
+            rememberReleased(allocator.persistentDedicatedPlan);
+            for (PersistentDedicatedPhysicalProgram& program : allocator.persistentDedicatedPrograms)
+                rememberReleased(program.plan);
             ReleasePersistentDedicatedPlan(allocator, true);
         }
+        else if (scratch->hasNativeResourceBindings && allocator.boundContract != nullptr)
+        {
+            // Contract-backed and standalone programs never share admission. The
+            // graph-cache variants may coexist with one another, but an old legacy
+            // reservation must not consume budget behind the contract path.
+            if (allocator.persistentDedicatedPlan.valid)
+                ReleaseDedicatedPlanStorage(allocator, allocator.persistentDedicatedPlan, true);
+            if (PersistentDedicatedPhysicalProgram* const program = FindPersistentDedicatedProgram(allocator, *allocator.boundContract))
+                activePersistentPlan = &program->plan;
+        }
+        else if (scratch->hasNativeResourceBindings && allocator.contractCompileTarget != nullptr)
+        {
+            if (allocator.persistentDedicatedPlan.valid)
+                ReleaseDedicatedPlanStorage(allocator, allocator.persistentDedicatedPlan, true);
+            // A cold republish of the same semantic contract supersedes its old
+            // physical program. Drop those strong leases before acquiring the new
+            // shape so stale-plan bytes cannot create false hard-budget pressure.
+            RemovePersistentDedicatedProgramsForContract(allocator, allocator.contractCompileTarget->contractIdentity);
+        }
+        else if (scratch->hasNativeResourceBindings)
+        {
+            // Standalone sessions preserve the pre-RF13 exact-match behavior and
+            // do not retain cache-entry programs that they cannot identify.
+            while (!allocator.persistentDedicatedPrograms.Empty())
+                RemovePersistentDedicatedProgram(allocator, allocator.persistentDedicatedPrograms.Size() - 1u, true);
+            if (PersistentDedicatedPlanMatches(allocator.persistentDedicatedPlan, *scratch, resolveScratch))
+                activePersistentPlan = &allocator.persistentDedicatedPlan;
+            else if (allocator.persistentDedicatedPlan.valid)
+                ReleaseDedicatedPlanStorage(allocator, allocator.persistentDedicatedPlan, true);
+        }
+        const bool persistentPlanHit = activePersistentPlan != nullptr;
         if (persistentPlanHit)
         {
             ++allocator.stats.persistentDedicatedPlanHits;
-            persistentLanePhysical.Resize(allocator.persistentDedicatedPlan.lanes.Size(), InvalidRenderFlowResourceIndex);
-            persistentLaneAdoptionEntries.Resize(allocator.persistentDedicatedPlan.lanes.Size(), InvalidDedicatedResourceEntry);
-            for (PersistentDedicatedPlanLaneRuntime& runtime : allocator.persistentDedicatedPlan.laneRuntime)
+            persistentLanePhysical.Resize(activePersistentPlan->lanes.Size(), InvalidRenderFlowResourceIndex);
+            persistentLaneAdoptionEntries.Resize(activePersistentPlan->lanes.Size(), InvalidDedicatedResourceEntry);
+            for (PersistentDedicatedPlanLaneRuntime& runtime : activePersistentPlan->laneRuntime)
                 runtime.leases.Reserve(runtime.leases.Size() + 1u);
         }
 
@@ -3704,8 +4849,10 @@ namespace vanguard::rendering::detail
                 if (allocation >= scratch->allocations.Size())
                     return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation, "physical assignment order contains an invalid logical allocation");
                 const LogicalAllocationRecord& logical = scratch->allocations[allocation];
-                if (!logical.used || !logical.firstUsePosition.IsValid() || !logical.lastUsePosition.IsValid() || logical.firstUseCommandScopeIndex >= scratch->commandScopes.Size() ||
-                    logical.lastUseCommandScopeIndex >= scratch->commandScopes.Size())
+                if (!logical.used || !logical.firstUsePosition.IsValid() || !logical.lastUsePosition.IsValid() ||
+                    logical.firstUseSemanticOrdinal == InvalidRenderFlowResourceIndex || logical.lastUseSemanticOrdinal == InvalidRenderFlowResourceIndex ||
+                    logical.firstUseSemanticOrdinal > logical.lastUseSemanticOrdinal || logical.lastUseSemanticOrdinal >= semanticEventCount ||
+                    logical.firstUseCommandScopeIndex >= scratch->commandScopes.Size() || logical.lastUseCommandScopeIndex >= scratch->commandScopes.Size())
                     return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation, "used logical allocation has an incomplete compiled lifetime");
                 if (logical.imported || logical.exported || (logical.queueMask != QueueMask(rhi::QueueType::Graphics) && logical.queueMask != QueueMask(rhi::QueueType::Compute)))
                     continue;
@@ -3755,6 +4902,8 @@ namespace vanguard::rendering::detail
                 request.queue = queue;
                 request.firstAcquire = logical.firstUsePosition;
                 request.lastRelease = logical.lastUsePosition;
+                request.firstAcquireSemanticOrdinal = logical.firstUseSemanticOrdinal;
+                request.lastReleaseSemanticOrdinal = logical.lastUseSemanticOrdinal;
                 request.requirements = requirements;
                 placedRequests.PushBack(request);
                 placedObjects.PushBack({allocation, physicalDesc, logical.requiresCanonicalDescriptors});
@@ -3771,6 +4920,9 @@ namespace vanguard::rendering::detail
             {
                 PlacedRangePlannerConfig plannerConfig;
                 plannerConfig.heapAlignment = maximumRequiredAlignment;
+                plannerConfig.maximumPredecessorFragments = allocator.config.maximumCompiledResourceActions;
+                plannerConfig.semanticEventCount = semanticEventCount;
+                plannerConfig.requestsPreordered = true;
                 if (!BuildPlacedRangePlan(placedRequests, plannerConfig, placedPlan, placedPlannerScratch, failure))
                 {
                     const RenderFlowResourceFailureCode code = failure != nullptr ? failure->code : RenderFlowResourceFailureCode::BackendContractViolation;
@@ -3843,18 +4995,6 @@ namespace vanguard::rendering::detail
             }
         }
 
-        const auto releaseEventGreater = [](const WholeFrameReleaseEvent& left, const WholeFrameReleaseEvent& right) noexcept
-        {
-            return PositionBefore(right.release, left.release);
-        };
-        const auto pendingGreater = [](const WholeFrameReuseCandidate& left, const WholeFrameReuseCandidate& right) noexcept
-        {
-            if (left.producerScope != right.producerScope)
-                return left.producerScope > right.producerScope;
-            if (left.capacity != right.capacity)
-                return left.capacity > right.capacity;
-            return left.lane > right.lane;
-        };
         const auto candidateBetter = [](const WholeFrameReuseCandidate& left, const WholeFrameReuseCandidate& right) noexcept
         {
             return left.capacity != right.capacity ? left.capacity < right.capacity : left.lane < right.lane;
@@ -3880,25 +5020,20 @@ namespace vanguard::rendering::detail
                 ready.Remove(nodeIndex);
             }
         };
-        const auto promoteCross = [&validCandidate, &pendingGreater](containers::DynamicArray<WholeFrameReuseCandidate>& pending, WholeFrameReadyIndex& ready,
-                                                                     const u32 watermark) noexcept
+        const auto promoteCross = [&validCandidate](const containers::DynamicArray<WholeFrameReuseCandidate>& pending, u32& cursor, WholeFrameReadyIndex& ready,
+                                                    const u32 watermark) noexcept -> bool
         {
-            for (;;)
+            while (cursor < pending.Size())
             {
-                while (!pending.Empty() && !validCandidate(pending[0]))
-                {
-                    std::pop_heap(pending.Begin(), pending.End(), pendingGreater);
-                    pending.PopBack();
-                }
-                if (pending.Empty() || pending[0].producerScope > watermark)
-                    return;
-                std::pop_heap(pending.Begin(), pending.End(), pendingGreater);
-                const WholeFrameReuseCandidate candidate = pending.Back();
-                pending.PopBack();
+                const WholeFrameReuseCandidate candidate = pending[cursor];
+                if (candidate.producerScope > watermark)
+                    return true;
+                ++cursor;
                 if (!validCandidate(candidate))
                     continue;
                 static_cast<void>(ready.Insert(candidate));
             }
+            return true;
         };
         const auto findReuseClass = [&](const DedicatedResourceClassKey& compatibility, const bool create) noexcept -> u32
         {
@@ -3929,44 +5064,69 @@ namespace vanguard::rendering::detail
             }
             return index;
         };
-        const auto queueReleaseEvent = [&wholeFrameLanes, &wholeFrameReleaseEvents, &releaseEventGreater](const u32 laneIndex) noexcept
+        bool releaseBucketsInitialized = false;
+        const auto queueReleaseEvent = [&wholeFrameLanes, &wholeFrameReleaseEvents, &wholeFrameReleaseHeads, &releaseBucketsInitialized](const u32 laneIndex) noexcept -> bool
         {
+            if (!releaseBucketsInitialized || laneIndex >= wholeFrameLanes.Size())
+                return false;
             const WholeFrameLane& lane = wholeFrameLanes[laneIndex];
-            wholeFrameReleaseEvents.PushBack({lane.lastUsePosition, laneIndex, lane.epoch});
-            std::push_heap(wholeFrameReleaseEvents.Begin(), wholeFrameReleaseEvents.End(), releaseEventGreater);
+            if (lane.lastUseSemanticOrdinal >= wholeFrameReleaseHeads.Size())
+                return false;
+            const u32 eventIndex = wholeFrameReleaseEvents.Size();
+            wholeFrameReleaseEvents.PushBack({wholeFrameReleaseHeads[lane.lastUseSemanticOrdinal], laneIndex, lane.epoch});
+            wholeFrameReleaseHeads[lane.lastUseSemanticOrdinal] = eventIndex;
+            return true;
         };
-        const auto releaseBefore = [&](const PlanPosition position) noexcept
+        u32 releaseCursor = 0;
+        const auto releaseBefore = [&](const u32 semanticOrdinal) noexcept -> bool
         {
-            while (!wholeFrameReleaseEvents.Empty() && PositionBefore(wholeFrameReleaseEvents[0].release, position))
+            if (!releaseBucketsInitialized)
             {
-                std::pop_heap(wholeFrameReleaseEvents.Begin(), wholeFrameReleaseEvents.End(), releaseEventGreater);
-                const WholeFrameReleaseEvent event = wholeFrameReleaseEvents.Back();
-                wholeFrameReleaseEvents.PopBack();
-                if (event.lane >= wholeFrameLanes.Size())
-                    continue;
-                WholeFrameLane& lane = wholeFrameLanes[event.lane];
-                if (lane.epoch != event.epoch || lane.reuseClass >= resolveScratch.wholeFrameReuseClassCount || lane.lastUseCommandScopeIndex >= scratch->commandScopes.Size())
-                    continue;
-                const rhi::QueueType producerQueue = scratch->commandScopes[lane.lastUseCommandScopeIndex].queue;
-                WholeFrameReuseCandidate candidate;
-                candidate.capacity = lane.capacity;
-                candidate.lane = event.lane;
-                candidate.epoch = event.epoch;
-                candidate.producerScope = lane.lastUseCommandScopeIndex;
-                WholeFrameReuseClass& reuseClass = wholeFrameReuseClasses[lane.reuseClass];
-                auto& sameReady = sameReadyForQueue(reuseClass, producerQueue);
-                static_cast<void>(sameReady.Insert(candidate));
-                if (producerQueue == rhi::QueueType::Graphics)
-                {
-                    reuseClass.graphicsToComputePending.PushBack(candidate);
-                    std::push_heap(reuseClass.graphicsToComputePending.Begin(), reuseClass.graphicsToComputePending.End(), pendingGreater);
-                }
-                else if (producerQueue == rhi::QueueType::Compute)
-                {
-                    reuseClass.computeToGraphicsPending.PushBack(candidate);
-                    std::push_heap(reuseClass.computeToGraphicsPending.Begin(), reuseClass.computeToGraphicsPending.End(), pendingGreater);
-                }
+                wholeFrameReleaseHeads.Resize(semanticEventCount, InvalidRenderFlowResourceIndex);
+                releaseBucketsInitialized = true;
             }
+            if (semanticOrdinal < releaseCursor || semanticOrdinal > wholeFrameReleaseHeads.Size())
+                return false;
+            while (releaseCursor < semanticOrdinal)
+            {
+                u32 eventIndex = wholeFrameReleaseHeads[releaseCursor];
+                wholeFrameReleaseHeads[releaseCursor] = InvalidRenderFlowResourceIndex;
+                while (eventIndex != InvalidRenderFlowResourceIndex)
+                {
+                    if (eventIndex >= wholeFrameReleaseEvents.Size())
+                        return false;
+                    const WholeFrameReleaseEvent event = wholeFrameReleaseEvents[eventIndex];
+                    eventIndex = event.next;
+                    if (event.lane >= wholeFrameLanes.Size())
+                        continue;
+                    WholeFrameLane& lane = wholeFrameLanes[event.lane];
+                    if (lane.epoch != event.epoch || lane.reuseClass >= resolveScratch.wholeFrameReuseClassCount || lane.lastUseCommandScopeIndex >= scratch->commandScopes.Size())
+                        continue;
+                    const rhi::QueueType producerQueue = scratch->commandScopes[lane.lastUseCommandScopeIndex].queue;
+                    WholeFrameReuseCandidate candidate;
+                    candidate.capacity = lane.capacity;
+                    candidate.lane = event.lane;
+                    candidate.epoch = event.epoch;
+                    candidate.producerScope = lane.lastUseCommandScopeIndex;
+                    WholeFrameReuseClass& reuseClass = wholeFrameReuseClasses[lane.reuseClass];
+                    auto& sameReady = sameReadyForQueue(reuseClass, producerQueue);
+                    static_cast<void>(sameReady.Insert(candidate));
+                    if (producerQueue == rhi::QueueType::Graphics)
+                    {
+                        if (!reuseClass.graphicsToComputePending.Empty() && reuseClass.graphicsToComputePending.Back().producerScope > candidate.producerScope)
+                            return false;
+                        reuseClass.graphicsToComputePending.PushBack(candidate);
+                    }
+                    else if (producerQueue == rhi::QueueType::Compute)
+                    {
+                        if (!reuseClass.computeToGraphicsPending.Empty() && reuseClass.computeToGraphicsPending.Back().producerScope > candidate.producerScope)
+                            return false;
+                        reuseClass.computeToGraphicsPending.PushBack(candidate);
+                    }
+                }
+                ++releaseCursor;
+            }
+            return true;
         };
 
         u32 nextVirtualPhysical = 0;
@@ -3978,8 +5138,10 @@ namespace vanguard::rendering::detail
                 return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation, "physical assignment order contains an invalid logical allocation");
             LogicalAllocationRecord& logical = scratch->allocations[allocation];
             if (!assignmentLifetimesValidated &&
-                (!logical.used || !logical.firstUsePosition.IsValid() || !logical.lastUsePosition.IsValid() || logical.firstUseCommandScopeIndex >= scratch->commandScopes.Size() ||
-                 logical.lastUseCommandScopeIndex >= scratch->commandScopes.Size()))
+                (!logical.used || !logical.firstUsePosition.IsValid() || !logical.lastUsePosition.IsValid() ||
+                 logical.firstUseSemanticOrdinal == InvalidRenderFlowResourceIndex || logical.lastUseSemanticOrdinal == InvalidRenderFlowResourceIndex ||
+                 logical.firstUseSemanticOrdinal > logical.lastUseSemanticOrdinal || logical.lastUseSemanticOrdinal >= semanticEventCount ||
+                 logical.firstUseCommandScopeIndex >= scratch->commandScopes.Size() || logical.lastUseCommandScopeIndex >= scratch->commandScopes.Size()))
                 return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation, "used logical allocation has an incomplete compiled lifetime");
             if (logical.imported)
             {
@@ -4002,8 +5164,8 @@ namespace vanguard::rendering::detail
                 if (logical.requiresCanonicalDescriptors &&
                     !RunCanonicalDescriptorPublicationWithGlobalPressure(
                         allocator,
-                        [&](CanonicalDescriptorPressure* const pressure, const bool) noexcept
-                        { return EnsureRetainedImportCanonicalDescriptors(allocator, binding, retained.desc, pressure, failure); },
+                        [&](CanonicalDescriptorPressure* const pressure, const bool recordStats) noexcept
+                        { return BorrowRetainedImportCanonicalDescriptors(allocator, binding, retained.desc, pressure, recordStats, failure); },
                         failure))
                 {
                     const RenderFlowResourceFailureCode code = failure != nullptr && failure->code != RenderFlowResourceFailureCode::None
@@ -4014,24 +5176,39 @@ namespace vanguard::rendering::detail
                                                     : "retained import canonical descriptor publication failed";
                     return FailResolve(allocator, scratch, failure, code, message);
                 }
-                if (logical.requiresCanonicalDescriptors && allocator.resourceDescriptors.IsValid() &&
-                    !HasRequiredCanonicalDescriptors(binding, retained.desc))
-                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                       "retained import whole-resource descriptor publication is incomplete");
                 const u32 bindingIndex = scratch->physicalBindings.Size();
                 scratch->physicalBindings.PushBack(std::move(binding));
                 logical.physical = {bindingIndex, physicalGeneration};
+                if (logical.requiresCanonicalDescriptors && allocator.resourceDescriptors.IsValid() &&
+                    !HasRequiredCanonicalDescriptors(scratch->physicalBindings[bindingIndex], retained.desc))
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                       "retained import whole-resource descriptor publication is incomplete");
                 continue;
             }
             if (logical.physical.IsValid())
                 continue;
 
-            DedicatedResourceRequest dedicatedRequest = BuildDedicatedResourceRequest(logical.desc);
-            dedicatedRequest.requiresCanonicalDescriptors = logical.requiresCanonicalDescriptors;
+            // The structural contract and the persistent physical topology have
+            // already been certified. Reuse the exact authored native request
+            // instead of rehashing and reconstructing its descriptor for every
+            // logical allocation on every warm frame. Live lease/fence and
+            // canonical descriptor publication checks remain below unchanged.
+            DedicatedResourceRequest uncachedRequest;
+            const DedicatedResourceRequest* dedicatedRequestPtr = nullptr;
+            if (persistentPlanHit && !logical.exported)
+                dedicatedRequestPtr = &activePersistentPlan->allocations[allocation].dedicatedRequest;
+            else
+            {
+                uncachedRequest = BuildDedicatedResourceRequest(logical.desc);
+                uncachedRequest.requiresCanonicalDescriptors = logical.requiresCanonicalDescriptors;
+                dedicatedRequestPtr = &uncachedRequest;
+            }
+            const DedicatedResourceRequest& dedicatedRequest = *dedicatedRequestPtr;
 
             if (persistentPlanHit && !logical.exported)
             {
-                PersistentDedicatedPhysicalPlan& plan = allocator.persistentDedicatedPlan;
+                VG_ASSERT(activePersistentPlan != nullptr);
+                PersistentDedicatedPhysicalPlan& plan = *activePersistentPlan;
                 const u32 laneIndex = plan.allocations[allocation].lane;
                 if (laneIndex >= plan.lanes.Size() || laneIndex >= persistentLanePhysical.Size())
                     return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
@@ -4143,7 +5320,9 @@ namespace vanguard::rendering::detail
             }
 
             const u32 firstScopeIndex = logical.firstUseCommandScopeIndex;
-            releaseBefore(logical.firstUsePosition);
+            if (!releaseBefore(logical.firstUseSemanticOrdinal))
+                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                   "dedicated-resource release buckets are not monotonic with first-touch order");
 
             u32 reusableLane = InvalidRenderFlowResourceIndex;
             if (!logical.exported)
@@ -4160,12 +5339,16 @@ namespace vanguard::rendering::detail
                         const u32 watermark = crossQueueProducerScopes[firstScopeIndex];
                         if (watermark != InvalidRenderFlowResourceIndex && consumerQueue == rhi::QueueType::Compute)
                         {
-                            promoteCross(reuseClass.graphicsToComputePending, reuseClass.graphicsToComputeReady, watermark);
+                            if (!promoteCross(reuseClass.graphicsToComputePending, reuseClass.graphicsToComputePendingCursor, reuseClass.graphicsToComputeReady, watermark))
+                                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                                   "dedicated-resource cross-queue pending order is inconsistent");
                             crossReady = &reuseClass.graphicsToComputeReady;
                         }
                         else if (watermark != InvalidRenderFlowResourceIndex && consumerQueue == rhi::QueueType::Graphics)
                         {
-                            promoteCross(reuseClass.computeToGraphicsPending, reuseClass.computeToGraphicsReady, watermark);
+                            if (!promoteCross(reuseClass.computeToGraphicsPending, reuseClass.computeToGraphicsPendingCursor, reuseClass.computeToGraphicsReady, watermark))
+                                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                                   "dedicated-resource cross-queue pending order is inconsistent");
                             crossReady = &reuseClass.computeToGraphicsReady;
                         }
                     }
@@ -4240,12 +5423,14 @@ namespace vanguard::rendering::detail
                                                "same-frame dedicated whole-resource descriptor binding is not backed by a canonical physical owner");
                     }
                 }
-                lane.lastUsePosition = logical.lastUsePosition;
+                lane.lastUseSemanticOrdinal = logical.lastUseSemanticOrdinal;
                 lane.lastUseCommandScopeIndex = logical.lastUseCommandScopeIndex;
                 ++lane.epoch;
                 if (lane.epoch == 0)
                     lane.epoch = 1;
-                queueReleaseEvent(reusableLane);
+                if (!queueReleaseEvent(reusableLane))
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                       "dedicated-resource release event exceeds the sealed semantic range");
                 continue;
             }
 
@@ -4295,7 +5480,7 @@ namespace vanguard::rendering::detail
             {
                 WholeFrameLane lane;
                 lane.capacity = physicalCapacity;
-                lane.lastUsePosition = logical.lastUsePosition;
+                lane.lastUseSemanticOrdinal = logical.lastUseSemanticOrdinal;
                 lane.lastUseCommandScopeIndex = logical.lastUseCommandScopeIndex;
                 lane.physicalIndex = physicalIndex;
                 lane.reuseClass = findReuseClass(dedicatedRequest.compatibility, true);
@@ -4303,7 +5488,9 @@ namespace vanguard::rendering::detail
                 wholeFrameLanes.PushBack(lane);
                 const u32 laneIndex = wholeFrameLanes.Size() - 1u;
                 persistentAllocationLanes[allocation] = laneIndex;
-                queueReleaseEvent(laneIndex);
+                if (!queueReleaseEvent(laneIndex))
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                       "dedicated-resource release event exceeds the sealed semantic range");
             }
         }
 
@@ -4319,7 +5506,7 @@ namespace vanguard::rendering::detail
             const LogicalAllocationRecord& destination = scratch->allocations[range.allocation];
             const AllocationLogicalState& destinationTimeline = allocationStates[range.allocation];
             const ActiveUseRecord* firstUse = destinationTimeline.firstUseRecord < uses.Size() ? &uses[destinationTimeline.firstUseRecord] : nullptr;
-            // The physical lifetime may start earlier at a RED-shaped named or
+            // The physical lifetime may start earlier at a named or
             // cross-node scope. Alias activation still belongs to the first
             // executable use of the placed object.
             if (firstUse == nullptr || firstUse->allocation != range.allocation || firstUse->packet >= scratch->packets.Size())
@@ -4465,8 +5652,29 @@ namespace vanguard::rendering::detail
         resolveProfilePhase.reset();
         resolveProfilePhase.emplace(finalizeStatesProfileLocation);
 #endif
-        if (scratch->hasNativeResourceBindings)
+        const bool cachedStateProgramHit = scratch->hasNativeResourceBindings && persistentPlanHit &&
+                                           !allocator.activePolicy.enablePlacedResources &&
+                                           activePersistentPlan != nullptr &&
+                                           ValidatePersistentStateProgram(activePersistentPlan->stateProgram, *scratch, resolveScratch);
+        if (cachedStateProgramHit)
         {
+            VG_PROFILE_ZONE_NAMED("RenderFlow/Resolve/BindCachedStateProgram");
+            if (!RestorePersistentStateProgram(activePersistentPlan->stateProgram, allocator, *scratch, resolveScratch))
+            {
+                static_cast<void>(FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "cached state program failed to bind current physical resources"));
+                return false;
+            }
+            ++allocator.stats.persistentStateProgramHits;
+        }
+        else if (scratch->hasNativeResourceBindings)
+        {
+            if (deferredStructuralSteps && boundStructuralPlan != nullptr &&
+                !MaterializeDeferredStructuralSteps(*boundStructuralPlan, allocator, *scratch))
+                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                   "cached execution program miss could not restore full structural steps");
+            if (persistentPlanHit && !allocator.activePolicy.enablePlacedResources)
+                ++allocator.stats.persistentStateProgramMisses;
             resolveScratch.ResetPhysicalHistory(scratch->physicalBindings.Size());
             containers::DynamicArray<PhysicalScopeState>& history = resolveScratch.physicalHistory;
             const u32 historyCount = resolveScratch.physicalHistoryCount;
@@ -4474,12 +5682,18 @@ namespace vanguard::rendering::detail
                 return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::CapacityExceeded, "physical-state table allocation failed");
             for (const LogicalAllocationRecord& allocation : scratch->allocations)
             {
-                if (!allocation.used || allocation.desc.kind != FrameResourceKind::Texture || allocation.desc.texture.active.keepInitialState)
+                if (!allocation.used)
+                    continue;
+                const bool explicitState = allocation.desc.kind == FrameResourceKind::Texture
+                                               ? !allocation.desc.texture.active.keepInitialState
+                                               : !allocation.desc.buffer.active.keepInitialState;
+                if (!explicitState)
                     continue;
                 if (!allocation.physical.IsValid() || allocation.physical.index >= historyCount)
-                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "explicit texture lost its physical history");
+                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::InvalidOrStaleIdentity, "explicit resource lost its physical history");
                 PhysicalScopeState& state = history[allocation.physical.index];
-                state.initial = allocation.desc.texture.active.initialState;
+                state.initial = allocation.desc.kind == FrameResourceKind::Texture ? allocation.desc.texture.active.initialState
+                                                                                    : allocation.desc.buffer.active.initialState;
                 state.terminal = state.initial; // Pool reuse starts from creation state after successful completion.
                 if (allocation.imported)
                 {
@@ -4489,28 +5703,46 @@ namespace vanguard::rendering::detail
                 }
             }
             for (const PendingExportRecord& exported : scratch->pendingExports)
-                if (exported.kind == FrameResourceKind::Texture && !exported.textureDesc.keepInitialState)
-                {
+            {
+                const bool explicitState = exported.kind == FrameResourceKind::Texture ? !exported.textureDesc.keepInitialState : !exported.bufferDesc.keepInitialState;
+                if (explicitState)
                     history[exported.physical.index].terminal = exported.terminalState;
-                }
+            }
             if (!LowerPhysicalStates(allocator, *scratch, resolveScratch, compiledResourceActionCount, failure))
             {
                 // Preserve the precise lowering failure while rolling back unpublished native assignments.
                 static_cast<void>(FailResolve(allocator, scratch, nullptr, RenderFlowResourceFailureCode::BackendContractViolation, "physical state lowering failed"));
                 return false;
             }
+            if (!BuildPacketResourceBindings(allocator, *scratch, resolveScratch, failure))
+            {
+                static_cast<void>(FailResolve(allocator, scratch, nullptr, RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "packet resource binding compilation failed"));
+                return false;
+            }
+            if (!CompilePacketBarriers(allocator, *scratch, resolveScratch, compiledBarrierCount, failure))
+            {
+                static_cast<void>(FailResolve(allocator, scratch, nullptr, RenderFlowResourceFailureCode::BackendContractViolation,
+                                              "packet exact barrier compilation failed"));
+                return false;
+            }
         }
 
-        // Compile the immutable semantic execution tape only after native state
-        // lowering has finalized every step action slice and packet exit action.
-        // The tape omits actionless uses entirely; one entry represents one
-        // step's real semantic work and preserves its exact intra-step ordering.
+        // Compile the immutable semantic action tape only after native state
+        // lowering and RF17 exact barrier compilation have finalized every step
+        // slice. Ordinary use-state work lives in packet.compiledBarriers; this
+        // sparse tape remains the ordering topology for clears, Present and the
+        // exceptional transition/UAV actions that own fallback barrier spans.
         for (CompiledPacket& packet : scratch->packets)
         {
-            packet.actionTape.Clear();
-            packet.exitActionTapeOffset = 0;
+            if (cachedStateProgramHit)
+                continue; // The complete immutable tape was restored above.
+            if (!scratch->hasNativeResourceBindings)
+            {
+                packet.actionTape.Clear();
+                packet.actionTape.Reserve(packet.steps.Size() + (packet.exitActions.Empty() ? 0u : 1u));
+            }
             packet.exitActionTapeCount = 0;
-            packet.actionTape.Reserve(packet.steps.Size() + (packet.exitActions.Empty() ? 0u : 1u));
 
             const auto appendTapeEntry = [&](const CompiledActionTapePhase phase, const u32 stepIndex, const u32 actionOffset,
                                              const u32 actionCount) noexcept -> bool
@@ -4520,43 +5752,46 @@ namespace vanguard::rendering::detail
                 return packet.actionTape.Size() == expected;
             };
 
-            for (u32 stepIndex = 0; stepIndex < packet.steps.Size(); ++stepIndex)
+            if (!scratch->hasNativeResourceBindings)
             {
-                CompiledStep& step = packet.steps[stepIndex];
-                step.actionTapeOffset = packet.actionTape.Size();
-                step.actionTapeCount = 0;
-                if (step.kind == CompiledResourceStepKind::TextureUseBegin || step.kind == CompiledResourceStepKind::BufferUseBegin)
+                for (u32 stepIndex = 0; stepIndex < packet.steps.Size(); ++stepIndex)
                 {
-                    if (step.beforeActionOffset > packet.actions.Size() || step.beforeActionCount > packet.actions.Size() - step.beforeActionOffset ||
-                        step.afterActionCount != 0)
-                        return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                           "compiled begin step has an invalid semantic action slice", packet.node, {}, step.use);
-                    if (step.aliasPredecessorCount != 0 || step.beforeActionCount != 0)
+                    CompiledStep& step = packet.steps[stepIndex];
+                    step.actionTapeOffset = packet.actionTape.Size();
+                    step.actionTapeCount = 0;
+                    if (step.kind == CompiledResourceStepKind::TextureUseBegin || step.kind == CompiledResourceStepKind::BufferUseBegin)
                     {
-                        if (!appendTapeEntry(CompiledActionTapePhase::Begin, stepIndex, step.beforeActionOffset, step.beforeActionCount))
-                            return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::CapacityExceeded,
-                                               "compiled begin action tape allocation failed", packet.node, {}, step.use);
-                        step.actionTapeCount = 1;
+                        if (step.beforeActionOffset > packet.actions.Size() || step.beforeActionCount > packet.actions.Size() - step.beforeActionOffset ||
+                            step.afterActionCount != 0)
+                            return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                               "compiled begin step has an invalid semantic action slice", packet.node, {}, step.use);
+                        if (step.aliasPredecessorCount != 0 || step.beforeActionCount != 0)
+                        {
+                            if (!appendTapeEntry(CompiledActionTapePhase::Begin, stepIndex, step.beforeActionOffset, step.beforeActionCount))
+                                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::CapacityExceeded,
+                                                   "compiled begin action tape allocation failed", packet.node, {}, step.use);
+                            step.actionTapeCount = 1;
+                        }
                     }
-                }
-                else if (step.kind == CompiledResourceStepKind::UseEnd)
-                {
-                    if (step.afterActionOffset > packet.actions.Size() || step.afterActionCount > packet.actions.Size() - step.afterActionOffset ||
-                        step.beforeActionCount != 0)
-                        return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                           "compiled end step has an invalid semantic action slice", packet.node, {}, step.use);
-                    if (step.afterActionCount != 0 || step.finalizeForAlias)
+                    else if (step.kind == CompiledResourceStepKind::UseEnd)
                     {
-                        if (!appendTapeEntry(CompiledActionTapePhase::End, stepIndex, step.afterActionOffset, step.afterActionCount))
-                            return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::CapacityExceeded,
-                                               "compiled end action tape allocation failed", packet.node, {}, step.use);
-                        step.actionTapeCount = 1;
+                        if (step.afterActionOffset > packet.actions.Size() || step.afterActionCount > packet.actions.Size() - step.afterActionOffset ||
+                            step.beforeActionCount != 0)
+                            return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                               "compiled end step has an invalid semantic action slice", packet.node, {}, step.use);
+                        if (step.afterActionCount != 0 || step.finalizeForAlias)
+                        {
+                            if (!appendTapeEntry(CompiledActionTapePhase::End, stepIndex, step.afterActionOffset, step.afterActionCount))
+                                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::CapacityExceeded,
+                                                   "compiled end action tape allocation failed", packet.node, {}, step.use);
+                            step.actionTapeCount = 1;
+                        }
                     }
-                }
-                else
-                {
-                    return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
-                                       "compiled action tape encountered an unknown step kind", packet.node, {}, step.use);
+                    else
+                    {
+                        return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::BackendContractViolation,
+                                           "compiled action tape encountered an unknown step kind", packet.node, {}, step.use);
+                    }
                 }
             }
 
@@ -4570,13 +5805,35 @@ namespace vanguard::rendering::detail
             }
         }
 
+        // Capture only complete, full-compiler output after RF17 and action-tape
+        // finalization. The persistent dedicated plan is installed transactionally
+        // below; an optional cache miss never weakens the ordinary Resolve path.
+        if (!persistentPlanHit && persistentCandidateReady && !allocator.activePolicy.enablePlacedResources)
+            static_cast<void>(CapturePersistentStateProgram(*scratch, resolveScratch.candidateDedicatedPlan.stateProgram,
+                                                            resolveScratch.candidateDedicatedPlan.allocations.Size()));
+        else if (persistentPlanHit && !cachedStateProgramHit && activePersistentPlan != nullptr &&
+                 scratch->hasNativeResourceBindings && !allocator.activePolicy.enablePlacedResources)
+        {
+            // A permitted decision patch can change the RF17 program without
+            // changing dedicated topology. Recompile once, then atomically
+            // replace only the symbolic snapshot after complete publication.
+            // Existing execution generations already own their packet copies.
+            PersistentStateProgram rebuilt;
+            if (CapturePersistentStateProgram(*scratch, rebuilt, activePersistentPlan->allocations.Size()))
+            {
+                activePersistentPlan->stateProgram = static_cast<PersistentStateProgram&&>(rebuilt);
+                ++allocator.stats.persistentStateProgramBuilds;
+            }
+        }
+
 #if VG_ENABLE_PROFILING
         resolveProfilePhase.reset();
         resolveProfilePhase.emplace(publishProfileLocation);
 #endif
         if (persistentPlanHit)
         {
-            PersistentDedicatedPhysicalPlan& plan = allocator.persistentDedicatedPlan;
+            VG_ASSERT(activePersistentPlan != nullptr);
+            PersistentDedicatedPhysicalPlan& plan = *activePersistentPlan;
             for (u32 laneIndex = 0; laneIndex < persistentLaneAdoptionEntries.Size(); ++laneIndex)
             {
                 const u32 entry = persistentLaneAdoptionEntries[laneIndex];
@@ -4587,7 +5844,8 @@ namespace vanguard::rendering::detail
                     plan.laneRuntime[laneIndex].leases.PushBack(lease);
             }
         }
-        else if (persistentCandidateReady && resolveScratch.candidateDedicatedPlan.lanes.Size() == wholeFrameLanes.Size())
+        bool persistentCandidateReserved = false;
+        if (!persistentPlanHit && persistentCandidateReady && resolveScratch.candidateDedicatedPlan.lanes.Size() == wholeFrameLanes.Size())
         {
             bool reserved = true;
             for (u32 laneIndex = 0; laneIndex < wholeFrameLanes.Size(); ++laneIndex)
@@ -4607,11 +5865,7 @@ namespace vanguard::rendering::detail
                 resolveScratch.candidateDedicatedPlan.laneRuntime[laneIndex].leases.PushBack(lease);
             }
             if (reserved)
-            {
-                ReleasePersistentDedicatedPlan(allocator, true);
-                allocator.persistentDedicatedPlan = static_cast<PersistentDedicatedPhysicalPlan&&>(resolveScratch.candidateDedicatedPlan);
-                ++allocator.stats.persistentDedicatedPlanBuilds;
-            }
+                persistentCandidateReserved = true;
             else
             {
                 for (PersistentDedicatedPlanLaneRuntime& runtime : resolveScratch.candidateDedicatedPlan.laneRuntime)
@@ -4620,13 +5874,54 @@ namespace vanguard::rendering::detail
                 resolveScratch.candidateDedicatedPlan.Clear();
             }
         }
-        else if (!persistentPlanHit)
-            ReleasePersistentDedicatedPlan(allocator, true);
 
         if (structuralCandidateReady && resolveScratch.candidateStructuralPlan.valid)
         {
-            allocator.structuralPlan = static_cast<PersistentStructuralPlan&&>(resolveScratch.candidateStructuralPlan);
+            ResourceContractStorage* const target = allocator.contractCompileTarget;
+            if (target == nullptr || !target->candidateNodesReady)
+                return FailResolve(allocator, scratch, failure, RenderFlowResourceFailureCode::IncompletePlanning,
+                                   "cold resource-contract compilation did not publish normalized render-node binding templates");
+            target->plan = static_cast<PersistentStructuralPlan&&>(resolveScratch.candidateStructuralPlan);
+            target->nodes = static_cast<containers::DynamicArray<ResourceContractNodeTemplate>&&>(target->candidateNodes);
+            target->candidateNodes.Clear();
+            target->candidateNodesReady = false;
+            target->rhiDeviceIncarnation = allocator.rhiDeviceIncarnation;
+            target->descriptorDomainIdentity = allocator.descriptorDomainIdentity;
+            ++target->publicationSerial;
+            if (target->publicationSerial == 0)
+                ++target->publicationSerial;
+            target->valid = true;
             ++allocator.stats.structuralPlanBuilds;
+        }
+
+        if (persistentCandidateReserved)
+        {
+            if (resolveScratch.candidateDedicatedPlan.stateProgram.valid)
+                ++allocator.stats.persistentStateProgramBuilds;
+            if (allocator.boundContract != nullptr)
+            {
+                InstallPersistentDedicatedProgram(allocator, static_cast<PersistentDedicatedPhysicalPlan&&>(resolveScratch.candidateDedicatedPlan),
+                                                  *allocator.boundContract);
+                ++allocator.stats.persistentDedicatedPlanBuilds;
+            }
+            else if (allocator.contractCompileTarget != nullptr && structuralCandidateReady && allocator.contractCompileTarget->valid)
+            {
+                InstallPersistentDedicatedProgram(allocator, static_cast<PersistentDedicatedPhysicalPlan&&>(resolveScratch.candidateDedicatedPlan),
+                                                  *allocator.contractCompileTarget);
+                ++allocator.stats.persistentDedicatedPlanBuilds;
+            }
+            else if (allocator.contractCompileTarget == nullptr)
+            {
+                ReleaseDedicatedPlanStorage(allocator, allocator.persistentDedicatedPlan, true);
+                allocator.persistentDedicatedPlan = static_cast<PersistentDedicatedPhysicalPlan&&>(resolveScratch.candidateDedicatedPlan);
+                ++allocator.stats.persistentDedicatedPlanBuilds;
+            }
+            else
+            {
+                // A cold contract that failed to publish its immutable structural
+                // image cannot retain a physical program under the old serial.
+                ReleaseDedicatedPlanStorage(allocator, resolveScratch.candidateDedicatedPlan, true);
+            }
         }
 
         allocator.executionGeneration = scratch->id.generation;
@@ -4636,6 +5931,7 @@ namespace vanguard::rendering::detail
         ++allocator.stats.resolvedFrames;
         allocator.stats.compiledOperations += compiledOperationCount;
         allocator.stats.compiledResourceActions += compiledResourceActionCount;
+        allocator.stats.compiledBarriers += compiledBarrierCount;
         allocator.stats.logicalAllocations = scratch->allocations.Size();
         allocator.stats.compiledPackets = scratch->packets.Size();
         allocator.stats.retainedImports = scratch->retainedImports.Size();
@@ -4644,7 +5940,7 @@ namespace vanguard::rendering::detail
         scratch->allocations.Clear();
         // The immutable execution generation now owns every datum required by
         // Consume. Candidate tapes are no longer replayed; clear logical size
-        // while retaining only hard-bounded per-writer backing, matching RED's
+        // while retaining only hard-bounded per-writer backing, preserving the
         // fixed parallel-group request storage behavior.
         allocator.stats.rejectedOperations += allocator.pendingRejectedOperations.Exchange(0);
         // Resolve's name index borrows StringViews from the sealed candidate
@@ -4652,6 +5948,11 @@ namespace vanguard::rendering::detail
         resolveScratch.namedSlots.Reset();
         ResetPlanningStorage(allocator, true);
         allocator.retainedImports.Clear();
+        allocator.reservedExportContractPatches.Clear();
+        allocator.reservedExportContractPatchIndices.Reset();
+        allocator.contractDecisionPatches.Reset();
+        allocator.contractCompileTarget = nullptr;
+        allocator.boundContract = nullptr;
         return true;
     }
 } // namespace vanguard::rendering::detail

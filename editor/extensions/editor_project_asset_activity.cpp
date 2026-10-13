@@ -6,6 +6,7 @@
 #include <vanguard/memory/memory.hpp>
 
 #include <cstdio>
+#include <cstring>
 #include <new>
 
 namespace
@@ -219,12 +220,25 @@ namespace
         char automaticDetail[editor::MaximumEditorActivityDetailBytes]{};
         std::snprintf(
             automaticDetail, sizeof(automaticDetail),
-            "%s; pending assets=%u inputs=%u outputs=%u; reimport=%u repair=%u delivery=%u; retries=%u%s%s",
-            AutomaticRecookStateName(automatic.state), automatic.pendingAssets,
+            "%s; build operations=%u/%u; pending assets=%u inputs=%u outputs=%u; reimport=%u repair=%u delivery=%u; retries=%u%s%s",
+            AutomaticRecookStateName(automatic.state), automatic.completedBuildOperations, automatic.buildOperations,
+            automatic.pendingAssets,
             automatic.pendingInputs, automatic.pendingOutputs, automatic.pendingReimportOutputs,
             automatic.pendingRepairOutputs, automatic.pendingDeliveryOutputs, automatic.retryEntries,
             automatic.retryRequested ? "; retry requested" : "",
             automatic.recoveryRequired ? "; recovery required" : "");
+        if (automatic.state == assetStreaming::ProjectAssetAutomaticRecookState::Failed ||
+            automatic.state == assetStreaming::ProjectAssetAutomaticRecookState::RecoveryRequired)
+        {
+            const std::size_t used = std::strlen(automaticDetail);
+            std::snprintf(automaticDetail + used, sizeof(automaticDetail) - used,
+                          "; reason=%s; failedRoots=%u; graph=%s; compile=%s; %s",
+                          vanguard::assets::ToString(automatic.lastRecookFailure),
+                          automatic.failedRootCount,
+                          vanguard::assets::ToString(automatic.firstFailedRoot.graphFailure),
+                          vanguard::assets::ToString(automatic.firstFailedRoot.buildResult),
+                          automatic.firstFailedRoot.message);
+        }
         if (!AddStatusRow(writer, AutomaticRecookItemId, AutomaticRecookActivityState(automatic.state),
                           AutomaticRecookAttention(automatic), "Asset recook / reimport",
                           automaticDetail, failure))

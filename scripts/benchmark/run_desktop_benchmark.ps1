@@ -5,6 +5,9 @@ param(
     [int] $WarmupSeconds = 2,
     [int] $WindowWidth = 1280,
     [int] $WindowHeight = 720,
+    [switch] $SchedulerProbe,
+    [ValidateSet(0, 64, 320)]
+    [int] $ProbeResources = 0,
     [switch] $SkipBuild
 )
 
@@ -139,6 +142,8 @@ $request = [ordered]@{
     warmupSeconds = $WarmupSeconds
     windowWidth = $WindowWidth
     windowHeight = $WindowHeight
+    schedulerProbe = [bool]$SchedulerProbe
+    probeResources = $ProbeResources
 } | ConvertTo-Json
 $localRequest = Join-Path (Join-Path $repository 'build\profiling') ('desktop_request_' + $runId + '.json')
 Set-Content -LiteralPath $localRequest -Value $request -Encoding utf8

@@ -1013,11 +1013,29 @@ resources::Failure failure = ToFailure(result);
 
     bool ResourceStreamer::UnregisterDecoder(const resources::ResourceTypeId type) noexcept
     {
-        if (m_impl == nullptr || !m_impl->pipeline->UnregisterLoader(type))
+        if (m_impl == nullptr)
         {
             return false;
         }
         m_impl->lock.Acquire();
+        for (auto entry = m_impl->activeLoads.Begin(); entry != m_impl->activeLoads.End(); ++entry)
+        {
+            const StreamLoad* const load = entry.Value();
+            if (load != nullptr && load->reference.ExpectedType() == type)
+            {
+                m_impl->lock.Release();
+                return false;
+            }
+        }
+        // Keep the streamer lock held across loader unregister so a new load cannot
+        // copy this decoder after the active-load proof but before its callback state
+        // is removed. A load that already copied the descriptor remains in activeLoads
+        // until decode/destroy work has finished and ReleaseLoad removes it.
+        if (!m_impl->pipeline->UnregisterLoader(type))
+        {
+            m_impl->lock.Release();
+            return false;
+        }
         const bool removed = m_impl->decoders.Remove(type).IsSuccessful();
         for (u32 index = 0; index < m_impl->decoderTypes.Size(); ++index)
         {

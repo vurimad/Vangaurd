@@ -608,6 +608,12 @@ inline void Buffer::Read(Value &obj, Asset &r) {
         if (byteLength > 0) {
             std::string dir = !r.mCurrentAssetDir.empty() ? (r.mCurrentAssetDir.back() == '/' ? r.mCurrentAssetDir : r.mCurrentAssetDir + '/') : "";
 
+            if (r.mVanguardModelProvenance != nullptr && r.mVanguardModelProvenance->recordStructuralDependency != nullptr &&
+                    !r.mVanguardModelProvenance->recordStructuralDependency(
+                            r.mVanguardModelProvenance->userData, aiVanguardModelSourceKind::Gltf2, uri)) {
+                throw DeadlyImportError("GLTF: external structural buffer is rejected by Vanguard model import policy");
+            }
+
             IOStream *file = r.OpenFile(dir + uri, "rb");
             if (file) {
                 bool ok = LoadFromStream(*file, byteLength);

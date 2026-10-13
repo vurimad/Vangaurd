@@ -113,6 +113,13 @@ namespace vanguard::rendering
         {
             return true;
         }
+        // Warm RF12 hook for genuinely dynamic declaration-time choices. This
+        // pass may patch RTDecision values only; it must not replay declarations
+        // or mutate the revision-compiled resource topology.
+        [[nodiscard]] virtual bool PatchResourceContract(const RenderNodeImplContext&, RenderFlowResourceFailure*) const noexcept
+        {
+            return true;
+        }
         virtual void Execute(const RenderNodeImplContext& context, jobs::Builder* builder) const = 0;
         [[nodiscard]] virtual const char* GetName() const noexcept { return ""; }
         [[nodiscard]] virtual rhi::CommandListRef CreateCommandList() const;
@@ -258,6 +265,12 @@ namespace vanguard::rendering
         void RemoveHelperNodes();
         void BuildRenderFlowGroups();
         [[nodiscard]] bool PrepareResourceBindings(RenderNodeResourceBindings& resourceBindings, RenderNodeResourcePreparationFailures& failures) const;
+        [[nodiscard]] bool CaptureResourceContract(RenderFlowResourceContract& contract, const RenderNodeResourceBindings& resourceBindings,
+                                                   RenderFlowResourceAllocator& allocator, RenderFlowResourceFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] bool InstantiateResourceContract(const RenderFlowResourceContract& contract, RenderNodeResourceBindings& resourceBindings,
+                                                       RenderFlowResourceAllocator& allocator, RenderFlowResourceFailure* failure = nullptr) const noexcept;
+        [[nodiscard]] bool PatchResourceContract(const RenderNodeImplContext& context, RenderFlowResourceAllocator& allocator,
+                                                 RenderNodeResourceBindings& resourceBindings, RenderFlowResourceFailure* failure = nullptr) const noexcept;
         void PrepareResourcesParallel(const RenderNodeImplContext& context, RenderFlowResourceAllocator& allocator, RenderNodeResourceBindings& resourceBindings,
                                       RenderNodeResourcePreparationFailures& failures, jobs::Builder& builder) const;
         [[nodiscard]] bool PrepareExecutionPackets(RenderFlowResourceAllocator& allocator, RenderFrameCommandLists& frameCommandLists, RenderNodeResourceBindings& resourceBindings,
@@ -287,7 +300,7 @@ namespace vanguard::rendering
 
     private:
         void MergeNodes(u32 numOriginalUsedNodeIndices);
-        void BuildFlattenedNodesArray(containers::DynamicArray<ItemId>& nodes, RenderNodeDependencyType dependencyType) const;
+        void CompileCpuExecutionTopology(containers::DynamicArray<u32>& scratch) noexcept;
 
         concurrency::SpinLock m_updateFlag;
         concurrency::Atomic<u64> m_updateAcquisitions{0};
@@ -295,6 +308,16 @@ namespace vanguard::rendering
         concurrency::Atomic<u64> m_totalUpdateWaitNanoseconds{0};
         NodesArray m_nodes;
         DependenciesArray m_dependencies;
+        // Immutable CPU scheduler image compiled with the graph. Ordered nodes
+        // follow the already-proven CPU flow-group order. Parent offsets address
+        // dense node-usage indices, so steady frames never rescan graph edges or
+        // rebuild incoming/outgoing counts before dispatching jobs.
+        containers::DynamicArray<ItemId> m_cpuOrderedNodes;
+        containers::DynamicArray<u32> m_cpuParentOffsets;
+        containers::DynamicArray<u32> m_cpuParentUsageIndices;
+        u32 m_cpuRootCount = 0;
+        u32 m_cpuLeafCount = 0;
+        u32 m_cpuTerminalLeafUsageIndex = InvalidRenderFlowResourceIndex;
         bool m_isBuilt = false;
 
         friend class RenderNodeJob;

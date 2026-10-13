@@ -39,6 +39,7 @@ project "assimp"
     defines {
         "ASSIMP_STATIC",
         "ASSIMP_BUILD_NO_EXPORT",
+        "z_errmsg=assimp_z_errmsg",
         "RAPIDJSON_HAS_STDSTRING=1",
         "RAPIDJSON_NOMEMBERITERATORCLASS",
         "_CRT_SECURE_NO_WARNINGS",
